@@ -131,6 +131,7 @@ interface Invoice {
   due_date: string | null;
   created_at?: string;
   updated_at?: string;
+  items?: any[];
 }
 
 // ---------- Original Simple StatCard (clean, no gradients) ----------

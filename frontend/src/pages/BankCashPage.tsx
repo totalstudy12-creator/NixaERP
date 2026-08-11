@@ -671,7 +671,6 @@ export function BankCashPage() {
               striped
               highlightOnHover
               pointerOnHover
-              searchable={false}  // 👈 disables built‑in search, we use our own filter
             />
           )}
         </Suspense>

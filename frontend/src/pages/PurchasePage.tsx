@@ -959,6 +959,9 @@ export function PurchasePage() {
             ...printInvoice,
             invoice_no: printInvoice.purchase_number,
             customer: printInvoice.supplier,
+            total_amount: printInvoice.grand_total,
+            tax_amount: 0,
+            items: printInvoice.items ?? [],
           }}
           onReady={() => {}}
         />

@@ -79,10 +79,11 @@ interface Order {
   status: OrderStatus; source: OrderSource; delivery_date: string | null;
   shipping_address: string; notes: string; items: OrderItem[];
   created_at?: string; updated_at?: string; balance_due?: number; payment_status?: string;
+  customer_name?: string;
   company?: Company;
 }
 interface OrderFormData {
-  company_id: number | ''; customer_id: number | ''; quotation_id: number | '';
+  company_id: string | number; customer_id: string | number; quotation_id: string | number;
   order_no: string; total_amount: number | string; tax_amount: number | string;
   status: OrderStatus; source: OrderSource; payment_method: PaymentMethod;
   payment_amount: number | string; is_partial: boolean; delivery_date: string;
@@ -635,7 +636,7 @@ export function OrdersPage() {
   ], [openView, openEdit, handleDelete, handlePrint]);
 
   // ── Render field helper (kept for other fields) ──
-  const renderField = (label: string, field: keyof OrderFormData, type: 'text' | 'number' | 'select' | 'textarea' = 'text', options?: any[], required = false, readOnly = false) => {
+  const renderField = (label: string, field: keyof OrderFormData, type: 'text' | 'number' | 'date' | 'select' | 'textarea' = 'text', options?: any[], required = false, readOnly = false) => {
     const value = (formData as any)[field] ?? '';
     const id = `field-${field}`;
     const hasError = formErrors[field];

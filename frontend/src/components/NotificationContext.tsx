@@ -11,9 +11,9 @@ export interface NotificationData {
 }
 
 interface NotificationContextValue {
-  showSuccess: (title: string, message: string) => void;
-  showError: (title: string, message: string) => void;
-  showInfo: (title: string, message: string) => void;
+  showSuccess: (title: string, message?: string) => void;
+  showError: (title: string, message?: string) => void;
+  showInfo: (title: string, message?: string) => void;
 }
 
 const NotificationContext = createContext<NotificationContextValue | null>(null);
@@ -38,9 +38,9 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(
     () => ({
-      showSuccess: (title: string, message: string) => createNotification('success', title, message),
-      showError: (title: string, message: string) => createNotification('error', title, message),
-      showInfo: (title: string, message: string) => createNotification('info', title, message),
+      showSuccess: (title: string, message: string = '') => createNotification('success', title, message),
+      showError: (title: string, message: string = '') => createNotification('error', title, message),
+      showInfo: (title: string, message: string = '') => createNotification('info', title, message),
     }),
     []
   );

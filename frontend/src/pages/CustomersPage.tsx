@@ -81,7 +81,6 @@ interface Customer {
   email: string;
   contact_no: string;
   contact_person?: string;
-  contact_no?: string;
   gst_number: string;
   registration_type?: string;
   pan?: string;
@@ -123,7 +122,6 @@ interface CustomerFormData {
   email: string;
   contact_no: string;
   contact_person: string;
-  contact_no: string;
   gst_number: string;
   registration_type: string;
   pan: string;
@@ -242,7 +240,6 @@ export function CustomersPage() {
     email: '',
     contact_no: '',
     contact_person: '',
-    contact_no: '',
     gst_number: '',
     registration_type: '',
     pan: '',
@@ -443,7 +440,7 @@ export function CustomersPage() {
   const handleCreate = useCallback(() => {
     setEditingId(null);
     setFormData({
-      name: '', type: 'customer', company_type: '', email: '', phone: '',
+      name: '', type: 'customer', company_type: '', email: '',
       contact_person: '', contact_no: '', gst_number: '', registration_type: '', pan: '',
       billing_street: '', billing_landmark: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
       shipping_street: '', shipping_landmark: '', shipping_city: '', shipping_state: '', shipping_country: 'India', shipping_pincode: '',
@@ -466,7 +463,6 @@ export function CustomersPage() {
       type: customer.type || 'customer',
       company_type: customer.company_type || '',
       email: customer.email || '',
-      phone: customer.phone || '',
       contact_person: customer.contact_person || '',
       contact_no: customer.contact_no || '',
       gst_number: customer.gst_number || '',
@@ -574,7 +570,7 @@ export function CustomersPage() {
       showError('Export failed', 'No customers to export.');
       return;
     }
-    const headers = ['Name', 'Type', 'Email', 'Phone', 'Company', 'Branch', 'GST', 'City', 'State'];
+    const headers = ['Name', 'Type', 'Email', 'Contact No', 'Company', 'Branch', 'GST', 'City', 'State'];
     const rows = filteredCustomers.map(c => [
       c.name, c.type, c.email, c.contact_no,
       c.company?.name || '', c.branch?.name || '',
@@ -663,7 +659,7 @@ export function CustomersPage() {
       width: '200px',
     },
     {
-      name: 'Phone',
+      name: 'Contact No',
       selector: (row: Customer) => row.contact_no,
       cell: (row: Customer) => <span className="text-sm text-slate-600">{row.contact_no}</span>,
       width: '150px',

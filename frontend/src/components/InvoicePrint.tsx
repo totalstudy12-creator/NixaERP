@@ -74,13 +74,13 @@ interface Invoice {
   general_discount_percent?: number;
   general_discount_amount?: number;
   round_off?: number;
-  total_amount: number | string;
-  tax_amount: number | string;
+  total_amount?: number | string;
+  tax_amount?: number | string;
   discount_amount?: number | string;
   status: string;
-  due_date?: string;
+  due_date?: string | null;
   notes?: string;
-  items: InvoiceItem[];
+  items?: InvoiceItem[];
   payments?: { amount: number | string }[];
 }
 
@@ -149,7 +149,7 @@ const InvoicePrint: React.FC<Props> = ({ invoice, onReady }) => {
   const num = (val: any): number => Number(val) || 0;
 
   // Normalize items
-  const safeItems = invoice.items.map((item, idx) => ({
+  const safeItems = (invoice.items ?? []).map((item, idx) => ({
     name: item.product?.name || item.product_name || `Product #${item.product_id || idx + 1}`,
     qty: num(item.quantity ?? item.qty),
     price: num(item.unit_price ?? item.price),

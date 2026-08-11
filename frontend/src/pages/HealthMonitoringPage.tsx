@@ -54,6 +54,7 @@ import {
   AlertEntry,
   HistorySection,
   ServiceStatusItem,
+  HealthStatus,
 } from '../services/healthService';
 import { formatDateTime } from '../utils/date';
 
@@ -140,19 +141,19 @@ export function HealthMonitoringPage() {
       setOverview(overviewRes);
       setServer(serverRes);
       setDatabase(dbRes);
-      setApiEntries(Array.isArray(apiRes) ? apiRes : Array.isArray(apiRes?.data) ? apiRes.data : []);
-      setIntegrationEntries(Array.isArray(integrationRes) ? integrationRes : Array.isArray(integrationRes?.data) ? integrationRes.data : []);
+      setApiEntries(apiRes);
+      setIntegrationEntries(integrationRes);
       setQueue(queueRes);
-      setCronTasks(Array.isArray(cronRes) ? cronRes : Array.isArray(cronRes?.data) ? cronRes.data : []);
+      setCronTasks(cronRes);
       setStorage(storageRes);
       setBackup(backupRes);
       setSecurity(securityRes);
-      setLogs(Array.isArray(logsRes) ? logsRes : Array.isArray(logsRes?.data) ? logsRes.data : []);
+      setLogs(logsRes);
       setPerformance(perfRes);
       setUptime(uptimeRes);
-      setAlerts(Array.isArray(alertRes) ? alertRes : Array.isArray(alertRes?.data) ? alertRes.data : []);
-      setHistory(Array.isArray(historyRes) ? historyRes : Array.isArray(historyRes?.data) ? historyRes.data : []);
-      setServiceStatuses(Array.isArray(servicesRes) ? servicesRes : Array.isArray(servicesRes?.data) ? servicesRes.data : []);
+      setAlerts(alertRes);
+      setHistory(historyRes);
+      setServiceStatuses(servicesRes);
       setNextRefreshIn(autoRefreshInterval);
       showSuccess('Health updated', 'System health data refreshed successfully');
     } catch (error: any) {

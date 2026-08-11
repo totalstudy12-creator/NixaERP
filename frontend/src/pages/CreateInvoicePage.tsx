@@ -210,7 +210,7 @@ export function CreateInvoicePage() {
         setForm(prev => {
           if (branchList.length === 0) return { ...prev, branch: 'Main Branch' };
           const firstBranchName = branchList[0]?.name || 'Main Branch';
-          if (!branchList.some(b => b.name === prev.branch)) return { ...prev, branch: firstBranchName };
+          if (!branchList.some((b: any) => b.name === prev.branch)) return { ...prev, branch: firstBranchName };
           return prev;
         });
       })

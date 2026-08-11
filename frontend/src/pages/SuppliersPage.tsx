@@ -88,7 +88,7 @@ type Supplier = {
   shipping_state?: string;
   shipping_country?: string;
   shipping_pincode?: string;
-  eway_bill_distance?: number;
+  eway_bill_distance?: number | string;
   territory?: string;
   zone?: string;
   status?: string;
@@ -99,7 +99,7 @@ type Supplier = {
   kyc_status?: string;
   approved_at?: string;
   opening_balance?: number;
-  due_days?: number;
+  due_days?: number | string;
   fax?: string;
   website?: string;
   note?: string;

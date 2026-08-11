@@ -88,11 +88,12 @@ type Dealer = {
   shipping_state?: string;
   shipping_country?: string;
   shipping_pincode?: string;
-  eway_bill_distance?: number;
+  eway_bill_distance?: number | string;
   group_id?: number | null;
   opening_balance?: number;
   credit_limit?: number;
-  due_days?: number;
+  due_days?: number | string;
+  status?: string;
   fax?: string;
   website?: string;
   note?: string;

@@ -579,8 +579,80 @@ export const apiClient = {
     return this.request('GET', '/ai/assistant/workflows');
   },
 
-  async sendAIAssistantChat(message: string) {
-    return this.request('POST', '/ai/assistant/chat', { message });
+  async getAiProviders() {
+    return this.request('GET', '/ai/providers');
+  },
+  async createAiProvider(data: any) {
+    return this.request('POST', '/ai/providers', data);
+  },
+  async updateAiProvider(id: number, data: any) {
+    return this.request('PUT', `/ai/providers/${id}`, data);
+  },
+
+  async sendAIAssistantChat(message: string, providerId?: number) {
+    const payload: any = { message };
+    if (providerId) payload.provider_id = providerId;
+    return this.request('POST', '/ai/assistant/chat', payload);
+  },
+
+  // Dashboard / summaries
+  async getPaymentSummary() {
+    return this.request('GET', '/dashboard/payments-summary');
+  },
+
+  async getInventorySummary() {
+    return this.request('GET', '/dashboard/inventory-summary');
+  },
+
+  async getInvoiceCountSummary() {
+    return this.request('GET', '/dashboard/invoices-count-summary');
+  },
+
+  async getInvoiceAmountSummary() {
+    return this.request('GET', '/dashboard/invoices-amount-summary');
+  },
+
+  async getTopSellingProducts(limit = 5) {
+    return this.request('GET', `/reports/top-selling-products?limit=${limit}`);
+  },
+
+  async getLeastSellingProducts(limit = 5) {
+    return this.request('GET', `/reports/least-selling-products?limit=${limit}`);
+  },
+
+  async getLowStockProducts() {
+    return this.request('GET', '/products/low-stock');
+  },
+
+  async getTopCustomers(limit = 5) {
+    return this.request('GET', `/customers/top?limit=${limit}`);
+  },
+
+  async getTopVendors(limit = 5) {
+    return this.request('GET', `/vendors/top?limit=${limit}`);
+  },
+
+  async getPurchaseDueInvoices() {
+    return this.request('GET', '/purchases/due');
+  },
+
+  async getLoginActivity() {
+    return this.request('GET', '/admin/login-activity');
+  },
+
+  async getBankAccounts() {
+    return this.request('GET', '/bank-accounts');
+  },
+
+  // Invoice helpers
+  async duplicateInvoice(id: number) {
+    return this.request('POST', `/invoices/${id}/duplicate`);
+  },
+
+  // Purchase invoices convenience
+  async createPurchaseInvoice(data: any) {
+    // alias to createPurchase if backend uses /purchases
+    return this.createPurchase(data);
   },
 
   // Employees

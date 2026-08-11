@@ -75,6 +75,9 @@ const ChatAreaSkeleton = () => (
 // ── Main Component ──
 export function AIAssistantPage() {
   const { showSuccess, showError } = useNotification();
+  const [providers, setProviders] = useState<any[]>([]);
+  const [selectedProviderId, setSelectedProviderId] = useState<number | null>(null);
+  const [autoRead, setAutoRead] = useState(false);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
@@ -97,6 +100,18 @@ export function AIAssistantPage() {
   // ── API data ──
   const fetchInsights = useCallback(() => apiClient.getAIAssistantInsights(), []);
   const { data: insights, loading: insightsLoading } = useApiCache<any>('ai-insights', fetchInsights);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await apiClient.getAiProviders();
+        if (res && res.data) setProviders(res.data);
+        if (res && res.data && res.data.length > 0) setSelectedProviderId(res.data[0].id);
+      } catch (e) {
+        // ignore
+      }
+    })();
+  }, []);
 
   // Seed initial conversation from real insights (only once)
   const seeded = useRef(false);
@@ -223,7 +238,7 @@ export function AIAssistantPage() {
     setIsTyping(true);
 
     try {
-      const response = await apiClient.sendAIAssistantChat(userMsg.content);
+      const response = await apiClient.sendAIAssistantChat(userMsg.content, selectedProviderId ?? undefined);
       const reply = response.reply || 'I can help with accounting, payroll, inventory, and sales insights.';
       const aiMsg: Message = {
         id: Date.now() + 1,
@@ -232,6 +247,14 @@ export function AIAssistantPage() {
         content: reply,
         created_at: new Date().toISOString(),
       };
+      // Text-to-speech if enabled
+      if (autoRead && 'speechSynthesis' in window) {
+        try {
+          const utter = new SpeechSynthesisUtterance(reply);
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(utter);
+        } catch (e) { /* ignore */ }
+      }
       setMessages(prev => [...prev, aiMsg]);
       setConversations(prev =>
         prev.map(c =>
@@ -322,6 +345,29 @@ export function AIAssistantPage() {
           <p className="text-sm text-slate-300">Get instant business insights and recommendations</p>
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 mr-2">
+            <select value={selectedProviderId ?? ''} onChange={(e) => setSelectedProviderId(e.target.value ? Number(e.target.value) : null)} className="rounded-xl bg-white/8 px-3 py-2 text-sm text-slate-800">
+              {providers.length === 0 && <option value="">No provider</option>}
+              {providers.map(p => (
+                <option key={p.id} value={p.id}>{p.name}{p.enabled ? '' : ' (disabled)'}</option>
+              ))}
+            </select>
+            <label className="flex items-center gap-1 text-sm text-slate-200">
+              <input type="checkbox" checked={autoRead} onChange={(e) => setAutoRead(e.target.checked)} /> Auto Read
+            </label>
+            <button onClick={async () => {
+              const name = prompt('Provider name (e.g. OpenAI)');
+              if (!name) return;
+              const key = prompt('Provider key (will be stored securely) — enter blank to skip');
+              const model = prompt('Model (e.g. gpt-4o-mini) — optional');
+              try {
+                await apiClient.createAiProvider({ name, key, config: { model } });
+                const res = await apiClient.getAiProviders();
+                if (res && res.data) setProviders(res.data);
+                alert('Provider created');
+              } catch (e: any) { alert('Failed: ' + (e.message || e)); }
+            }} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20">Manage Providers</button>
+          </div>
           <button onClick={handleExportChat} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20">
             <FiDownload className="inline mr-1" size={14} /> Export
           </button>

@@ -49,7 +49,7 @@ interface Order {
   id: number;
   order_no: string;
   created_at?: string;
-  delivery_date?: string;
+  delivery_date?: string | null;
   company?: Company;
   customer?: Customer;
   items: OrderItem[];
@@ -106,7 +106,7 @@ function numberToWords(num: number): string {
   return parts.join(' ').replace(/^\w/, (c) => c.toUpperCase());
 }
 
-function formatDate(dateStr?: string): string {
+function formatDate(dateStr?: string | null): string {
   if (!dateStr) return '-';
   const d = new Date(dateStr);
   return isNaN(d.getTime()) ? '-' : d.toLocaleDateString('en-IN');
