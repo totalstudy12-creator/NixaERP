@@ -4,7 +4,7 @@ import {
   FiUsers, FiMapPin, FiPackage, FiFileText,
   FiTrendingUp, FiClipboard, FiFolder,
   FiShoppingBag, FiBriefcase, FiUserPlus, FiCalendar, FiCreditCard,
-  FiBookOpen, FiZap, FiShield, FiCpu, FiCreditCard as FiBank, FiBarChart2,
+  FiBookOpen, FiZap, FiShield, FiCpu, FiActivity, FiCreditCard as FiBank, FiBarChart2,
 } from 'react-icons/fi';
 import { useCallback, useEffect } from 'react';
 import clsx from 'clsx';
@@ -25,6 +25,7 @@ const menuSections: MenuSection[] = [
     title: 'Main',
     items: [{ icon: FiHome, label: 'Dashboard', path: '/dashboard' }],
   },
+  
   {
     title: 'Sales & CRM',
     items: [
@@ -67,6 +68,12 @@ const menuSections: MenuSection[] = [
       { icon: FiCpu, label: 'Automation', path: '/automation' },
       { icon: FiShield, label: 'Security', path: '/security' },
       { icon: FiZap, label: 'AI Assistant', path: '/ai-assistant' },
+    ],
+  },
+  {
+    title: 'System',
+    items: [
+      { icon: FiActivity, label: 'Health Monitoring', path: '/health-monitoring' },
     ],
   },
 ];

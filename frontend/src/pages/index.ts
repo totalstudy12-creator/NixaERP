@@ -32,6 +32,7 @@ export * from './UserRoleManagementPage';
 export * from './CustomersCRMPage';
 export * from './DealersPage';
 export * from './SuppliersPage';
+export * from './HealthMonitoringPage';
 export * from './PageTemplate';
 
 export { MarketingPage } from './MarketingPage';
