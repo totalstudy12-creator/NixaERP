@@ -33,6 +33,7 @@ export * from './CustomersCRMPage';
 export * from './DealersPage';
 export * from './SuppliersPage';
 export * from './HealthMonitoringPage';
+export * from './BackupRestorePage';
 export * from './PageTemplate';
 
 export { MarketingPage } from './MarketingPage';

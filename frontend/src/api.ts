@@ -746,33 +746,6 @@ export const apiClient = {
   async createSupplierGroup(data: { name: string }) {
     return this.request('POST', '/supplier-groups', data);
   },
-// Purchase Invoices
-async createPurchaseInvoice(data: any) {
-  return this.request('POST', '/purchase-invoices', data);   // matches your backend resource
-},
-
-// If you already have getPurchases / deletePurchase, keep them but use /purchase-invoices
-async getPurchases() {
-  return this.request('GET', '/purchase-invoices');
-},
-
-async deletePurchase(id: number) {
-  return this.request('DELETE', `/purchase-invoices/${id}`);
-},
-  
-// Purchase Invoices
-async createPurchaseInvoice(data: any) {
-  return this.request('POST', '/purchase-invoices', data);
-},
-
-async getAIAssistantInsights() {
-  return this.request('GET', '/ai/assistant/insights');
-},
-async getAIAssistantWorkflows() {
-  return this.request('GET', '/ai/assistant/workflows');
-},
-async sendAIAssistantChat(message: string) {
-  return this.request('POST', '/ai/assistant/chat', { message });
-},
+// Purchase Invoices (handled earlier under /purchases)
 
 };
