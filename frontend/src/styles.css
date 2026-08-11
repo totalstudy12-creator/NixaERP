@@ -1,0 +1,271 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --border: #cbd5e1;
+  --primary: #2563eb;
+  --primary-dark: #1d4ed8;
+  --text: #0f172a;
+  --bg: #f8fafc;
+  --error: #dc2626;
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-2xl font-semibold transition shadow-sm;
+  }
+
+  .btn-secondary {
+    @apply bg-slate-700 hover:bg-slate-800 text-white px-4 py-2 rounded-2xl font-semibold transition;
+  }
+
+  .btn-danger {
+    @apply bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-2xl font-semibold transition;
+  }
+
+  .btn-outline {
+    @apply bg-white border border-slate-300 text-slate-700 hover:bg-slate-50;
+  }
+
+  .card {
+    @apply bg-white rounded-[1.5rem] shadow-[0_20px_60px_-30px_rgba(15,23,42,0.3)] p-6 border border-slate-200;
+  }
+
+  .input-field {
+    @apply w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-900 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20;
+  }
+
+  .navbar-search {
+    @apply w-full rounded-full border border-slate-700 bg-slate-900/90 py-2.5 pl-12 pr-4 text-sm text-slate-100 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-500/30;
+  }
+
+  .page-header {
+    @apply mb-8 rounded-[2rem] bg-white p-8 shadow-sm border border-slate-200;
+  }
+
+  .page-title {
+    @apply text-3xl font-bold text-slate-900;
+  }
+
+  .page-description {
+    @apply mt-3 text-slate-600 max-w-2xl;
+  }
+
+  .sidebar-card {
+    @apply rounded-3xl bg-slate-950/95 p-6 shadow-lg border border-slate-800;
+  }
+
+  .section-title {
+    @apply text-xs font-semibold uppercase tracking-[0.24em] text-slate-500;
+  }
+}
+
+/* Hide scrollbar for all elements */
+* {
+  -ms-overflow-style: none;  /* Internet Explorer/Edge */
+  scrollbar-width: none;      /* Firefox */
+}
+
+*::-webkit-scrollbar {
+  display: none;              /* Chrome, Safari, Edge */
+}
+
+/* Login Page */
+.login-container {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  padding: 2rem;
+}
+
+.login-card {
+  background: white;
+  border-radius: 12px;
+  padding: 2.5rem;
+  width: 100%;
+  max-width: 400px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+}
+
+.login-card h1 {
+  margin-top: 0;
+  text-align: center;
+  color: var(--primary);
+  margin-bottom: 2rem;
+}
+
+.form-group {
+  margin-bottom: 1.5rem;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 1rem;
+}
+
+.form-group input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.login-card button {
+  width: 100%;
+}
+
+.hint {
+  text-align: center;
+  font-size: 0.875rem;
+  color: #6b7280;
+  margin-top: 1.5rem;
+}
+
+.error {
+  color: var(--error);
+  padding: 0.75rem;
+  background: #fee2e2;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+}
+
+/* Legacy shell helpers */
+.app-shell {
+  @apply min-h-screen bg-slate-100 text-slate-900;
+}
+
+.main-content {
+  @apply px-6 py-6 lg:px-10 lg:py-8;
+}
+
+.page {
+  @apply max-w-[1200px];
+}
+
+.page h1 {
+  @apply text-slate-900;
+}
+
+.page h2 {
+  @apply text-slate-700;
+}
+
+.form-section {
+  @apply rounded-2xl bg-white border border-slate-200 p-6 mb-6;
+}
+
+.form-section button {
+  background: var(--primary);
+  color: white;
+  border: none;
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.form-section button:hover {
+  background: var(--primary-dark);
+}
+
+/* Lists & Tables */
+.list-section {
+  background: white;
+  border-radius: 12px;
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+
+thead {
+  background: var(--bg);
+}
+
+th {
+  padding: 1rem;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 2px solid var(--border);
+  color: var(--text);
+}
+
+td {
+  padding: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+tbody tr:hover {
+  background: var(--bg);
+}
+
+/* Buttons */
+button {
+  border: none;
+  border-radius: 8px;
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Hide scrollbar for Chrome, Safari and Opera */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Hide scrollbar for IE, Edge and Firefox */
+.scrollbar-hide {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+
+/* Dashboard */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1.5rem;
+  margin-top: 2rem;
+}
+
+.stat-card {
+  background: white;
+  border-radius: 12px;
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.stat-card h3 {
+  margin: 0;
+  font-size: 2rem;
+  color: var(--primary);
+}
+
+.stat-card p {
+  margin: 0.5rem 0 0;
+  color: #6b7280;
+  font-size: 0.875rem;
+}
