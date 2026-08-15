@@ -1,0 +1,244 @@
+<?php
+
+use App\Http\Controllers\Api\AttendanceController;
+use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\BiometricAttendanceController;
+use App\Http\Controllers\Api\BiometricDeviceController;
+use App\Http\Controllers\Api\BiometricScanController;
+use App\Http\Controllers\Api\BranchController;
+use App\Http\Controllers\Api\CompanyController;
+use App\Http\Controllers\Api\AccountingController;
+use App\Http\Controllers\Api\CustomerController;
+use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\DealerController;
+use App\Http\Controllers\Api\EmployeeController;
+use App\Http\Controllers\Api\FingerprintController;
+use App\Http\Controllers\Api\HealthController;
+use App\Http\Controllers\Api\InvoiceController;
+use App\Http\Controllers\Api\PurchaseInvoiceController;
+use App\Http\Controllers\Api\OfflineSyncController;
+use App\Http\Controllers\Api\OrderController;
+use App\Http\Controllers\Api\PaymentController;
+use App\Http\Controllers\Api\PayrollController;
+use App\Http\Controllers\Api\ProductController;
+use App\Http\Controllers\Api\SalesController;
+use App\Http\Controllers\Api\SettingsController;
+use App\Http\Controllers\Api\UploadController;
+use App\Http\Controllers\Api\UserAccessController;
+use App\Http\Controllers\Api\BackupController;
+use App\Http\Controllers\Api\WarehouseController;
+use App\Http\Controllers\Api\SupplierController;
+use App\Http\Controllers\Api\MarketingController;
+use Illuminate\Support\Facades\Route;
+
+// ---------- Health check ----------
+Route::get('status', fn() => response()->json(['status' => 'ok', 'service' => 'Business OS API']));
+
+// ---------- Auth ----------
+Route::post('login', [AuthController::class, 'login'])->name('login');
+Route::post('logout', [AuthController::class, 'logout'])->middleware('auth:sanctum');
+Route::get('me', [AuthController::class, 'me'])->middleware('auth:sanctum');
+Route::get('profile', [AuthController::class, 'profile'])->middleware('auth:sanctum');
+Route::put('profile', [AuthController::class, 'updateProfile'])->middleware('auth:sanctum');
+
+// ---------- Public biometric device endpoints (no auth) ----------
+Route::post('biometric/device/register', [BiometricDeviceController::class, 'register']);
+Route::post('biometric/device/heartbeat', [BiometricDeviceController::class, 'heartbeat']);
+Route::post('biometric/attendance', [BiometricAttendanceController::class, 'store']);
+Route::post('biometric/offline/sync', [OfflineSyncController::class, 'batchSync']);
+
+ 
+Route::apiResource('suppliers', SupplierController::class);
+// Public enrollment check (ESP32 polls this without token)
+Route::get('biometric/device/pending-enrollment', [BiometricDeviceController::class, 'pendingEnrollment']);
+
+// Enrollment status reporting also public (ESP32 calls it)
+Route::post('biometric/device/{device}/enroll', [BiometricDeviceController::class, 'startEnrollment']);
+Route::post('biometric/device/{device}/enroll-status', [BiometricDeviceController::class, 'updateEnrollmentStatus']);
+
+// ---------- Protected routes (frontend + admin) ----------
+Route::middleware(['auth:sanctum'])->group(function () {
+
+    // ---------- Dashboard & report endpoints (must be registered before wildcard resource routes) ----------
+    Route::get('dashboard/analytics', [DashboardController::class, 'analytics']);
+    Route::get('dashboard/payments-summary', [DashboardController::class, 'paymentSummary']);
+    Route::get('dashboard/inventory-summary', [DashboardController::class, 'inventorySummary']);
+    Route::get('dashboard/invoices-count-summary', [DashboardController::class, 'invoiceCountSummary']);
+    Route::get('dashboard/invoices-amount-summary', [DashboardController::class, 'invoiceAmountSummary']);
+    Route::get('reports/top-selling-products', [DashboardController::class, 'topSellingProducts']);
+    Route::get('reports/least-selling-products', [DashboardController::class, 'leastSellingProducts']);
+    Route::get('dashboard/low-stock', [DashboardController::class, 'lowStockProducts']);
+    Route::get('products/low-stock', [DashboardController::class, 'lowStockProducts']);
+    Route::get('dashboard/top-customers', [DashboardController::class, 'topCustomers']);
+    Route::get('customers/top', [DashboardController::class, 'topCustomers']);
+    Route::get('dashboard/top-vendors', [DashboardController::class, 'topVendors']);
+    Route::get('vendors/top', [DashboardController::class, 'topVendors']);
+    Route::get('dashboard/purchase-due', [DashboardController::class, 'purchaseDueInvoices']);
+    Route::get('purchases/due', [DashboardController::class, 'purchaseDueInvoices']);
+    Route::get('dashboard/login-activity', [DashboardController::class, 'loginActivity']);
+    Route::get('admin/login-activity', [DashboardController::class, 'loginActivity']);
+
+    // Core business resources
+    Route::apiResource('companies', CompanyController::class);
+    Route::apiResource('branches', BranchController::class);
+    Route::apiResource('warehouses', WarehouseController::class);
+    Route::apiResource('customers', CustomerController::class);
+    Route::apiResource('products', ProductController::class);
+    Route::apiResource('orders', OrderController::class);
+    Route::apiResource('payments', PaymentController::class);
+    Route::apiResource('dealers', DealerController::class);
+    Route::apiResource('invoices', InvoiceController::class);
+    Route::apiResource('purchase-invoices', PurchaseInvoiceController::class);
+    Route::apiResource('employees', EmployeeController::class);
+
+    Route::get('accounting/summary', [AccountingController::class, 'summary']);
+    Route::get('accounting/accounts', [AccountingController::class, 'index']);
+    Route::post('accounting/accounts', [AccountingController::class, 'store']);
+    Route::get('accounting/accounts/{id}', [AccountingController::class, 'show']);
+    Route::put('accounting/accounts/{id}', [AccountingController::class, 'update']);
+    Route::delete('accounting/accounts/{id}', [AccountingController::class, 'destroy']);
+    Route::get('accounting/journals', [AccountingController::class, 'journals']);
+    Route::post('accounting/journals', [AccountingController::class, 'storeJournal']);
+    Route::get('accounting/statements', [AccountingController::class, 'statements']);
+
+    Route::get('sales/summary', [SalesController::class, 'summary']);
+    Route::get('sales/orders', [SalesController::class, 'orders']);
+    Route::post('sales/orders', [SalesController::class, 'storeOrder']);
+    Route::get('sales/quotations', [SalesController::class, 'quotations']);
+    Route::post('sales/quotations', [SalesController::class, 'storeQuotation']);
+    Route::get('sales/proformas', [SalesController::class, 'proformas']);
+    Route::post('sales/proformas', [SalesController::class, 'storeProforma']);
+    Route::get('sales/delivery-challans', [SalesController::class, 'deliveryChallans']);
+    Route::post('sales/delivery-challans', [SalesController::class, 'storeDeliveryChallan']);
+    Route::get('sales/returns', [SalesController::class, 'returns']);
+    Route::post('sales/returns', [SalesController::class, 'storeReturn']);
+    Route::get('sales/reports', [SalesController::class, 'reports']);
+
+    Route::get('purchases/summary', [SalesController::class, 'purchaseSummary']);
+    Route::get('purchases/orders', [SalesController::class, 'purchaseOrders']);
+    Route::post('purchases/orders', [SalesController::class, 'storePurchaseOrder']);
+    Route::get('purchases/bills', [SalesController::class, 'purchaseBills']);
+    Route::post('purchases/bills', [SalesController::class, 'storePurchaseBill']);
+    Route::get('purchases/grn', [SalesController::class, 'grn']);
+    Route::get('purchases/returns', [SalesController::class, 'purchaseReturns']);
+    Route::get('purchases/reports', [SalesController::class, 'purchaseReports']);
+
+    // ---------- Attendance ----------
+    Route::get('attendance/today-summary', [AttendanceController::class, 'todaySummary']);
+    Route::get('attendance/today-employees', [AttendanceController::class, 'todayEmployees']);
+    Route::get('attendance', [AttendanceController::class, 'index']);
+    Route::post('attendance', [AttendanceController::class, 'store']);
+    Route::get('attendance/{attendance}', [AttendanceController::class, 'show']);
+    Route::match(['put', 'patch'], 'attendance/{attendance}', [AttendanceController::class, 'update']);
+    Route::delete('attendance/{attendance}', [AttendanceController::class, 'destroy']);
+    Route::post('attendance/bulk-status', [AttendanceController::class, 'bulkUpdateStatus']);
+    Route::post('attendance/bulk-delete', [AttendanceController::class, 'bulkDelete']);
+
+    // ---------- Payroll & HR (single, correctly ordered group) ----------
+    Route::prefix('payroll')->group(function () {
+        // Core payroll
+        Route::get('/', [PayrollController::class, 'index']);
+        Route::post('/', [PayrollController::class, 'store']);
+        Route::post('/run', [PayrollController::class, 'runPayroll']);
+
+        // Static sub-resources (must come BEFORE the wildcard /{payroll})
+        Route::get('/advances', [PayrollController::class, 'advances']);
+        Route::post('/advances', [PayrollController::class, 'storeAdvance']);
+        Route::get('/advances/{advance}', [PayrollController::class, 'showAdvance']);
+        Route::match(['put', 'patch'], '/advances/{advance}', [PayrollController::class, 'updateAdvance']);
+        Route::delete('/advances/{advance}', [PayrollController::class, 'destroyAdvance']);
+
+        // If you still need leaves, shifts, loans – keep them here, before the wildcard:
+        // Route::get('/leaves', [PayrollController::class, 'leaves']);
+        // Route::post('/leaves', [PayrollController::class, 'storeLeave']);
+        // Route::get('/leaves/{leave}', [PayrollController::class, 'showLeave']);
+        // Route::match(['put', 'patch'], '/leaves/{leave}', [PayrollController::class, 'updateLeave']);
+        // Route::delete('/leaves/{leave}', [PayrollController::class, 'destroyLeave']);
+        //
+        // Route::get('/shifts', [PayrollController::class, 'shifts']);
+        // Route::post('/shifts', [PayrollController::class, 'storeShift']);
+        // Route::get('/shifts/{shift}', [PayrollController::class, 'showShift']);
+        // Route::match(['put', 'patch'], '/shifts/{shift}', [PayrollController::class, 'updateShift']);
+        // Route::delete('/shifts/{shift}', [PayrollController::class, 'destroyShift']);
+        //
+        // Route::get('/loans', [PayrollController::class, 'loans']);
+        // Route::post('/loans', [PayrollController::class, 'storeLoan']);
+        // Route::get('/loans/{loan}', [PayrollController::class, 'showLoan']);
+        // Route::match(['put', 'patch'], '/loans/{loan}', [PayrollController::class, 'updateLoan']);
+        // Route::delete('/loans/{loan}', [PayrollController::class, 'destroyLoan']);
+
+        // Payslips (optional, also before wildcard)
+        Route::get('/payslips', [PayrollController::class, 'payslips']);
+        Route::post('/payslips', [PayrollController::class, 'storePayslip']);
+        Route::get('/payslips/{payslip}', [PayrollController::class, 'showPayslip']);
+        Route::match(['put', 'patch'], '/payslips/{payslip}', [PayrollController::class, 'updatePayslip']);
+        Route::delete('/payslips/{payslip}', [PayrollController::class, 'destroyPayslip']);
+
+        // Wildcard – must be LAST
+        Route::get('/{payroll}', [PayrollController::class, 'show']);
+        Route::match(['put', 'patch'], '/{payroll}', [PayrollController::class, 'update']);
+        Route::delete('/{payroll}', [PayrollController::class, 'destroy']);
+        Route::get('/{payroll}/payslip', [PayrollController::class, 'payslip']);
+    });
+
+    // Biometric management (admin)
+    Route::get('biometric/devices', [BiometricDeviceController::class, 'index']);
+    Route::post('biometric/templates/upload', [FingerprintController::class, 'upload']);
+    Route::post('biometric/templates/download', [FingerprintController::class, 'downloadAll']);
+    Route::delete('biometric/templates/{id}', [FingerprintController::class, 'destroy']);
+
+    // Live scan data
+    Route::get('biometric/scans', [BiometricScanController::class, 'liveFeed']);
+    Route::get('biometric/offline/pending', [BiometricScanController::class, 'pendingQueue']);
+    Route::get('biometric/unknown-fingers', [BiometricScanController::class, 'unknownFingers']);
+
+    // Biometric device control
+    Route::post('biometric/device/{device}/sync', [BiometricDeviceController::class, 'sync']);
+    Route::post('biometric/device/{device}/settings', [BiometricDeviceController::class, 'updateSettings']);
+    Route::post('biometric/device/{device}/restart', [BiometricDeviceController::class, 'restart']);
+    Route::put('biometric/device/{device}', [BiometricDeviceController::class, 'update']);
+    Route::delete('biometric/device/{device}', [BiometricDeviceController::class, 'destroy']);
+
+    // File uploads, roles, settings...
+    Route::get('uploads', [UploadController::class, 'index']);
+    Route::post('uploads', [UploadController::class, 'store']);
+    Route::post('uploads/folders', [UploadController::class, 'createFolder']);
+    Route::post('uploads/delete', [UploadController::class, 'destroy']);
+    Route::get('roles', [UserAccessController::class, 'roles']);
+    Route::post('roles', [UserAccessController::class, 'storeRole']);
+    Route::match(['put', 'patch'], 'roles/{roleId}', [UserAccessController::class, 'updateRole']);
+    Route::delete('roles/{roleId}', [UserAccessController::class, 'destroyRole']);
+    Route::get('permissions', [UserAccessController::class, 'permissions']);
+    Route::get('users', [UserAccessController::class, 'users']);
+    Route::post('users/{userId}/roles', [UserAccessController::class, 'assignRolesToUser']);
+    Route::get('settings', [SettingsController::class, 'index']);
+    Route::get('settings/{key}', [SettingsController::class, 'show']);
+    Route::post('settings', [SettingsController::class, 'store']);
+    Route::put('settings/{key}', [SettingsController::class, 'update']);
+    Route::get('health/cron', [HealthController::class, 'cron']);
+    Route::get('health/backups', [BackupController::class, 'index']);
+    Route::post('health/backup', [BackupController::class, 'store']);
+    Route::get('backups', [BackupController::class, 'index']);
+    Route::post('backups', [BackupController::class, 'store']);
+    Route::post('backups/restore', [BackupController::class, 'restore']);
+    Route::get('backups/{backup}/download', [BackupController::class, 'download']);
+
+    Route::prefix('marketing')->group(function () {
+        Route::get('dashboard', [MarketingController::class, 'dashboard']);
+        Route::get('accounts', [MarketingController::class, 'accounts']);
+        Route::get('posts', [MarketingController::class, 'posts']);
+        Route::post('posts', [MarketingController::class, 'store']);
+        Route::put('posts/{post}', [MarketingController::class, 'update']);
+        Route::delete('posts/{post}', [MarketingController::class, 'destroy']);
+        Route::get('calendar', [MarketingController::class, 'calendar']);
+        Route::get('analytics', [MarketingController::class, 'analytics']);
+        Route::get('inbox', [MarketingController::class, 'inbox']);
+    });
+    // AI Assistant
+    Route::get('ai/assistant/insights', [\App\Http\Controllers\Api\AiController::class, 'insights']);
+    Route::post('ai/assistant/chat', [\App\Http\Controllers\Api\AiController::class, 'chat']);
+    // Provider management (admin)
+    Route::get('ai/providers', [\App\Http\Controllers\Api\AiProviderController::class, 'index']);
+    Route::post('ai/providers', [\App\Http\Controllers\Api\AiProviderController::class, 'store']);
+    Route::put('ai/providers/{provider}', [\App\Http\Controllers\Api\AiProviderController::class, 'update']);
+});
