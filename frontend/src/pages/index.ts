@@ -28,6 +28,7 @@ export * from './MarketingPage';
 export * from './BannerPosterPage';
 export * from './QRPaymentPage';
 export * from './SettingsPage';
+export * from './ProfilePage';
 export * from './UserRoleManagementPage';
 export * from './CustomersCRMPage';
 export * from './DealersPage';

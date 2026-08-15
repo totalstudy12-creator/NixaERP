@@ -97,6 +97,7 @@ export function HealthMonitoringPage() {
   const [integrationEntries, setIntegrationEntries] = useState<IntegrationHealthEntry[]>([]);
   const [queue, setQueue] = useState<QueueHealth | null>(null);
   const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
+  const [cronTasksError, setCronTasksError] = useState<string | null>(null);
   const [storage, setStorage] = useState<StorageHealth | null>(null);
   const [backup, setBackup] = useState<BackupHealth | null>(null);
   const [security, setSecurity] = useState<SecurityHealth | null>(null);
@@ -119,50 +120,68 @@ export function HealthMonitoringPage() {
   const loadHealth = useCallback(async () => {
     setLoading(true);
     setPageError(null);
-    try {
-      const [overviewRes, serverRes, dbRes, apiRes, integrationRes, queueRes, cronRes, storageRes, backupRes, securityRes, logsRes, perfRes, uptimeRes, alertRes, historyRes, servicesRes] = await Promise.all([
-        getHealthOverview(),
-        getServerHealth(),
-        getDatabaseHealth(),
-        getApiHealth(),
-        getIntegrationHealth(),
-        getQueueHealth(),
-        getCronHealth(),
-        getStorageHealth(),
-        getBackupHealth(),
-        getSecurityHealth(),
-        getLogHealth(),
-        getPerformanceHealth(),
-        getUptimeHealth(),
-        getAlertHealth(),
-        getHistorySections(),
-        getServiceStatusGrid(),
-      ]);
-      setOverview(overviewRes);
-      setServer(serverRes);
-      setDatabase(dbRes);
-      setApiEntries(apiRes);
-      setIntegrationEntries(integrationRes);
-      setQueue(queueRes);
-      setCronTasks(cronRes);
-      setStorage(storageRes);
-      setBackup(backupRes);
-      setSecurity(securityRes);
-      setLogs(logsRes);
-      setPerformance(perfRes);
-      setUptime(uptimeRes);
-      setAlerts(alertRes);
-      setHistory(historyRes);
-      setServiceStatuses(servicesRes);
-      setNextRefreshIn(autoRefreshInterval);
-      showSuccess('Health updated', 'System health data refreshed successfully');
-    } catch (error: any) {
-      const message = error?.message || 'Unable to load health data';
+    setCronTasksError(null);
+
+    const results = await Promise.allSettled([
+      getHealthOverview(),
+      getServerHealth(),
+      getDatabaseHealth(),
+      getApiHealth(),
+      getIntegrationHealth(),
+      getQueueHealth(),
+      getCronHealth(),
+      getStorageHealth(),
+      getBackupHealth(),
+      getSecurityHealth(),
+      getLogHealth(),
+      getPerformanceHealth(),
+      getUptimeHealth(),
+      getAlertHealth(),
+      getHistorySections(),
+      getServiceStatusGrid(),
+    ]);
+
+    const [overviewRes, serverRes, dbRes, apiRes, integrationRes, queueRes, cronRes, storageRes, backupRes, securityRes, logsRes, perfRes, uptimeRes, alertRes, historyRes, servicesRes] = results;
+
+    setOverview(overviewRes.status === 'fulfilled' ? overviewRes.value : null);
+    setServer(serverRes.status === 'fulfilled' ? serverRes.value : null);
+    setDatabase(dbRes.status === 'fulfilled' ? dbRes.value : null);
+    setApiEntries(apiRes.status === 'fulfilled' ? apiRes.value : []);
+    setIntegrationEntries(integrationRes.status === 'fulfilled' ? integrationRes.value : []);
+    setQueue(queueRes.status === 'fulfilled' ? queueRes.value : null);
+    setStorage(storageRes.status === 'fulfilled' ? storageRes.value : null);
+    setBackup(backupRes.status === 'fulfilled' ? backupRes.value : null);
+    setSecurity(securityRes.status === 'fulfilled' ? securityRes.value : null);
+    setLogs(logsRes.status === 'fulfilled' ? logsRes.value : []);
+    setPerformance(perfRes.status === 'fulfilled' ? perfRes.value : null);
+    setUptime(uptimeRes.status === 'fulfilled' ? uptimeRes.value : null);
+    setAlerts(alertRes.status === 'fulfilled' ? alertRes.value : []);
+    setHistory(historyRes.status === 'fulfilled' ? historyRes.value : null);
+    setServiceStatuses(servicesRes.status === 'fulfilled' ? servicesRes.value : []);
+
+    if (cronRes.status === 'fulfilled') {
+      setCronTasks(cronRes.value);
+      setCronTasksError(null);
+    } else {
+      setCronTasks([]);
+      setCronTasksError(cronRes.reason?.message || 'Unable to load scheduled tasks');
+    }
+
+    const failedCounts = results.filter((result) => result.status === 'rejected').length;
+    if (failedCounts > 0) {
+      const firstFailure = results.find((result) => result.status === 'rejected');
+      const message = firstFailure && firstFailure.status === 'rejected'
+        ? (firstFailure.reason?.message || 'Unable to load all health data')
+        : 'Unable to load health data';
       setPageError(message);
       showError('Health load failed', message);
-    } finally {
-      setLoading(false);
+    } else {
+      setPageError(null);
+      showSuccess('Health updated', 'System health data refreshed successfully');
     }
+
+    setNextRefreshIn(autoRefreshInterval);
+    setLoading(false);
   }, [autoRefreshInterval, showError, showSuccess]);
 
   useEffect(() => {
@@ -409,34 +428,46 @@ export function HealthMonitoringPage() {
               <p className="text-sm font-semibold uppercase tracking-[0.24em] text-slate-500">Cron / Scheduler</p>
               <p className="mt-2 text-2xl font-semibold text-slate-900">Task execution and schedule health</p>
             </div>
-            <HealthStatusBadge status={cronTasks.some((task) => task.status === 'Warning') ? 'Warning' : 'Healthy'} />
+            <HealthStatusBadge status={cronTasksError ? 'Warning' : cronTasks.some((task) => task.status === 'Warning') ? 'Warning' : cronTasks.some((task) => task.status === 'Critical') ? 'Critical' : 'Healthy'} />
           </div>
-          <div className="mt-6 overflow-x-auto">
-            <table className="min-w-full text-left text-sm text-slate-600">
-              <thead className="border-b border-slate-200 text-slate-900">
-                <tr>
-                  <th className="px-4 py-3">Task</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Last Run</th>
-                  <th className="px-4 py-3">Next Run</th>
-                  <th className="px-4 py-3">Duration</th>
-                  <th className="px-4 py-3">Failures</th>
-                </tr>
-              </thead>
-              <tbody>
-                {cronTasks.map((task) => (
-                  <tr key={task.name} className="border-b border-slate-100 hover:bg-slate-50">
-                    <td className="px-4 py-3 font-medium text-slate-900">{task.name}</td>
-                    <td className="px-4 py-3"><HealthStatusBadge status={task.status} /></td>
-                    <td className="px-4 py-3">{task.lastRun}</td>
-                    <td className="px-4 py-3">{task.nextRun}</td>
-                    <td className="px-4 py-3">{task.duration}</td>
-                    <td className="px-4 py-3">{task.failures}</td>
+          {cronTasksError ? (
+            <div className="mt-6 rounded-3xl border border-amber-200 bg-amber-50 p-4 text-amber-800">
+              <p className="font-medium">Unable to load scheduled tasks</p>
+              <p className="mt-1 text-sm">{cronTasksError}</p>
+              <button onClick={handleRefresh} className="mt-3 btn btn-secondary btn-sm">Retry</button>
+            </div>
+          ) : cronTasks.length === 0 ? (
+            <div className="mt-6 rounded-3xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
+              No scheduled tasks configured.
+            </div>
+          ) : (
+            <div className="mt-6 overflow-x-auto">
+              <table className="min-w-full text-left text-sm text-slate-600">
+                <thead className="border-b border-slate-200 text-slate-900">
+                  <tr>
+                    <th className="px-4 py-3">Task</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Last Run</th>
+                    <th className="px-4 py-3">Next Run</th>
+                    <th className="px-4 py-3">Duration</th>
+                    <th className="px-4 py-3">Failures</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {cronTasks.map((task) => (
+                    <tr key={task.id ?? task.name} className="border-b border-slate-100 hover:bg-slate-50">
+                      <td className="px-4 py-3 font-medium text-slate-900">{task.name}</td>
+                      <td className="px-4 py-3"><HealthStatusBadge status={task.status} /></td>
+                      <td className="px-4 py-3">{task.lastRun}</td>
+                      <td className="px-4 py-3">{task.nextRun}</td>
+                      <td className="px-4 py-3">{task.duration}</td>
+                      <td className="px-4 py-3">{task.failures}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         <div className="space-y-4">

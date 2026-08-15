@@ -82,12 +82,101 @@ export interface QueueHealth {
 }
 
 export interface CronTask {
+  id?: string | number;
   name: string;
+  command?: string;
+  schedule?: string;
   status: HealthStatus;
   lastRun: string;
   nextRun: string;
   duration: string;
   failures: number;
+  enabled?: boolean;
+  error?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
+
+const extractArrayPayload = <T>(payload: unknown, candidateKeys: string[] = ['data', 'items', 'tasks', 'cronTasks']): T[] => {
+  if (Array.isArray(payload)) return payload as T[];
+
+  if (!isRecord(payload)) {
+    if (isRecord((payload as any)?.response)) {
+      return extractArrayPayload<T>((payload as any).response, candidateKeys);
+    }
+    return [];
+  }
+
+  for (const key of candidateKeys) {
+    const value = payload[key];
+    if (Array.isArray(value)) return value as T[];
+  }
+
+  const nestedData = payload.data;
+  if (Array.isArray(nestedData)) return nestedData as T[];
+
+  if (payload.success === false) {
+    const message = typeof payload.message === 'string' ? payload.message : 'Request failed';
+    throw new Error(message);
+  }
+
+  const errorMessage = typeof payload.message === 'string' ? payload.message : null;
+  if (errorMessage) {
+    throw new Error(errorMessage);
+  }
+
+  const knownObjectKeys = Object.keys(payload);
+  const hasArrayValues = knownObjectKeys.some((key) => Array.isArray(payload[key]));
+  if (hasArrayValues) {
+    for (const key of knownObjectKeys) {
+      if (Array.isArray(payload[key])) return payload[key] as T[];
+    }
+  }
+
+  throw new Error('Malformed health API response: expected an array payload');
+};
+
+export function normalizeCronTasks(response: unknown): CronTask[] {
+  try {
+    const tasks = extractArrayPayload<CronTask>(response, ['data', 'tasks', 'cronTasks']);
+    return tasks.map((task, index) => {
+      const record = isRecord(task) ? (task as Record<string, unknown>) : null;
+      const statusValue = record?.['status'];
+      const normalizedStatus: HealthStatus = statusValue === 'Warning' || statusValue === 'Critical' || statusValue === 'Offline' || statusValue === 'Healthy'
+        ? statusValue
+        : 'Healthy';
+
+      const idValue = record?.['id'];
+      const id: string | number | undefined = typeof idValue === 'string' || typeof idValue === 'number' ? idValue : `${index + 1}`;
+      const nameValue = record?.['name'] ?? record?.['task'] ?? `Task ${index + 1}`;
+      const commandValue = record?.['command'];
+      const scheduleValue = record?.['schedule'];
+      const lastRunValue = record?.['lastRun'] ?? record?.['last_run'] ?? 'Unknown';
+      const nextRunValue = record?.['nextRun'] ?? record?.['next_run'] ?? 'Unknown';
+      const durationValue = record?.['duration'] ?? 0;
+      const failuresValue = record?.['failures'] ?? 0;
+
+      return {
+        id,
+        name: String(nameValue),
+        command: typeof commandValue === 'string' ? commandValue : undefined,
+        schedule: typeof scheduleValue === 'string' ? scheduleValue : undefined,
+        status: normalizedStatus,
+        lastRun: typeof lastRunValue === 'string' ? lastRunValue : 'Unknown',
+        nextRun: typeof nextRunValue === 'string' ? nextRunValue : 'Unknown',
+        duration: typeof durationValue === 'string' ? durationValue : `${durationValue ?? 0}s`,
+        failures: typeof failuresValue === 'number' ? failuresValue : Number(failuresValue ?? 0),
+        enabled: typeof record?.['enabled'] === 'boolean' ? record['enabled'] as boolean : undefined,
+        error: typeof record?.['error'] === 'string' ? record['error'] as string : undefined,
+        createdAt: typeof record?.['createdAt'] === 'string' ? record['createdAt'] as string : undefined,
+        updatedAt: typeof record?.['updatedAt'] === 'string' ? record['updatedAt'] as string : undefined,
+      } satisfies CronTask;
+    });
+  } catch (error) {
+    throw error instanceof Error ? error : new Error('Unable to load scheduled tasks');
+  }
 }
 
 export interface StorageHealth {
@@ -214,55 +303,151 @@ export async function getDatabaseHealth(): Promise<DatabaseHealth> {
 }
 
 export async function getApiHealth(): Promise<ApiHealthEntry[]> {
-  return apiClient.request('GET', '/health/apis');
+  const response = await apiClient.request('GET', '/health/apis');
+  return extractArrayPayload<ApiHealthEntry>(response, ['data', 'items', 'checks', 'endpoints']);
 }
 
 export async function getIntegrationHealth(): Promise<IntegrationHealthEntry[]> {
-  return apiClient.request('GET', '/health/integrations');
+  const response = await apiClient.request('GET', '/health/integrations');
+  return extractArrayPayload<IntegrationHealthEntry>(response, ['data', 'items', 'integrations']);
 }
 
 export async function getQueueHealth(): Promise<QueueHealth> {
-  return apiClient.request('GET', '/health/queue');
+  const response = await apiClient.request('GET', '/health/queue');
+  if (isRecord(response)) {
+    const record = response as Record<string, unknown>;
+    return {
+      pending: Number(record.pending ?? 0),
+      processing: Number(record.processing ?? 0),
+      completed: Number(record.completed ?? 0),
+      failed: Number(record.failed ?? 0),
+      retryCount: Number(record.retryCount ?? 0),
+      delay: typeof record.delay === 'string' ? record.delay : 'Unavailable',
+      scheduledJobs: Number(record.scheduledJobs ?? 0),
+    } satisfies QueueHealth;
+  }
+  return { pending: 0, processing: 0, completed: 0, failed: 0, retryCount: 0, delay: 'Unavailable', scheduledJobs: 0 };
 }
 
 export async function getCronHealth(): Promise<CronTask[]> {
-  return apiClient.request('GET', '/health/cron');
+  const response = await apiClient.request('GET', '/health/cron');
+  return normalizeCronTasks(response);
 }
 
 export async function getStorageHealth(): Promise<StorageHealth> {
-  return apiClient.request('GET', '/health/storage');
+  const response = await apiClient.request('GET', '/health/storage');
+  if (isRecord(response)) {
+    const record = response as Record<string, unknown>;
+    return {
+      total: typeof record.total === 'string' ? record.total : 'Unavailable',
+      used: typeof record.used === 'string' ? record.used : 'Unavailable',
+      free: typeof record.free === 'string' ? record.free : 'Unavailable',
+      usedPercentage: Number(record.usedPercentage ?? 0),
+      databaseStorage: typeof record.databaseStorage === 'string' ? record.databaseStorage : 'Unavailable',
+      invoiceStorage: typeof record.invoiceStorage === 'string' ? record.invoiceStorage : 'Unavailable',
+      imageStorage: typeof record.imageStorage === 'string' ? record.imageStorage : 'Unavailable',
+      backupStorage: typeof record.backupStorage === 'string' ? record.backupStorage : 'Unavailable',
+      logStorage: typeof record.logStorage === 'string' ? record.logStorage : 'Unavailable',
+      tempStorage: typeof record.tempStorage === 'string' ? record.tempStorage : 'Unavailable',
+    } satisfies StorageHealth;
+  }
+  return { total: 'Unavailable', used: 'Unavailable', free: 'Unavailable', usedPercentage: 0, databaseStorage: 'Unavailable', invoiceStorage: 'Unavailable', imageStorage: 'Unavailable', backupStorage: 'Unavailable', logStorage: 'Unavailable', tempStorage: 'Unavailable' };
 }
 
 export async function getBackupHealth(): Promise<BackupHealth> {
-  return apiClient.request('GET', '/health/backups');
+  const response = await apiClient.request('GET', '/health/backups');
+  if (isRecord(response)) {
+    const record = response as Record<string, unknown>;
+    return {
+      status: (record.status as HealthStatus) ?? 'Offline',
+      databaseStatus: (record.databaseStatus as HealthStatus) ?? 'Offline',
+      fileStatus: (record.fileStatus as HealthStatus) ?? 'Offline',
+      lastSuccessful: typeof record.lastSuccessful === 'string' ? record.lastSuccessful : 'Never',
+      lastFailed: typeof record.lastFailed === 'string' ? record.lastFailed : 'Never',
+      size: typeof record.size === 'string' ? record.size : '0 B',
+      destination: typeof record.destination === 'string' ? record.destination : 'Unavailable',
+      schedule: typeof record.schedule === 'string' ? record.schedule : 'Manual only',
+      retention: typeof record.retention === 'string' ? record.retention : '30 days',
+      verification: typeof record.verification === 'string' ? record.verification : 'Unavailable',
+      history: Array.isArray(record.history) ? record.history as BackupHistoryEntry[] : [],
+    } satisfies BackupHealth;
+  }
+  return { status: 'Offline', databaseStatus: 'Offline', fileStatus: 'Offline', lastSuccessful: 'Never', lastFailed: 'Never', size: '0 B', destination: 'Unavailable', schedule: 'Manual only', retention: '30 days', verification: 'Unavailable', history: [] };
 }
 
 export async function getSecurityHealth(): Promise<SecurityHealth> {
-  return apiClient.request('GET', '/health/security');
+  const response = await apiClient.request('GET', '/health/security');
+  if (isRecord(response)) {
+    const record = response as Record<string, unknown>;
+    return {
+      sslStatus: typeof record.sslStatus === 'string' ? record.sslStatus : 'Unavailable',
+      httpsStatus: typeof record.httpsStatus === 'string' ? record.httpsStatus : 'Unavailable',
+      sslExpiry: typeof record.sslExpiry === 'string' ? record.sslExpiry : 'Unavailable',
+      authenticationFailures: Number(record.authenticationFailures ?? 0),
+      failedLogins: Number(record.failedLogins ?? 0),
+      apiAuthFailures: Number(record.apiAuthFailures ?? 0),
+      expiredTokens: Number(record.expiredTokens ?? 0),
+      configIssues: Number(record.configIssues ?? 0),
+      filePermissions: Number(record.filePermissions ?? 0),
+      suspiciousRequests: Number(record.suspiciousRequests ?? 0),
+    } satisfies SecurityHealth;
+  }
+  return { sslStatus: 'Unavailable', httpsStatus: 'Unavailable', sslExpiry: 'Unavailable', authenticationFailures: 0, failedLogins: 0, apiAuthFailures: 0, expiredTokens: 0, configIssues: 0, filePermissions: 0, suspiciousRequests: 0 };
 }
 
 export async function getLogHealth(): Promise<LogEntry[]> {
-  return apiClient.request('GET', '/health/logs');
+  const response = await apiClient.request('GET', '/health/logs');
+  return extractArrayPayload<LogEntry>(response, ['data', 'items', 'logs']);
 }
 
 export async function getPerformanceHealth(): Promise<PerformanceHealth> {
-  return apiClient.request('GET', '/health/performance');
+  const response = await apiClient.request('GET', '/health/performance');
+  if (isRecord(response)) {
+    const record = response as Record<string, unknown>;
+    return {
+      serverCpu: Array.isArray(record.serverCpu) ? record.serverCpu as Array<{ time: string; value: number }> : [],
+      serverRam: Array.isArray(record.serverRam) ? record.serverRam as Array<{ time: string; value: number }> : [],
+      serverLoad: Array.isArray(record.serverLoad) ? record.serverLoad as Array<{ time: string; value: number }> : [],
+      apiResponse: Array.isArray(record.apiResponse) ? record.apiResponse as Array<{ time: string; value: number }> : [],
+      databaseQuery: Array.isArray(record.databaseQuery) ? record.databaseQuery as Array<{ time: string; value: number }> : [],
+      appResponse: Array.isArray(record.appResponse) ? record.appResponse as Array<{ time: string; value: number }> : [],
+      requestsPerMinute: Array.isArray(record.requestsPerMinute) ? record.requestsPerMinute as Array<{ time: string; value: number }> : [],
+      storageGrowth: Array.isArray(record.storageGrowth) ? record.storageGrowth as Array<{ time: string; value: number }> : [],
+    } satisfies PerformanceHealth;
+  }
+  return { serverCpu: [], serverRam: [], serverLoad: [], apiResponse: [], databaseQuery: [], appResponse: [], requestsPerMinute: [], storageGrowth: [] };
 }
 
 export async function getUptimeHealth(): Promise<UptimeHealth> {
-  return apiClient.request('GET', '/health/uptime');
+  const response = await apiClient.request('GET', '/health/uptime');
+  if (isRecord(response)) {
+    const record = response as Record<string, unknown>;
+    return {
+      current: Number(record.current ?? 0),
+      daily: Number(record.daily ?? 0),
+      weekly: Number(record.weekly ?? 0),
+      monthly: Number(record.monthly ?? 0),
+      downtimeMinutes: Number(record.downtimeMinutes ?? 0),
+      incidents: Number(record.incidents ?? 0),
+      history: Array.isArray(record.history) ? record.history as Array<{ date: string; uptime: number; incidents: number }> : [],
+    } satisfies UptimeHealth;
+  }
+  return { current: 0, daily: 0, weekly: 0, monthly: 0, downtimeMinutes: 0, incidents: 0, history: [] };
 }
 
 export async function getAlertHealth(): Promise<AlertEntry[]> {
-  return apiClient.request('GET', '/health/alerts');
+  const response = await apiClient.request('GET', '/health/alerts');
+  return extractArrayPayload<AlertEntry>(response, ['data', 'items', 'alerts']);
 }
 
 export async function getHistorySections(): Promise<HistorySection[]> {
-  return apiClient.request('GET', '/health/history');
+  const response = await apiClient.request('GET', '/health/history');
+  return extractArrayPayload<HistorySection>(response, ['data', 'items', 'history']);
 }
 
 export async function getServiceStatusGrid(): Promise<ServiceStatusItem[]> {
-  return apiClient.request('GET', '/health/services');
+  const response = await apiClient.request('GET', '/health/services');
+  return extractArrayPayload<ServiceStatusItem>(response, ['data', 'items', 'services']);
 }
 
 export async function testDatabaseConnection(): Promise<{ message: string }> {

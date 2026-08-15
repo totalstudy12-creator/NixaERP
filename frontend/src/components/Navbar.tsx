@@ -165,14 +165,20 @@ export function Navbar({ onMenuClick }: NavbarProps) {
                   <p className="text-xs text-slate-400 truncate">{user?.email || 'user@example.com'}</p>
                 </div>
                 <button
-                  onClick={() => setIsDropdownOpen(false)}
+                  onClick={() => {
+                    setIsDropdownOpen(false);
+                    navigate('/profile');
+                  }}
                   className="flex w-full items-center gap-3 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 hover:text-white"
                 >
                   <FiUser className="h-4 w-4" />
                   Profile
                 </button>
                 <button
-                  onClick={() => setIsDropdownOpen(false)}
+                  onClick={() => {
+                    setIsDropdownOpen(false);
+                    navigate('/settings');
+                  }}
                   className="flex w-full items-center gap-3 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800 hover:text-white"
                 >
                   <FiSettings className="h-4 w-4" />

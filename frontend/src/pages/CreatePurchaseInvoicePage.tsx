@@ -484,7 +484,8 @@ export function CreatePurchaseInvoicePage() {
 
     setSubmitting(true);
     try {
-      const res = await apiClient.createPurchaseInvoice(payload);
+      // ✅ FIX: Use createPurchaseBill instead of createPurchaseInvoice
+      const res = await apiClient.createPurchaseBill(payload);
       const newPurchase = res?.data ?? res;
       if (!newPurchase?.id) {
         showSuccess('Purchase created', `Invoice ${form.invoice_no} saved, but no ID returned.`);

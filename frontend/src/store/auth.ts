@@ -4,6 +4,11 @@ interface User {
   id: number;
   name: string;
   email: string;
+  phone?: string | null;
+  location?: string | null;
+  timezone?: string | null;
+  bio?: string | null;
+  avatar_url?: string | null;
   roles?: any[];
 }
 

@@ -2,9 +2,76 @@ import { useAuthStore } from './store/auth';
 
 const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '');
 const normalizeEndpoint = (endpoint: string) => (endpoint.startsWith('/') ? endpoint : `/${endpoint}`);
+const DASHBOARD_ENDPOINT_FALLBACKS: Record<string, string[]> = {
+  '/products/low-stock': ['/dashboard/low-stock'],
+  '/customers/top': ['/dashboard/top-customers'],
+  '/vendors/top': ['/dashboard/top-vendors'],
+  '/purchases/due': ['/dashboard/purchase-due'],
+  '/admin/login-activity': ['/dashboard/login-activity'],
+};
+
+export interface ApiError extends Error {
+  status?: number;
+  endpoint?: string;
+  method?: string;
+  backendMessage?: string;
+  validationErrors?: Record<string, string[] | string>;
+  requestId?: string;
+}
+
+const normalizeApiPayload = <T>(payload: unknown, fallback: T): T => {
+  if (payload === null || payload === undefined) return fallback;
+
+  if (Array.isArray(payload)) return payload as T;
+
+  if (typeof payload !== 'object') return fallback;
+
+  const record = payload as Record<string, unknown>;
+  if ('data' in record && record.data !== undefined) {
+    return normalizeApiPayload(record.data, fallback);
+  }
+
+  if ('success' in record && record.success === true && 'data' in record) {
+    return normalizeApiPayload(record.data, fallback);
+  }
+
+  return payload as T;
+};
+
+const buildApiError = (options: {
+  status: number;
+  endpoint: string;
+  method: string;
+  fallbackMessage: string;
+  payload?: unknown;
+}): ApiError => {
+  const payloadObject = options.payload && typeof options.payload === 'object' ? options.payload as Record<string, unknown> : {};
+  const backendMessage =
+    (typeof payloadObject.message === 'string' && payloadObject.message) ||
+    (typeof payloadObject.error === 'string' && payloadObject.error) ||
+    options.fallbackMessage;
+
+  const validationErrors =
+    payloadObject.errors && typeof payloadObject.errors === 'object'
+      ? (payloadObject.errors as Record<string, string[] | string>)
+      : undefined;
+
+  const requestId = typeof payloadObject.request_id === 'string' ? payloadObject.request_id : undefined;
+
+  const error = new Error(backendMessage) as ApiError;
+  error.name = 'ApiRequestError';
+  error.status = options.status;
+  error.endpoint = options.endpoint;
+  error.method = options.method;
+  error.backendMessage = backendMessage;
+  error.validationErrors = validationErrors;
+  error.requestId = requestId;
+
+  return error;
+};
 
 export const apiClient = {
-  async request(method: string, endpoint: string, data?: any, options?: any) {
+  async request<T = any>(method: string, endpoint: string, data?: any, options?: any): Promise<T> {
     const token = useAuthStore.getState().token;
     const headers: any = {
       'Content-Type': 'application/json',
@@ -20,17 +87,24 @@ export const apiClient = {
       headers,
     };
 
-    if (data) {
+    if (data !== undefined && data !== null) {
       requestOptions.body = JSON.stringify(data);
     }
 
+    const requestUrl = `${API_BASE}${normalizeEndpoint(endpoint)}`;
+
     try {
-      const response = await fetch(`${API_BASE}${normalizeEndpoint(endpoint)}`, requestOptions);
+      const response = await fetch(requestUrl, requestOptions);
 
       if (response.status === 401) {
         useAuthStore.getState().logout();
         window.location.href = '/login';
-        throw new Error('Unauthorized - please login again');
+        throw buildApiError({
+          status: 401,
+          endpoint,
+          method,
+          fallbackMessage: 'Unauthorized - please login again',
+        });
       }
 
       const contentType = response.headers.get('content-type') || '';
@@ -38,14 +112,50 @@ export const apiClient = {
       const body = isJson ? await response.json() : await response.text();
 
       if (!response.ok) {
-        const errorMessage = isJson ? body.message || response.statusText : response.statusText;
-        throw new Error(errorMessage || `API Error: ${response.statusText}`);
+        const fallbackEndpoints = method === 'GET' ? DASHBOARD_ENDPOINT_FALLBACKS[endpoint] || [] : [];
+        if (response.status === 404 && fallbackEndpoints.length > 0) {
+          let lastError: unknown;
+          for (const fallbackEndpoint of fallbackEndpoints) {
+            try {
+              return await this.request(method, fallbackEndpoint, data, options);
+            } catch (error) {
+              lastError = error;
+            }
+          }
+          if (lastError) throw lastError;
+        }
+
+        throw buildApiError({
+          status: response.status,
+          endpoint,
+          method,
+          fallbackMessage: response.statusText || 'Request failed',
+          payload: body,
+        });
       }
 
-      return body;
+      return normalizeApiPayload(body, body ?? null);
     } catch (error: any) {
-      console.error('API Error:', error);
-      throw error;
+      const apiError = error as ApiError;
+
+      if (apiError?.name === 'ApiRequestError') {
+        console.error(`API request failed: ${method.toUpperCase()} ${endpoint}`, {
+          status: apiError.status,
+          backendMessage: apiError.backendMessage,
+          validationErrors: apiError.validationErrors,
+        });
+        throw apiError;
+      }
+
+      const networkMessage = error instanceof Error ? error.message : 'Network request failed';
+      console.error(`API request failed: ${method.toUpperCase()} ${endpoint}`, error);
+      throw buildApiError({
+        status: 0,
+        endpoint,
+        method,
+        fallbackMessage: networkMessage || 'Network request failed',
+        payload: error,
+      });
     }
   },
 
@@ -60,6 +170,14 @@ export const apiClient = {
 
   async getMe() {
     return this.request('GET', '/me');
+  },
+
+  async getProfile() {
+    return this.request('GET', '/profile');
+  },
+
+  async updateProfile(data: any) {
+    return this.request('PUT', '/profile', data);
   },
 
   // Companies
@@ -818,6 +936,4 @@ export const apiClient = {
   async createSupplierGroup(data: { name: string }) {
     return this.request('POST', '/supplier-groups', data);
   },
-// Purchase Invoices (handled earlier under /purchases)
-
 };

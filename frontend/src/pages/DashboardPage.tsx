@@ -1,5 +1,5 @@
 // src/pages/DashboardPage.tsx
-import { useEffect, useState, useCallback, useMemo, lazy, Suspense, memo } from 'react';
+import { useEffect, useState, useCallback, useMemo, lazy, Suspense, memo, useRef } from 'react';
 import {
   FiRefreshCw, FiClock, FiUsers, FiShoppingCart, FiBox,
   FiDollarSign, FiTrendingUp, FiBarChart2, FiUserCheck, FiUserX,
@@ -16,7 +16,17 @@ import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 
 // ---------- Simple API Cache Hook ----------
-const cache = new Map<string, { data: any; timestamp: number }>();
+const cache = new Map<string, { data: unknown; timestamp: number }>();
+const normalizeCachePayload = <T,>(payload: unknown): T => {
+  if (payload === null || payload === undefined) return [] as unknown as T;
+  if (Array.isArray(payload)) return payload as T;
+  if (typeof payload === 'object' && payload !== null && 'data' in payload) {
+    const nested = (payload as { data?: unknown }).data;
+    return normalizeCachePayload<T>(nested);
+  }
+  return payload as T;
+};
+
 function useApiCache<T>(
   key: string,
   fetcher: () => Promise<T>,
@@ -25,31 +35,50 @@ function useApiCache<T>(
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const inFlightRef = useRef<Promise<T | null> | null>(null);
+
   const fetchData = useCallback(async (skipCache = false) => {
     if (!skipCache) {
       const entry = cache.get(key);
       if (entry && Date.now() - entry.timestamp < ttlMs) {
-        setData(entry.data);
+        setData(normalizeCachePayload<T>(entry.data));
         setLoading(false);
-        return;
+        return entry.data as T;
       }
     }
+
+    if (!skipCache && inFlightRef.current) {
+      return inFlightRef.current;
+    }
+
     setLoading(true);
     setError(null);
-    try {
-      const res = await fetcher();
-      const result = Array.isArray(res) ? res : (res as any).data ?? [];
-      cache.set(key, { data: result, timestamp: Date.now() });
-      setData(result);
-    } catch (err: any) {
-      const msg = err.message || 'Failed to load';
-      setError(msg);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
+
+    const request = (async () => {
+      try {
+        const res = await fetcher();
+        const result = normalizeCachePayload<T>(res);
+        cache.set(key, { data: result, timestamp: Date.now() });
+        setData(result);
+        return result;
+      } catch (err: any) {
+        const msg = err?.backendMessage || err?.message || 'Failed to load';
+        setError(msg);
+        return null;
+      } finally {
+        setLoading(false);
+        inFlightRef.current = null;
+      }
+    })();
+
+    inFlightRef.current = request;
+    return request;
   }, [key, fetcher, ttlMs]);
-  useEffect(() => { fetchData(); }, [fetchData]);
+
+  useEffect(() => {
+    void fetchData();
+  }, [fetchData]);
+
   return { data, loading, error, refresh: () => fetchData(true) };
 }
 
@@ -62,10 +91,18 @@ interface DashboardStats {
   invoices: number;
   totalRevenue: number;
 }
-interface PaymentSummary {
-  inward: { total: number; online: number; cash: number };
-  outward: { total: number; online: number; cash: number };
+
+interface PaymentBreakdown {
+  total: number;
+  online: number;
+  cash: number;
 }
+
+interface PaymentSummary {
+  inward: PaymentBreakdown;
+  outward: PaymentBreakdown;
+}
+
 interface InventorySummary {
   totalProducts: number;
   totalQuantity: number;
@@ -74,6 +111,7 @@ interface InventorySummary {
   zeroStock: number;
   negativeStock: number;
 }
+
 interface InvoiceCountSummary { sale: number; purchase: number }
 interface InvoiceAmountSummary { sale: number; purchase: number }
 interface TopSellingProduct { product_name: string; total_qty: number }
@@ -85,11 +123,16 @@ interface PurchaseDueInvoice {
   company_name: string;
   name: string;
   phone: string;
-  due_date: string;
+  due_date: string | null;
   due_from: string;
   remaining_payment: number;
 }
 interface LoginActivityItem { day: string; count: number }
+
+const EMPTY_PAYMENT_SUMMARY: PaymentSummary = {
+  inward: { total: 0, online: 0, cash: 0 },
+  outward: { total: 0, online: 0, cash: 0 },
+};
 
 const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#F97316'];
 
@@ -144,60 +187,79 @@ export function DashboardPage() {
   const { showError } = useNotification();
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
+  const fetchCompanies = useCallback(() => apiClient.getCompanies(), []);
+  const fetchCustomers = useCallback(() => apiClient.getCustomers(), []);
+  const fetchProducts = useCallback(() => apiClient.getProducts(), []);
+  const fetchOrders = useCallback(() => apiClient.getOrders(), []);
+  const fetchInvoices = useCallback(() => apiClient.getInvoices(), []);
+  const fetchEmployees = useCallback(() => apiClient.getEmployees(), []);
+
   // Core data (original)
   const {
     data: companies, loading: compsLoading, error: compsError, refresh: refreshComps,
-  } = useApiCache<any[]>('companies', () => apiClient.getCompanies());
+  } = useApiCache<any[]>('companies', fetchCompanies);
   const {
     data: customers, loading: custsLoading, error: custsError, refresh: refreshCusts,
-  } = useApiCache<any[]>('customers', () => apiClient.getCustomers());
+  } = useApiCache<any[]>('customers', fetchCustomers);
   const {
     data: products, loading: prodsLoading, error: prodsError, refresh: refreshProds,
-  } = useApiCache<any[]>('products', () => apiClient.getProducts());
+  } = useApiCache<any[]>('products', fetchProducts);
   const {
     data: orders, loading: ordsLoading, error: ordsError, refresh: refreshOrds,
-  } = useApiCache<any[]>('orders', () => apiClient.getOrders());
+  } = useApiCache<any[]>('orders', fetchOrders);
   const {
     data: invoices, loading: invsLoading, error: invsError, refresh: refreshInvs,
-  } = useApiCache<any[]>('invoices', () => apiClient.getInvoices());
+  } = useApiCache<any[]>('invoices', fetchInvoices);
   const {
     data: employees, loading: empsLoading, error: empsError, refresh: refreshEmps,
-  } = useApiCache<any[]>('employees', () => apiClient.getEmployees());
+  } = useApiCache<any[]>('employees', fetchEmployees);
+
+  const fetchPaymentSummary = useCallback(() => apiClient.getPaymentSummary(), []);
+  const fetchInventorySummary = useCallback(() => apiClient.getInventorySummary(), []);
+  const fetchInvoiceCountSummary = useCallback(() => apiClient.getInvoiceCountSummary(), []);
+  const fetchInvoiceAmountSummary = useCallback(() => apiClient.getInvoiceAmountSummary(), []);
+  const fetchTopSellingProducts = useCallback(() => apiClient.getTopSellingProducts(5), []);
+  const fetchLeastSellingProducts = useCallback(() => apiClient.getLeastSellingProducts(5), []);
+  const fetchLowStockProducts = useCallback(() => apiClient.getLowStockProducts(), []);
+  const fetchTopCustomers = useCallback(() => apiClient.getTopCustomers(5), []);
+  const fetchTopVendors = useCallback(() => apiClient.getTopVendors(5), []);
+  const fetchPurchaseDueInvoices = useCallback(() => apiClient.getPurchaseDueInvoices(), []);
+  const fetchLoginActivity = useCallback(() => apiClient.getLoginActivity(), []);
 
   // New data sections
   const {
     data: paymentSummary, loading: payLoading, error: payError, refresh: refreshPay,
-  } = useApiCache<PaymentSummary>('paymentSummary', () => apiClient.getPaymentSummary());
+  } = useApiCache<PaymentSummary>('paymentSummary', fetchPaymentSummary);
   const {
     data: inventory, loading: invSumLoading, error: invSumError, refresh: refreshInv,
-  } = useApiCache<InventorySummary>('inventorySummary', () => apiClient.getInventorySummary());
+  } = useApiCache<InventorySummary>('inventorySummary', fetchInventorySummary);
   const {
     data: invoiceCountSummary, loading: invCntLoading, error: invCntError, refresh: refreshInvCnt,
-  } = useApiCache<InvoiceCountSummary>('invoiceCountSummary', () => apiClient.getInvoiceCountSummary());
+  } = useApiCache<InvoiceCountSummary>('invoiceCountSummary', fetchInvoiceCountSummary);
   const {
     data: invoiceAmtSummary, loading: invAmtLoading, error: invAmtError, refresh: refreshInvAmt,
-  } = useApiCache<InvoiceAmountSummary>('invoiceAmountSummary', () => apiClient.getInvoiceAmountSummary());
+  } = useApiCache<InvoiceAmountSummary>('invoiceAmountSummary', fetchInvoiceAmountSummary);
   const {
     data: topSelling, loading: topSellLoading, error: topSellError, refresh: refreshTopSell,
-  } = useApiCache<TopSellingProduct[]>('topSellingProducts', () => apiClient.getTopSellingProducts(5));
+  } = useApiCache<TopSellingProduct[]>('topSellingProducts', fetchTopSellingProducts);
   const {
     data: leastSelling, loading: leastSellLoading, error: leastSellError, refresh: refreshLeastSell,
-  } = useApiCache<TopSellingProduct[]>('leastSellingProducts', () => apiClient.getLeastSellingProducts(5));
+  } = useApiCache<TopSellingProduct[]>('leastSellingProducts', fetchLeastSellingProducts);
   const {
     data: lowStock, loading: lowStockLoading, error: lowStockError, refresh: refreshLowStock,
-  } = useApiCache<LowStockProduct[]>('lowStockProducts', () => apiClient.getLowStockProducts());
+  } = useApiCache<LowStockProduct[]>('lowStockProducts', fetchLowStockProducts);
   const {
     data: topCustomers, loading: topCustLoading, error: topCustError, refresh: refreshTopCust,
-  } = useApiCache<TopCustomer[]>('topCustomers', () => apiClient.getTopCustomers(5));
+  } = useApiCache<TopCustomer[]>('topCustomers', fetchTopCustomers);
   const {
     data: topVendors, loading: topVendLoading, error: topVendError, refresh: refreshTopVend,
-  } = useApiCache<TopVendor[]>('topVendors', () => apiClient.getTopVendors(5));
+  } = useApiCache<TopVendor[]>('topVendors', fetchTopVendors);
   const {
     data: purchaseDue, loading: purDueLoading, error: purDueError, refresh: refreshPurDue,
-  } = useApiCache<PurchaseDueInvoice[]>('purchaseDue', () => apiClient.getPurchaseDueInvoices());
+  } = useApiCache<PurchaseDueInvoice[]>('purchaseDue', fetchPurchaseDueInvoices);
   const {
     data: loginActivity, loading: loginActLoading, error: loginActError, refresh: refreshLoginAct,
-  } = useApiCache<LoginActivityItem[]>('loginActivity', () => apiClient.getLoginActivity());
+  } = useApiCache<LoginActivityItem[]>('loginActivity', fetchLoginActivity);
 
   const isLoading = compsLoading || custsLoading || prodsLoading || ordsLoading || invsLoading || empsLoading;
   const hasError = compsError || custsError || prodsError || ordsError || invsError || empsError;
@@ -244,10 +306,10 @@ export function DashboardPage() {
 
   // Payment breakdown for bar chart
   const paymentChartData = useMemo(() => {
-    if (!paymentSummary) return [];
+    const safeSummary = paymentSummary ?? EMPTY_PAYMENT_SUMMARY;
     return [
-      { name: 'Inward', Online: paymentSummary.inward.online, Cash: paymentSummary.inward.cash },
-      { name: 'Outward', Online: paymentSummary.outward.online, Cash: paymentSummary.outward.cash },
+      { name: 'Inward', Online: safeSummary.inward.online, Cash: safeSummary.inward.cash },
+      { name: 'Outward', Online: safeSummary.outward.online, Cash: safeSummary.outward.cash },
     ];
   }, [paymentSummary]);
 
@@ -381,12 +443,14 @@ export function DashboardPage() {
         {/* Inward Payment */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
           <h3 className="text-sm font-semibold text-slate-500 mb-2">Inward Payment</h3>
-          {payLoading ? <StatCardSkeleton /> : (
+          {payLoading ? <StatCardSkeleton /> : payError ? (
+            <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">Payment summary unavailable.</div>
+          ) : (
             <>
-              <p className="text-2xl font-bold text-emerald-600">₹{paymentSummary?.inward.total.toLocaleString()}</p>
+              <p className="text-2xl font-bold text-emerald-600">₹{(paymentSummary ?? EMPTY_PAYMENT_SUMMARY).inward.total.toLocaleString()}</p>
               <div className="mt-3 space-y-1 text-xs text-slate-600">
-                <div className="flex justify-between"><span>Online</span><span className="font-medium">₹{paymentSummary?.inward.online.toLocaleString()}</span></div>
-                <div className="flex justify-between"><span>Cash</span><span className="font-medium">₹{paymentSummary?.inward.cash.toLocaleString()}</span></div>
+                <div className="flex justify-between"><span>Online</span><span className="font-medium">₹{(paymentSummary ?? EMPTY_PAYMENT_SUMMARY).inward.online.toLocaleString()}</span></div>
+                <div className="flex justify-between"><span>Cash</span><span className="font-medium">₹{(paymentSummary ?? EMPTY_PAYMENT_SUMMARY).inward.cash.toLocaleString()}</span></div>
               </div>
             </>
           )}
@@ -394,19 +458,23 @@ export function DashboardPage() {
         {/* Outward Payment */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
           <h3 className="text-sm font-semibold text-slate-500 mb-2">Outward Payment</h3>
-          {payLoading ? <StatCardSkeleton /> : (
+          {payLoading ? <StatCardSkeleton /> : payError ? (
+            <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">Outward summary unavailable.</div>
+          ) : (
             <>
-              <p className="text-2xl font-bold text-rose-600">₹{paymentSummary?.outward.total.toLocaleString()}</p>
+              <p className="text-2xl font-bold text-rose-600">₹{(paymentSummary ?? EMPTY_PAYMENT_SUMMARY).outward.total.toLocaleString()}</p>
               <div className="mt-3 space-y-1 text-xs text-slate-600">
-                <div className="flex justify-between"><span>Online</span><span className="font-medium">₹{paymentSummary?.outward.online.toLocaleString()}</span></div>
-                <div className="flex justify-between"><span>Cash</span><span className="font-medium">₹{paymentSummary?.outward.cash.toLocaleString()}</span></div>
+                <div className="flex justify-between"><span>Online</span><span className="font-medium">₹{(paymentSummary ?? EMPTY_PAYMENT_SUMMARY).outward.online.toLocaleString()}</span></div>
+                <div className="flex justify-between"><span>Cash</span><span className="font-medium">₹{(paymentSummary ?? EMPTY_PAYMENT_SUMMARY).outward.cash.toLocaleString()}</span></div>
               </div>
             </>
           )}
         </div>
         {/* Payment Breakdown Chart */}
         <ChartCard title="Payment Breakdown" className="md:col-span-2">
-          {payLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : (
+          {payLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : payError ? (
+            <div className="flex h-40 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-700">Unable to load payment data.</div>
+          ) : (
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={paymentChartData} barCategoryGap="20%">
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
@@ -487,7 +555,9 @@ export function DashboardPage() {
           )}
         </ChartCard>
         <ChartCard title="⚠️ Low Stock">
-          {lowStockLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : (
+          {lowStockLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : lowStockError ? (
+            <div className="flex h-40 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-700">Low-stock data unavailable.</div>
+          ) : (
             <>
               <MiniTable columns={['Product Name', 'Qty.']} data={(lowStock || []).map(p => [p.product_name, p.qty.toLocaleString()])} />
               <button className="mt-3 text-xs text-blue-600 hover:underline self-end">View All</button>
@@ -502,7 +572,9 @@ export function DashboardPage() {
       </h2>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
         <ChartCard title="👑 Top Customers">
-          {topCustLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : (
+          {topCustLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : topCustError ? (
+            <div className="flex h-40 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-700">Top customer data unavailable.</div>
+          ) : (
             <>
               <MiniTable columns={['Name', 'Amount']} data={(topCustomers || []).map(c => [c.name, `₹${c.amount.toLocaleString()}`])} />
               <button className="mt-3 text-xs text-blue-600 hover:underline self-end">View All</button>
@@ -542,17 +614,20 @@ export function DashboardPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {(purchaseDue || []).map((inv, i) => (
-                      <tr key={i} className="hover:bg-slate-50">
-                        <td className="py-2 px-2">{inv.invoice_no}</td>
-                        <td className="py-2 px-2">{inv.company_name}</td>
-                        <td className="py-2 px-2">{inv.name}</td>
-                        <td className="py-2 px-2">{inv.phone || '—'}</td>
-                        <td className="py-2 px-2">{new Date(inv.due_date).toLocaleDateString()}</td>
-                        <td className="py-2 px-2">{inv.due_from}</td>
-                        <td className="py-2 px-2 font-medium text-rose-600">₹{inv.remaining_payment.toLocaleString()}</td>
-                      </tr>
-                    ))}
+                    {(purchaseDue || []).map((inv, i) => {
+                      const dueDate = inv.due_date ? new Date(inv.due_date) : null;
+                      return (
+                        <tr key={i} className="hover:bg-slate-50">
+                          <td className="py-2 px-2">{inv.invoice_no}</td>
+                          <td className="py-2 px-2">{inv.company_name}</td>
+                          <td className="py-2 px-2">{inv.name}</td>
+                          <td className="py-2 px-2">{inv.phone || '—'}</td>
+                          <td className="py-2 px-2">{dueDate && !Number.isNaN(dueDate.getTime()) ? dueDate.toLocaleDateString() : '—'}</td>
+                          <td className="py-2 px-2">{inv.due_from}</td>
+                          <td className="py-2 px-2 font-medium text-rose-600">₹{inv.remaining_payment.toLocaleString()}</td>
+                        </tr>
+                      );
+                    })}
                     {(!purchaseDue || purchaseDue.length === 0) && (
                       <tr><td colSpan={7} className="py-4 text-center text-slate-400">No records found</td></tr>
                     )}

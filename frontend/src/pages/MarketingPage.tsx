@@ -21,27 +21,24 @@ const Offcanvas = lazy(() =>
 
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import {
+  getMarketingAccounts,
+  getMarketingAnalytics,
+  getMarketingDashboard,
+  getMarketingInbox,
+  getMarketingPosts,
+  createMarketingPost,
+  updateMarketingPost,
+  deleteMarketingPost,
+  type SocialAccount,
+  type SocialPost,
+} from '../services/marketingService';
 
 // ---------- Types ----------
-interface SocialAccount {
-  id: number;
-  platform: 'facebook' | 'instagram' | 'twitter' | 'linkedin' | 'youtube' | 'tiktok' | 'threads' | 'google' | 'whatsapp' | 'pinterest' | 'telegram';
-  name: string;
-  handle: string;
-  connected: boolean;
-  followers: number;
-}
-
-interface Post {
-  id: number;
-  content: string;
+interface Post extends SocialPost {
   type: 'text' | 'image' | 'carousel' | 'video' | 'reel' | 'story' | 'poll';
   platforms: string[];
-  status: 'draft' | 'scheduled' | 'published' | 'failed';
-  scheduled_at: string | null;
-  published_at: string | null;
   engagement: { likes: number; comments: number; shares: number; clicks: number };
-  created_at: string;
 }
 
 // ---------- Platform icons ----------
@@ -59,72 +56,6 @@ const PLATFORM_ICONS: Record<string, string> = {
   telegram: '✈️',
 };
 
-// ---------- Mock Data ----------
-const MOCK_ACCOUNTS: SocialAccount[] = [
-  { id: 1, platform: 'facebook', name: 'Business OS', handle: '@businessos', connected: true, followers: 25600 },
-  { id: 2, platform: 'instagram', name: 'Business OS', handle: '@businessos', connected: true, followers: 41000 },
-  { id: 3, platform: 'twitter', name: 'Business OS', handle: '@businessos', connected: true, followers: 12000 },
-  { id: 4, platform: 'linkedin', name: 'Business OS Inc.', handle: '/company/businessos', connected: false, followers: 0 },
-  { id: 5, platform: 'youtube', name: 'Business OS', handle: '@businessos', connected: false, followers: 0 },
-];
-
-const MOCK_POSTS: Post[] = [
-  {
-    id: 1,
-    content: '🚀 Exciting news! Our new inventory module is live.',
-    type: 'text',
-    platforms: ['facebook', 'twitter'],
-    status: 'published',
-    scheduled_at: null,
-    published_at: '2026-07-28T09:00:00Z',
-    engagement: { likes: 245, comments: 34, shares: 12, clicks: 1500 },
-    created_at: '2026-07-27T10:00:00Z',
-  },
-  {
-    id: 2,
-    content: 'Summer Sale is coming! Check out our offers.',
-    type: 'image',
-    platforms: ['instagram', 'facebook'],
-    status: 'scheduled',
-    scheduled_at: '2026-08-01T08:00:00Z',
-    published_at: null,
-    engagement: { likes: 0, comments: 0, shares: 0, clicks: 0 },
-    created_at: '2026-07-27T14:00:00Z',
-  },
-  {
-    id: 3,
-    content: '🎥 Behind the scenes of our product shoot.',
-    type: 'video',
-    platforms: ['youtube', 'tiktok'],
-    status: 'draft',
-    scheduled_at: null,
-    published_at: null,
-    engagement: { likes: 0, comments: 0, shares: 0, clicks: 0 },
-    created_at: '2026-07-26T09:00:00Z',
-  },
-  {
-    id: 4,
-    content: 'Customer success story: How Company X increased sales by 30%',
-    type: 'carousel',
-    platforms: ['linkedin'],
-    status: 'published',
-    scheduled_at: null,
-    published_at: '2026-07-25T11:00:00Z',
-    engagement: { likes: 410, comments: 52, shares: 18, clicks: 2900 },
-    created_at: '2026-07-24T15:00:00Z',
-  },
-  {
-    id: 5,
-    content: 'Poll: Which feature do you want next?',
-    type: 'poll',
-    platforms: ['twitter', 'instagram'],
-    status: 'draft',
-    scheduled_at: null,
-    published_at: null,
-    engagement: { likes: 0, comments: 0, shares: 0, clicks: 0 },
-    created_at: '2026-07-23T10:00:00Z',
-  },
-];
 
 // ---------- Stat Card ----------
 const StatCard = memo(({ icon: Icon, label, value, tone, prefix }: {
@@ -158,9 +89,12 @@ export function MarketingPage() {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
 
   // Data
-  const [accounts, setAccounts] = useState<SocialAccount[]>(MOCK_ACCOUNTS);
-  const [posts, setPosts] = useState<Post[]>(MOCK_POSTS);
+  const [accounts, setAccounts] = useState<SocialAccount[]>([]);
+  const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(false);
+  const [dashboardError, setDashboardError] = useState<string | null>(null);
+  const [analytics, setAnalytics] = useState<{ followers: number; engagement: number; accounts: number; message?: string } | null>(null);
+  const [inbox, setInbox] = useState<any[]>([]);
 
   // Search & Filters
   const [searchTerm, setSearchTerm] = useState('');
@@ -187,18 +121,57 @@ export function MarketingPage() {
   const [aiPrompt, setAiPrompt] = useState('');
   const [generatingAI, setGeneratingAI] = useState(false);
 
-  // ---------- Simulated data refresh ----------
-  const refreshData = useCallback(() => {
+  const refreshData = useCallback(async () => {
     setLoading(true);
-    setTimeout(() => {
-      setAccounts([...MOCK_ACCOUNTS]);
-      setPosts([...MOCK_POSTS]);
-      setLoading(false);
-      showSuccess('Refreshed', 'Data updated.');
-    }, 500);
-  }, [showSuccess]);
+    setDashboardError(null);
 
-  useEffect(() => { refreshData(); }, []);
+    try {
+      const [dashboard, accountsData, postsData, analyticsData, inboxData] = await Promise.all([
+        getMarketingDashboard(),
+        getMarketingAccounts(),
+        getMarketingPosts(),
+        getMarketingAnalytics(),
+        getMarketingInbox(),
+      ]);
+
+      setAccounts(accountsData);
+      setPosts((postsData || []).map((post: SocialPost) => ({
+        ...post,
+        type: 'text',
+        platforms: Array.isArray((post as any).metadata?.platforms) ? (post as any).metadata.platforms : [],
+        engagement: { likes: 0, comments: 0, shares: 0, clicks: 0 },
+      })));
+      setAnalytics(analyticsData || { followers: 0, engagement: 0, accounts: 0, message: 'Analytics unavailable' });
+      setInbox(Array.isArray(inboxData) ? inboxData : []);
+      setAccounts((accountsData || []).map((account) => ({
+        ...account,
+        account_name: account.account_name ?? account.username ?? account.platform,
+      })));
+      setPosts((postsData || []).map((post) => ({
+        ...post,
+        type: 'text',
+        platforms: Array.isArray((post as any).metadata?.platforms) ? (post as any).metadata.platforms : [],
+        engagement: { likes: 0, comments: 0, shares: 0, clicks: 0 },
+      })));
+      const dashboardStats = dashboard || { connected_accounts: 0, scheduled_posts: 0, total_followers: 0, total_engagement: 0, accounts: [], posts: [] };
+      if (dashboardStats.accounts?.length) setAccounts(dashboardStats.accounts as SocialAccount[]);
+      if (dashboardStats.posts?.length) setPosts((dashboardStats.posts as SocialPost[]).map((post: SocialPost) => ({
+        ...post,
+        type: 'text',
+        platforms: Array.isArray((post as any).metadata?.platforms) ? (post as any).metadata.platforms : [],
+        engagement: { likes: 0, comments: 0, shares: 0, clicks: 0 },
+      })));
+      showSuccess('Refreshed', 'Marketing data updated.');
+    } catch (error: any) {
+      const message = error?.message || 'Unable to load marketing data';
+      setDashboardError(message);
+      showError('Marketing update failed', message);
+    } finally {
+      setLoading(false);
+    }
+  }, [showError, showSuccess]);
+
+  useEffect(() => { void refreshData(); }, [refreshData]);
 
   // ---------- Filtered posts ----------
   const filteredPosts = useMemo(() => {
@@ -219,13 +192,10 @@ export function MarketingPage() {
     scheduled: posts.filter(p => p.status === 'scheduled').length,
     published: posts.filter(p => p.status === 'published').length,
     draft: posts.filter(p => p.status === 'draft').length,
-    connectedAccounts: accounts.filter(a => a.connected).length,
-    totalFollowers: accounts.filter(a => a.connected).reduce((sum, a) => sum + a.followers, 0),
-    totalEngagement: posts.filter(p => p.status === 'published').reduce(
-      (sum, p) => sum + p.engagement.likes + p.engagement.comments + p.engagement.shares + p.engagement.clicks,
-      0
-    ),
-  }), [posts, accounts]);
+    connectedAccounts: accounts.filter(a => a.status === 'connected').length,
+    totalFollowers: analytics?.followers ?? 0,
+    totalEngagement: analytics?.engagement ?? 0,
+  }), [posts, accounts, analytics]);
 
   // ---------- Post CRUD ----------
   const handleCreatePost = () => {
@@ -245,30 +215,41 @@ export function MarketingPage() {
     setIsPostPanelOpen(true);
   };
 
-  const handleDeletePost = (id: number) => {
+  const handleDeletePost = async (id: number) => {
     if (confirm('Delete this post?')) {
-      setPosts(prev => prev.filter(p => p.id !== id));
-      showSuccess('Deleted', 'Post removed.');
+      try {
+        await deleteMarketingPost(id);
+        setPosts(prev => prev.filter(p => p.id !== id));
+        showSuccess('Deleted', 'Post removed.');
+      } catch (error: any) {
+        showError('Delete failed', error?.message || 'Unable to delete post');
+      }
     }
   };
 
-  const handleSavePost = () => {
+  const handleSavePost = async () => {
     if (!postForm.content.trim()) { showError('Validation', 'Content is required.'); return; }
     if (postForm.platforms.length === 0) { showError('Validation', 'Select at least one platform.'); return; }
     setSubmitting(true);
-    setTimeout(() => {
+    try {
       if (editingPost) {
-        setPosts(prev => prev.map(p => p.id === editingPost.id ? {
-          ...p,
+        await updateMarketingPost(editingPost.id, {
           content: postForm.content,
-          type: postForm.type,
-          platforms: postForm.platforms,
           scheduled_at: postForm.scheduled_at || null,
-          status: postForm.scheduled_at ? 'scheduled' : p.status,
-        } : p));
+          status: postForm.scheduled_at ? 'scheduled' : editingPost.status,
+          metadata: { platforms: postForm.platforms },
+        });
+        setPosts(prev => prev.map(p => p.id === editingPost.id ? { ...p, content: postForm.content, platforms: postForm.platforms, scheduled_at: postForm.scheduled_at || null, status: postForm.scheduled_at ? 'scheduled' : p.status } : p));
       } else {
-        const newPost: Post = {
-          id: Date.now(),
+        const created = await createMarketingPost({
+          content: postForm.content,
+          platforms: postForm.platforms,
+          status: postForm.scheduled_at ? 'scheduled' : 'draft',
+          scheduled_at: postForm.scheduled_at || null,
+        });
+        const newPost = {
+          ...(created?.data || created),
+          id: created?.data?.id ?? Date.now(),
           content: postForm.content,
           type: postForm.type,
           platforms: postForm.platforms,
@@ -277,13 +258,16 @@ export function MarketingPage() {
           published_at: null,
           engagement: { likes: 0, comments: 0, shares: 0, clicks: 0 },
           created_at: new Date().toISOString(),
-        };
+        } as Post;
         setPosts(prev => [newPost, ...prev]);
       }
       showSuccess('Saved', 'Post saved successfully.');
       setIsPostPanelOpen(false);
+    } catch (error: any) {
+      showError('Save failed', error?.message || 'Unable to save post');
+    } finally {
       setSubmitting(false);
-    }, 600);
+    }
   };
 
   // AI content generation
@@ -340,7 +324,7 @@ export function MarketingPage() {
           <p className="text-sm text-slate-300">Create, schedule, publish & analyse all social content from one place.</p>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={refreshData} disabled={loading} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 transition hover:bg-white/20 disabled:opacity-60">
+          <button onClick={() => void refreshData()} disabled={loading} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 transition hover:bg-white/20 disabled:opacity-60">
             <FiRefreshCw className={loading ? 'animate-spin inline mr-1' : 'inline mr-1'} size={14} /> Refresh
           </button>
           <button onClick={handleCreatePost} className="rounded-xl bg-cyan-400 text-slate-950 px-3 py-2 text-sm font-medium transition hover:bg-cyan-300 shadow-md shadow-cyan-500/20">
@@ -349,11 +333,12 @@ export function MarketingPage() {
         </div>
       </div>
 
+      {dashboardError && <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{dashboardError}</div>}
       {/* Summary Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <StatCard icon={FiLink2} label="Connected Accounts" value={stats.connectedAccounts} tone="blue" />
-        <StatCard icon={FiUsers} label="Total Followers" value={stats.totalFollowers.toLocaleString()} tone="emerald" />
-        <StatCard icon={FiBarChart2} label="Total Engagement" value={stats.totalEngagement.toLocaleString()} tone="amber" />
+        <StatCard icon={FiUsers} label="Total Followers" value={stats.totalFollowers === 0 ? '—' : stats.totalFollowers.toLocaleString()} tone="emerald" />
+        <StatCard icon={FiBarChart2} label="Total Engagement" value={stats.totalEngagement === 0 ? '—' : stats.totalEngagement.toLocaleString()} tone="amber" />
         <StatCard icon={FiCalendar} label="Scheduled Posts" value={stats.scheduled} tone="purple" />
       </div>
 
@@ -385,31 +370,37 @@ export function MarketingPage() {
         {activeTab === 'dashboard' && (
           <div className="space-y-6">
             <h2 className="text-xl font-semibold">Connected Accounts</h2>
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-              {accounts.map(acc => (
-                <div key={acc.id} className={clsx('p-4 rounded-xl border', acc.connected ? 'bg-blue-50 border-blue-200' : 'bg-gray-50 border-gray-200 opacity-60')}>
-                  <div className="text-2xl mb-2">{PLATFORM_ICONS[acc.platform]}</div>
-                  <p className="font-medium text-sm">{acc.name}</p>
-                  <p className="text-xs text-slate-500">{acc.handle}</p>
-                  {acc.connected ? (
-                    <span className="text-xs text-emerald-600 mt-2 block">✔ Connected</span>
-                  ) : (
-                    <button className="text-xs text-blue-600 mt-2">Connect</button>
-                  )}
-                </div>
-              ))}
-            </div>
+            {accounts.length === 0 ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">No connected accounts configured.</div>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+                {accounts.map(acc => (
+                  <div key={acc.id} className={clsx('p-4 rounded-xl border', acc.status === 'connected' ? 'bg-blue-50 border-blue-200' : 'bg-gray-50 border-gray-200 opacity-60')}>
+                    <div className="text-2xl mb-2">{PLATFORM_ICONS[acc.platform] ?? '🔗'}</div>
+                    <p className="font-medium text-sm">{acc.account_name ?? acc.platform}</p>
+                    <p className="text-xs text-slate-500">{acc.username ?? acc.external_account_id ?? 'Not connected'}</p>
+                    {acc.status === 'connected' ? (
+                      <span className="text-xs text-emerald-600 mt-2 block">✔ Connected</span>
+                    ) : (
+                      <button className="text-xs text-blue-600 mt-2">Connect</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
             <h2 className="text-xl font-semibold mt-8">Recent Posts</h2>
             <div className="space-y-3">
-              {posts.slice(0, 3).map(post => (
+              {posts.length === 0 ? (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">No posts found.</div>
+              ) : posts.slice(0, 3).map(post => (
                 <div key={post.id} className="p-3 bg-slate-50 rounded-xl flex justify-between items-start">
                   <div>
-                    <p className="text-sm font-medium">{post.content.slice(0, 80)}...</p>
+                    <p className="text-sm font-medium">{post.content.slice(0, 80)}{post.content.length > 80 ? '...' : ''}</p>
                     <div className="flex gap-2 text-xs text-slate-400 mt-1">
-                      <span>{post.status}</span> • <span>{post.platforms.join(', ')}</span>
+                      <span>{post.status}</span> • <span>{post.platforms.join(', ') || 'No platform selected'}</span>
                     </div>
                   </div>
-                  <span className="text-xs text-slate-400">{new Date(post.created_at).toLocaleDateString()}</span>
+                  <span className="text-xs text-slate-400">{post.created_at ? new Date(post.created_at).toLocaleDateString() : '—'}</span>
                 </div>
               ))}
             </div>
@@ -572,11 +563,11 @@ export function MarketingPage() {
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="p-4 bg-slate-50 rounded-xl">
                 <p className="text-sm text-slate-500">Total Followers</p>
-                <p className="text-2xl font-bold">{stats.totalFollowers.toLocaleString()}</p>
+                <p className="text-2xl font-bold">{stats.totalFollowers === 0 ? '—' : stats.totalFollowers.toLocaleString()}</p>
               </div>
               <div className="p-4 bg-slate-50 rounded-xl">
                 <p className="text-sm text-slate-500">Total Engagement</p>
-                <p className="text-2xl font-bold">{stats.totalEngagement.toLocaleString()}</p>
+                <p className="text-2xl font-bold">{stats.totalEngagement === 0 ? '—' : stats.totalEngagement.toLocaleString()}</p>
               </div>
               <div className="p-4 bg-slate-50 rounded-xl">
                 <p className="text-sm text-slate-500">Reach</p>
