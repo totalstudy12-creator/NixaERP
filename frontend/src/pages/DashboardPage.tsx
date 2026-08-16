@@ -794,12 +794,12 @@ export function DashboardPage() {
                 style={{ width: '100%', height: 'auto' }}
               >
                 <Geographies geography={geoData}>
-                  {({ geographies }) => {
+                  {({ geographies }: { geographies: any[] }) => {
                     const maxSales = Math.max(
                       ...(biharDistrictSales || []).map((d: any) => d.sales),
                       1
                     );
-                    return geographies.map((geo) => {
+                    return geographies.map((geo: any) => {
                       const districtName =
                         geo.properties.district ||
                         geo.properties.NAME_2 ||
@@ -855,7 +855,7 @@ export function DashboardPage() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis type="number" />
                 <YAxis type="category" dataKey="district" width={160} fontSize={11} />
-                <RechartsTooltip formatter={(val: number) => `₹${Number(val).toLocaleString()}`} />
+                <RechartsTooltip formatter={(value: any) => `₹${Number(value).toLocaleString()}`} />
                 <Bar dataKey="sales" fill="#3B82F6" radius={[4, 4, 4, 4]} />
               </BarChart>
             </ResponsiveContainer>
