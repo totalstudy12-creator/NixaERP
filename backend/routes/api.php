@@ -65,6 +65,14 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('dashboard/inventory-summary', [DashboardController::class, 'inventorySummary']);
     Route::get('dashboard/invoices-count-summary', [DashboardController::class, 'invoiceCountSummary']);
     Route::get('dashboard/invoices-amount-summary', [DashboardController::class, 'invoiceAmountSummary']);
+    Route::get('dashboard/business-health', [DashboardController::class, 'businessHealth']);
+    Route::get('dashboard/forecast', [DashboardController::class, 'forecast']);
+    Route::get('dashboard/risks', [DashboardController::class, 'risks']);
+    Route::get('dashboard/anomalies', [DashboardController::class, 'anomalies']);
+    Route::get('dashboard/rankings', [DashboardController::class, 'rankings']);
+    Route::get('dashboard/hero-product', [DashboardController::class, 'heroProduct']);
+    Route::get('dashboard/hero-customer', [DashboardController::class, 'heroCustomer']);
+    Route::get('dashboard/district-sales', [DashboardController::class, 'districtSales']);
     Route::get('reports/top-selling-products', [DashboardController::class, 'topSellingProducts']);
     Route::get('reports/least-selling-products', [DashboardController::class, 'leastSellingProducts']);
     Route::get('dashboard/low-stock', [DashboardController::class, 'lowStockProducts']);
@@ -149,23 +157,23 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::delete('/advances/{advance}', [PayrollController::class, 'destroyAdvance']);
 
         // If you still need leaves, shifts, loans – keep them here, before the wildcard:
-        // Route::get('/leaves', [PayrollController::class, 'leaves']);
-        // Route::post('/leaves', [PayrollController::class, 'storeLeave']);
-        // Route::get('/leaves/{leave}', [PayrollController::class, 'showLeave']);
-        // Route::match(['put', 'patch'], '/leaves/{leave}', [PayrollController::class, 'updateLeave']);
-        // Route::delete('/leaves/{leave}', [PayrollController::class, 'destroyLeave']);
-        //
-        // Route::get('/shifts', [PayrollController::class, 'shifts']);
-        // Route::post('/shifts', [PayrollController::class, 'storeShift']);
-        // Route::get('/shifts/{shift}', [PayrollController::class, 'showShift']);
-        // Route::match(['put', 'patch'], '/shifts/{shift}', [PayrollController::class, 'updateShift']);
-        // Route::delete('/shifts/{shift}', [PayrollController::class, 'destroyShift']);
-        //
-        // Route::get('/loans', [PayrollController::class, 'loans']);
-        // Route::post('/loans', [PayrollController::class, 'storeLoan']);
-        // Route::get('/loans/{loan}', [PayrollController::class, 'showLoan']);
-        // Route::match(['put', 'patch'], '/loans/{loan}', [PayrollController::class, 'updateLoan']);
-        // Route::delete('/loans/{loan}', [PayrollController::class, 'destroyLoan']);
+        Route::get('/leaves', [PayrollController::class, 'leaves']);
+        Route::post('/leaves', [PayrollController::class, 'storeLeave']);
+        Route::get('/leaves/{leave}', [PayrollController::class, 'showLeave']);
+        Route::match(['put', 'patch'], '/leaves/{leave}', [PayrollController::class, 'updateLeave']);
+        Route::delete('/leaves/{leave}', [PayrollController::class, 'destroyLeave']);
+
+        Route::get('/shifts', [PayrollController::class, 'shifts']);
+        Route::post('/shifts', [PayrollController::class, 'storeShift']);
+        Route::get('/shifts/{shift}', [PayrollController::class, 'showShift']);
+        Route::match(['put', 'patch'], '/shifts/{shift}', [PayrollController::class, 'updateShift']);
+        Route::delete('/shifts/{shift}', [PayrollController::class, 'destroyShift']);
+
+        Route::get('/loans', [PayrollController::class, 'loans']);
+        Route::post('/loans', [PayrollController::class, 'storeLoan']);
+        Route::get('/loans/{loan}', [PayrollController::class, 'showLoan']);
+        Route::match(['put', 'patch'], '/loans/{loan}', [PayrollController::class, 'updateLoan']);
+        Route::delete('/loans/{loan}', [PayrollController::class, 'destroyLoan']);
 
         // Payslips (optional, also before wildcard)
         Route::get('/payslips', [PayrollController::class, 'payslips']);
@@ -209,12 +217,15 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::match(['put', 'patch'], 'roles/{roleId}', [UserAccessController::class, 'updateRole']);
     Route::delete('roles/{roleId}', [UserAccessController::class, 'destroyRole']);
     Route::get('permissions', [UserAccessController::class, 'permissions']);
+    Route::post('permissions', [UserAccessController::class, 'storePermission']);
     Route::get('users', [UserAccessController::class, 'users']);
+    Route::post('users', [UserAccessController::class, 'storeUser']);
     Route::post('users/{userId}/roles', [UserAccessController::class, 'assignRolesToUser']);
     Route::get('settings', [SettingsController::class, 'index']);
     Route::get('settings/{key}', [SettingsController::class, 'show']);
     Route::post('settings', [SettingsController::class, 'store']);
     Route::put('settings/{key}', [SettingsController::class, 'update']);
+    Route::get('settings/quickstart', [SettingsController::class, 'quickstart']);
     Route::get('health/cron', [HealthController::class, 'cron']);
     Route::get('health/backups', [BackupController::class, 'index']);
     Route::post('health/backup', [BackupController::class, 'store']);
@@ -237,6 +248,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // AI Assistant
     Route::get('ai/assistant/insights', [\App\Http\Controllers\Api\AiController::class, 'insights']);
     Route::post('ai/assistant/chat', [\App\Http\Controllers\Api\AiController::class, 'chat']);
+    // Dashboard AI (uses configured AI provider via AiManager)
+    Route::post('dashboard/ai/ask', [\App\Http\Controllers\Api\DashboardAiController::class, 'ask']);
+    Route::post('dashboard/ai/business-health', [\App\Http\Controllers\Api\DashboardAiController::class, 'businessHealth']);
+    Route::post('dashboard/ai/forecast', [\App\Http\Controllers\Api\DashboardAiController::class, 'forecast']);
+    Route::post('dashboard/ai/generic', [\App\Http\Controllers\Api\DashboardAiController::class, 'genericAnalysis']);
     // Provider management (admin)
     Route::get('ai/providers', [\App\Http\Controllers\Api\AiProviderController::class, 'index']);
     Route::post('ai/providers', [\App\Http\Controllers\Api\AiProviderController::class, 'store']);

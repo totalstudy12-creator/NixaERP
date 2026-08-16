@@ -27,7 +27,9 @@ class UserSeeder extends Seeder
             ]
         );
         $adminRole = Role::where('name', 'Admin')->first();
-        $admin->assignRole($adminRole);
+        if ($adminRole) {
+            $admin->roles()->attach($adminRole->id);
+        }
 
         // Create Regular Users
         for ($i = 0; $i < 5; $i++) {
@@ -38,7 +40,7 @@ class UserSeeder extends Seeder
             ]);
             $userRole = Role::where('name', 'User')->first();
             if ($userRole) {
-                $user->assignRole($userRole);
+                $user->roles()->attach($userRole->id);
             }
         }
     }

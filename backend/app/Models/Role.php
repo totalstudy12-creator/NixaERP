@@ -29,4 +29,13 @@ class Role extends Model
     {
         return $this->belongsToMany(User::class, 'role_user');
     }
+
+    public function givePermissionTo(array|string $permissions): void
+    {
+        $names = is_array($permissions) ? $permissions : [$permissions];
+        $permissionIds = Permission::whereIn('name', $names)->pluck('id')->all();
+        if (!empty($permissionIds)) {
+            $this->permissions()->syncWithoutDetaching($permissionIds);
+        }
+    }
 }

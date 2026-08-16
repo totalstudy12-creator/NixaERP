@@ -24,7 +24,7 @@ class AttendanceController extends Controller
             $query->whereYear('date', $year)->whereMonth('date', $month);
         }
 
-        return $query->orderBy('date')->get()->map(function ($attendance) {
+        $list = $query->orderBy('date')->get()->map(function ($attendance) {
             $date = $attendance->date;
             $dateStr = $date instanceof \Carbon\Carbon ? $date->format('Y-m-d') : (string) $date;
 
@@ -48,6 +48,8 @@ class AttendanceController extends Controller
                 'employee_code' => $employeeCode,
             ];
         });
+
+        return response()->json(['data' => $list]);
     }
 
     public function todaySummary()
@@ -109,7 +111,7 @@ class AttendanceController extends Controller
                 ];
             });
 
-        return response()->json($attendances);
+        return response()->json(['data' => $attendances]);
     }
 
     // ---------- Rest of existing methods ----------

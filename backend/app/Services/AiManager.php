@@ -41,8 +41,11 @@ class AiManager
         $name = strtolower($provider->name ?? '');
         $type = strtolower($provider->config['type'] ?? '');
         // Choose adapter by provider name or config
-        if (str_contains($name, 'openai') || str_contains($name, 'gemini') || str_contains($name, 'gpt')
-            || $type === 'openai' || $type === 'gemini' || $type === 'gpt') {
+        if (str_contains($name, 'gemini') || $type === 'gemini') {
+            return new GeminiProvider($provider);
+        }
+
+        if (str_contains($name, 'openai') || str_contains($name, 'gpt') || $type === 'openai' || $type === 'gpt') {
             return new OpenAiProvider($provider);
         }
 

@@ -48,6 +48,29 @@ class UserAccessController extends Controller
         ]);
     }
 
+    public function storePermission(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'name' => 'required|string|max:255|unique:permissions,name',
+            'group' => 'nullable|string|max:255',
+            'description' => 'nullable|string|max:1000',
+            'active' => 'nullable|boolean',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'message' => 'Validation failed', 'errors' => $validator->errors()], 422);
+        }
+
+        $perm = Permission::create([
+            'name' => $request->input('name'),
+            'group' => $request->input('group'),
+            'description' => $request->input('description'),
+            'active' => $request->boolean('active', true),
+        ]);
+
+        return response()->json(['success' => true, 'message' => 'Permission created', 'data' => $perm], 201);
+    }
+
     public function users()
     {
         $users = User::with('roles')->orderBy('name')->get();
@@ -66,6 +89,33 @@ class UserAccessController extends Controller
                 ];
             }),
         ]);
+    }
+
+    public function storeUser(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'name' => 'required|string|max:255',
+            'email' => 'required|email|unique:users,email',
+            'password' => 'required|string|min:6',
+            'role_ids' => 'nullable|array',
+            'role_ids.*' => 'integer|exists:roles,id',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['success' => false, 'message' => 'Validation failed', 'errors' => $validator->errors()], 422);
+        }
+
+        $user = User::create([
+            'name' => $request->input('name'),
+            'email' => $request->input('email'),
+            'password' => $request->input('password'),
+        ]);
+
+        if ($request->has('role_ids')) {
+            $user->roles()->sync($request->input('role_ids', []));
+        }
+
+        return response()->json(['success' => true, 'message' => 'User created', 'data' => $user->load('roles')], 201);
     }
 
     public function storeRole(Request $request)
