@@ -1,5 +1,5 @@
 // src/pages/DashboardPage.tsx
-import { useEffect, useState, useCallback, useMemo, lazy, Suspense, memo, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, memo, useRef } from 'react';
 import {
   FiRefreshCw, FiClock, FiUsers, FiShoppingCart, FiBox,
   FiDollarSign, FiTrendingUp, FiBarChart2, FiUserCheck, FiUserX,
@@ -9,13 +9,17 @@ import {
 } from 'react-icons/fi';
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
   ResponsiveContainer,
 } from 'recharts';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
+// ----- Map imports (only if you want the map) -----
+import { ComposableMap, Geographies, Geography } from 'react-simple-maps';
+import { Tooltip } from 'react-tooltip';
+import 'react-tooltip/dist/react-tooltip.css';
 
-// ---------- Simple API Cache Hook ----------
+// ---------- Simple API Cache Hook (unchanged) ----------
 const cache = new Map<string, { data: unknown; timestamp: number }>();
 const normalizeCachePayload = <T,>(payload: unknown): T => {
   if (payload === null || payload === undefined) return [] as unknown as T;
@@ -187,6 +191,26 @@ export function DashboardPage() {
   const { showError } = useNotification();
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
+  // ---------- State for map GeoJSON ----------
+  const [geoData, setGeoData] = useState<any>(null);
+  const [geoLoading, setGeoLoading] = useState(true);
+
+  useEffect(() => {
+    fetch('/data/bihar-districts.json')
+      .then(res => {
+        if (!res.ok) throw new Error('Failed to load district map data');
+        return res.json();
+      })
+      .then(data => {
+        setGeoData(data);
+        setGeoLoading(false);
+      })
+      .catch(() => {
+        setGeoLoading(false);
+        // geoData remains null → fallback to bar chart
+      });
+  }, []);
+
   const fetchCompanies = useCallback(() => apiClient.getCompanies(), []);
   const fetchCustomers = useCallback(() => apiClient.getCustomers(), []);
   const fetchProducts = useCallback(() => apiClient.getProducts(), []);
@@ -225,6 +249,7 @@ export function DashboardPage() {
   const fetchTopVendors = useCallback(() => apiClient.getTopVendors(5), []);
   const fetchPurchaseDueInvoices = useCallback(() => apiClient.getPurchaseDueInvoices(), []);
   const fetchLoginActivity = useCallback(() => apiClient.getLoginActivity(), []);
+  const fetchBiharDistrictSales = useCallback(() => apiClient.getDistrictSales('Bihar'), []);
 
   // New data sections
   const {
@@ -260,6 +285,10 @@ export function DashboardPage() {
   const {
     data: loginActivity, loading: loginActLoading, error: loginActError, refresh: refreshLoginAct,
   } = useApiCache<LoginActivityItem[]>('loginActivity', fetchLoginActivity);
+
+  const {
+    data: biharDistrictSales, loading: biharDistrictLoading, error: biharDistrictError, refresh: refreshBiharDistrict,
+  } = useApiCache<any[]>('biharDistrictSales', fetchBiharDistrictSales);
 
   const isLoading = compsLoading || custsLoading || prodsLoading || ordsLoading || invsLoading || empsLoading;
   const hasError = compsError || custsError || prodsError || ordsError || invsError || empsError;
@@ -324,6 +353,7 @@ export function DashboardPage() {
       refreshPay(), refreshInv(), refreshInvCnt(), refreshInvAmt(),
       refreshTopSell(), refreshLeastSell(), refreshLowStock(),
       refreshTopCust(), refreshTopVend(), refreshPurDue(), refreshLoginAct(),
+      refreshBiharDistrict(),
     ]);
     setLastUpdated(new Date());
   };
@@ -363,6 +393,18 @@ export function DashboardPage() {
       </table>
     </div>
   );
+
+  // ---------- Helper color scale for map ----------
+  const getMapColor = (sales: number, maxSales: number) => {
+    if (!maxSales) return '#CBD5E1';
+    const intensity = sales / maxSales;
+    const hue = 210; // blue
+    const lightness = 90 - 60 * intensity; // light to dark
+    return `hsl(${hue}, 70%, ${lightness}%)`;
+  };
+
+  // ---------- Determine whether to show map or bar chart ----------
+  const showMap = !biharDistrictError && geoData && !geoLoading;
 
   return (
     <div className="min-h-screen bg-[#f5f7fb] p-4 md:p-7 text-slate-800">
@@ -480,7 +522,7 @@ export function DashboardPage() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                 <XAxis dataKey="name" />
                 <YAxis />
-                <Tooltip />
+                <RechartsTooltip />
                 <Bar dataKey="Online" fill="#3B82F6" radius={[4,4,0,0]} />
                 <Bar dataKey="Cash" fill="#F59E0B" radius={[4,4,0,0]} />
               </BarChart>
@@ -663,14 +705,14 @@ export function DashboardPage() {
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey="day" fontSize={12} />
               <YAxis allowDecimals={false} />
-              <Tooltip />
+              <RechartsTooltip />
               <Bar dataKey="count" fill="#0EA5E9" radius={[4,4,0,0]} />
             </BarChart>
           </ResponsiveContainer>
         )}
       </ChartCard>
 
-      {/* ===== Charts & Trends (original section) ===== */}
+      {/* ===== Charts & Trends ===== */}
       <h2 className="text-lg font-bold text-slate-700 mb-3 mt-8 flex items-center gap-2">
         <FiBarChart2 className="text-indigo-600" /> Charts & Trends
       </h2>
@@ -681,7 +723,7 @@ export function DashboardPage() {
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey="month" />
               <YAxis />
-              <Tooltip />
+              <RechartsTooltip />
               <Area type="monotone" dataKey="value" stroke="#10B981" fill="#10B981" fillOpacity={0.2} strokeWidth={2} />
             </AreaChart>
           </ResponsiveContainer>
@@ -693,7 +735,7 @@ export function DashboardPage() {
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey="month" />
               <YAxis allowDecimals={false} />
-              <Tooltip />
+              <RechartsTooltip />
               <Bar dataKey="value" fill="#3B82F6" radius={[6, 6, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
@@ -705,7 +747,7 @@ export function DashboardPage() {
               <Pie data={orderStatusDist} dataKey="value" nameKey="name" outerRadius={80} label>
                 {orderStatusDist.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
               </Pie>
-              <Tooltip />
+              <RechartsTooltip />
             </PieChart>
           </ResponsiveContainer>
         </ChartCard>
@@ -716,7 +758,7 @@ export function DashboardPage() {
               <Pie data={employeeStatus} dataKey="value" nameKey="name" outerRadius={80} label>
                 {employeeStatus.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
               </Pie>
-              <Tooltip />
+              <RechartsTooltip />
             </PieChart>
           </ResponsiveContainer>
         </ChartCard>
@@ -727,9 +769,97 @@ export function DashboardPage() {
               <Pie data={activeInactive} dataKey="value" innerRadius={50} outerRadius={80}>
                 {activeInactive.map((_, i) => <Cell key={i} fill={i === 0 ? '#10B981' : '#EF4444'} />)}
               </Pie>
-              <Tooltip />
+              <RechartsTooltip />
             </PieChart>
           </ResponsiveContainer>
+        </ChartCard>
+
+        {/* ===== Bihar District Sales – map or fallback bar chart ===== */}
+        <ChartCard title="📍 District Sales — Bihar">
+          {biharDistrictLoading || geoLoading ? (
+            <div className="h-80 bg-slate-200 rounded animate-pulse" />
+          ) : biharDistrictError ? (
+            <div className="flex h-80 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-700">
+              District sales data unavailable.
+            </div>
+          ) : showMap ? (
+            // --------------------- MAP (when GeoJSON is loaded) ---------------------
+            <>
+              <ComposableMap
+                projection="geoMercator"
+                projectionConfig={{
+                  scale: 2500,
+                  center: [85.5, 25.5],
+                }}
+                style={{ width: '100%', height: 'auto' }}
+              >
+                <Geographies geography={geoData}>
+                  {({ geographies }) => {
+                    const maxSales = Math.max(
+                      ...(biharDistrictSales || []).map((d: any) => d.sales),
+                      1
+                    );
+                    return geographies.map((geo) => {
+                      const districtName =
+                        geo.properties.district ||
+                        geo.properties.NAME_2 ||
+                        geo.properties.name;
+                      const districtData = (biharDistrictSales || []).find(
+                        (d: any) => d.district.toLowerCase() === districtName?.toLowerCase()
+                      );
+                      const sales = districtData?.sales || 0;
+                      return (
+                        <Geography
+                          key={geo.rsmKey}
+                          geography={geo}
+                          data-tooltip-id="bihar-tooltip"
+                          data-tooltip-content={`${districtName}: ₹${sales.toLocaleString()}`}
+                          style={{
+                            default: {
+                              fill: getMapColor(sales, maxSales),
+                              stroke: '#FFFFFF',
+                              strokeWidth: 0.8,
+                              outline: 'none',
+                            },
+                            hover: {
+                              fill: '#3B82F6',
+                              stroke: '#FFFFFF',
+                              strokeWidth: 1.2,
+                              outline: 'none',
+                              cursor: 'pointer',
+                            },
+                            pressed: {
+                              fill: '#1E40AF',
+                              outline: 'none',
+                            },
+                          }}
+                        />
+                      );
+                    });
+                  }}
+                </Geographies>
+              </ComposableMap>
+              <Tooltip id="bihar-tooltip" place="top" style={{ backgroundColor: '#1e293b', color: '#fff' }} />
+              <p className="text-xs text-center text-slate-400 mt-2">
+                Hover over a district to see sales
+              </p>
+            </>
+          ) : (
+            // --------------------- FALLBACK: Bar Chart (when GeoJSON is missing) ---------------------
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart
+                layout="vertical"
+                data={(biharDistrictSales || []).slice().sort((a: any, b: any) => b.sales - a.sales)}
+                margin={{ left: 20 }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis type="number" />
+                <YAxis type="category" dataKey="district" width={160} fontSize={11} />
+                <RechartsTooltip formatter={(val: number) => `₹${Number(val).toLocaleString()}`} />
+                <Bar dataKey="sales" fill="#3B82F6" radius={[4, 4, 4, 4]} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </ChartCard>
       </div>
     </div>

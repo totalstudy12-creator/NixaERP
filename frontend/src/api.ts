@@ -758,6 +758,40 @@ export const apiClient = {
     return this.request('GET', '/admin/login-activity');
   },
 
+  // Dashboard AI & advanced summaries
+  async getBusinessHealthScore() {
+    return this.request('GET', '/dashboard/business-health');
+  },
+
+  async getForecastData() {
+    return this.request('GET', '/dashboard/forecast');
+  },
+
+  async getRiskCenter() {
+    return this.request('GET', '/dashboard/risks');
+  },
+
+  async getAnomalies() {
+    return this.request('GET', '/dashboard/anomalies');
+  },
+
+  async getRankings() {
+    return this.request('GET', '/dashboard/rankings');
+  },
+
+  async getHeroProduct() {
+    return this.request('GET', '/dashboard/hero-product');
+  },
+
+  async getHeroCustomer() {
+    return this.request('GET', '/dashboard/hero-customer');
+  },
+
+  async getDistrictSales(state?: string) {
+    const qs = state ? `?state=${encodeURIComponent(state)}` : '';
+    return this.request('GET', `/dashboard/district-sales${qs}`);
+  },
+
   async getBankAccounts() {
     return this.request('GET', '/bank-accounts');
   },
