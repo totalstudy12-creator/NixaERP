@@ -189,7 +189,7 @@ export function Sidebar({ isOpen = true, onClose }: SidebarProps) {
             <p className="font-semibold text-white">Need a hand?</p>
             <p className="mt-2 leading-6">Use the built-in docs and API guides to connect mobile apps and workflows quickly.</p>
             <div className="mt-4 text-xs text-slate-500 flex items-center justify-between">
-              <span>v1.0.1</span>
+              <span>v1.0.7</span>
               <span className="flex items-center gap-1">
                 <span className="inline-block w-2 h-2 rounded-full bg-green-400"></span>
                 System Online

@@ -104,7 +104,7 @@ interface Customer {
   opening_balance?: number;
   credit_limit?: number;
   due_days?: number;
-  outstanding_amount?: number;   // <-- Added
+  outstanding_amount?: number | string;
   fax?: string;
   website?: string;
   note?: string;
@@ -854,9 +854,7 @@ export function CustomersPage() {
       sortable: true,
       cell: (row: Customer) => {
         const isVisible = outstandingVisibleIds.has(row.id);
-        const amount = typeof row.outstanding_amount === 'number'
-          ? row.outstanding_amount
-          : parseFloat(row.outstanding_amount) || 0;
+        const amount = Number(row.outstanding_amount ?? 0);
         return (
           <div className="flex items-center gap-2">
             <span className="font-medium">
