@@ -1,0 +1,53 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "district": "Patna", "NAME_2": "Patna" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [85.0, 25.5],
+            [85.5, 25.5],
+            [85.5, 25.9],
+            [85.0, 25.9],
+            [85.0, 25.5]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "district": "Gaya", "NAME_2": "Gaya" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [84.8, 24.7],
+            [85.3, 24.7],
+            [85.3, 25.1],
+            [84.8, 25.1],
+            [84.8, 24.7]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "district": "Muzaffarpur", "NAME_2": "Muzaffarpur" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [85.2, 26.0],
+            [85.7, 26.0],
+            [85.7, 26.4],
+            [85.2, 26.4],
+            [85.2, 26.0]
+          ]
+        ]
+      }
+    }
+  ]
+}
