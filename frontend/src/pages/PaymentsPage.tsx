@@ -150,6 +150,74 @@ const StatCard = memo(({ icon: Icon, label, value, tone, prefix }: {
   );
 });
 
+// ---------- Delete Confirmation Modal ----------
+interface DeleteTarget {
+  type: 'single' | 'bulk';
+  payment?: Payment;
+  ids?: number[];
+}
+
+const DeleteConfirmModal = memo(({
+  target,
+  onCancel,
+  onConfirm,
+  loading,
+}: {
+  target: DeleteTarget | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+  loading: boolean;
+}) => {
+  if (!target) return null;
+
+  const message = target.type === 'single'
+    ? `Are you sure you want to delete payment "${target.payment?.reference_no}"?`
+    : `Are you sure you want to delete ${target.ids?.length} selected payment(s)?`;
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onCancel} />
+      <div className="relative bg-white rounded-2xl shadow-xl max-w-md w-full p-6 animate-fadeIn">
+        <div className="flex items-start gap-4">
+          <div className="flex-shrink-0 w-10 h-10 rounded-full bg-rose-100 flex items-center justify-center">
+            <FiTrash2 className="text-rose-600" size={20} />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-lg font-semibold text-gray-900">Confirm Deletion</h3>
+            <p className="mt-2 text-sm text-gray-600">{message}</p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                onClick={onCancel}
+                disabled={loading}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={onConfirm}
+                disabled={loading}
+                className="px-4 py-2 text-sm font-medium text-white bg-rose-600 rounded-lg hover:bg-rose-700 transition-colors disabled:opacity-50 inline-flex items-center gap-2"
+              >
+                {loading ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Deleting...
+                  </>
+                ) : (
+                  'Delete'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 // ---------- Component ----------
 export function PaymentsPage() {
   const [searchTerm, setSearchTerm] = useState('');
@@ -177,6 +245,10 @@ export function PaymentsPage() {
 
   // Selection for bulk actions
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+
+  // Delete confirmation state
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   // UI expand sections for form
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -243,23 +315,9 @@ export function PaymentsPage() {
   useEffect(() => setCurrentPage(1), [searchTerm, filterStatus, filterMethod]);
 
   // ---------- Bulk actions ----------
-  const handleBulkDelete = async () => {
+  const handleBulkDeleteRequest = () => {
     if (selectedIds.length === 0) return;
-    if (!confirm(`Delete ${selectedIds.length} payment(s)?`)) return;
-    try {
-      await Promise.all(selectedIds.map(id => apiClient.deletePayment(id)));
-      showSuccess('Bulk delete', `${selectedIds.length} payment(s) deleted.`);
-      addAppLog({
-        module: 'Payments',
-        action: 'Bulk delete',
-        status: 'success',
-        message: `Deleted ${selectedIds.length} payments`,
-      });
-      setSelectedIds([]);
-      refreshPayments();
-    } catch (err: any) {
-      showError('Bulk delete failed', err.message);
-    }
+    setDeleteTarget({ type: 'bulk', ids: selectedIds });
   };
 
   const handleBulkStatusChange = async (status: PaymentStatus) => {
@@ -322,23 +380,52 @@ export function PaymentsPage() {
     setIsPanelOpen(true);
   }, []);
 
-  // ---------- Delete ----------
-  const handleDelete = useCallback(async (payment: Payment) => {
-    if (!confirm(`Delete payment ${payment.reference_no}?`)) return;
+  // ---------- Delete handlers ----------
+  const handleDeleteRequest = useCallback((payment: Payment) => {
+    setDeleteTarget({ type: 'single', payment });
+  }, []);
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleteLoading(true);
     try {
-      await apiClient.deletePayment(payment.id);
-      showSuccess('Payment deleted', `${payment.reference_no} removed.`);
-      addAppLog({
-        module: 'Payments',
-        action: 'Delete payment',
-        status: 'success',
-        message: `Deleted payment ${payment.reference_no}`,
-      });
+      if (deleteTarget.type === 'single' && deleteTarget.payment) {
+        await apiClient.deletePayment(deleteTarget.payment.id);
+        showSuccess('Payment deleted', `${deleteTarget.payment.reference_no} removed.`);
+        addAppLog({
+          module: 'Payments',
+          action: 'Delete payment',
+          status: 'success',
+          message: `Deleted payment ${deleteTarget.payment.reference_no}`,
+        });
+        if (isViewPanelOpen && viewingPayment?.id === deleteTarget.payment.id) {
+          setIsViewPanelOpen(false);
+          setViewingPayment(null);
+        }
+      } else if (deleteTarget.type === 'bulk' && deleteTarget.ids) {
+        await Promise.all(deleteTarget.ids.map(id => apiClient.deletePayment(id)));
+        showSuccess('Bulk delete', `${deleteTarget.ids.length} payment(s) deleted.`);
+        addAppLog({
+          module: 'Payments',
+          action: 'Bulk delete',
+          status: 'success',
+          message: `Deleted ${deleteTarget.ids.length} payments`,
+        });
+        setSelectedIds([]);
+      }
       refreshPayments();
     } catch (err: any) {
       showError('Delete failed', err.message);
+    } finally {
+      setDeleteLoading(false);
+      setDeleteTarget(null);
     }
-  }, [refreshPayments, showError, showSuccess]);
+  };
+
+  const cancelDelete = () => {
+    setDeleteTarget(null);
+    setDeleteLoading(false);
+  };
 
   // ---------- Validation ----------
   const validateForm = (): boolean => {
@@ -518,7 +605,7 @@ export function PaymentsPage() {
             <FiEdit size={16} />
           </button>
           <button
-            onClick={() => handleDelete(row)}
+            onClick={() => handleDeleteRequest(row)}
             className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50 transition-colors"
             title="Delete"
           >
@@ -528,7 +615,7 @@ export function PaymentsPage() {
       ),
       width: '120px',
     },
-  ], [handleView, handleEdit, handleDelete]);
+  ], [handleView, handleEdit, handleDeleteRequest]);
 
   // ---------- UI Helpers ----------
   const toggleSection = useCallback((section: string) => {
@@ -691,7 +778,7 @@ export function PaymentsPage() {
           <button onClick={() => handleBulkStatusChange('reconciled')} className="inline-flex items-center gap-2 rounded-lg bg-blue-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-600 transition-colors">
             <FiCheckCircle size={16} /> Mark Reconciled
           </button>
-          <button onClick={handleBulkDelete} className="inline-flex items-center gap-2 rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 transition-colors">
+          <button onClick={handleBulkDeleteRequest} className="inline-flex items-center gap-2 rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-700 transition-colors">
             <FiTrash2 size={16} /> Delete
           </button>
           <button onClick={() => setSelectedIds([])} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors">
@@ -750,7 +837,15 @@ export function PaymentsPage() {
             title={`Payment ${viewingPayment?.reference_no || ''}`}
             onClose={() => setIsViewPanelOpen(false)}
             footer={
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => {
+                    if (viewingPayment) handleDeleteRequest(viewingPayment);
+                  }}
+                  className="px-4 py-2 rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50 transition-colors"
+                >
+                  <FiTrash2 className="inline mr-1" size={14} /> Delete
+                </button>
                 <button onClick={() => setIsViewPanelOpen(false)} className="btn btn-secondary">
                   Close
                 </button>
@@ -880,6 +975,14 @@ export function PaymentsPage() {
           </Offcanvas>
         </Suspense>
       )}
+
+      {/* Delete Confirmation Modal */}
+      <DeleteConfirmModal
+        target={deleteTarget}
+        onCancel={cancelDelete}
+        onConfirm={confirmDelete}
+        loading={deleteLoading}
+      />
 
       {/* Styles */}
       <style>{`

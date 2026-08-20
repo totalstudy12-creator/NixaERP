@@ -409,7 +409,10 @@ export const apiClient = {
   async getCatalog(page = 1) {
     return this.request('GET', `/products?page=${page}`);
   },
-
+  // ADD THIS NEW METHOD
+  async getAllProducts() {
+    return this.request('GET', '/products?per_page=all');
+  },
   async getCatalogItems(page = 1) {
     return this.getCatalog(page);
   },
@@ -801,10 +804,29 @@ export const apiClient = {
     return this.request('POST', `/invoices/${id}/duplicate`);
   },
 
-  // Purchase invoices convenience
+  // Purchase invoices — backend resource is /purchase-invoices
+  async getPurchaseInvoices(page = 1) {
+    return this.request('GET', `/purchase-invoices?page=${page}`);
+  },
+
+  async getPurchaseInvoice(id: number) {
+    return this.request('GET', `/purchase-invoices/${id}`);
+  },
+
   async createPurchaseInvoice(data: any) {
-    // alias to createPurchase if backend uses /purchases
-    return this.createPurchase(data);
+    return this.request('POST', '/purchase-invoices', data);
+  },
+
+  async updatePurchaseInvoice(id: number, data: any) {
+    return this.request('PUT', `/purchase-invoices/${id}`, data);
+  },
+
+  async deletePurchaseInvoice(id: number) {
+    return this.request('DELETE', `/purchase-invoices/${id}`);
+  },
+
+  async addPurchaseInvoicePayment(id: number, data: any) {
+    return this.request('POST', `/purchase-invoices/${id}/payments`, data);
   },
 
   // Employees
@@ -903,28 +925,30 @@ export const apiClient = {
     return this.request('GET', `/branches?company_id=${companyId}`);
   },
 
+  // Legacy purchase endpoints – kept for compatibility, but point to /purchase-invoices if needed
   async getPurchases(params?: any) {
-    return this.request('GET', '/purchases', params);
+    return this.getPurchaseInvoices(params?.page || 1);
   },
 
   async getPurchase(id: number) {
-    return this.request('GET', `/purchases/${id}`);
+    return this.getPurchaseInvoice(id);
   },
 
   async createPurchase(data: any) {
-    return this.request('POST', '/purchases', data);
+    return this.createPurchaseInvoice(data);
   },
 
   async updatePurchase(id: number, data: any) {
-    return this.request('PUT', `/purchases/${id}`, data);
+    return this.updatePurchaseInvoice(id, data);
   },
 
   async deletePurchase(id: number) {
-    return this.request('DELETE', `/purchases/${id}`);
+    return this.deletePurchaseInvoice(id);
   },
 
   async duplicatePurchase(id: number) {
-    return this.request('POST', `/purchases/${id}/duplicate`);
+    // Not implemented in backend; keep placeholder
+    throw new Error('Duplicate purchase is not available.');
   },
 
   // Customer Groups
@@ -969,5 +993,104 @@ export const apiClient = {
 
   async createSupplierGroup(data: { name: string }) {
     return this.request('POST', '/supplier-groups', data);
+  },
+
+  // ── Inventory Import/Export ──
+  async importInventory(file: File, duplicateAction: 'skip' | 'update' | 'stop', dryRun: boolean) {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('duplicate_action', duplicateAction);
+    formData.append('dry_run', dryRun ? '1' : '0');
+
+    const token = useAuthStore.getState().token;
+    const headers: any = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE}/inventory/import`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+
+    const contentType = response.headers.get('content-type') || '';
+    const isJson = contentType.includes('application/json') || contentType.includes('text/json');
+    const body = isJson ? await response.json() : await response.text();
+
+    if (!response.ok) {
+      throw new Error(isJson ? body.message || response.statusText : response.statusText);
+    }
+    return body;
+  },
+
+  async exportInventory(params: any = {}): Promise<Blob> {
+    const token = useAuthStore.getState().token;
+    const headers: any = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const query = new URLSearchParams(params).toString();
+    const url = `${API_BASE}/inventory/export${query ? '?' + query : ''}`;
+
+    const response = await fetch(url, { method: 'GET', headers });
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.message || response.statusText);
+    }
+    return response.blob();
+  },
+
+  async downloadTemplate(): Promise<Blob> {
+    const token = useAuthStore.getState().token;
+    const headers: any = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE}/inventory/template`, { method: 'GET', headers });
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.message || response.statusText);
+    }
+    return response.blob();
+  },
+
+  // Customers import
+  async importCustomers(file: File, duplicateAction: 'skip' | 'update' | 'stop', dryRun: boolean) {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('duplicate_action', duplicateAction);
+    formData.append('dry_run', dryRun ? '1' : '0');
+
+    const token = useAuthStore.getState().token;
+    const headers: any = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE}/customers/import`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+
+    const contentType = response.headers.get('content-type') || '';
+    const isJson = contentType.includes('application/json') || contentType.includes('text/json');
+    const body = isJson ? await response.json() : await response.text();
+
+    if (!response.ok) {
+      throw new Error(isJson ? body.message || response.statusText : response.statusText);
+    }
+    return body;
+  },
+
+  async downloadCustomerTemplate(): Promise<Blob> {
+    const token = useAuthStore.getState().token;
+    const headers: any = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const response = await fetch(`${API_BASE}/customers/template`, { method: 'GET', headers });
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.message || response.statusText);
+    }
+    return response.blob();
   },
 };

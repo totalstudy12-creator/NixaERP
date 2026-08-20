@@ -197,7 +197,7 @@ const StatCard = memo(
   }
 );
 
-// ---------- Portal-based Action Dropdown (all actions except View) ----------
+// ---------- Portal-based Action Dropdown ----------
 const ActionDropdown = memo(
   ({
     row,
@@ -224,7 +224,6 @@ const ActionDropdown = memo(
           if (willOpen && buttonRef.current) {
             const rect = buttonRef.current.getBoundingClientRect();
             const viewportHeight = window.innerHeight;
-            // If not enough space below, show above
             const top =
               rect.bottom + 4 + 280 > viewportHeight
                 ? rect.top - 4 - 280
@@ -357,12 +356,13 @@ export function PurchasePage() {
   const [payMethod, setPayMethod] = useState('Bank Transfer');
   const [paySubmitting, setPaySubmitting] = useState(false);
 
+  // ✅ FIX: use the correct API method
   const {
     data: purchases,
     loading,
     error,
     refresh,
-  } = useApiCache<PurchaseInvoice[]>('purchases', () => apiClient.getPurchases());
+  } = useApiCache<PurchaseInvoice[]>('purchase-invoices', () => apiClient.getPurchaseInvoices());
 
   const filteredPurchases = useMemo(() => {
     if (!purchases) return [];
@@ -429,7 +429,8 @@ export function PurchasePage() {
     if (selectedIds.length === 0) return;
     if (!confirm(`Delete ${selectedIds.length} purchase(s)?`)) return;
     try {
-      await Promise.all(selectedIds.map(id => apiClient.deletePurchase(id)));
+      // ✅ FIX
+      await Promise.all(selectedIds.map(id => apiClient.deletePurchaseInvoice(id)));
       showSuccess('Bulk delete', `${selectedIds.length} purchase(s) deleted.`);
       addAppLog({ module: 'Purchases', action: 'Bulk delete', status: 'success', message: `Deleted ${selectedIds.length} purchases` });
       startTransition(() => setSelectedIds([]));
@@ -443,7 +444,8 @@ export function PurchasePage() {
     if (selectedIds.length === 0) return;
     if (!confirm(`Change ${selectedIds.length} purchase(s) to "${status}"?`)) return;
     try {
-      await Promise.all(selectedIds.map(id => apiClient.updatePurchase(id, { status } as any)));
+      // ✅ FIX
+      await Promise.all(selectedIds.map(id => apiClient.updatePurchaseInvoice(id, { status } as any)));
       showSuccess('Bulk update', `${selectedIds.length} purchase(s) updated.`);
       addAppLog({ module: 'Purchases', action: 'Bulk status change', status: 'success', message: `Changed status to ${status} for ${selectedIds.length} purchases` });
       startTransition(() => setSelectedIds([]));
@@ -462,7 +464,8 @@ export function PurchasePage() {
     async (purchase: PurchaseInvoice) => {
       if (!confirm(`Delete purchase ${purchase.purchase_number}?`)) return;
       try {
-        await apiClient.deletePurchase(purchase.id);
+        // ✅ FIX
+        await apiClient.deletePurchaseInvoice(purchase.id);
         showSuccess('Purchase deleted', `Purchase ${purchase.purchase_number} removed.`);
         addAppLog({ module: 'Purchases', action: 'Delete', status: 'success', message: `Deleted ${purchase.purchase_number}` });
         refresh();
@@ -476,10 +479,7 @@ export function PurchasePage() {
   const handleDuplicate = useCallback(
     async (purchase: PurchaseInvoice) => {
       try {
-        // Enable this when API supports it:
-        // await apiClient.duplicatePurchase(purchase.id);
-        // showSuccess('Duplicated', `Purchase ${purchase.purchase_number} duplicated.`);
-        // refresh();
+        // You can add a duplicate endpoint if needed
         showError('Not available', 'Duplicate feature is not yet integrated.');
       } catch (err: any) {
         showError('Duplicate failed', err.message);
@@ -504,14 +504,13 @@ export function PurchasePage() {
     }
     setPaySubmitting(true);
     try {
-      await apiClient.createPayment({
-        company_id: payingPurchase.company_id || null,
-        payable_id: payingPurchase.id,
-        payable_type: 'PurchaseInvoice',
+      // ✅ FIX: use purchase invoice payment endpoint
+      await apiClient.addPurchaseInvoicePayment(payingPurchase.id, {
         amount,
         payment_method: payMethod,
         payment_date: new Date().toISOString().split('T')[0],
         reference: '',
+        notes: '',
       });
       showSuccess('Payment recorded', `₹${amount.toFixed(2)} received.`);
       addAppLog({
@@ -654,7 +653,6 @@ export function PurchasePage() {
         name: 'Actions',
         cell: (row: PurchaseInvoice) => (
           <div className="flex items-center gap-1">
-            {/* Only View button remains outside the dropdown */}
             <button
               onClick={() => handleView(row)}
               className="p-1.5 rounded-lg text-slate-600 hover:bg-slate-50 transition-colors"

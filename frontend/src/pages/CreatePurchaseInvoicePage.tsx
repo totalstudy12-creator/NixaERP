@@ -135,7 +135,8 @@ export function CreatePurchaseInvoicePage() {
 
   const getCompanies = useCallback(() => apiClient.getCompanies(), []);
   const getSuppliers = useCallback(() => apiClient.getSuppliers(), []);
-  const getProducts = useCallback(() => apiClient.getProducts(), []);
+  // ✅ FIX: Use getAllProducts() to load the entire product list for search
+  const getProducts = useCallback(() => apiClient.getAllProducts(), []);
   const getBanks = useCallback(async () => {
     try { return await apiClient.request('GET', '/banks'); } catch { return []; }
   }, []);
@@ -479,13 +480,13 @@ export function CreatePurchaseInvoicePage() {
       payment_amount: Number(form.payment_received || 0),
       payment_method: form.payment_type,
       payment_date: new Date().toISOString().split('T')[0],
-      payment_reference: form.remarks || null,   // maps remarks → payment_reference
+      payment_reference: form.remarks || null,
     };
 
     setSubmitting(true);
     try {
-      // ✅ FIX: Use createPurchaseBill instead of createPurchaseInvoice
-      const res = await apiClient.createPurchaseBill(payload);
+      // ✅ FIX: Use createPurchaseInvoice instead of createPurchaseBill
+      const res = await apiClient.createPurchaseInvoice(payload);
       const newPurchase = res?.data ?? res;
       if (!newPurchase?.id) {
         showSuccess('Purchase created', `Invoice ${form.invoice_no} saved, but no ID returned.`);

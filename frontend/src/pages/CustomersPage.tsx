@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback, useMemo, lazy, Suspense, memo } from 'react';
+import { useEffect, useState, useCallback, useMemo, lazy, Suspense, memo, useRef, DragEvent } from 'react';
 import {
-  FiPlus, FiRefreshCw, FiTrash2, FiEdit, FiDownload,
+  FiPlus, FiRefreshCw, FiTrash2, FiEdit, FiDownload, FiUpload,
   FiUsers, FiShoppingBag, FiTruck, FiPackage, FiAlertCircle,
-  FiFilter, FiSearch, FiX, FiBriefcase, FiMapPin
+  FiFilter, FiSearch, FiX, FiBriefcase, FiMapPin,
+  FiFile, FiCheck, FiAlertTriangle, FiChevronDown, FiEye, FiEyeOff
 } from 'react-icons/fi';
 
 // ---------- Lazy loaded heavy components ----------
@@ -68,6 +69,7 @@ function useApiCache<T>(
 
 // ---------- Types ----------
 type CustomerType = 'customer' | 'dealer' | 'distributor';   // vendor removed
+type DuplicateAction = 'skip' | 'update' | 'stop';
 
 interface Company { id: number; name: string; }
 interface Branch { id: number; name: string; company_id?: number; }
@@ -102,6 +104,7 @@ interface Customer {
   opening_balance?: number;
   credit_limit?: number;
   due_days?: number;
+  outstanding_amount?: number;   // <-- Added
   fax?: string;
   website?: string;
   note?: string;
@@ -142,6 +145,7 @@ interface CustomerFormData {
   opening_balance: number | string;
   credit_limit: number | string;
   due_days: number | string;
+  outstanding_amount?: number | string;
   fax: string;
   website: string;
   note: string;
@@ -152,6 +156,25 @@ interface CustomerFormData {
   company_id: number | null | string;
   branch_id: number | null | string;
   same_as_billing: boolean;
+}
+
+interface ImportPreviewRow {
+  row: number;
+  data: Record<string, any>;
+  valid: boolean;
+  errors: Record<string, string>;
+  name: string;
+  email: string;
+}
+
+interface ImportSummary {
+  total: number;
+  valid: number;
+  invalid: number;
+  created?: number;
+  updated?: number;
+  skipped?: number;
+  failed?: number;
 }
 
 // ---------- Skeleton Components ----------
@@ -260,6 +283,7 @@ export function CustomersPage() {
     opening_balance: '',
     credit_limit: '',
     due_days: '',
+    outstanding_amount: '',
     fax: '',
     website: '',
     note: '',
@@ -278,6 +302,23 @@ export function CustomersPage() {
   const [showGroupModal, setShowGroupModal] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [addingGroup, setAddingGroup] = useState(false);
+
+  // ── Import state ──
+  const [isImportOpen, setIsImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importStep, setImportStep] = useState<'select' | 'preview' | 'result'>('select');
+  const [importLoading, setImportLoading] = useState(false);
+  const [duplicateAction, setDuplicateAction] = useState<DuplicateAction>('skip');
+  const [importPreview, setImportPreview] = useState<ImportPreviewRow[]>([]);
+  const [importSummary, setImportSummary] = useState<ImportSummary | null>(null);
+  const [importErrors, setImportErrors] = useState<Array<{ row: number; field: string; message: string }>>([]);
+  const [importResultMessage, setImportResultMessage] = useState('');
+  const [importSuccess, setImportSuccess] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  // ── Outstanding amount visibility state ──
+  const [outstandingVisibleIds, setOutstandingVisibleIds] = useState<Set<number>>(new Set());
 
   const { showSuccess, showError } = useNotification();
 
@@ -445,6 +486,7 @@ export function CustomersPage() {
       billing_street: '', billing_landmark: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
       shipping_street: '', shipping_landmark: '', shipping_city: '', shipping_state: '', shipping_country: 'India', shipping_pincode: '',
       eway_bill_distance: '', group_id: '', opening_balance: '', credit_limit: '', due_days: '',
+      outstanding_amount: '',
       fax: '', website: '', note: '', license_no: '', custom_field_1: '', custom_field_2: '',
       is_active: true, company_id: '', branch_id: '',
       same_as_billing: true,
@@ -485,6 +527,7 @@ export function CustomersPage() {
       opening_balance: customer.opening_balance ?? '',
       credit_limit: customer.credit_limit ?? '',
       due_days: customer.due_days ?? '',
+      outstanding_amount: customer.outstanding_amount ?? '',
       fax: customer.fax || '',
       website: customer.website || '',
       note: customer.note || '',
@@ -541,6 +584,7 @@ export function CustomersPage() {
       opening_balance: formData.opening_balance ? Number(formData.opening_balance) : 0,
       credit_limit: formData.credit_limit ? Number(formData.credit_limit) : null,
       due_days: formData.due_days ? Number(formData.due_days) : null,
+      outstanding_amount: formData.outstanding_amount ? Number(formData.outstanding_amount) : 0,
     };
 
     setSubmitting(true);
@@ -570,11 +614,12 @@ export function CustomersPage() {
       showError('Export failed', 'No customers to export.');
       return;
     }
-    const headers = ['Name', 'Type', 'Email', 'Contact No', 'Company', 'Branch', 'GST', 'City', 'State'];
+    const headers = ['Name', 'Type', 'Email', 'Contact No', 'Company', 'Branch', 'GST', 'City', 'State', 'Outstanding'];
     const rows = filteredCustomers.map(c => [
       c.name, c.type, c.email, c.contact_no,
       c.company?.name || '', c.branch?.name || '',
-      c.gst_number || '', c.billing_city || '', c.billing_state || ''
+      c.gst_number || '', c.billing_city || '', c.billing_state || '',
+      c.outstanding_amount ?? 0
     ]);
     const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -586,6 +631,145 @@ export function CustomersPage() {
     window.URL.revokeObjectURL(url);
     showSuccess('Export', 'Data exported.');
   }, [filteredCustomers, showSuccess, showError]);
+
+  // ---------- IMPORT Handlers ----------
+  const handleImportOpen = () => {
+    setIsImportOpen(true);
+    setImportStep('select');
+    setImportFile(null);
+    setImportPreview([]);
+    setImportSummary(null);
+    setImportErrors([]);
+    setImportResultMessage('');
+    setImportSuccess(false);
+    setDragOver(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleFileChange = (file: File | null) => {
+    if (!file) return;
+    const validTypes = ['text/csv', 'application/vnd.ms-excel'];
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (!validTypes.includes(file.type) && ext !== 'csv') {
+      showError('Invalid file', 'Please select a CSV file.');
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      showError('File too large', 'Maximum size is 10MB.');
+      return;
+    }
+    setImportFile(file);
+    handlePreview(file);
+  };
+
+  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(false);
+    const files = e.dataTransfer.files;
+    if (files.length) {
+      handleFileChange(files[0]);
+    }
+  };
+
+  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(true);
+  };
+
+  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(false);
+  };
+
+  const handlePreview = async (file: File = importFile!) => {
+    if (!file) return;
+    setImportLoading(true);
+    try {
+      const response = await apiClient.importCustomers(file, duplicateAction, true);
+      setImportPreview(response.preview || []);
+      setImportSummary({ total: response.total, valid: response.valid, invalid: response.invalid });
+      setImportErrors(response.errors || []);
+      setImportStep('preview');
+    } catch (err: any) {
+      showError('Preview failed', err.message);
+      setImportStep('select');
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const handleImport = async () => {
+    if (!importFile) return;
+    setImportLoading(true);
+    try {
+      const response = await apiClient.importCustomers(importFile, duplicateAction, false);
+      setImportSummary(response.summary);
+      setImportErrors(response.errors || []);
+      setImportResultMessage(response.message);
+      setImportSuccess(response.success);
+      setImportStep('result');
+      if (response.success) {
+        showSuccess('Import completed', response.message);
+        refreshCustomers();
+        addAppLog({ module: 'Customers', action: 'Import', status: 'success', message: `Imported ${response.summary.created} customers` });
+      } else {
+        showError('Import failed', response.message || 'Please check errors.');
+        addAppLog({ module: 'Customers', action: 'Import', status: 'error', message: response.message });
+      }
+    } catch (err: any) {
+      showError('Import failed', err.message);
+      setImportStep('preview');
+      addAppLog({ module: 'Customers', action: 'Import', status: 'error', message: err.message });
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const handleDownloadTemplate = async () => {
+    try {
+      const blob = await apiClient.downloadCustomerTemplate();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'customers_template.csv';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      showSuccess('Template downloaded', 'Ready for import.');
+    } catch (err: any) {
+      showError('Template download failed', err.message);
+    }
+  };
+
+  const handleDownloadErrorReport = () => {
+    if (importErrors.length === 0) return;
+    const headers = ['Row', 'Field', 'Error'];
+    const rows = importErrors.map(e => [e.row, e.field, e.message]);
+    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'customer_import_errors.csv';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
+  // ---------- Outstanding visibility toggle ----------
+  const toggleOutstandingVisibility = useCallback((id: number) => {
+    setOutstandingVisibleIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
 
   // ---------- Helper: render a field with red glow on error ----------
   const renderField = (
@@ -665,6 +849,32 @@ export function CustomersPage() {
       width: '150px',
     },
     {
+      name: 'Outstanding',
+      selector: (row: Customer) => row.outstanding_amount ?? 0,
+      sortable: true,
+      cell: (row: Customer) => {
+        const isVisible = outstandingVisibleIds.has(row.id);
+        const amount = typeof row.outstanding_amount === 'number'
+          ? row.outstanding_amount
+          : parseFloat(row.outstanding_amount) || 0;
+        return (
+          <div className="flex items-center gap-2">
+            <span className="font-medium">
+              {isVisible ? `₹${amount.toFixed(2)}` : '•••••'}
+            </span>
+            <button
+              onClick={() => toggleOutstandingVisibility(row.id)}
+              className="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
+              title={isVisible ? 'Hide amount' : 'Show amount'}
+            >
+              {isVisible ? <FiEyeOff size={16} /> : <FiEye size={16} />}
+            </button>
+          </div>
+        );
+      },
+      width: '140px',
+    },
+    {
       name: 'Company',
       selector: (row: Customer) => row.company?.name || '-',
       cell: (row: Customer) => <span className="text-sm">{row.company?.name || '-'}</span>,
@@ -686,7 +896,7 @@ export function CustomersPage() {
       ),
       width: '100px',
     },
-  ], [handleEdit, handleDelete]);
+  ], [handleEdit, handleDelete, outstandingVisibleIds, toggleOutstandingVisibility]);
 
   // ---------- Render ----------
   return (
@@ -706,6 +916,9 @@ export function CustomersPage() {
         <div className="flex items-center gap-2">
           <button onClick={refreshCustomers} disabled={custLoading} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20 disabled:opacity-60">
             <FiRefreshCw className={custLoading ? 'animate-spin inline mr-1' : 'inline mr-1'} size={14} /> Refresh
+          </button>
+          <button onClick={handleImportOpen} className="rounded-xl bg-emerald-400 text-slate-950 px-3 py-2 text-sm font-medium hover:bg-emerald-300 shadow-md shadow-emerald-500/20">
+            <FiUpload className="inline mr-1" size={14} /> Import
           </button>
           <button onClick={handleExport} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20">
             <FiDownload className="inline mr-1" size={14} /> Export
@@ -857,7 +1070,6 @@ export function CustomersPage() {
                   <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Customer / Vendor Detail
                 </legend>
                 <div className="mt-3 space-y-4">
-                  {/* Type dropdown (Customer/Dealer/Distributor) */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
                     <select
@@ -871,7 +1083,6 @@ export function CustomersPage() {
                     </select>
                   </div>
 
-                  {/* Company & Branch */}
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Company *</label>
@@ -897,7 +1108,6 @@ export function CustomersPage() {
                     </div>
                   </div>
 
-                  {/* GSTIN with Auto Fill */}
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">GSTIN</label>
                     <div className="flex gap-2">
@@ -1096,6 +1306,21 @@ export function CustomersPage() {
                   <div className="grid grid-cols-2 gap-4">
                     {renderField('Opening Balance', 'opening_balance', 'number')}
                     <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Outstanding Amount</label>
+                      <div className="flex items-center gap-2">
+                        <span className="text-gray-500">₹</span>
+                        <input
+                          type="number"
+                          value={formData.outstanding_amount ?? ''}
+                          onChange={(e) => setFormData(prev => ({ ...prev, outstanding_amount: e.target.value }))}
+                          className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                          placeholder="0"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Credit</label>
                       <div className="flex items-center gap-2">
                         <span className="text-gray-500">₹</span>
@@ -1109,8 +1334,8 @@ export function CustomersPage() {
                       </div>
                       <span className="text-xs text-slate-500">(You pay the customer)</span>
                     </div>
+                    {renderField('Due Days', 'due_days', 'number')}
                   </div>
-                  {renderField('Due Days', 'due_days', 'number')}
                 </div>
               </fieldset>
 
@@ -1137,7 +1362,6 @@ export function CustomersPage() {
                     {renderField('Website', 'website')}
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    {renderField('Credit Limit', 'credit_limit', 'number')}
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">Note</label>
                       <textarea
@@ -1188,6 +1412,185 @@ export function CustomersPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ── IMPORT OFFCANVAS ── */}
+      {isImportOpen && (
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
+          <Offcanvas
+            isOpen={isImportOpen}
+            title="Import Customers"
+            onClose={() => setIsImportOpen(false)}
+            footer={
+              <div className="flex justify-between w-full">
+                <button onClick={() => setIsImportOpen(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={importLoading}>
+                  Close
+                </button>
+                {importStep === 'select' && (
+                  <button onClick={() => fileInputRef.current?.click()} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700">
+                    Browse File
+                  </button>
+                )}
+                {importStep === 'preview' && !importLoading && (
+                  <button onClick={handleImport} className="px-5 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-50" disabled={!importSummary || importSummary.valid === 0}>
+                    Import {importSummary && `(${importSummary.valid} valid)`}
+                  </button>
+                )}
+                {importStep === 'result' && (
+                  <button onClick={() => { setIsImportOpen(false); refreshCustomers(); }} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700">
+                    Close & Refresh
+                  </button>
+                )}
+              </div>
+            }
+          >
+            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
+              {importStep === 'select' && (
+                <>
+                  <div className="text-sm text-slate-600 mb-4">
+                    Upload a CSV file to import customers. The file must match the required format. You can download a template below.
+                  </div>
+                  <div
+                    className={`border-2 border-dashed rounded-xl p-8 text-center transition ${dragOver ? 'border-blue-500 bg-blue-50' : 'border-slate-300'}`}
+                    onDrop={handleDrop}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                  >
+                    <FiUpload size={40} className="mx-auto text-slate-400 mb-3" />
+                    <p className="text-sm text-slate-600">Drag and drop your CSV file here, or click to browse</p>
+                    <input type="file" ref={fileInputRef} onChange={(e) => { const file = e.target.files?.[0]; if (file) handleFileChange(file); }} accept=".csv" className="hidden" />
+                    <button onClick={() => fileInputRef.current?.click()} className="mt-3 px-4 py-2 text-sm bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100">
+                      Browse Files
+                    </button>
+                  </div>
+                  {importFile && (
+                    <div className="flex items-center justify-between bg-slate-50 p-3 rounded-lg border">
+                      <div className="flex items-center gap-2">
+                        <FiFile className="text-blue-600" />
+                        <span className="text-sm font-medium">{importFile.name}</span>
+                        <span className="text-xs text-slate-500">({(importFile.size / 1024).toFixed(1)} KB)</span>
+                      </div>
+                      <button onClick={() => { setImportFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; setImportStep('select'); }} className="text-rose-600 hover:text-rose-800">
+                        <FiX size={18} />
+                      </button>
+                    </div>
+                  )}
+                  <div className="flex justify-between items-center mt-4">
+                    <button onClick={handleDownloadTemplate} className="text-sm text-blue-600 hover:underline flex items-center gap-1">
+                      <FiDownload size={14} /> Download Template
+                    </button>
+                    {importFile && (
+                      <button onClick={() => handlePreview(importFile)} disabled={importLoading} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
+                        {importLoading ? 'Processing...' : 'Preview'}
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {importStep === 'preview' && (
+                <>
+                  <div className="flex flex-wrap items-center gap-4 mb-4">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">Duplicate Action:</span>
+                      <select value={duplicateAction} onChange={(e) => setDuplicateAction(e.target.value as DuplicateAction)} className="rounded border px-2 py-1 text-sm" disabled={importLoading}>
+                        <option value="skip">Skip</option>
+                        <option value="update">Update</option>
+                        <option value="stop">Stop</option>
+                      </select>
+                    </div>
+                    <div className="flex items-center gap-4 text-sm">
+                      <span>Total: <strong>{importSummary?.total || 0}</strong></span>
+                      <span className="text-emerald-600">Valid: <strong>{importSummary?.valid || 0}</strong></span>
+                      <span className="text-rose-600">Invalid: <strong>{importSummary?.invalid || 0}</strong></span>
+                    </div>
+                  </div>
+                  {importLoading ? (
+                    <div className="flex justify-center py-8"><div className="animate-spin rounded-full h-8 w-8 border-4 border-blue-500 border-t-transparent" /></div>
+                  ) : (
+                    <>
+                      <div className="overflow-x-auto border rounded-lg">
+                        <table className="w-full text-sm">
+                          <thead className="bg-slate-50 border-b">
+                            <tr>
+                              <th className="px-3 py-2 text-left">#</th>
+                              <th className="px-3 py-2 text-left">Name</th>
+                              <th className="px-3 py-2 text-left">Email</th>
+                              <th className="px-3 py-2 text-left">Contact</th>
+                              <th className="px-3 py-2 text-left">Company</th>
+                              <th className="px-3 py-2 text-left">City</th>
+                              <th className="px-3 py-2 text-left">Valid</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {importPreview.slice(0, 50).map((row) => (
+                              <tr key={row.row} className={`border-b ${row.valid ? '' : 'bg-rose-50'}`}>
+                                <td className="px-3 py-2">{row.row}</td>
+                                <td className="px-3 py-2">{row.data.name || '-'}</td>
+                                <td className="px-3 py-2">{row.data.email || '-'}</td>
+                                <td className="px-3 py-2">{row.data.contact_no || '-'}</td>
+                                <td className="px-3 py-2">{row.data.company_id || '-'}</td>
+                                <td className="px-3 py-2">{row.data.billing_city || '-'}</td>
+                                <td className="px-3 py-2">{row.valid ? <FiCheck className="text-emerald-600" /> : <FiAlertTriangle className="text-rose-600" title={Object.values(row.errors).join(', ')} />}</td>
+                              </tr>
+                            ))}
+                            {importPreview.length > 50 && <tr><td colSpan={7} className="px-3 py-2 text-center text-slate-500">... and {importPreview.length - 50} more rows</td></tr>}
+                          </tbody>
+                        </table>
+                      </div>
+                      {importErrors.length > 0 && (
+                        <div className="mt-4 p-3 bg-rose-50 rounded-lg border border-rose-200">
+                          <p className="text-sm font-medium text-rose-700 mb-2">Validation errors:</p>
+                          <ul className="text-xs text-rose-600 space-y-1 max-h-40 overflow-y-auto">
+                            {importErrors.slice(0, 20).map((err, idx) => <li key={idx}>Row {err.row}: {err.field} – {err.message}</li>)}
+                            {importErrors.length > 20 && <li>... and {importErrors.length - 20} more</li>}
+                          </ul>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+
+              {importStep === 'result' && (
+                <div className="space-y-4">
+                  <div className={`p-4 rounded-lg ${importSuccess ? 'bg-emerald-50 border border-emerald-200' : 'bg-rose-50 border border-rose-200'}`}>
+                    <h3 className="font-bold text-lg">{importSuccess ? '✅ Import Completed' : '❌ Import Failed'}</h3>
+                    <p className="text-sm mt-1">{importResultMessage}</p>
+                  </div>
+                  {importSummary && (
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+                      <div className="bg-slate-50 p-3 rounded-lg text-center"><div className="font-bold">{importSummary.total}</div><div className="text-slate-500">Total</div></div>
+                      <div className="bg-emerald-50 p-3 rounded-lg text-center"><div className="font-bold text-emerald-700">{importSummary.created ?? 0}</div><div className="text-slate-500">Created</div></div>
+                      <div className="bg-blue-50 p-3 rounded-lg text-center"><div className="font-bold text-blue-700">{importSummary.updated ?? 0}</div><div className="text-slate-500">Updated</div></div>
+                      <div className="bg-amber-50 p-3 rounded-lg text-center"><div className="font-bold text-amber-700">{importSummary.skipped ?? 0}</div><div className="text-slate-500">Skipped</div></div>
+                      <div className="bg-rose-50 p-3 rounded-lg text-center"><div className="font-bold text-rose-700">{importSummary.failed ?? 0}</div><div className="text-slate-500">Failed</div></div>
+                    </div>
+                  )}
+                  {importErrors.length > 0 && (
+                    <div>
+                      <div className="flex justify-between items-center">
+                        <p className="text-sm font-medium text-rose-700">Errors ({importErrors.length})</p>
+                        <button onClick={handleDownloadErrorReport} className="text-xs text-blue-600 hover:underline flex items-center gap-1">
+                          <FiDownload size={12} /> Download Error Report
+                        </button>
+                      </div>
+                      <div className="mt-2 max-h-48 overflow-y-auto border rounded-lg">
+                        <table className="w-full text-xs">
+                          <thead className="bg-slate-50"><tr><th className="px-3 py-1 text-left">Row</th><th className="px-3 py-1 text-left">Field</th><th className="px-3 py-1 text-left">Message</th></tr></thead>
+                          <tbody>
+                            {importErrors.slice(0, 50).map((err, idx) => <tr key={idx} className="border-t"><td className="px-3 py-1">{err.row}</td><td className="px-3 py-1">{err.field}</td><td className="px-3 py-1">{err.message}</td></tr>)}
+                            {importErrors.length > 50 && <tr><td colSpan={3} className="px-3 py-1 text-center text-slate-500">... and {importErrors.length - 50} more</td></tr>}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </Offcanvas>
+        </Suspense>
       )}
 
       <style>{`

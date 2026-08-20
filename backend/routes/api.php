@@ -47,8 +47,9 @@ Route::post('biometric/device/heartbeat', [BiometricDeviceController::class, 'he
 Route::post('biometric/attendance', [BiometricAttendanceController::class, 'store']);
 Route::post('biometric/offline/sync', [OfflineSyncController::class, 'batchSync']);
 
- 
+// NOTE: This is public – consider moving inside auth group if suppliers should be protected
 Route::apiResource('suppliers', SupplierController::class);
+
 // Public enrollment check (ESP32 polls this without token)
 Route::get('biometric/device/pending-enrollment', [BiometricDeviceController::class, 'pendingEnrollment']);
 
@@ -59,7 +60,7 @@ Route::post('biometric/device/{device}/enroll-status', [BiometricDeviceControlle
 // ---------- Protected routes (frontend + admin) ----------
 Route::middleware(['auth:sanctum'])->group(function () {
 
-    // ---------- Dashboard & report endpoints (must be registered before wildcard resource routes) ----------
+    // ---------- Dashboard & report endpoints ----------
     Route::get('dashboard/analytics', [DashboardController::class, 'analytics']);
     Route::get('dashboard/payments-summary', [DashboardController::class, 'paymentSummary']);
     Route::get('dashboard/inventory-summary', [DashboardController::class, 'inventorySummary']);
@@ -97,8 +98,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('dealers', DealerController::class);
     Route::apiResource('invoices', InvoiceController::class);
     Route::apiResource('purchase-invoices', PurchaseInvoiceController::class);
+    // Additional purchase invoice routes
+    Route::post('purchase-invoices/{purchase_invoice}/payments', [PurchaseInvoiceController::class, 'addPayment']);
     Route::apiResource('employees', EmployeeController::class);
 
+    // Accounting
     Route::get('accounting/summary', [AccountingController::class, 'summary']);
     Route::get('accounting/accounts', [AccountingController::class, 'index']);
     Route::post('accounting/accounts', [AccountingController::class, 'store']);
@@ -109,6 +113,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('accounting/journals', [AccountingController::class, 'storeJournal']);
     Route::get('accounting/statements', [AccountingController::class, 'statements']);
 
+    // Sales
     Route::get('sales/summary', [SalesController::class, 'summary']);
     Route::get('sales/orders', [SalesController::class, 'orders']);
     Route::post('sales/orders', [SalesController::class, 'storeOrder']);
@@ -122,6 +127,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('sales/returns', [SalesController::class, 'storeReturn']);
     Route::get('sales/reports', [SalesController::class, 'reports']);
 
+    // Purchases (legacy endpoints still used by some frontend parts)
     Route::get('purchases/summary', [SalesController::class, 'purchaseSummary']);
     Route::get('purchases/orders', [SalesController::class, 'purchaseOrders']);
     Route::post('purchases/orders', [SalesController::class, 'storePurchaseOrder']);
@@ -131,7 +137,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('purchases/returns', [SalesController::class, 'purchaseReturns']);
     Route::get('purchases/reports', [SalesController::class, 'purchaseReports']);
 
-    // ---------- Attendance ----------
+    // Attendance
     Route::get('attendance/today-summary', [AttendanceController::class, 'todaySummary']);
     Route::get('attendance/today-employees', [AttendanceController::class, 'todayEmployees']);
     Route::get('attendance', [AttendanceController::class, 'index']);
@@ -142,40 +148,41 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('attendance/bulk-status', [AttendanceController::class, 'bulkUpdateStatus']);
     Route::post('attendance/bulk-delete', [AttendanceController::class, 'bulkDelete']);
 
-    // ---------- Payroll & HR (single, correctly ordered group) ----------
+    // Payroll & HR
     Route::prefix('payroll')->group(function () {
-        // Core payroll
         Route::get('/', [PayrollController::class, 'index']);
         Route::post('/', [PayrollController::class, 'store']);
         Route::post('/run', [PayrollController::class, 'runPayroll']);
 
-        // Static sub-resources (must come BEFORE the wildcard /{payroll})
+        // Advances
         Route::get('/advances', [PayrollController::class, 'advances']);
         Route::post('/advances', [PayrollController::class, 'storeAdvance']);
         Route::get('/advances/{advance}', [PayrollController::class, 'showAdvance']);
         Route::match(['put', 'patch'], '/advances/{advance}', [PayrollController::class, 'updateAdvance']);
         Route::delete('/advances/{advance}', [PayrollController::class, 'destroyAdvance']);
 
-        // If you still need leaves, shifts, loans – keep them here, before the wildcard:
+        // Leaves
         Route::get('/leaves', [PayrollController::class, 'leaves']);
         Route::post('/leaves', [PayrollController::class, 'storeLeave']);
         Route::get('/leaves/{leave}', [PayrollController::class, 'showLeave']);
         Route::match(['put', 'patch'], '/leaves/{leave}', [PayrollController::class, 'updateLeave']);
         Route::delete('/leaves/{leave}', [PayrollController::class, 'destroyLeave']);
 
+        // Shifts
         Route::get('/shifts', [PayrollController::class, 'shifts']);
         Route::post('/shifts', [PayrollController::class, 'storeShift']);
         Route::get('/shifts/{shift}', [PayrollController::class, 'showShift']);
         Route::match(['put', 'patch'], '/shifts/{shift}', [PayrollController::class, 'updateShift']);
         Route::delete('/shifts/{shift}', [PayrollController::class, 'destroyShift']);
 
+        // Loans
         Route::get('/loans', [PayrollController::class, 'loans']);
         Route::post('/loans', [PayrollController::class, 'storeLoan']);
         Route::get('/loans/{loan}', [PayrollController::class, 'showLoan']);
         Route::match(['put', 'patch'], '/loans/{loan}', [PayrollController::class, 'updateLoan']);
         Route::delete('/loans/{loan}', [PayrollController::class, 'destroyLoan']);
 
-        // Payslips (optional, also before wildcard)
+        // Payslips
         Route::get('/payslips', [PayrollController::class, 'payslips']);
         Route::post('/payslips', [PayrollController::class, 'storePayslip']);
         Route::get('/payslips/{payslip}', [PayrollController::class, 'showPayslip']);
@@ -189,7 +196,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('/{payroll}/payslip', [PayrollController::class, 'payslip']);
     });
 
-    // Biometric management (admin)
+    // Biometric management
     Route::get('biometric/devices', [BiometricDeviceController::class, 'index']);
     Route::post('biometric/templates/upload', [FingerprintController::class, 'upload']);
     Route::post('biometric/templates/download', [FingerprintController::class, 'downloadAll']);
@@ -207,7 +214,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::put('biometric/device/{device}', [BiometricDeviceController::class, 'update']);
     Route::delete('biometric/device/{device}', [BiometricDeviceController::class, 'destroy']);
 
-    // File uploads, roles, settings...
+    // File uploads, roles, settings, backups, etc.
     Route::get('uploads', [UploadController::class, 'index']);
     Route::post('uploads', [UploadController::class, 'store']);
     Route::post('uploads/folders', [UploadController::class, 'createFolder']);
@@ -234,6 +241,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('backups/restore', [BackupController::class, 'restore']);
     Route::get('backups/{backup}/download', [BackupController::class, 'download']);
 
+    // Marketing
     Route::prefix('marketing')->group(function () {
         Route::get('dashboard', [MarketingController::class, 'dashboard']);
         Route::get('accounts', [MarketingController::class, 'accounts']);
@@ -245,10 +253,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('analytics', [MarketingController::class, 'analytics']);
         Route::get('inbox', [MarketingController::class, 'inbox']);
     });
+
     // AI Assistant
     Route::get('ai/assistant/insights', [\App\Http\Controllers\Api\AiController::class, 'insights']);
     Route::post('ai/assistant/chat', [\App\Http\Controllers\Api\AiController::class, 'chat']);
-    // Dashboard AI (uses configured AI provider via AiManager)
+    // Dashboard AI
     Route::post('dashboard/ai/ask', [\App\Http\Controllers\Api\DashboardAiController::class, 'ask']);
     Route::post('dashboard/ai/business-health', [\App\Http\Controllers\Api\DashboardAiController::class, 'businessHealth']);
     Route::post('dashboard/ai/forecast', [\App\Http\Controllers\Api\DashboardAiController::class, 'forecast']);
@@ -257,4 +266,20 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('ai/providers', [\App\Http\Controllers\Api\AiProviderController::class, 'index']);
     Route::post('ai/providers', [\App\Http\Controllers\Api\AiProviderController::class, 'store']);
     Route::put('ai/providers/{provider}', [\App\Http\Controllers\Api\AiProviderController::class, 'update']);
+
+    // Inventory import/export
+    Route::post('/inventory/import', [ProductController::class, 'import']);
+    Route::get('/inventory/export', [ProductController::class, 'export']);
+    Route::get('/inventory/template', [ProductController::class, 'template']);
+
+    // Customer import/template
+    Route::get('customers/template', [CustomerController::class, 'template']);
+    Route::post('customers/import', [CustomerController::class, 'import']);
+
+    Route::apiResource('settings', SettingsController::class);
+    // Additional endpoints if needed
+    Route::post('settings/bulk-update', [SettingsController::class, 'bulkUpdate']);
+    Route::get('settings/export', [SettingsController::class, 'export']);
+    Route::post('settings/import', [SettingsController::class, 'import']);
+    Route::post('settings/cache/clear', [SettingsController::class, 'clearCache']);
 });
