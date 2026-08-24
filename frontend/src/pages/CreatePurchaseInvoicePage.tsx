@@ -47,7 +47,7 @@ interface PaymentEntry {
   bank_name: string;
   account_number: string;
   remarks: string;
-  payment_direction: 'inward' | 'outward';   // required
+  payment_direction: 'inward' | 'outward';
 }
 
 interface PurchaseFormData {
@@ -78,7 +78,6 @@ interface PurchaseFormData {
 
 // ── Number to words ───────────────────────────────
 function numberToWordsINR(amount: number): string {
-  // ... (same as before, unchanged) ...
   const units = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
   const teens = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
   const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
@@ -233,7 +232,7 @@ export function CreatePurchaseInvoicePage() {
     custom_field_2: '',
     notes: '',
     email: '',
-    payments: [],           // initially empty
+    payments: [],
   });
 
   const [productSearch, setProductSearch] = useState('');
@@ -353,7 +352,6 @@ export function CreatePurchaseInvoicePage() {
       refreshSuppliers();
       setForm(prev => ({ ...prev, supplier_id: created.id }));
       setShowSupplierOffcanvas(false);
-      // Reset form
       setNewSupplier({
         company_id: '',
         name: '',
@@ -435,7 +433,6 @@ export function CreatePurchaseInvoicePage() {
       showSuccess('Product created', `${created.name} added to catalog.`);
       refreshProducts();
       setShowProductOffcanvas(false);
-      // Reset product form
       setNewProduct({
         company_id: '',
         branch_id: '',
@@ -450,14 +447,12 @@ export function CreatePurchaseInvoicePage() {
         reorder_level: '0',
         description: '',
       });
-      // Optionally add the new product directly to invoice items
       if (created?.id && created?.name && created?.purchase_price !== undefined) {
         const productToAdd: Product = {
           id: created.id,
           name: created.name,
           hsn_sac_code: created.hsn_sac_code || '',
           uom: created.unit || 'NOS',
-          
           purchase_price: created.purchase_price,
           tax_rate: created.tax_rate,
           igst_rate: created.tax_rate,
@@ -577,18 +572,18 @@ export function CreatePurchaseInvoicePage() {
     additional_charges: prev.additional_charges.filter(c => c.id !== id)
   }));
 
-  // ── Payment Management (NEW) ──
+  // ── Payment Management ──
   const addPayment = () => {
     const newPayment: PaymentEntry = {
       id: `new_${Date.now()}`,
       amount: 0,
-      payment_method: 'bank_transfer',   // default for purchases
+      payment_method: 'bank_transfer',
       reference_no: '',
       transaction_date: new Date().toISOString().split('T')[0],
       bank_name: '',
       account_number: '',
       remarks: '',
-      payment_direction: 'outward',      // default outward for purchase
+      payment_direction: 'outward',
     };
     setForm(prev => ({ ...prev, payments: [...prev.payments, newPayment] }));
   };
@@ -639,7 +634,7 @@ export function CreatePurchaseInvoicePage() {
   const grandTotal = totalBeforeRoundOff + form.round_off;
   const totalInWords = useMemo(() => numberToWordsINR(grandTotal), [grandTotal]);
 
-  // Derived payment totals from payments array
+  // Derived payment totals
   const totalPaid = useMemo(() => form.payments.reduce((s, p) => s + (p.amount || 0), 0), [form.payments]);
   const balanceDue = grandTotal - totalPaid;
 
@@ -653,8 +648,6 @@ export function CreatePurchaseInvoicePage() {
     if (!form.supplier_id) { setErrorMsg('Select a supplier.'); return false; }
     if (!form.invoice_no.trim()) { setErrorMsg('Invoice number is required.'); return false; }
     if (items.length === 0) { setErrorMsg('Add at least one product.'); return false; }
-
-    // Validate payment_direction on each payment entry
     for (const payment of form.payments) {
       if (!['inward', 'outward'].includes(payment.payment_direction)) {
         setErrorMsg('Each payment must have a valid direction (inward or outward).');
@@ -727,7 +720,6 @@ export function CreatePurchaseInvoicePage() {
         sgst_percent: Number(i.sgst_percent || 0),
         igst_percent: Number(i.igst_percent || 0),
       })),
-      // Removed single payment fields; handled via payments array below
     };
 
     setSubmitting(true);
@@ -751,7 +743,7 @@ export function CreatePurchaseInvoicePage() {
             amount: payment.amount,
             payment_method: payment.payment_method,
             status: 'completed',
-            payment_direction: payment.payment_direction || 'outward',  // ensure direction is sent
+            payment_direction: payment.payment_direction || 'outward',
             transaction_date: payment.transaction_date,
             bank_name: payment.bank_name,
             account_number: payment.account_number,
@@ -1092,7 +1084,7 @@ export function CreatePurchaseInvoicePage() {
                 </select>
               </div>
 
-              {/* Payments Section (NEW) */}
+              {/* Payments Section */}
               <div className="mt-6 border-t pt-4">
                 <div className="flex justify-between items-center mb-3">
                   <h3 className="text-sm font-semibold text-slate-700">Payments</h3>

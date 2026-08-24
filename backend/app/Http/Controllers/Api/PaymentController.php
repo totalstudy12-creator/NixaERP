@@ -26,18 +26,18 @@ class PaymentController extends Controller
     public function store(Request $request)
     {
         $data = $request->validate([
-            'company_id'        => 'nullable|exists:companies,id',
-            'invoice_id'        => 'nullable|exists:invoices,id',
-            'reference_no'      => 'nullable|string|max:255',
-            'amount'            => 'required|numeric|min:0.01',
-            'payment_method'    => 'required|string|max:100',
-            'status'            => 'required|string|max:100',
+            'company_id' => 'nullable|exists:companies,id',
+            'invoice_id' => 'nullable|exists:invoices,id',
+            'reference_no' => 'nullable|string|max:255',
+            'amount' => 'required|numeric|min:0.01',
+            'payment_method' => 'required|string|max:100',
+            'status' => 'required|string|max:100',
             'payment_direction' => 'required|in:inward,outward',
-            'transaction_date'  => 'nullable|date',
-            'bank_name'         => 'nullable|string|max:255',
-            'account_number'    => 'nullable|string|max:255',
-            'ledger_reference'  => 'nullable|string|max:255',
-            'remarks'           => 'nullable|string',
+            'transaction_date' => 'nullable|date',
+            'bank_name' => 'nullable|string|max:255',
+            'account_number' => 'nullable|string|max:255',
+            'ledger_reference' => 'nullable|string|max:255',
+            'remarks' => 'nullable|string',
         ]);
 
         $data['transaction_date'] = $data['transaction_date'] ?? now()->toDateString();
@@ -72,18 +72,18 @@ class PaymentController extends Controller
     public function update(Request $request, Payment $payment)
     {
         $data = $request->validate([
-            'company_id'        => 'nullable|exists:companies,id',
-            'invoice_id'        => 'nullable|exists:invoices,id',
-            'reference_no'      => 'nullable|string|max:255',
-            'amount'            => 'required|numeric|min:0.01',
-            'payment_method'    => 'required|string|max:100',
-            'status'            => 'required|string|max:100',
+            'company_id' => 'nullable|exists:companies,id',
+            'invoice_id' => 'nullable|exists:invoices,id',
+            'reference_no' => 'nullable|string|max:255',
+            'amount' => 'required|numeric|min:0.01',
+            'payment_method' => 'required|string|max:100',
+            'status' => 'required|string|max:100',
             'payment_direction' => 'required|in:inward,outward',
-            'transaction_date'  => 'nullable|date',
-            'bank_name'         => 'nullable|string|max:255',
-            'account_number'    => 'nullable|string|max:255',
-            'ledger_reference'  => 'nullable|string|max:255',
-            'remarks'           => 'nullable|string',
+            'transaction_date' => 'nullable|date',
+            'bank_name' => 'nullable|string|max:255',
+            'account_number' => 'nullable|string|max:255',
+            'ledger_reference' => 'nullable|string|max:255',
+            'remarks' => 'nullable|string',
         ]);
 
         $data['transaction_date'] = $data['transaction_date'] ?? now()->toDateString();
@@ -133,9 +133,16 @@ class PaymentController extends Controller
     private function updateInvoiceStatus(int $invoiceId)
     {
         $invoice = Invoice::find($invoiceId);
-        if (!$invoice) return;
+        if (!$invoice)
+            return;
 
-        // Only incoming payments should count towards invoice payment status
+        // Skip status update for purchase invoices/bills
+        $purchaseTypes = ['purchase_invoice', 'purchase_bill'];
+        if (in_array($invoice->type, $purchaseTypes)) {
+            return; // Do not change status
+        }
+
+        // Existing logic for sales invoices
         $totalPaid = $invoice->payments()
             ->where('payment_direction', 'inward')
             ->sum('amount');
@@ -151,4 +158,7 @@ class PaymentController extends Controller
 
         $invoice->update(['status' => $status]);
     }
+
+
+
 }

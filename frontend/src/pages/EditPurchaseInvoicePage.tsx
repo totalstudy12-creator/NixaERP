@@ -59,7 +59,7 @@ interface PaymentEntry {
   bank_name: string;
   account_number: string;
   remarks: string;
-  payment_direction: 'inward' | 'outward';   // required
+  payment_direction: 'inward' | 'outward';
 }
 
 interface PurchaseFormData {
@@ -92,7 +92,6 @@ interface PurchaseFormData {
   general_discount_percent: number;
   general_discount_amount: number;
   tcs_percent: number;
-  round_off: number;
   terms_title: string;
   terms_detail: string;
   document_note: string;
@@ -224,7 +223,6 @@ export function EditPurchaseInvoicePage() {
     general_discount_percent: 0,
     general_discount_amount: 0,
     tcs_percent: 0,
-    round_off: 0,
     terms_title: 'Terms and Conditions',
     terms_detail: '',
     document_note: '',
@@ -284,7 +282,7 @@ export function EditPurchaseInvoicePage() {
   });
   const [productFormErrors, setProductFormErrors] = useState<Record<string, boolean>>({});
 
-  // Load purchase invoice by ID
+  // ---- Load purchase invoice by ID ----
   useEffect(() => {
     if (!id) return;
     (async () => {
@@ -292,7 +290,7 @@ export function EditPurchaseInvoicePage() {
         const response = await apiClient.getPurchase(Number(id));
         const inv = response.data || response;
 
-        // Map existing payments, prefix with existing_ to distinguish
+        // Map existing payments
         const existingPayments: PaymentEntry[] = Array.isArray(inv.payments)
           ? inv.payments.map((p: any) => ({
               id: `existing_${p.id ?? Date.now()}`,
@@ -337,7 +335,6 @@ export function EditPurchaseInvoicePage() {
           general_discount_percent: Number(inv.general_discount_percent) || 0,
           general_discount_amount: Number(inv.general_discount_amount) || 0,
           tcs_percent: Number(inv.tcs_percent) || 0,
-          round_off: Number(inv.round_off) || 0,
           terms_title: inv.terms_title || 'Terms and Conditions',
           terms_detail: inv.terms_detail || '',
           document_note: inv.document_note || '',
@@ -397,7 +394,7 @@ export function EditPurchaseInvoicePage() {
     })();
   }, [id, showError]);
 
-  // Fetch branches when company changes
+  // ---- Fetch branches when company changes ----
   useEffect(() => {
     if (!form.company_id) {
       setAvailableBranches(['Main Branch']);
@@ -423,7 +420,7 @@ export function EditPurchaseInvoicePage() {
     return () => { cancelled = true; };
   }, [form.company_id]);
 
-  // Filtered lists
+  // ---- Filtered lists ----
   const filteredSuppliers = useMemo(() => {
     if (!suppliers) return [];
     const term = supplierSearch.toLowerCase();
@@ -440,7 +437,7 @@ export function EditPurchaseInvoicePage() {
     );
   }, [products, productSearch]);
 
-  // Auto-fill supplier info
+  // ---- Auto-fill supplier info ----
   useEffect(() => {
     if (form.supplier_id && suppliers) {
       const sup = suppliers.find(s => s.id === Number(form.supplier_id));
@@ -486,22 +483,9 @@ export function EditPurchaseInvoicePage() {
       igst_amount: 0,
       total: 0,
     };
-    const base = newItem.qty * newItem.price;
-    const discount = 0;
-    const afterDiscount = base - discount;
-    let cgst = 0, sgst = 0, igst = 0;
-    if (newItem.is_inter_state) {
-      igst = afterDiscount * (newItem.gst_slab / 100);
-    } else {
-      const half = newItem.gst_slab / 2;
-      cgst = afterDiscount * (half / 100);
-      sgst = afterDiscount * (half / 100);
-    }
-    newItem.cgst_amount = cgst;
-    newItem.sgst_amount = sgst;
-    newItem.igst_amount = igst;
-    newItem.total = afterDiscount + cgst + sgst + igst;
-    setItems(prev => [...prev, newItem]);
+    // Recalculate
+    const calculated = recalcItemInternal(newItem);
+    setItems(prev => [...prev, calculated]);
     setProductSearch('');
   }, [items, showError]);
 
@@ -512,36 +496,45 @@ export function EditPurchaseInvoicePage() {
   const updateItem = useCallback((index: number, field: keyof PurchaseItem, value: any) => {
     setItems(prev => {
       const updated = [...prev];
-      updated[index] = { ...updated[index], [field]: value };
+      const item = { ...updated[index], [field]: value };
+      updated[index] = recalcItemInternal(item);
       return updated;
     });
   }, []);
 
+  // Helper to recalc a single item
+  function recalcItemInternal(item: PurchaseItem): PurchaseItem {
+    const base = item.qty * item.price;
+    const discount = item.discount_type === 'percent'
+      ? base * (item.discount_percent / 100)
+      : item.discount_amount;
+    const afterDiscount = base - discount;
+    const slab = item.gst_slab || 0;
+    let cgst = 0, sgst = 0, igst = 0;
+    if (item.is_inter_state) {
+      igst = afterDiscount * (slab / 100);
+    } else {
+      const half = slab / 2;
+      cgst = afterDiscount * (half / 100);
+      sgst = afterDiscount * (half / 100);
+    }
+    return {
+      ...item,
+      discount_amount: discount,
+      cgst_percent: item.is_inter_state ? 0 : slab / 2,
+      sgst_percent: item.is_inter_state ? 0 : slab / 2,
+      igst_percent: item.is_inter_state ? slab : 0,
+      cgst_amount: cgst,
+      sgst_amount: sgst,
+      igst_amount: igst,
+      total: afterDiscount + cgst + sgst + igst,
+    };
+  }
+
   const recalcItem = useCallback((index: number) => {
     setItems(prev => {
       const updated = [...prev];
-      const item = { ...updated[index] };
-      const base = item.qty * item.price;
-      const discount = item.discount_type === 'percent'
-        ? base * (item.discount_percent / 100)
-        : item.discount_amount;
-      const afterDiscount = base - discount;
-      const slab = item.gst_slab || 0;
-      if (item.is_inter_state) {
-        item.igst_percent = slab;
-        item.cgst_percent = 0; item.sgst_percent = 0;
-        item.igst_amount = afterDiscount * (slab / 100);
-        item.cgst_amount = 0; item.sgst_amount = 0;
-      } else {
-        const half = slab / 2;
-        item.cgst_percent = half; item.sgst_percent = half; item.igst_percent = 0;
-        item.cgst_amount = afterDiscount * (half / 100);
-        item.sgst_amount = afterDiscount * (half / 100);
-        item.igst_amount = 0;
-      }
-      item.discount_amount = discount;
-      item.total = afterDiscount + item.cgst_amount + item.sgst_amount + item.igst_amount;
-      updated[index] = item;
+      updated[index] = recalcItemInternal(updated[index]);
       return updated;
     });
   }, []);
@@ -698,7 +691,6 @@ export function EditPurchaseInvoicePage() {
           name: created.name,
           hsn_sac_code: created.hsn_sac_code || '',
           uom: created.unit || 'NOS',
-          // 'price' property removed because Product interface does not have it
           purchase_price: created.purchase_price,
           tax_rate: created.tax_rate,
           igst_rate: created.tax_rate,
@@ -717,7 +709,7 @@ export function EditPurchaseInvoicePage() {
     }
   };
 
-  /* ========== TOTALS ========== */
+  /* ========== SUMMARY CALCULATIONS ========== */
   const itemSubtotal = useMemo(() => items.reduce((s, i) => s + (i.qty * i.price), 0), [items]);
   const itemDiscountTotal = useMemo(() => items.reduce((s, i) => s + (i.discount_amount || 0), 0), [items]);
   const itemCgstTotal = useMemo(() => items.reduce((s, i) => s + (i.cgst_amount || 0), 0), [items]);
@@ -726,6 +718,7 @@ export function EditPurchaseInvoicePage() {
   const totalTax = itemCgstTotal + itemSgstTotal + itemIgstTotal;
   const itemTaxableTotal = useMemo(() => itemSubtotal - itemDiscountTotal, [itemSubtotal, itemDiscountTotal]);
 
+  // General discount: use percent if set, else amount
   const generalDiscountAmount = useMemo(() =>
     form.general_discount_percent
       ? (itemTaxableTotal * form.general_discount_percent) / 100
@@ -737,11 +730,15 @@ export function EditPurchaseInvoicePage() {
   const totalBeforeTcs = itemTaxableTotal - generalDiscountAmount + totalTax + additionalChargesTotal + form.packing_charges;
   const tcsAmount = useMemo(() => totalBeforeTcs * (form.tcs_percent / 100), [totalBeforeTcs, form.tcs_percent]);
   const totalBeforeRoundOff = totalBeforeTcs + tcsAmount;
-  const grandTotal = totalBeforeRoundOff + form.round_off;
+  const roundOff = Math.round(totalBeforeRoundOff) - totalBeforeRoundOff;
+  const grandTotal = Math.round(totalBeforeRoundOff);
   const totalInWords = useMemo(() => numberToWordsINR(grandTotal), [grandTotal]);
 
   const totalPaid = useMemo(() => form.payments.reduce((s, p) => s + (p.amount || 0), 0), [form.payments]);
   const balanceDue = grandTotal - totalPaid;
+
+  // Auto-update round off in form (for display only, we don't store it)
+  // We will not store round_off in state; we just use the computed value in summary display.
 
   /* ========== VALIDATION & UPDATE ========== */
   const handleSupplierSelect = (supplier: Supplier) => {
@@ -753,8 +750,12 @@ export function EditPurchaseInvoicePage() {
     if (!form.company_id) { setErrorMsg('Select a company.'); return false; }
     if (!form.supplier_id) { setErrorMsg('Select a supplier.'); return false; }
     if (!form.invoice_no.trim()) { setErrorMsg('Purchase number is required.'); return false; }
+    if (!form.place_of_supply.trim()) { setErrorMsg('Place of supply is required.'); return false; }
     if (items.length === 0) { setErrorMsg('Add at least one product.'); return false; }
-
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].qty <= 0) { setErrorMsg(`Item ${i+1}: quantity must be positive.`); return false; }
+      if (items[i].price < 0) { setErrorMsg(`Item ${i+1}: price cannot be negative.`); return false; }
+    }
     for (const payment of form.payments) {
       if (!['inward', 'outward'].includes(payment.payment_direction)) {
         setErrorMsg('Each payment must have a valid direction (inward or outward).');
@@ -798,7 +799,7 @@ export function EditPurchaseInvoicePage() {
       general_discount_percent: form.general_discount_percent,
       general_discount_amount: generalDiscountAmount,
       tcs_percent: form.tcs_percent,
-      round_off: form.round_off,
+      round_off: roundOff,   // computed round off
       terms_title: form.terms_title,
       terms_detail: form.terms_detail,
       document_note: form.document_note,
@@ -861,7 +862,7 @@ export function EditPurchaseInvoicePage() {
     } finally {
       setSubmitting(false);
     }
-  }, [form, id, items, grandTotal, totalTax, itemDiscountTotal, generalDiscountAmount, navigate, showSuccess, showError]);
+  }, [form, id, items, grandTotal, totalTax, itemDiscountTotal, generalDiscountAmount, roundOff, navigate, showSuccess, showError]);
 
   const inputClass = "w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-200 focus:border-blue-500 outline-none transition bg-white";
 
@@ -1045,33 +1046,33 @@ export function EditPurchaseInvoicePage() {
                     <tr key={idx} className="hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-0">
                       <td className="py-2 px-3"><input type="text" value={item.product_name} onChange={e => updateItem(idx, 'product_name', e.target.value)} className="w-full bg-transparent border-0 focus:ring-0 text-sm p-1" /></td>
                       <td className="py-2 px-3">
-                        <input type="number" min="1" value={item.qty} onChange={e => { updateItem(idx, 'qty', Number(e.target.value)); recalcItem(idx); }} className="w-16 bg-transparent border-0 focus:ring-0 text-center p-1" />
+                        <input type="number" min="1" value={item.qty} onChange={e => { updateItem(idx, 'qty', Number(e.target.value)); }} className="w-16 bg-transparent border-0 focus:ring-0 text-center p-1" />
                         {products?.find(p => p.id === item.product_id)?.stock_quantity != null && (
                           <div className="text-xs text-gray-400 text-center -mt-0.5">Stock: {products.find(p => p.id === item.product_id)?.stock_quantity}</div>
                         )}
                       </td>
                       <td className="py-2 px-3"><input type="text" value={item.uom} onChange={e => updateItem(idx, 'uom', e.target.value)} className="w-14 bg-transparent border-0 focus:ring-0 text-center p-1" /></td>
-                      <td className="py-2 px-3"><input type="number" step="0.01" value={item.price} onChange={e => { updateItem(idx, 'price', Number(e.target.value)); recalcItem(idx); }} className="w-20 bg-transparent border-0 focus:ring-0 text-right p-1" /></td>
+                      <td className="py-2 px-3"><input type="number" step="0.01" value={item.price} onChange={e => { updateItem(idx, 'price', Number(e.target.value)); }} className="w-20 bg-transparent border-0 focus:ring-0 text-right p-1" /></td>
                       <td className="py-2 px-3">
-                        <select value={item.discount_type} onChange={e => { updateItem(idx, 'discount_type', e.target.value as 'percent'|'amount'); recalcItem(idx); }} className="bg-transparent border-0 focus:ring-0 text-center p-1 text-sm">
+                        <select value={item.discount_type} onChange={e => { updateItem(idx, 'discount_type', e.target.value as 'percent'|'amount'); }} className="bg-transparent border-0 focus:ring-0 text-center p-1 text-sm">
                           <option value="percent">%</option><option value="amount">₹</option>
                         </select>
                       </td>
                       <td className="py-2 px-3">
                         {item.discount_type === 'percent' ? (
-                          <input type="number" value={item.discount_percent} onChange={e => { updateItem(idx, 'discount_percent', Number(e.target.value)); recalcItem(idx); }} className="w-14 bg-transparent border-0 focus:ring-0 text-center p-1" />
+                          <input type="number" value={item.discount_percent} onChange={e => { updateItem(idx, 'discount_percent', Number(e.target.value)); }} className="w-14 bg-transparent border-0 focus:ring-0 text-center p-1" />
                         ) : (
-                          <input type="number" step="0.01" value={item.discount_amount} onChange={e => { updateItem(idx, 'discount_amount', Number(e.target.value)); recalcItem(idx); }} className="w-20 bg-transparent border-0 focus:ring-0 text-center p-1" />
+                          <input type="number" step="0.01" value={item.discount_amount} onChange={e => { updateItem(idx, 'discount_amount', Number(e.target.value)); }} className="w-20 bg-transparent border-0 focus:ring-0 text-center p-1" />
                         )}
                       </td>
                       <td className="py-2 px-3">
-                        <select value={item.gst_slab} onChange={e => { updateItem(idx, 'gst_slab', Number(e.target.value)); recalcItem(idx); }} className="bg-transparent border-0 focus:ring-0 text-center p-1 text-sm">
+                        <select value={item.gst_slab} onChange={e => { updateItem(idx, 'gst_slab', Number(e.target.value)); }} className="bg-transparent border-0 focus:ring-0 text-center p-1 text-sm">
                           <option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option>
                         </select>
-                        {item.gst_slab === -1 && <input type="number" step="0.01" placeholder="%" onChange={e => { const val = Number(e.target.value); if (!isNaN(val)) { updateItem(idx, 'gst_slab', val); recalcItem(idx); } }} className="w-12 bg-transparent border-0 focus:ring-0 text-center p-1 ml-1" />}
+                        {item.gst_slab === -1 && <input type="number" step="0.01" placeholder="%" onChange={e => { const val = Number(e.target.value); if (!isNaN(val)) { updateItem(idx, 'gst_slab', val); } }} className="w-12 bg-transparent border-0 focus:ring-0 text-center p-1 ml-1" />}
                       </td>
                       <td className="py-2 px-3">
-                        <label className="inline-flex items-center gap-1 text-xs cursor-pointer"><input type="checkbox" checked={item.is_inter_state} onChange={e => { updateItem(idx, 'is_inter_state', e.target.checked); recalcItem(idx); }} className="rounded border-gray-300" />IGST</label>
+                        <label className="inline-flex items-center gap-1 text-xs cursor-pointer"><input type="checkbox" checked={item.is_inter_state} onChange={e => { updateItem(idx, 'is_inter_state', e.target.checked); }} className="rounded border-gray-300" />IGST</label>
                       </td>
                       <td className="py-2 px-3 text-right font-semibold text-slate-700">₹{(item.total || 0).toFixed(2)}</td>
                       <td className="py-2 px-3"><button onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600" aria-label="Remove item"><FiTrash2 size={16} /></button></td>
@@ -1091,20 +1092,20 @@ export function EditPurchaseInvoicePage() {
                 <div className="flex justify-between items-start"><span className="text-xs font-semibold text-gray-400">#{idx + 1}</span><button onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600"><FiTrash2 size={16} /></button></div>
                 <input type="text" value={item.product_name} onChange={e => updateItem(idx, 'product_name', e.target.value)} className="w-full bg-transparent border-0 focus:ring-0 text-sm font-medium" />
                 <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-gray-500">Qty</label><input type="number" value={item.qty} onChange={e => { updateItem(idx, 'qty', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                  <div><label className="text-xs text-gray-500">Qty</label><input type="number" value={item.qty} onChange={e => { updateItem(idx, 'qty', Number(e.target.value)); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
                   <div><label className="text-xs text-gray-500">Unit</label><input type="text" value={item.uom} onChange={e => updateItem(idx, 'uom', e.target.value)} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-gray-500">Price</label><input type="number" step="0.01" value={item.price} onChange={e => { updateItem(idx, 'price', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
-                  <div><label className="text-xs text-gray-500">Disc Type</label><select value={item.discount_type} onChange={e => { updateItem(idx, 'discount_type', e.target.value as 'percent'|'amount'); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs"><option value="percent">%</option><option value="amount">₹</option></select></div>
+                  <div><label className="text-xs text-gray-500">Price</label><input type="number" step="0.01" value={item.price} onChange={e => { updateItem(idx, 'price', Number(e.target.value)); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                  <div><label className="text-xs text-gray-500">Disc Type</label><select value={item.discount_type} onChange={e => { updateItem(idx, 'discount_type', e.target.value as 'percent'|'amount'); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs"><option value="percent">%</option><option value="amount">₹</option></select></div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-gray-500">Discount %</label><input type="number" value={item.discount_percent} onChange={e => { updateItem(idx, 'discount_percent', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
-                  <div><label className="text-xs text-gray-500">Disc Amount</label><input type="number" step="0.01" value={item.discount_amount} onChange={e => { updateItem(idx, 'discount_amount', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                  <div><label className="text-xs text-gray-500">Discount %</label><input type="number" value={item.discount_percent} onChange={e => { updateItem(idx, 'discount_percent', Number(e.target.value)); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                  <div><label className="text-xs text-gray-500">Disc Amount</label><input type="number" step="0.01" value={item.discount_amount} onChange={e => { updateItem(idx, 'discount_amount', Number(e.target.value)); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-gray-500">GST Slab</label><select value={item.gst_slab} onChange={e => { updateItem(idx, 'gst_slab', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs"><option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option></select>{item.gst_slab === -1 && <input type="number" step="0.01" placeholder="%" onChange={e => { const val = Number(e.target.value); if (!isNaN(val)) { updateItem(idx, 'gst_slab', val); recalcItem(idx); } }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs mt-1" />}</div>
-                  <div className="flex items-center gap-2"><label className="text-xs text-gray-500 flex items-center gap-1"><input type="checkbox" checked={item.is_inter_state} onChange={e => { updateItem(idx, 'is_inter_state', e.target.checked); recalcItem(idx); }} className="rounded" />IGST</label></div>
+                  <div><label className="text-xs text-gray-500">GST Slab</label><select value={item.gst_slab} onChange={e => { updateItem(idx, 'gst_slab', Number(e.target.value)); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs"><option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option></select>{item.gst_slab === -1 && <input type="number" step="0.01" placeholder="%" onChange={e => { const val = Number(e.target.value); if (!isNaN(val)) { updateItem(idx, 'gst_slab', val); } }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs mt-1" />}</div>
+                  <div className="flex items-center gap-2"><label className="text-xs text-gray-500 flex items-center gap-1"><input type="checkbox" checked={item.is_inter_state} onChange={e => { updateItem(idx, 'is_inter_state', e.target.checked); }} className="rounded" />IGST</label></div>
                 </div>
                 <div className="text-right font-semibold">₹{(item.total || 0).toFixed(2)}</div>
               </div>
@@ -1130,8 +1131,8 @@ export function EditPurchaseInvoicePage() {
             <div className="space-y-3 text-sm">
               <div className="flex justify-between"><span>Taxable Amount</span><span className="font-medium">₹{itemTaxableTotal.toFixed(2)}</span></div>
               <div className="grid grid-cols-2 gap-2">
-                <div><label className="block text-xs font-medium">General Discount %</label><input type="number" step="0.01" value={form.general_discount_percent} onChange={e => setForm(prev => ({ ...prev, general_discount_percent: Number(e.target.value) }))} className={inputClass} /></div>
-                <div><label className="block text-xs font-medium">Or Amount</label><input type="number" step="0.01" value={form.general_discount_amount} onChange={e => setForm(prev => ({ ...prev, general_discount_amount: Number(e.target.value) }))} className={inputClass} /></div>
+                <div><label className="block text-xs font-medium">General Discount %</label><input type="number" step="0.01" value={form.general_discount_percent} onChange={e => setForm(prev => ({ ...prev, general_discount_percent: Number(e.target.value), general_discount_amount: 0 }))} className={inputClass} /></div>
+                <div><label className="block text-xs font-medium">Or Amount</label><input type="number" step="0.01" value={form.general_discount_amount} onChange={e => setForm(prev => ({ ...prev, general_discount_amount: Number(e.target.value), general_discount_percent: 0 }))} className={inputClass} /></div>
               </div>
               <div className="flex justify-between"><span>Packing Charges</span><input type="number" step="0.01" value={form.packing_charges} onChange={e => setForm(prev => ({ ...prev, packing_charges: Number(e.target.value) }))} className="w-24 text-right border rounded px-2 py-1" /></div>
               <div className="space-y-2">
@@ -1149,7 +1150,10 @@ export function EditPurchaseInvoicePage() {
               <div className="flex justify-between items-center"><span>TCS %</span><input type="number" step="0.01" value={form.tcs_percent} onChange={e => setForm(prev => ({ ...prev, tcs_percent: Number(e.target.value) }))} className="w-20 text-right border rounded px-2 py-1" /></div>
               <div className="flex justify-between"><span>TCS Amount</span><span>₹{tcsAmount.toFixed(2)}</span></div>
               <div className="flex justify-between"><span>Total Tax</span><span>₹{totalTax.toFixed(2)}</span></div>
-              <div className="flex justify-between items-center"><span>Round Off</span><input type="number" step="0.01" value={form.round_off} onChange={e => setForm(prev => ({ ...prev, round_off: Number(e.target.value) }))} className="w-20 text-right border rounded px-2 py-1" /></div>
+              <div className="flex justify-between">
+                <span>Round Off</span>
+                <span className="font-medium">{roundOff >= 0 ? '+' : ''}{roundOff.toFixed(2)}</span>
+              </div>
               <hr className="border-slate-200" />
               <div className="flex justify-between text-base font-bold text-slate-800"><span>Grand Total</span><span>₹{grandTotal.toFixed(2)}</span></div>
               <div className="text-xs text-gray-500 mt-1">{totalInWords}</div>
