@@ -1,12 +1,15 @@
-import { useEffect, useState, useCallback, useMemo } from 'react';
+// src/pages/CreatePurchaseInvoicePage.tsx
+import { useEffect, useState, useCallback, useMemo, lazy, Suspense } from 'react';
 import {
   FiPlus, FiTrash2, FiSearch, FiFileText, FiCalendar, FiUser, FiBox,
-  FiX, FiSave, FiPrinter, FiRefreshCw
+  FiX, FiSave, FiPrinter, FiRefreshCw, FiLoader
 } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+
+const Offcanvas = lazy(() => import('../components/Offcanvas').then(m => ({ default: m.Offcanvas })));
 
 // ── Types ──────────────────────────────────────────
 interface Company { id: number; name: string; }
@@ -35,6 +38,18 @@ interface PurchaseItem {
 
 interface AdditionalCharge { id: string; label: string; amount: number; }
 
+interface PaymentEntry {
+  id: string;
+  amount: number;
+  payment_method: 'UPI' | 'cash' | 'cheque' | 'bank_transfer' | 'other';
+  reference_no: string;
+  transaction_date: string;
+  bank_name: string;
+  account_number: string;
+  remarks: string;
+  payment_direction: 'inward' | 'outward';   // required
+}
+
 interface PurchaseFormData {
   company_id: number | ''; supplier_id: number | '';
   supplier_name: string; supplier_address: string;
@@ -46,8 +61,7 @@ interface PurchaseFormData {
   po_no: string; po_date: string; lr_no: string; eway_no: string;
   delivery_mode: string;
   payment_type: 'credit' | 'cash' | 'cheque' | 'online' | 'bank_transfer';
-  payment_received: number; keep_advance: boolean;
-  remarks: string; payment_term: string; due_date: string;
+  payment_term: string; due_date: string;
   bank_id: number | '';
   packing_charges: number; general_discount_percent: number; general_discount_amount: number;
   tcs_percent: number; round_off: number;
@@ -59,10 +73,12 @@ interface PurchaseFormData {
   wallet_balance: number; commission_rate: number; kyc_status: string; opening_balance: number;
   due_days: number; fax: string; website: string; license_no: string;
   custom_field_1: string; custom_field_2: string; notes: string; email: string;
+  payments: PaymentEntry[];
 }
 
 // ── Number to words ───────────────────────────────
 function numberToWordsINR(amount: number): string {
+  // ... (same as before, unchanged) ...
   const units = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
   const teens = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
   const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
@@ -135,15 +151,14 @@ export function CreatePurchaseInvoicePage() {
 
   const getCompanies = useCallback(() => apiClient.getCompanies(), []);
   const getSuppliers = useCallback(() => apiClient.getSuppliers(), []);
-  // ✅ FIX: Use getAllProducts() to load the entire product list for search
   const getProducts = useCallback(() => apiClient.getAllProducts(), []);
   const getBanks = useCallback(async () => {
     try { return await apiClient.request('GET', '/banks'); } catch { return []; }
   }, []);
 
   const { data: companies } = useApiCache<Company[]>('companies', getCompanies);
-  const { data: suppliers } = useApiCache<Supplier[]>('suppliers', getSuppliers);
-  const { data: products } = useApiCache<Product[]>('products', getProducts);
+  const { data: suppliers, refresh: refreshSuppliers } = useApiCache<Supplier[]>('suppliers', getSuppliers);
+  const { data: products, refresh: refreshProducts } = useApiCache<Product[]>('products', getProducts);
   const { data: banks } = useApiCache<BankAccount[]>('banks', getBanks);
 
   const generateInvoicePlaceholder = () => {
@@ -178,9 +193,6 @@ export function CreatePurchaseInvoicePage() {
     eway_no: '',
     delivery_mode: '',
     payment_type: 'credit',
-    payment_received: 0,
-    keep_advance: false,
-    remarks: '',
     payment_term: '',
     due_date: '',
     bank_id: '',
@@ -221,11 +233,61 @@ export function CreatePurchaseInvoicePage() {
     custom_field_2: '',
     notes: '',
     email: '',
+    payments: [],           // initially empty
   });
 
   const [productSearch, setProductSearch] = useState('');
   const [supplierSearch, setSupplierSearch] = useState('');
 
+  // ── Supplier creation offcanvas state ──
+  const [showSupplierOffcanvas, setShowSupplierOffcanvas] = useState(false);
+  const [supplierSubmitting, setSupplierSubmitting] = useState(false);
+  const [newSupplier, setNewSupplier] = useState({
+    company_id: '',
+    name: '',
+    contact_person: '',
+    contact_no: '',
+    email: '',
+    phone: '',
+    gst_number: '',
+    pan: '',
+    billing_street: '',
+    billing_city: '',
+    billing_state: '',
+    billing_country: 'India',
+    billing_pincode: '',
+    shipping_street: '',
+    shipping_city: '',
+    shipping_state: '',
+    shipping_country: 'India',
+    shipping_pincode: '',
+    same_as_billing: true,
+    opening_balance: 0,
+    credit_limit: 0,
+    due_days: 0,
+    notes: '',
+  });
+
+  // ── Product creation offcanvas state ──
+  const [showProductOffcanvas, setShowProductOffcanvas] = useState(false);
+  const [productSubmitting, setProductSubmitting] = useState(false);
+  const [newProduct, setNewProduct] = useState({
+    company_id: '',
+    branch_id: '',
+    name: '',
+    sku: '',
+    hsn_sac_code: '',
+    unit: 'Piece',
+    sale_price: '',
+    purchase_price: '',
+    tax_rate: '0',
+    stock_quantity: '0',
+    reorder_level: '0',
+    description: '',
+  });
+  const [productFormErrors, setProductFormErrors] = useState<Record<string, boolean>>({});
+
+  // ── Filtered lists ──
   const filteredSuppliers = useMemo(() => {
     if (!suppliers) return [];
     const term = supplierSearch.toLowerCase();
@@ -263,6 +325,156 @@ export function CreatePurchaseInvoicePage() {
       }
     }
   }, [form.supplier_id, suppliers]);
+
+  // ── Open product offcanvas ──
+  const openProductOffcanvas = () => {
+    setNewProduct(prev => ({
+      ...prev,
+      company_id: form.company_id ? String(form.company_id) : '',
+    }));
+    setProductFormErrors({});
+    setShowProductOffcanvas(true);
+  };
+
+  // ── Supplier creation handler ──
+  const createSupplier = async () => {
+    if (!newSupplier.name.trim()) { showError('Validation', 'Supplier name is required.'); return; }
+    if (!newSupplier.company_id) { showError('Validation', 'Company is required.'); return; }
+    try {
+      setSupplierSubmitting(true);
+      const payload = {
+        ...newSupplier,
+        company_id: Number(newSupplier.company_id),
+        type: 'supplier',
+        is_active: true,
+      };
+      const created = await apiClient.createSupplier(payload);
+      showSuccess('Supplier created', `${created.name} added.`);
+      refreshSuppliers();
+      setForm(prev => ({ ...prev, supplier_id: created.id }));
+      setShowSupplierOffcanvas(false);
+      // Reset form
+      setNewSupplier({
+        company_id: '',
+        name: '',
+        contact_person: '',
+        contact_no: '',
+        email: '',
+        phone: '',
+        gst_number: '',
+        pan: '',
+        billing_street: '',
+        billing_city: '',
+        billing_state: '',
+        billing_country: 'India',
+        billing_pincode: '',
+        shipping_street: '',
+        shipping_city: '',
+        shipping_state: '',
+        shipping_country: 'India',
+        shipping_pincode: '',
+        same_as_billing: true,
+        opening_balance: 0,
+        credit_limit: 0,
+        due_days: 0,
+        notes: '',
+      });
+    } catch (err: any) {
+      const errorMsg = err.validationErrors ? Object.values(err.validationErrors).flat().join(', ') : err.message;
+      showError('Create failed', errorMsg);
+    } finally {
+      setSupplierSubmitting(false);
+    }
+  };
+
+  // ── Product creation handler ──
+  const createProduct = async () => {
+    const errors: Record<string, boolean> = {};
+    if (!newProduct.company_id) errors.company_id = true;
+    if (!newProduct.name.trim()) errors.name = true;
+    if (!newProduct.purchase_price || parseFloat(newProduct.purchase_price) < 0) errors.purchase_price = true;
+    if (!newProduct.unit.trim()) errors.unit = true;
+    setProductFormErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      showError('Validation', 'Please fill in required fields (Company, Name, Purchase Price, Unit).');
+      return;
+    }
+
+    let sku = newProduct.sku.trim();
+    if (!sku) {
+      const prefix = 'FU-';
+      let maxNum = 0;
+      products?.forEach(p => {
+        if (p.sku && p.sku.startsWith(prefix)) {
+          const num = parseInt(p.sku.slice(prefix.length), 10);
+          if (!isNaN(num) && num > maxNum) maxNum = num;
+        }
+      });
+      sku = `${prefix}${(maxNum + 1).toString().padStart(3, '0')}`;
+    }
+
+    const payload = {
+      company_id: Number(newProduct.company_id),
+      branch_id: newProduct.branch_id ? Number(newProduct.branch_id) : null,
+      name: newProduct.name.trim(),
+      sku,
+      hsn_sac_code: newProduct.hsn_sac_code.trim(),
+      unit: newProduct.unit.trim(),
+      sale_price: parseFloat(newProduct.sale_price || '0'),
+      purchase_price: parseFloat(newProduct.purchase_price || '0'),
+      tax_rate: parseFloat(newProduct.tax_rate || '0'),
+      stock_quantity: parseInt(newProduct.stock_quantity || '0'),
+      reorder_level: parseInt(newProduct.reorder_level || '0'),
+      description: newProduct.description.trim(),
+      active: true,
+    };
+
+    setProductSubmitting(true);
+    try {
+      const created = await apiClient.createProduct(payload);
+      showSuccess('Product created', `${created.name} added to catalog.`);
+      refreshProducts();
+      setShowProductOffcanvas(false);
+      // Reset product form
+      setNewProduct({
+        company_id: '',
+        branch_id: '',
+        name: '',
+        sku: '',
+        hsn_sac_code: '',
+        unit: 'Piece',
+        sale_price: '',
+        purchase_price: '',
+        tax_rate: '0',
+        stock_quantity: '0',
+        reorder_level: '0',
+        description: '',
+      });
+      // Optionally add the new product directly to invoice items
+      if (created?.id && created?.name && created?.purchase_price !== undefined) {
+        const productToAdd: Product = {
+          id: created.id,
+          name: created.name,
+          hsn_sac_code: created.hsn_sac_code || '',
+          uom: created.unit || 'NOS',
+          price: created.purchase_price || 0,
+          purchase_price: created.purchase_price,
+          tax_rate: created.tax_rate,
+          igst_rate: created.tax_rate,
+          stock_quantity: created.stock_quantity,
+          unit: created.unit,
+          sku: created.sku,
+        };
+        addItem(productToAdd);
+      }
+    } catch (err: any) {
+      const errorMsg = err.validationErrors ? Object.values(err.validationErrors).flat().join(', ') : err.message;
+      showError('Product creation failed', errorMsg);
+      addAppLog({ module: 'Inventory', action: 'Create', status: 'error', message: errorMsg });
+    } finally {
+      setProductSubmitting(false);
+    }
+  };
 
   // ── Item Management ──
   const addItem = useCallback((product: Product) => {
@@ -365,6 +577,36 @@ export function CreatePurchaseInvoicePage() {
     additional_charges: prev.additional_charges.filter(c => c.id !== id)
   }));
 
+  // ── Payment Management (NEW) ──
+  const addPayment = () => {
+    const newPayment: PaymentEntry = {
+      id: `new_${Date.now()}`,
+      amount: 0,
+      payment_method: 'bank_transfer',   // default for purchases
+      reference_no: '',
+      transaction_date: new Date().toISOString().split('T')[0],
+      bank_name: '',
+      account_number: '',
+      remarks: '',
+      payment_direction: 'outward',      // default outward for purchase
+    };
+    setForm(prev => ({ ...prev, payments: [...prev.payments, newPayment] }));
+  };
+
+  const updatePayment = (id: string, field: keyof PaymentEntry, value: any) => {
+    setForm(prev => ({
+      ...prev,
+      payments: prev.payments.map(p => p.id === id ? { ...p, [field]: value } : p)
+    }));
+  };
+
+  const removePayment = (id: string) => {
+    setForm(prev => ({
+      ...prev,
+      payments: prev.payments.filter(p => p.id !== id)
+    }));
+  };
+
   // ── Totals ──
   const itemSubtotal = useMemo(() => items.reduce((s, i) => s + (i.qty * i.price), 0), [items]);
   const itemDiscountTotal = useMemo(() => items.reduce((s, i) => s + (i.discount_amount || 0), 0), [items]);
@@ -386,7 +628,6 @@ export function CreatePurchaseInvoicePage() {
   const tcsAmount = useMemo(() => totalBeforeTcs * (form.tcs_percent / 100), [totalBeforeTcs, form.tcs_percent]);
   const totalBeforeRoundOff = totalBeforeTcs + tcsAmount;
 
-  // ✅ Auto round‑off (to nearest integer)
   useEffect(() => {
     if (autoRoundOff) {
       const rounded = Math.round(totalBeforeRoundOff);
@@ -398,6 +639,10 @@ export function CreatePurchaseInvoicePage() {
   const grandTotal = totalBeforeRoundOff + form.round_off;
   const totalInWords = useMemo(() => numberToWordsINR(grandTotal), [grandTotal]);
 
+  // Derived payment totals from payments array
+  const totalPaid = useMemo(() => form.payments.reduce((s, p) => s + (p.amount || 0), 0), [form.payments]);
+  const balanceDue = grandTotal - totalPaid;
+
   const handleSupplierSelect = (supplier: Supplier) => {
     setForm(prev => ({ ...prev, supplier_id: supplier.id }));
     setSupplierSearch('');
@@ -408,6 +653,14 @@ export function CreatePurchaseInvoicePage() {
     if (!form.supplier_id) { setErrorMsg('Select a supplier.'); return false; }
     if (!form.invoice_no.trim()) { setErrorMsg('Invoice number is required.'); return false; }
     if (items.length === 0) { setErrorMsg('Add at least one product.'); return false; }
+
+    // Validate payment_direction on each payment entry
+    for (const payment of form.payments) {
+      if (!['inward', 'outward'].includes(payment.payment_direction)) {
+        setErrorMsg('Each payment must have a valid direction (inward or outward).');
+        return false;
+      }
+    }
     return true;
   };
 
@@ -439,9 +692,6 @@ export function CreatePurchaseInvoicePage() {
       eway_no: form.eway_no || null,
       delivery_mode: form.delivery_mode || null,
       payment_type: form.payment_type,
-      payment_received: Number(form.payment_received || 0),
-      keep_advance: Boolean(form.keep_advance),
-      remarks: form.remarks || null,
       payment_term: form.payment_term || null,
       bank_id: form.bank_id ? Number(form.bank_id) : null,
       packing_charges: Number(form.packing_charges || 0),
@@ -477,15 +727,11 @@ export function CreatePurchaseInvoicePage() {
         sgst_percent: Number(i.sgst_percent || 0),
         igst_percent: Number(i.igst_percent || 0),
       })),
-      payment_amount: Number(form.payment_received || 0),
-      payment_method: form.payment_type,
-      payment_date: new Date().toISOString().split('T')[0],
-      payment_reference: form.remarks || null,
+      // Removed single payment fields; handled via payments array below
     };
 
     setSubmitting(true);
     try {
-      // ✅ FIX: Use createPurchaseInvoice instead of createPurchaseBill
       const res = await apiClient.createPurchaseInvoice(payload);
       const newPurchase = res?.data ?? res;
       if (!newPurchase?.id) {
@@ -493,7 +739,30 @@ export function CreatePurchaseInvoicePage() {
         navigate('/purchases');
         return;
       }
-      showSuccess('Purchase created', `Invoice ${form.invoice_no} created successfully.`);
+
+      // Create payment records for each payment with amount > 0
+      const validPayments = form.payments.filter(p => p.amount > 0);
+      if (validPayments.length > 0) {
+        const paymentPromises = validPayments.map((payment, idx) =>
+          apiClient.request('POST', '/payments', {
+            company_id: Number(form.company_id),
+            invoice_id: newPurchase.id,
+            reference_no: payment.reference_no || `PAY-${newPurchase.id}-${idx + 1}`,
+            amount: payment.amount,
+            payment_method: payment.payment_method,
+            status: 'completed',
+            payment_direction: payment.payment_direction || 'outward',  // ensure direction is sent
+            transaction_date: payment.transaction_date,
+            bank_name: payment.bank_name,
+            account_number: payment.account_number,
+            ledger_reference: payment.reference_no || `PAY-${newPurchase.id}-${idx + 1}`,
+            remarks: payment.remarks,
+          })
+        );
+        await Promise.all(paymentPromises);
+      }
+
+      showSuccess('Purchase created', `Invoice ${form.invoice_no} created successfully.${validPayments.length ? ' Payments recorded.' : ''}`);
       addAppLog({ module: 'Purchases', action: 'Create', status: 'success', message: form.invoice_no });
       navigate('/purchases');
     } catch (err: any) {
@@ -538,20 +807,39 @@ export function CreatePurchaseInvoicePage() {
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">Supplier *</label>
-                <div className="relative">
-                  <input type="text" value={supplierSearch} onChange={e => setSupplierSearch(e.target.value)} placeholder="Search supplier..." className={inputClass} />
-                  {supplierSearch && (
-                    <button className="absolute right-2 top-2 text-gray-400 hover:text-gray-600" onClick={() => setSupplierSearch('')} aria-label="Clear search"><FiX size={16} /></button>
-                  )}
-                  {supplierSearch && filteredSuppliers.length > 0 && (
-                    <div className="absolute z-20 w-full bg-white border rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                      {filteredSuppliers.map(s => (
-                        <div key={s.id} className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm" onClick={() => handleSupplierSelect(s)}>
-                          {s.name} {s.code ? `(${s.code})` : ''}
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      value={supplierSearch}
+                      onChange={e => setSupplierSearch(e.target.value)}
+                      placeholder="Search supplier..."
+                      className={inputClass}
+                    />
+                    {supplierSearch && (
+                      <button className="absolute right-2 top-2 text-gray-400 hover:text-gray-600" onClick={() => setSupplierSearch('')} aria-label="Clear search"><FiX size={16} /></button>
+                    )}
+                    {supplierSearch && filteredSuppliers.length > 0 && (
+                      <div className="absolute z-20 w-full bg-white border rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                        {filteredSuppliers.map(s => (
+                          <div
+                            key={s.id}
+                            className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm"
+                            onClick={() => handleSupplierSelect(s)}
+                          >
+                            {s.name} {s.code ? `(${s.code})` : ''}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowSupplierOffcanvas(true)}
+                    className="px-3 py-2 rounded-lg border text-sm text-blue-600 hover:bg-blue-50 whitespace-nowrap"
+                  >
+                    Add Supplier
+                  </button>
                 </div>
               </div>
               <div><label className="block text-sm font-medium mb-1">M/S.</label><input type="text" value={form.supplier_name} onChange={e => setForm(prev => ({ ...prev, supplier_name: e.target.value }))} className={inputClass} /></div>
@@ -619,27 +907,36 @@ export function CreatePurchaseInvoicePage() {
         {/* Items Section */}
         <section className="bg-white rounded-xl shadow-sm overflow-hidden">
           <div className="p-4 md:p-6 border-b">
-            <div className="relative w-full">
-              <FiSearch className="absolute left-4 top-3.5 text-gray-400 z-10" size={18} />
-              <input
-                type="text"
-                placeholder="Search product by name, HSN or SKU and press Enter to add..."
-                value={productSearch}
-                onChange={e => setProductSearch(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && productSearch.trim() && filteredProducts.length > 0) addItem(filteredProducts[0]); }}
-                className="w-full pl-12 pr-4 py-3 rounded-xl border-0 bg-slate-50 text-sm focus:ring-2 focus:ring-blue-200 focus:bg-white outline-none transition"
-              />
-              {productSearch && (<button className="absolute right-3 top-3 text-gray-400 hover:text-gray-600" onClick={() => setProductSearch('')} aria-label="Clear search"><FiX size={18} /></button>)}
-              {productSearch && filteredProducts.length > 0 && (
-                <div className="absolute z-20 w-full mt-1 bg-white border rounded-xl shadow-lg max-h-60 overflow-y-auto">
-                  {filteredProducts.slice(0, 10).map(p => (
-                    <div key={p.id} className="px-4 py-3 hover:bg-blue-50 cursor-pointer text-sm flex justify-between items-center border-b last:border-0" onClick={() => addItem(p)}>
-                      <div><span className="font-medium text-slate-700">{p.name}</span>{p.hsn_sac_code && <span className="ml-2 text-xs text-gray-400">HSN: {p.hsn_sac_code}</span>}</div>
-                      <span className="text-gray-600 font-medium">₹{p.purchase_price || 0}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
+            <div className="relative w-full flex gap-2">
+              <div className="relative flex-1">
+                <FiSearch className="absolute left-4 top-3.5 text-gray-400 z-10" size={18} />
+                <input
+                  type="text"
+                  placeholder="Search product by name, HSN or SKU and press Enter to add..."
+                  value={productSearch}
+                  onChange={e => setProductSearch(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && productSearch.trim() && filteredProducts.length > 0) addItem(filteredProducts[0]); }}
+                  className="w-full pl-12 pr-4 py-3 rounded-xl border-0 bg-slate-50 text-sm focus:ring-2 focus:ring-blue-200 focus:bg-white outline-none transition"
+                />
+                {productSearch && (<button className="absolute right-3 top-3 text-gray-400 hover:text-gray-600" onClick={() => setProductSearch('')} aria-label="Clear search"><FiX size={18} /></button>)}
+                {productSearch && filteredProducts.length > 0 && (
+                  <div className="absolute z-20 w-full mt-1 bg-white border rounded-xl shadow-lg max-h-60 overflow-y-auto">
+                    {filteredProducts.slice(0, 10).map(p => (
+                      <div key={p.id} className="px-4 py-3 hover:bg-blue-50 cursor-pointer text-sm flex justify-between items-center border-b last:border-0" onClick={() => addItem(p)}>
+                        <div><span className="font-medium text-slate-700">{p.name}</span>{p.hsn_sac_code && <span className="ml-2 text-xs text-gray-400">HSN: {p.hsn_sac_code}</span>}</div>
+                        <span className="text-gray-600 font-medium">₹{p.purchase_price || 0}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={openProductOffcanvas}
+                className="px-4 py-2 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1 whitespace-nowrap"
+              >
+                <FiPlus size={16} /> Add Product
+              </button>
             </div>
           </div>
 
@@ -783,9 +1080,9 @@ export function CreatePurchaseInvoicePage() {
               <div className="flex justify-between text-base font-bold text-slate-800"><span>Grand Total</span><span>₹{grandTotal.toFixed(2)}</span></div>
               <div className="text-xs text-gray-500 mt-1">{totalInWords}</div>
 
-              {/* Payment Type */}
+              {/* Payment Type (default for new payments) */}
               <div className="pt-4">
-                <label className="block text-sm font-medium mb-1">Payment Type</label>
+                <label className="block text-sm font-medium mb-1">Default Payment Type</label>
                 <select value={form.payment_type} onChange={e => setForm(prev => ({ ...prev, payment_type: e.target.value as PurchaseFormData['payment_type'] }))} className={inputClass}>
                   <option value="credit">Credit</option>
                   <option value="cash">Cash</option>
@@ -795,55 +1092,72 @@ export function CreatePurchaseInvoicePage() {
                 </select>
               </div>
 
-              {/* Payment Received – text input, allows empty */}
-              <div className="mt-4">
-                <label className="block text-xs font-medium mb-1">Payment Received</label>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={form.payment_received === 0 ? '' : form.payment_received}
-                  onChange={e => {
-                    const raw = e.target.value;
-                    if (raw === '') {
-                      setForm(prev => ({ ...prev, payment_received: 0 }));
-                    } else {
-                      const num = parseFloat(raw);
-                      if (!isNaN(num)) {
-                        setForm(prev => ({ ...prev, payment_received: num }));
-                      }
-                    }
-                  }}
-                  className={inputClass}
-                  placeholder="0.00"
-                />
-              </div>
-
-              {/* Payment Reference (visible when amount > 0) */}
-              {form.payment_received > 0 && (
-                <div className="mt-2">
-                  <label className="block text-xs font-medium mb-1">Payment Reference (optional)</label>
-                  <input
-                    type="text"
-                    value={form.remarks}
-                    onChange={e => setForm(prev => ({ ...prev, remarks: e.target.value }))}
-                    className={inputClass}
-                    placeholder="e.g., cheque no, UPI ref"
-                  />
+              {/* Payments Section (NEW) */}
+              <div className="mt-6 border-t pt-4">
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="text-sm font-semibold text-slate-700">Payments</h3>
+                  <button onClick={addPayment} className="text-blue-600 text-xs flex items-center gap-1"><FiPlus size={14} /> Add Payment</button>
                 </div>
-              )}
-
-              <div className="flex items-end mt-4">
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={form.keep_advance} onChange={e => setForm(prev => ({ ...prev, keep_advance: e.target.checked }))} />
-                  Keep as Advance
-                </label>
-              </div>
-
-              <div className="flex justify-between font-medium mt-1">
-                <span className="text-sm">Balance Due</span>
-                <span className={`text-sm ${grandTotal - form.payment_received > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                  ₹{(grandTotal - form.payment_received).toFixed(2)}
-                </span>
+                {form.payments.length === 0 && (
+                  <p className="text-xs text-gray-400">No payments recorded.</p>
+                )}
+                <div className="space-y-3">
+                  {form.payments.map((pay, idx) => (
+                    <div key={pay.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="text-xs font-semibold text-gray-500">Payment #{idx + 1}</span>
+                        <button onClick={() => removePayment(pay.id)} className="text-red-400 hover:text-red-600"><FiTrash2 size={14} /></button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-xs text-gray-500">Amount</label>
+                          <input type="number" step="0.01" value={pay.amount} onChange={e => updatePayment(pay.id, 'amount', Number(e.target.value))} className="w-full border rounded px-2 py-1 text-xs" />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500">Method</label>
+                          <select value={pay.payment_method} onChange={e => updatePayment(pay.id, 'payment_method', e.target.value as any)} className="w-full border rounded px-2 py-1 text-xs">
+                            <option value="UPI">UPI</option>
+                            <option value="cash">Cash</option>
+                            <option value="cheque">Cheque</option>
+                            <option value="bank_transfer">Bank Transfer</option>
+                            <option value="other">Other</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500">Reference No</label>
+                          <input type="text" value={pay.reference_no} onChange={e => updatePayment(pay.id, 'reference_no', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500">Date</label>
+                          <input type="date" value={pay.transaction_date} onChange={e => updatePayment(pay.id, 'transaction_date', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500">Direction *</label>
+                          <select value={pay.payment_direction} onChange={e => updatePayment(pay.id, 'payment_direction', e.target.value as 'inward' | 'outward')} className="w-full border rounded px-2 py-1 text-xs">
+                            <option value="outward">Outward (Pay Supplier)</option>
+                            <option value="inward">Inward (Refund)</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500">Bank Name</label>
+                          <input type="text" value={pay.bank_name} onChange={e => updatePayment(pay.id, 'bank_name', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        </div>
+                        <div className="col-span-2">
+                          <label className="block text-xs text-gray-500">Remarks</label>
+                          <input type="text" value={pay.remarks} onChange={e => updatePayment(pay.id, 'remarks', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex justify-between mt-3 text-sm font-medium">
+                  <span>Total Paid</span>
+                  <span>₹{totalPaid.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between mt-1 text-sm font-medium">
+                  <span>Balance Due</span>
+                  <span className={balanceDue > 0 ? 'text-rose-600' : 'text-emerald-600'}>₹{balanceDue.toFixed(2)}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -858,7 +1172,257 @@ export function CreatePurchaseInvoicePage() {
         <button onClick={() => handleSubmit('save_print')} disabled={submitting} className="px-5 py-2.5 rounded-xl bg-cyan-500 text-white hover:bg-cyan-600 text-sm flex items-center gap-2"><FiPrinter size={16} /> Print & Save</button>
       </div>
 
-      <style>{`.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; } .scrollbar-hide::-webkit-scrollbar { display: none; }`}</style>
+      {/* Supplier Offcanvas */}
+      {showSupplierOffcanvas && (
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
+          <Offcanvas
+            isOpen={showSupplierOffcanvas}
+            title="Add Supplier"
+            onClose={() => setShowSupplierOffcanvas(false)}
+            footer={
+              <div className="flex justify-between w-full">
+                <button onClick={() => setShowSupplierOffcanvas(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={supplierSubmitting}>
+                  Close
+                </button>
+                <button onClick={createSupplier} disabled={supplierSubmitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50">
+                  {supplierSubmitting ? 'Creating...' : 'Create Supplier'}
+                </button>
+              </div>
+            }
+          >
+            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
+              <fieldset className="border rounded-lg p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Basic Information
+                </legend>
+                <div className="mt-3 space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Company *</label>
+                    <select
+                      value={newSupplier.company_id}
+                      onChange={e => setNewSupplier(prev => ({ ...prev, company_id: e.target.value }))}
+                      className={inputClass}
+                    >
+                      <option value="">Select Company</option>
+                      {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Supplier Name *</label>
+                    <input
+                      type="text"
+                      value={newSupplier.name}
+                      onChange={e => setNewSupplier(prev => ({ ...prev, name: e.target.value }))}
+                      className={inputClass}
+                      placeholder="e.g., ABC Traders"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Contact Person</label>
+                      <input type="text" value={newSupplier.contact_person} onChange={e => setNewSupplier(prev => ({ ...prev, contact_person: e.target.value }))} className={inputClass} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Contact No</label>
+                      <input type="text" value={newSupplier.contact_no} onChange={e => setNewSupplier(prev => ({ ...prev, contact_no: e.target.value }))} className={inputClass} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Email</label>
+                      <input type="email" value={newSupplier.email} onChange={e => setNewSupplier(prev => ({ ...prev, email: e.target.value }))} className={inputClass} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Phone</label>
+                      <input type="text" value={newSupplier.phone} onChange={e => setNewSupplier(prev => ({ ...prev, phone: e.target.value }))} className={inputClass} />
+                    </div>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset className="border rounded-lg p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Tax Details
+                </legend>
+                <div className="mt-3 grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">GST Number</label>
+                    <input type="text" value={newSupplier.gst_number} onChange={e => setNewSupplier(prev => ({ ...prev, gst_number: e.target.value }))} className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">PAN</label>
+                    <input type="text" value={newSupplier.pan} onChange={e => setNewSupplier(prev => ({ ...prev, pan: e.target.value }))} className={inputClass} />
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset className="border rounded-lg p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Billing Address
+                </legend>
+                <div className="mt-3 space-y-3">
+                  <textarea rows={2} value={newSupplier.billing_street} onChange={e => setNewSupplier(prev => ({ ...prev, billing_street: e.target.value }))} className={inputClass} placeholder="Street Address" />
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium mb-1">City</label>
+                      <input type="text" value={newSupplier.billing_city} onChange={e => setNewSupplier(prev => ({ ...prev, billing_city: e.target.value }))} className={inputClass} />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">State</label>
+                      <input type="text" value={newSupplier.billing_state} onChange={e => setNewSupplier(prev => ({ ...prev, billing_state: e.target.value }))} className={inputClass} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium mb-1">Country</label>
+                      <input type="text" value={newSupplier.billing_country} onChange={e => setNewSupplier(prev => ({ ...prev, billing_country: e.target.value }))} className={inputClass} />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium mb-1">Pincode</label>
+                      <input type="text" value={newSupplier.billing_pincode} onChange={e => setNewSupplier(prev => ({ ...prev, billing_pincode: e.target.value }))} className={inputClass} />
+                    </div>
+                  </div>
+                </div>
+              </fieldset>
+            </div>
+          </Offcanvas>
+        </Suspense>
+      )}
+
+      {/* Product Offcanvas */}
+      {showProductOffcanvas && (
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
+          <Offcanvas
+            isOpen={showProductOffcanvas}
+            title="Add Product"
+            onClose={() => setShowProductOffcanvas(false)}
+            footer={
+              <div className="flex justify-between w-full">
+                <button onClick={() => setShowProductOffcanvas(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={productSubmitting}>
+                  Close
+                </button>
+                <button onClick={createProduct} disabled={productSubmitting} className="px-5 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-50">
+                  {productSubmitting ? 'Creating...' : 'Create Product'}
+                </button>
+              </div>
+            }
+          >
+            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
+              <fieldset className="border rounded-lg p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Basic Information
+                </legend>
+                <div className="mt-3 space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Company *</label>
+                      <select
+                        value={newProduct.company_id}
+                        onChange={e => setNewProduct(prev => ({ ...prev, company_id: e.target.value }))}
+                        className={`${inputClass} ${productFormErrors.company_id ? 'border-red-400 ring-2 ring-red-200' : ''}`}
+                      >
+                        <option value="">Select Company</option>
+                        {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Branch</label>
+                      <select
+                        value={newProduct.branch_id}
+                        onChange={e => setNewProduct(prev => ({ ...prev, branch_id: e.target.value }))}
+                        className={inputClass}
+                      >
+                        <option value="">Select Branch</option>
+                        {/* Branches would be loaded here based on company */}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Product Name *</label>
+                    <input
+                      type="text"
+                      value={newProduct.name}
+                      onChange={e => setNewProduct(prev => ({ ...prev, name: e.target.value }))}
+                      className={`${inputClass} ${productFormErrors.name ? 'border-red-400 ring-2 ring-red-200' : ''}`}
+                      placeholder="e.g., Steel Rod"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">SKU (optional)</label>
+                      <input type="text" value={newProduct.sku} onChange={e => setNewProduct(prev => ({ ...prev, sku: e.target.value }))} className={inputClass} placeholder="Auto-generated if blank" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">HSN/SAC Code</label>
+                      <input type="text" value={newProduct.hsn_sac_code} onChange={e => setNewProduct(prev => ({ ...prev, hsn_sac_code: e.target.value }))} className={inputClass} placeholder="e.g., 7308" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Unit *</label>
+                      <input
+                        type="text"
+                        value={newProduct.unit}
+                        onChange={e => setNewProduct(prev => ({ ...prev, unit: e.target.value }))}
+                        className={`${inputClass} ${productFormErrors.unit ? 'border-red-400 ring-2 ring-red-200' : ''}`}
+                        placeholder="e.g., Piece, Kg"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Purchase Price (₹) *</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={newProduct.purchase_price}
+                        onChange={e => setNewProduct(prev => ({ ...prev, purchase_price: e.target.value }))}
+                        className={`${inputClass} ${productFormErrors.purchase_price ? 'border-red-400 ring-2 ring-red-200' : ''}`}
+                        placeholder="0.00"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Sale Price (₹)</label>
+                      <input type="number" step="0.01" value={newProduct.sale_price} onChange={e => setNewProduct(prev => ({ ...prev, sale_price: e.target.value }))} className={inputClass} placeholder="0.00" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Tax Rate (%)</label>
+                      <input type="number" step="0.01" value={newProduct.tax_rate} onChange={e => setNewProduct(prev => ({ ...prev, tax_rate: e.target.value }))} className={inputClass} />
+                    </div>
+                  </div>
+                </div>
+              </fieldset>
+
+              <fieldset className="border rounded-lg p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Stock & Notes
+                </legend>
+                <div className="mt-3 grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Stock Quantity</label>
+                    <input type="number" value={newProduct.stock_quantity} onChange={e => setNewProduct(prev => ({ ...prev, stock_quantity: e.target.value }))} className={inputClass} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Reorder Level</label>
+                    <input type="number" value={newProduct.reorder_level} onChange={e => setNewProduct(prev => ({ ...prev, reorder_level: e.target.value }))} className={inputClass} />
+                  </div>
+                </div>
+                <div className="mt-4">
+                  <label className="block text-sm font-medium mb-1">Description</label>
+                  <textarea rows={2} value={newProduct.description} onChange={e => setNewProduct(prev => ({ ...prev, description: e.target.value }))} className={inputClass} placeholder="Optional description" />
+                </div>
+              </fieldset>
+            </div>
+          </Offcanvas>
+        </Suspense>
+      )}
+
+      <style>{`
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+      `}</style>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 // src/pages/DashboardPage.tsx
 import { useEffect, useState, useCallback, useMemo, memo, useRef } from 'react';
+import type { ReactNode } from 'react';
 import {
   FiRefreshCw, FiClock, FiUsers, FiShoppingCart, FiBox,
   FiDollarSign, FiTrendingUp, FiBarChart2, FiUserCheck, FiUserX,
@@ -10,7 +11,7 @@ import {
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
-  ResponsiveContainer,
+  ResponsiveContainer, ComposedChart, Legend,
 } from 'recharts';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
@@ -19,7 +20,7 @@ import { ComposableMap, Geographies, Geography } from 'react-simple-maps';
 import { Tooltip } from 'react-tooltip';
 import 'react-tooltip/dist/react-tooltip.css';
 
-// ---------- Simple API Cache Hook (unchanged) ----------
+// ---------- Simple API Cache Hook ----------
 const cache = new Map<string, { data: unknown; timestamp: number }>();
 const normalizeCachePayload = <T,>(payload: unknown): T => {
   if (payload === null || payload === undefined) return [] as unknown as T;
@@ -107,6 +108,12 @@ interface PaymentSummary {
   outward: PaymentBreakdown;
 }
 
+interface RawPayment {
+  payment_direction: 'inward' | 'outward';
+  payment_method: string;
+  amount: number;
+}
+
 interface InventorySummary {
   totalProducts: number;
   totalQuantity: number;
@@ -133,9 +140,27 @@ interface PurchaseDueInvoice {
 }
 interface LoginActivityItem { day: string; count: number }
 
+// 🆕 New vs Existing Customer Sale response
+interface NewVsExistingCustomerSale {
+  new_customers: number;
+  existing_customers: number;
+  total_sales: number;
+  new_customers_percentage: number;
+  existing_customers_percentage: number;
+}
+
 const EMPTY_PAYMENT_SUMMARY: PaymentSummary = {
   inward: { total: 0, online: 0, cash: 0 },
   outward: { total: 0, online: 0, cash: 0 },
+};
+
+// 🆕 Fallback sample data for new vs existing customers (when API unavailable)
+const FALLBACK_NEW_VS_EXISTING: NewVsExistingCustomerSale = {
+  new_customers: 15,
+  existing_customers: 85,
+  total_sales: 100,
+  new_customers_percentage: 15,
+  existing_customers_percentage: 85,
 };
 
 const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#F97316'];
@@ -207,7 +232,6 @@ export function DashboardPage() {
       })
       .catch(() => {
         setGeoLoading(false);
-        // geoData remains null → fallback to bar chart
       });
   }, []);
 
@@ -217,8 +241,11 @@ export function DashboardPage() {
   const fetchOrders = useCallback(() => apiClient.getOrders(), []);
   const fetchInvoices = useCallback(() => apiClient.getInvoices(), []);
   const fetchEmployees = useCallback(() => apiClient.getEmployees(), []);
+  const fetchPurchases = useCallback(() => apiClient.getPurchases(), []);
+  const fetchBranches = useCallback(() => apiClient.getBranches(), []);
+  const fetchProfitSummary = useCallback(() => apiClient.getProfitSummary(), []);
 
-  // Core data (original)
+  // Core data
   const {
     data: companies, loading: compsLoading, error: compsError, refresh: refreshComps,
   } = useApiCache<any[]>('companies', fetchCompanies);
@@ -237,8 +264,85 @@ export function DashboardPage() {
   const {
     data: employees, loading: empsLoading, error: empsError, refresh: refreshEmps,
   } = useApiCache<any[]>('employees', fetchEmployees);
+  const {
+    data: purchases, loading: purchasesLoading, error: purchasesError, refresh: refreshPurchases,
+  } = useApiCache<any[]>('purchases', fetchPurchases);
+  const {
+    data: branches, loading: branchesLoading, error: branchesError, refresh: refreshBranches,
+  } = useApiCache<any[]>('branches', fetchBranches);
+  const {
+    data: profitData, loading: profitLoading, error: profitError, refresh: refreshProfit,
+  } = useApiCache<any>('profitSummary', fetchProfitSummary);
 
-  const fetchPaymentSummary = useCallback(() => apiClient.getPaymentSummary(), []);
+  // 🆕 New vs Existing filters
+  const [nvCompanyFilter, setNvCompanyFilter] = useState('all');
+  const [nvBranchFilter, setNvBranchFilter] = useState('all');
+
+  const fetchNewVsExisting = useCallback(() => {
+    return apiClient.getNewVsExistingCustomerSale(
+      nvCompanyFilter !== 'all' ? nvCompanyFilter : undefined,
+      nvBranchFilter !== 'all' ? nvBranchFilter : undefined
+    );
+  }, [nvCompanyFilter, nvBranchFilter]);
+
+  const {
+    data: newVsExisting,
+    loading: newVsExistingLoading,
+    error: newVsExistingError,
+    refresh: refreshNewVsExisting,
+  } = useApiCache<NewVsExistingCustomerSale>(
+    `newVsExisting-${nvCompanyFilter}-${nvBranchFilter}`,
+    fetchNewVsExisting
+  );
+
+  // 🆕 Fallback to sample data when API fails
+  const displayNewVsExisting = useMemo(() => {
+    if (newVsExistingError && !newVsExisting) return FALLBACK_NEW_VS_EXISTING;
+    return newVsExisting;
+  }, [newVsExisting, newVsExistingError]);
+
+  // Derived branches for filter dropdown
+  const filterBranches = useMemo(() => {
+    if (!branches) return [];
+    if (nvCompanyFilter === 'all') return branches;
+    return branches.filter(b => b.company_id === parseInt(nvCompanyFilter));
+  }, [branches, nvCompanyFilter]);
+
+  // Chart data for new vs existing
+  const newVsExistingChartData = useMemo(() => {
+    if (!displayNewVsExisting) return [];
+    return [
+      { name: 'New Customers', value: displayNewVsExisting.new_customers },
+      { name: 'Existing Customers', value: displayNewVsExisting.existing_customers },
+    ];
+  }, [displayNewVsExisting]);
+
+  const fetchPaymentSummary = useCallback(async () => {
+    const res = await apiClient.getPaymentSummary();
+    if (res && typeof res === 'object' && 'inward' in res && 'outward' in res) {
+      return res as PaymentSummary;
+    }
+    if (Array.isArray(res)) {
+      const summary: PaymentSummary = {
+        inward: { total: 0, online: 0, cash: 0 },
+        outward: { total: 0, online: 0, cash: 0 },
+      };
+      (res as RawPayment[]).forEach((p) => {
+        const direction = p.payment_direction === 'outward' ? 'outward' : 'inward';
+        const method = (p.payment_method || '').toLowerCase();
+        const amount = p.amount || 0;
+        summary[direction].total += amount;
+        if (['qr', 'upi', 'online', 'bank_transfer', 'card'].includes(method)) {
+          summary[direction].online += amount;
+        } else if (method === 'cash') {
+          summary[direction].cash += amount;
+        }
+      });
+      return summary;
+    }
+    return EMPTY_PAYMENT_SUMMARY;
+  }, []);
+
   const fetchInventorySummary = useCallback(() => apiClient.getInventorySummary(), []);
   const fetchInvoiceCountSummary = useCallback(() => apiClient.getInvoiceCountSummary(), []);
   const fetchInvoiceAmountSummary = useCallback(() => apiClient.getInvoiceAmountSummary(), []);
@@ -251,7 +355,6 @@ export function DashboardPage() {
   const fetchLoginActivity = useCallback(() => apiClient.getLoginActivity(), []);
   const fetchBiharDistrictSales = useCallback(() => apiClient.getDistrictSales('Bihar'), []);
 
-  // New data sections
   const {
     data: paymentSummary, loading: payLoading, error: payError, refresh: refreshPay,
   } = useApiCache<PaymentSummary>('paymentSummary', fetchPaymentSummary);
@@ -285,7 +388,6 @@ export function DashboardPage() {
   const {
     data: loginActivity, loading: loginActLoading, error: loginActError, refresh: refreshLoginAct,
   } = useApiCache<LoginActivityItem[]>('loginActivity', fetchLoginActivity);
-
   const {
     data: biharDistrictSales, loading: biharDistrictLoading, error: biharDistrictError, refresh: refreshBiharDistrict,
   } = useApiCache<any[]>('biharDistrictSales', fetchBiharDistrictSales);
@@ -309,7 +411,35 @@ export function DashboardPage() {
 
   // ---------- Real chart data ----------
   const revenueTrend = useMemo(() => groupByMonth(invoices || [], 'created_at', 'total_amount'), [invoices]);
+  const purchaseTrend = useMemo(() => groupByMonth(purchases || [], 'created_at', 'total_amount'), [purchases]);
   const ordersTrend = useMemo(() => groupByMonth(orders || [], 'created_at'), [orders]);
+
+  const salesPurchaseTrend = useMemo(() => {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const saleMap: Record<string, number> = {};
+    const purchaseMap: Record<string, number> = {};
+    months.forEach(m => { saleMap[m] = 0; purchaseMap[m] = 0; });
+    (invoices || []).forEach(inv => {
+      const date = new Date(inv.created_at);
+      if (!isNaN(date.getTime())) {
+        const key = months[date.getMonth()];
+        saleMap[key] += parseFloat(inv.total_amount) || 0;
+      }
+    });
+    (purchases || []).forEach(pur => {
+      const date = new Date(pur.created_at);
+      if (!isNaN(date.getTime())) {
+        const key = months[date.getMonth()];
+        purchaseMap[key] += parseFloat(pur.total_amount) || 0;
+      }
+    });
+    return months.map(month => ({
+      month,
+      Sales: saleMap[month],
+      Purchase: purchaseMap[month],
+    }));
+  }, [invoices, purchases]);
+
   const orderStatusDist = useMemo(() => {
     const map: Record<string, number> = {};
     (orders || []).forEach(o => {
@@ -318,6 +448,7 @@ export function DashboardPage() {
     });
     return Object.entries(map).map(([name, value]) => ({ name, value }));
   }, [orders]);
+
   const employeeStatus = useMemo(() => {
     const map: Record<string, number> = { active: 0, inactive: 0, 'on-leave': 0 };
     (employees || []).forEach(e => {
@@ -327,13 +458,13 @@ export function DashboardPage() {
     });
     return Object.entries(map).map(([name, value]) => ({ name, value }));
   }, [employees]);
+
   const activeInactive = useMemo(() => {
     const active = (employees || []).filter(e => e.status === 'active').length;
     const inactive = (employees || []).length - active;
     return [{ name: 'Active', value: active }, { name: 'Inactive', value: inactive }];
   }, [employees]);
 
-  // Payment breakdown for bar chart
   const paymentChartData = useMemo(() => {
     const safeSummary = paymentSummary ?? EMPTY_PAYMENT_SUMMARY;
     return [
@@ -350,10 +481,11 @@ export function DashboardPage() {
   const refreshAll = async () => {
     await Promise.all([
       refreshComps(), refreshCusts(), refreshProds(), refreshOrds(), refreshInvs(), refreshEmps(),
+      refreshPurchases(), refreshBranches(),
       refreshPay(), refreshInv(), refreshInvCnt(), refreshInvAmt(),
       refreshTopSell(), refreshLeastSell(), refreshLowStock(),
       refreshTopCust(), refreshTopVend(), refreshPurDue(), refreshLoginAct(),
-      refreshBiharDistrict(),
+      refreshBiharDistrict(), refreshProfit(), refreshNewVsExisting(),
     ]);
     setLastUpdated(new Date());
   };
@@ -363,7 +495,7 @@ export function DashboardPage() {
   }, [isLoading]);
 
   // ---------- Chart Card Wrapper ----------
-  const ChartCard = ({ title, children, className = '' }: { title: string; children: React.ReactNode; className?: string }) => (
+  const ChartCard = ({ title, children, className = '' }: { title: string; children: ReactNode; className?: string }) => (
     <div className={`bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex flex-col ${className}`}>
       <h2 className="text-base font-semibold text-slate-800 mb-4">{title}</h2>
       <div className="flex-1">
@@ -398,12 +530,11 @@ export function DashboardPage() {
   const getMapColor = (sales: number, maxSales: number) => {
     if (!maxSales) return '#CBD5E1';
     const intensity = sales / maxSales;
-    const hue = 210; // blue
-    const lightness = 90 - 60 * intensity; // light to dark
+    const hue = 210;
+    const lightness = 90 - 60 * intensity;
     return `hsl(${hue}, 70%, ${lightness}%)`;
   };
 
-  // ---------- Determine whether to show map or bar chart ----------
   const showMap = !biharDistrictError && geoData && !geoLoading;
 
   return (
@@ -436,13 +567,13 @@ export function DashboardPage() {
         </div>
       )}
 
-      {/* ===== Category: Business Overview ===== */}
+      {/* ===== Business Overview ===== */}
       <h2 className="text-lg font-bold text-slate-700 mb-3 flex items-center gap-2">
         <FiActivity className="text-blue-600" /> Business Overview
       </h2>
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
         {isLoading ? (
-          [...Array(6)].map((_, i) => <StatCardSkeleton key={i} />)
+          [...Array(7)].map((_, i) => <StatCardSkeleton key={i} />)
         ) : (
           <>
             <StatCard icon={FiBox} label="Companies" value={stats.companies} tone="blue" />
@@ -451,11 +582,17 @@ export function DashboardPage() {
             <StatCard icon={FiShoppingCart} label="Orders" value={stats.orders} tone="amber" />
             <StatCard icon={FiDollarSign} label="Invoices" value={stats.invoices} tone="rose" />
             <StatCard icon={FiTrendingUp} label="Revenue" value={`₹${stats.totalRevenue.toFixed(0)}`} tone="teal" />
+            <StatCard
+              icon={FiTrendingUp}
+              label="Net Profit"
+              value={profitData ? `₹${profitData.total_profit.toFixed(0)}` : '—'}
+              tone="emerald"
+            />
           </>
         )}
       </div>
 
-      {/* ===== Category: HR & Employees ===== */}
+      {/* ===== HR & Employees ===== */}
       <h2 className="text-lg font-bold text-slate-700 mb-3 flex items-center gap-2">
         <FiUserCheck className="text-purple-600" /> HR & Employees
       </h2>
@@ -477,7 +614,7 @@ export function DashboardPage() {
         )}
       </div>
 
-      {/* ===== Category: Financial Overview ===== */}
+      {/* ===== Financial Overview ===== */}
       <h2 className="text-lg font-bold text-slate-700 mb-3 flex items-center gap-2">
         <FiDollarSign className="text-emerald-600" /> Financial Overview
       </h2>
@@ -531,7 +668,7 @@ export function DashboardPage() {
         </ChartCard>
       </div>
 
-      {/* ===== Category: Inventory ===== */}
+      {/* ===== Inventory ===== */}
       <h2 className="text-lg font-bold text-slate-700 mb-3 flex items-center gap-2">
         <FiPackage className="text-amber-600" /> Inventory
       </h2>
@@ -575,35 +712,74 @@ export function DashboardPage() {
         </div>
       </div>
 
-      {/* ===== Best / Least Selling Products ===== */}
+      {/* ===== New vs Existing Customer Sales ===== */}
       <h2 className="text-lg font-bold text-slate-700 mb-3 flex items-center gap-2">
-        <FiBarChart2 className="text-cyan-600" /> Products Performance
+        <FiUsers className="text-indigo-600" /> New vs Existing Customer Sales
       </h2>
+      <div className="flex flex-wrap items-center gap-3 mb-4">
+        <select
+          value={nvCompanyFilter}
+          onChange={(e) => { setNvCompanyFilter(e.target.value); setNvBranchFilter('all'); }}
+          className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm"
+        >
+          <option value="all">All Companies</option>
+          {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <select
+          value={nvBranchFilter}
+          onChange={(e) => setNvBranchFilter(e.target.value)}
+          className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm"
+          disabled={!filterBranches.length}
+        >
+          <option value="all">All Branches</option>
+          {filterBranches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+        </select>
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-        <ChartCard title="🏆 Best Selling Products">
-          {topSellLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : (
-            <>
-              <MiniTable columns={['Product Name', 'Qty.']} data={(topSelling || []).map(p => [p.product_name, p.total_qty.toLocaleString()])} />
-              <button className="mt-3 text-xs text-blue-600 hover:underline self-end">View All</button>
-            </>
+        <ChartCard title="Customer Type Distribution">
+          {newVsExistingLoading ? <div className="h-64 bg-slate-200 rounded animate-pulse" /> : (
+            <ResponsiveContainer width="100%" height={250}>
+              <PieChart>
+                <Pie data={newVsExistingChartData} dataKey="value" nameKey="name" outerRadius={80} label>
+                  {newVsExistingChartData.map((_, i) => <Cell key={i} fill={i === 0 ? '#3B82F6' : '#10B981'} />)}
+                </Pie>
+                <RechartsTooltip />
+                <Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          )}
+          {newVsExistingError && !newVsExisting && (
+            <p className="text-xs text-amber-600 mt-2 text-center">Showing sample data (API unavailable)</p>
           )}
         </ChartCard>
-        <ChartCard title="📉 Least Selling Products">
-          {leastSellLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : (
-            <>
-              <MiniTable columns={['Product Name', 'Qty.']} data={(leastSelling || []).map(p => [p.product_name, p.total_qty.toLocaleString()])} />
-              <button className="mt-3 text-xs text-blue-600 hover:underline self-end">View All</button>
-            </>
+        <ChartCard title="Sales by Customer Type">
+          {newVsExistingLoading ? <div className="h-64 bg-slate-200 rounded animate-pulse" /> : (
+            <ResponsiveContainer width="100%" height={250}>
+              <BarChart data={newVsExistingChartData}>
+                <defs>
+                  <linearGradient id="barGradientNew" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#3B82F6" stopOpacity={0.9} />
+                    <stop offset="100%" stopColor="#1D4ED8" stopOpacity={0.7} />
+                  </linearGradient>
+                  <linearGradient id="barGradientExisting" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#10B981" stopOpacity={0.9} />
+                    <stop offset="100%" stopColor="#047857" stopOpacity={0.7} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey="name" />
+                <YAxis />
+                <RechartsTooltip />
+                <Bar dataKey="value" radius={[8,8,0,0]}>
+                  {newVsExistingChartData.map((entry, index) => (
+                    <Cell key={index} fill={index === 0 ? 'url(#barGradientNew)' : 'url(#barGradientExisting)'} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
           )}
-        </ChartCard>
-        <ChartCard title="⚠️ Low Stock">
-          {lowStockLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : lowStockError ? (
-            <div className="flex h-40 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-700">Low-stock data unavailable.</div>
-          ) : (
-            <>
-              <MiniTable columns={['Product Name', 'Qty.']} data={(lowStock || []).map(p => [p.product_name, p.qty.toLocaleString()])} />
-              <button className="mt-3 text-xs text-blue-600 hover:underline self-end">View All</button>
-            </>
+          {newVsExistingError && !newVsExisting && (
+            <p className="text-xs text-amber-600 mt-2 text-center">Showing sample data (API unavailable)</p>
           )}
         </ChartCard>
       </div>
@@ -633,9 +809,9 @@ export function DashboardPage() {
         </ChartCard>
       </div>
 
-      {/* ===== Purchase Invoice Due & Total Outstanding ===== */}
+      {/* ===== Purchase Outstanding ===== */}
       <h2 className="text-lg font-bold text-slate-700 mb-3 flex items-center gap-2">
-        <FiClock className="text-rose-600" /> Purchase Invoice Due
+        <FiClock className="text-rose-600" /> Purchase Outstanding
       </h2>
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-8">
         <div className="xl:col-span-2 bg-white rounded-xl shadow-sm border border-slate-200 p-5">
@@ -741,6 +917,46 @@ export function DashboardPage() {
           </ResponsiveContainer>
         </ChartCard>
 
+        <ChartCard title="💰 Sales vs Purchase Trend">
+          {purchasesLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : purchasesError ? (
+            <div className="flex h-40 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-700">Purchase data unavailable.</div>
+          ) : (
+            <ResponsiveContainer width="100%" height={250}>
+              <ComposedChart data={salesPurchaseTrend}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey="month" />
+                <YAxis />
+                <RechartsTooltip />
+                <Legend />
+                <Bar dataKey="Sales" fill="#10B981" radius={[4,4,0,0]} />
+                <Bar dataKey="Purchase" fill="#F59E0B" radius={[4,4,0,0]} />
+                <Line type="monotone" dataKey="Sales" stroke="#10B981" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="Purchase" stroke="#F59E0B" strokeWidth={2} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          )}
+        </ChartCard>
+
+        <ChartCard title="💹 Monthly Net Profit">
+          {profitLoading ? (
+            <div className="h-40 bg-slate-200 rounded animate-pulse" />
+          ) : profitError ? (
+            <div className="flex h-40 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-sm text-rose-700">
+              Profit data unavailable.
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={250}>
+              <AreaChart data={profitData?.monthly_profit || []}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey="month" />
+                <YAxis />
+                <RechartsTooltip />
+                <Area type="monotone" dataKey="profit" stroke="#8B5CF6" fill="#8B5CF6" fillOpacity={0.2} strokeWidth={2} />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </ChartCard>
+
         <ChartCard title="🥧 Order Status Distribution">
           <ResponsiveContainer width="100%" height={250}>
             <PieChart>
@@ -774,7 +990,7 @@ export function DashboardPage() {
           </ResponsiveContainer>
         </ChartCard>
 
-        {/* ===== Bihar District Sales – map or fallback bar chart ===== */}
+        {/* ===== Bihar District Sales ===== */}
         <ChartCard title="📍 District Sales — Bihar">
           {biharDistrictLoading || geoLoading ? (
             <div className="h-80 bg-slate-200 rounded animate-pulse" />
@@ -783,7 +999,6 @@ export function DashboardPage() {
               District sales data unavailable.
             </div>
           ) : showMap ? (
-            // --------------------- MAP (when GeoJSON is loaded) ---------------------
             <>
               <ComposableMap
                 projection="geoMercator"
@@ -845,7 +1060,6 @@ export function DashboardPage() {
               </p>
             </>
           ) : (
-            // --------------------- FALLBACK: Bar Chart (when GeoJSON is missing) ---------------------
             <ResponsiveContainer width="100%" height={280}>
               <BarChart
                 layout="vertical"

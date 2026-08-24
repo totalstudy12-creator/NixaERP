@@ -1,3 +1,4 @@
+// src/pages/InvoicesPage.tsx
 import React, {
   useEffect,
   useState,
@@ -129,6 +130,7 @@ interface Invoice {
   tax_amount: number | string;
   status: 'paid' | 'pending' | 'overdue' | 'draft';
   due_date: string | null;
+  invoice_date?: string; // ✅ ADDED: invoice date field
   created_at?: string;
   updated_at?: string;
   items?: any[];
@@ -324,6 +326,7 @@ const ActionDropdown = memo(
 export function InvoicesPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  // ✅ KEEP: month picker as input type="month"
   const [filterMonth, setFilterMonth] = useState<string>(() => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -340,7 +343,7 @@ export function InvoicesPage() {
     dates: true,
   });
 
-  const [printInvoice, setPrintInvoice] = useState<Invoice | null>(null);
+  const [printInvoice, setPrintInvoice] = useState<any | null>(null);
   const printTriggered = useRef(false);
 
   const { showSuccess, showError } = useNotification();
@@ -352,6 +355,7 @@ export function InvoicesPage() {
     refresh: refreshInvoices,
   } = useApiCache<Invoice[]>('invoices', () => apiClient.getInvoices());
 
+  // ✅ FIX: Filter by invoice_date (fallback to created_at)
   const filteredInvoices = useMemo(() => {
     if (!invoices) return [];
     let filtered = [...invoices];
@@ -367,7 +371,14 @@ export function InvoicesPage() {
       filtered = filtered.filter(inv => inv.status === filterStatus);
     }
     if (filterMonth) {
-      filtered = filtered.filter(inv => inv.created_at?.startsWith(filterMonth));
+      filtered = filtered.filter(inv => {
+        const dateStr = inv.invoice_date || inv.created_at;
+        if (!dateStr) return false;
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return false;
+        const month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        return month === filterMonth;
+      });
     }
     return filtered;
   }, [invoices, searchTerm, filterStatus, filterMonth]);
@@ -403,10 +414,17 @@ export function InvoicesPage() {
 
   useEffect(() => setCurrentPage(1), [searchTerm, filterStatus, filterMonth]);
 
-  const handlePrint = useCallback((invoice: Invoice) => {
-    setPrintInvoice(invoice);
-    printTriggered.current = false;
-  }, []);
+  // ✅ FIX: Fetch full invoice before printing
+  const handlePrint = useCallback(async (invoice: Invoice) => {
+    try {
+      const res = await apiClient.getInvoice(invoice.id);
+      const fullInvoice = (res as any).data ?? res; // handle if api returns { data: invoice }
+      setPrintInvoice(fullInvoice);
+      printTriggered.current = false;
+    } catch (err: any) {
+      showError('Print failed', err.message || 'Failed to load invoice details.');
+    }
+  }, [showError]);
 
   useEffect(() => {
     if (printInvoice && !printTriggered.current) {
@@ -461,10 +479,19 @@ export function InvoicesPage() {
     }
   };
 
-  const handleView = useCallback((invoice: Invoice) => {
-    setViewingInvoice(invoice);
+  // ✅ FIX: Fetch full invoice for detailed view
+  const handleView = useCallback(async (invoice: Invoice) => {
+    setViewingInvoice(invoice); // show quick summary immediately
     setIsViewPanelOpen(true);
-  }, []);
+
+    try {
+      const res = await apiClient.getInvoice(invoice.id);
+      const fullInvoice = (res as any).data ?? res;
+      setViewingInvoice(fullInvoice);
+    } catch (err: any) {
+      showError('View failed', err.message || 'Failed to load invoice details.');
+    }
+  }, [showError]);
 
   const handleDelete = useCallback(async (invoice: Invoice) => {
     if (!confirm(`Delete invoice ${invoice.invoice_no}?`)) return;
@@ -502,15 +529,15 @@ export function InvoicesPage() {
       showError('Export failed', 'No invoices to export.');
       return;
     }
-    const headers = ['Invoice #', 'Customer', 'Total', 'Outstanding', 'Status', 'Due Date', 'Created At'];
+    const headers = ['Invoice #', 'Customer', 'Total', 'Outstanding', 'Status', 'Invoice Date', 'Due Date'];
     const rows = filteredInvoices.map(inv => [
       escapeCsvField(inv.invoice_no),
       escapeCsvField(inv.customer?.name || '-'),
       escapeCsvField(safeNum(inv.total_amount).toFixed(2)),
       escapeCsvField(inv.status === 'paid' ? '0.00' : safeNum(inv.total_amount).toFixed(2)),
       escapeCsvField(inv.status),
+      escapeCsvField(inv.invoice_date ? new Date(inv.invoice_date).toLocaleDateString() : '-'),
       escapeCsvField(inv.due_date ? new Date(inv.due_date).toLocaleDateString() : '-'),
-      escapeCsvField(inv.created_at ? new Date(inv.created_at).toLocaleDateString() : '-'),
     ]);
     const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -583,6 +610,17 @@ export function InvoicesPage() {
         return <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${s.color}`}>{s.label}</span>;
       },
       width: '110px',
+    },
+    {
+      name: 'Invoice Date',
+      selector: (row: Invoice) => row.invoice_date || '',
+      cell: (row: Invoice) => (
+        <span className="text-sm text-slate-600">
+          {row.invoice_date ? new Date(row.invoice_date).toLocaleDateString() : '-'}
+        </span>
+      ),
+      sortable: true,
+      width: '120px',
     },
     {
       name: 'Due Date',
@@ -680,6 +718,7 @@ export function InvoicesPage() {
             <option value="overdue">Overdue</option>
             <option value="draft">Draft</option>
           </select>
+          {/* ✅ Month Picker (input type month) - as requested */}
           <input
             type="month"
             value={filterMonth}
@@ -890,6 +929,12 @@ export function InvoicesPage() {
 
                       <Section title="Dates" sectionKey="dates" icon={<FiCalendar size={18} className="text-purple-500" />}>
                         <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700">Invoice Date</label>
+                            <div className="mt-1 text-gray-900">
+                              {viewingInvoice.invoice_date ? new Date(viewingInvoice.invoice_date).toLocaleDateString() : '-'}
+                            </div>
+                          </div>
                           <div>
                             <label className="block text-sm font-medium text-gray-700">Due Date</label>
                             <div className="mt-1 text-gray-900">

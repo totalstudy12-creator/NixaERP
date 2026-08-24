@@ -11,8 +11,17 @@ class InvoiceItem extends Model
         'product_id',
         'quantity',
         'unit_price',
+        'discount_type',
         'discount_percent',
+        'discount_amount',
+        'gst_slab',
+        'is_inter_state',
+        'cgst_percent',
+        'sgst_percent',
         'igst_percent',
+        'cgst_amount',
+        'sgst_amount',
+        'igst_amount',
         'tax_rate',
         'subtotal',
         'total',
@@ -21,13 +30,20 @@ class InvoiceItem extends Model
     protected $casts = [
         'unit_price'       => 'decimal:2',
         'discount_percent' => 'decimal:2',
+        'discount_amount'  => 'decimal:2',
+        'gst_slab'         => 'decimal:2',
+        'cgst_percent'     => 'decimal:2',
+        'sgst_percent'     => 'decimal:2',
         'igst_percent'     => 'decimal:2',
+        'cgst_amount'      => 'decimal:2',
+        'sgst_amount'      => 'decimal:2',
+        'igst_amount'      => 'decimal:2',
         'tax_rate'         => 'decimal:2',
         'subtotal'         => 'decimal:2',
         'total'            => 'decimal:2',
+        'is_inter_state'   => 'boolean',
     ];
 
-    // Relationships
     public function invoice()
     {
         return $this->belongsTo(Invoice::class);

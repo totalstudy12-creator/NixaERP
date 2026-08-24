@@ -26,25 +26,30 @@ class PaymentController extends Controller
     public function store(Request $request)
     {
         $data = $request->validate([
-            'company_id'       => 'nullable|exists:companies,id',
-            'invoice_id'       => 'nullable|exists:invoices,id',
-            'reference_no'     => 'required|string|max:255',
-            'amount'           => 'required|numeric|min:0.01',
-            'payment_method'   => 'required|string|max:100',
-            'status'           => 'required|string|max:100',
-            'transaction_date' => 'nullable|date',
-            'bank_name'        => 'nullable|string|max:255',
-            'account_number'   => 'nullable|string|max:255',
-            'ledger_reference' => 'nullable|string|max:255',
-            'remarks'          => 'nullable|string',
+            'company_id'        => 'nullable|exists:companies,id',
+            'invoice_id'        => 'nullable|exists:invoices,id',
+            'reference_no'      => 'nullable|string|max:255',
+            'amount'            => 'required|numeric|min:0.01',
+            'payment_method'    => 'required|string|max:100',
+            'status'            => 'required|string|max:100',
+            'payment_direction' => 'required|in:inward,outward',
+            'transaction_date'  => 'nullable|date',
+            'bank_name'         => 'nullable|string|max:255',
+            'account_number'    => 'nullable|string|max:255',
+            'ledger_reference'  => 'nullable|string|max:255',
+            'remarks'           => 'nullable|string',
         ]);
 
-        $data['transaction_date'] = $data['transaction_date'] ?? now();
+        $data['transaction_date'] = $data['transaction_date'] ?? now()->toDateString();
+
+        // Generate fallback reference if not provided
+        if (empty($data['reference_no'])) {
+            $data['reference_no'] = 'PAY-' . ($data['invoice_id'] ?? 'GEN') . '-' . now()->timestamp;
+        }
 
         return DB::transaction(function () use ($data) {
             $payment = Payment::create($data);
 
-            // Update invoice status if linked
             if ($payment->invoice_id) {
                 $this->updateInvoiceStatus($payment->invoice_id);
             }
@@ -67,33 +72,37 @@ class PaymentController extends Controller
     public function update(Request $request, Payment $payment)
     {
         $data = $request->validate([
-            'company_id'       => 'nullable|exists:companies,id',
-            'invoice_id'       => 'nullable|exists:invoices,id',
-            'reference_no'     => 'required|string|max:255',
-            'amount'           => 'required|numeric|min:0.01',
-            'payment_method'   => 'required|string|max:100',
-            'status'           => 'required|string|max:100',
-            'transaction_date' => 'nullable|date',
-            'bank_name'        => 'nullable|string|max:255',
-            'account_number'   => 'nullable|string|max:255',
-            'ledger_reference' => 'nullable|string|max:255',
-            'remarks'          => 'nullable|string',
+            'company_id'        => 'nullable|exists:companies,id',
+            'invoice_id'        => 'nullable|exists:invoices,id',
+            'reference_no'      => 'nullable|string|max:255',
+            'amount'            => 'required|numeric|min:0.01',
+            'payment_method'    => 'required|string|max:100',
+            'status'            => 'required|string|max:100',
+            'payment_direction' => 'required|in:inward,outward',
+            'transaction_date'  => 'nullable|date',
+            'bank_name'         => 'nullable|string|max:255',
+            'account_number'    => 'nullable|string|max:255',
+            'ledger_reference'  => 'nullable|string|max:255',
+            'remarks'           => 'nullable|string',
         ]);
- 
-        $data['transaction_date'] = $data['transaction_date'] ?? now();
+
+        $data['transaction_date'] = $data['transaction_date'] ?? now()->toDateString();
+
+        if (empty($data['reference_no'])) {
+            $data['reference_no'] = 'PAY-' . ($data['invoice_id'] ?? $payment->id) . '-' . now()->timestamp;
+        }
 
         return DB::transaction(function () use ($data, $payment) {
             $previousInvoiceId = $payment->invoice_id;
             $payment->update($data);
 
-            // If invoice changed or amount updated, recalc both old and new invoices
+            // Update the old invoice status if it existed
             if ($previousInvoiceId) {
                 $this->updateInvoiceStatus($previousInvoiceId);
             }
-            if ($payment->invoice_id && $payment->invoice_id !== $previousInvoiceId) {
-                $this->updateInvoiceStatus($payment->invoice_id);
-            } elseif ($payment->invoice_id) {
-                // Same invoice – just recalc
+
+            // Update the new invoice status if the payment is linked to one
+            if ($payment->invoice_id) {
                 $this->updateInvoiceStatus($payment->invoice_id);
             }
 
@@ -126,7 +135,10 @@ class PaymentController extends Controller
         $invoice = Invoice::find($invoiceId);
         if (!$invoice) return;
 
-        $totalPaid = $invoice->payments()->sum('amount');
+        // Only incoming payments should count towards invoice payment status
+        $totalPaid = $invoice->payments()
+            ->where('payment_direction', 'inward')
+            ->sum('amount');
         $totalAmount = $invoice->total_amount;
 
         if ($totalPaid <= 0) {

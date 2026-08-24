@@ -18,6 +18,7 @@ class Payment extends Model
         'amount',
         'status',
         'transaction_date',
+         'payment_direction',
         'bank_name',
         'account_number',
         'ledger_reference',

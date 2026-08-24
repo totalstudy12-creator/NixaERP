@@ -8,9 +8,19 @@ use Illuminate\Http\Request;
 
 class BranchController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return Branch::with('company')->orderBy('name')->paginate(15);
+        $request->validate([
+            'company_id' => 'nullable|integer|exists:companies,id',
+        ]);
+
+        return Branch::with('company')
+            ->when($request->filled('company_id'), function ($query) use ($request) {
+                $query->where('company_id', $request->input('company_id'));
+            })
+            ->orderBy('name')
+            ->paginate(15)
+            ->withQueryString();
     }
 
     public function store(Request $request)
@@ -25,7 +35,8 @@ class BranchController extends Controller
             'active' => 'boolean',
         ]);
 
-        return Branch::create($data);
+        $branch = Branch::create($data);
+        return $branch->load('company');
     }
 
     public function show(Branch $branch)
@@ -46,8 +57,7 @@ class BranchController extends Controller
         ]);
 
         $branch->update($data);
-
-        return $branch;
+        return $branch->load('company');
     }
 
     public function destroy(Branch $branch)

@@ -271,6 +271,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('/inventory/import', [ProductController::class, 'import']);
     Route::get('/inventory/export', [ProductController::class, 'export']);
     Route::get('/inventory/template', [ProductController::class, 'template']);
+    Route::get('products/all', [App\Http\Controllers\Api\ProductController::class, 'all']);
 
     // Customer import/template
     Route::get('customers/template', [CustomerController::class, 'template']);
@@ -282,4 +283,5 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('settings/export', [SettingsController::class, 'export']);
     Route::post('settings/import', [SettingsController::class, 'import']);
     Route::post('settings/cache/clear', [SettingsController::class, 'clearCache']);
+    Route::get('/dashboard/profit', [DashboardController::class, 'profitSummary']);
 });

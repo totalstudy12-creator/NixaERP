@@ -11,11 +11,11 @@ use Illuminate\Support\Facades\DB;
 class InvoiceController extends Controller
 {
     /**
-     * Display a listing of invoices (paginated).
+     * Display a listing of invoices.
      */
     public function index()
     {
-        return Invoice::with(['company', 'customer', 'items.product'])
+        return Invoice::with(['company', 'branch', 'customer', 'items.product'])
             ->orderBy('created_at', 'desc')
             ->paginate(15);
     }
@@ -27,27 +27,25 @@ class InvoiceController extends Controller
     {
         $data = $request->validate([
             'company_id'          => 'required|exists:companies,id',
+            'branch_id'           => 'nullable|exists:branches,id',
             'customer_id'         => 'required|exists:customers,id',
-            'order_id'            => 'nullable|exists:orders,id',
-            'invoice_no'          => 'nullable|string|max:100|unique:invoices,invoice_no',
-            'total_amount'        => 'nullable|numeric|min:0',
-            'tax_amount'          => 'nullable|numeric|min:0',
-            'discount_amount'     => 'nullable|numeric|min:0',
-            'status'              => 'nullable|string|max:50',
-            'due_date'            => 'nullable|date',
-            'notes'               => 'nullable|string',
-
-            // Additional fields from frontend (optional)
             'customer_name'       => 'nullable|string|max:255',
-            'customer_address'    => 'nullable|string',
+            'billing_street'      => 'nullable|string',
+            'billing_city'        => 'nullable|string',
+            'billing_state'       => 'nullable|string',
+            'billing_country'     => 'nullable|string',
+            'billing_pincode'     => 'nullable|string',
+            'shipping_street'     => 'nullable|string',
+            'shipping_city'       => 'nullable|string',
+            'shipping_state'      => 'nullable|string',
+            'shipping_country'    => 'nullable|string',
+            'shipping_pincode'    => 'nullable|string',
             'contact_person'      => 'nullable|string|max:100',
-            'phone_no'            => 'nullable|string|max:20',
+            'contact_no'          => 'nullable|string|max:20',
             'gstin'               => 'nullable|string|max:50',
             'pan'                 => 'nullable|string|max:50',
-            'reverse_charge'      => 'nullable|boolean',
-            'ship_to'             => 'nullable|string|max:50',
-            'place_of_supply'     => 'nullable|string|max:100',
             'invoice_type'        => 'nullable|string|max:50',
+            'invoice_no'          => 'nullable|string|max:100|unique:invoices,invoice_no',
             'invoice_date'        => 'nullable|date',
             'challan_no'          => 'nullable|string|max:100',
             'challan_date'        => 'nullable|date',
@@ -56,64 +54,148 @@ class InvoiceController extends Controller
             'lr_no'               => 'nullable|string|max:100',
             'eway_no'             => 'nullable|string|max:100',
             'delivery_mode'       => 'nullable|string|max:50',
-            'payment_type'        => 'nullable|string|max:50',
-            'payment_received'    => 'nullable|numeric|min:0',
-            'keep_advance'        => 'nullable|boolean',
+            'payment_term'        => 'nullable|string|max:100',
             'bank_id'             => 'nullable|exists:banks,id',
             'packing_charges'     => 'nullable|numeric|min:0',
             'general_discount_percent' => 'nullable|numeric|min:0',
             'general_discount_amount'  => 'nullable|numeric|min:0',
-            'round_off'           => 'nullable|numeric',
+            'tcs_percent'         => 'nullable|numeric|min:0',
             'terms_title'         => 'nullable|string',
             'terms_detail'        => 'nullable|string',
             'document_note'       => 'nullable|string',
+            'internal_note'       => 'nullable|string',
+            'additional_charges'  => 'nullable|array',
+            'additional_charges.*.label'  => 'nullable|string',
+            'additional_charges.*.amount' => 'nullable|numeric|min:0',
+            'status'              => 'nullable|string|max:50',
 
             // Items array
             'items'               => 'required|array|min:1',
             'items.*.product_id'  => 'required|exists:products,id',
             'items.*.quantity'    => 'required|integer|min:1',
             'items.*.unit_price'  => 'required|numeric|min:0',
+            'items.*.discount_type' => 'nullable|string|in:percent,amount',
             'items.*.discount_percent' => 'nullable|numeric|min:0',
-            'items.*.igst_percent'     => 'nullable|numeric|min:0',
+            'items.*.discount_amount'  => 'nullable|numeric|min:0',
+            'items.*.gst_slab'    => 'nullable|numeric|min:0',
+            'items.*.is_inter_state' => 'nullable|boolean',
+            'items.*.cgst_percent' => 'nullable|numeric|min:0',
+            'items.*.sgst_percent' => 'nullable|numeric|min:0',
+            'items.*.igst_percent' => 'nullable|numeric|min:0',
+            'items.*.cgst_amount' => 'nullable|numeric|min:0',
+            'items.*.sgst_amount' => 'nullable|numeric|min:0',
+            'items.*.igst_amount' => 'nullable|numeric|min:0',
+            'items.*.total'       => 'nullable|numeric|min:0',
         ]);
 
         // Auto‑generate invoice number if not provided
         if (empty($data['invoice_no'])) {
             $data['invoice_no'] = Invoice::generateInvoiceNo();
         } else {
-            // Ensure uniqueness (optional safety net)
             $exists = Invoice::withTrashed()->where('invoice_no', $data['invoice_no'])->exists();
             if ($exists) {
                 $data['invoice_no'] = Invoice::generateInvoiceNo();
             }
         }
 
+        if (empty($data['invoice_date'])) {
+            $data['invoice_date'] = now()->toDateString();
+        }
+
+        if (empty($data['status'])) {
+            $data['status'] = 'issued';
+        }
+
         return DB::transaction(function () use ($data) {
+            // Create invoice header
             $invoice = Invoice::create($data);
 
+            $subtotal = 0;
+            $totalDiscount = 0;
+            $totalTax = 0;
+
             foreach ($data['items'] as $item) {
-                $qty      = $item['quantity'];
-                $price    = $item['unit_price'];
-                $subtotal = $qty * $price;
-                $discount = $subtotal * ($item['discount_percent'] ?? 0) / 100;
-                $taxable  = $subtotal - $discount;
-                $igst     = $taxable * ($item['igst_percent'] ?? 0) / 100;
-                $total    = $taxable + $igst;
+                $qty = $item['quantity'];
+                $price = $item['unit_price'];
+                $itemSubtotal = $qty * $price;
+
+                $discountType = $item['discount_type'] ?? 'percent';
+                $discountAmount = $discountType === 'amount'
+                    ? ($item['discount_amount'] ?? 0)
+                    : $itemSubtotal * ($item['discount_percent'] ?? 0) / 100;
+
+                $afterDiscount = max(0, $itemSubtotal - $discountAmount);
+                $gstSlab = $item['gst_slab'] ?? 0;
+                $isInterState = $item['is_inter_state'] ?? false;
+
+                $cgstAmount = 0;
+                $sgstAmount = 0;
+                $igstAmount = 0;
+
+                if ($gstSlab > 0) {
+                    if ($isInterState) {
+                        $igstAmount = $afterDiscount * ($gstSlab / 100);
+                    } else {
+                        $half = $gstSlab / 2;
+                        $cgstAmount = $afterDiscount * ($half / 100);
+                        $sgstAmount = $cgstAmount;
+                    }
+                }
+
+                $itemTotal = $afterDiscount + $cgstAmount + $sgstAmount + $igstAmount;
+
+                $subtotal += $itemSubtotal;
+                $totalDiscount += $discountAmount;
+                $totalTax += $cgstAmount + $sgstAmount + $igstAmount;
 
                 InvoiceItem::create([
                     'invoice_id'       => $invoice->id,
                     'product_id'       => $item['product_id'],
                     'quantity'         => $qty,
                     'unit_price'       => $price,
+                    'discount_type'    => $discountType,
                     'discount_percent' => $item['discount_percent'] ?? 0,
-                    'igst_percent'     => $item['igst_percent'] ?? 0,
-                    'tax_rate'         => $item['igst_percent'] ?? 0,  // using IGST as tax_rate
-                    'subtotal'         => $subtotal,
-                    'total'            => $total,
+                    'discount_amount'  => $discountAmount,
+                    'gst_slab'         => $gstSlab,
+                    'is_inter_state'   => $isInterState,
+                    'cgst_percent'     => $isInterState ? 0 : ($gstSlab / 2),
+                    'sgst_percent'     => $isInterState ? 0 : ($gstSlab / 2),
+                    'igst_percent'     => $isInterState ? $gstSlab : 0,
+                    'cgst_amount'      => $cgstAmount,
+                    'sgst_amount'      => $sgstAmount,
+                    'igst_amount'      => $igstAmount,
+                    'tax_rate'         => $gstSlab,
+                    'subtotal'         => $itemSubtotal,
+                    'total'            => $itemTotal,
                 ]);
             }
 
-            return $invoice->load(['company', 'customer', 'items.product']);
+            // General discount
+            $generalDiscount = 0;
+            if (!empty($data['general_discount_percent']) && $data['general_discount_percent'] > 0) {
+                $generalDiscount = ($subtotal - $totalDiscount) * $data['general_discount_percent'] / 100;
+            } elseif (!empty($data['general_discount_amount'])) {
+                $generalDiscount = $data['general_discount_amount'];
+            }
+
+            $packing = $data['packing_charges'] ?? 0;
+            $additionalCharges = collect($data['additional_charges'] ?? [])->sum('amount');
+
+            $totalBeforeTcs = ($subtotal - $totalDiscount) - $generalDiscount + $totalTax + $packing + $additionalCharges;
+            $tcsAmount = $totalBeforeTcs * ($data['tcs_percent'] ?? 0) / 100;
+            $grandTotal = round($totalBeforeTcs + $tcsAmount);
+            $roundOff = $grandTotal - ($totalBeforeTcs + $tcsAmount);
+
+            // Update invoice with calculated totals
+            $invoice->update([
+                'discount_amount' => $totalDiscount + $generalDiscount,
+                'tax_amount'      => $totalTax,
+                'tcs_amount'      => $tcsAmount,
+                'round_off'       => $roundOff,
+                'total_amount'    => $grandTotal,
+            ]);
+
+            return $invoice->load(['company', 'branch', 'customer', 'items.product']);
         });
     }
 
@@ -122,28 +204,30 @@ class InvoiceController extends Controller
      */
     public function show(Invoice $invoice)
     {
-        return $invoice->load(['company', 'customer', 'items.product', 'payments']);
+        return $invoice->load(['company', 'branch', 'customer', 'items.product', 'payments']);
     }
 
     /**
-     * Update the invoice header (does not replace items – for simplicity).
+     * Update the invoice header.
      */
     public function update(Request $request, Invoice $invoice)
     {
         $data = $request->validate([
             'company_id'      => 'required|exists:companies,id',
+            'branch_id'       => 'nullable|exists:branches,id',
             'customer_id'     => 'required|exists:customers,id',
-            'order_id'        => 'nullable|exists:orders,id',
             'invoice_no'      => 'required|string|max:100|unique:invoices,invoice_no,' . $invoice->id,
             'total_amount'    => 'nullable|numeric|min:0',
             'tax_amount'      => 'nullable|numeric|min:0',
+            'discount_amount' => 'nullable|numeric|min:0',
             'status'          => 'nullable|string|max:50',
             'due_date'        => 'nullable|date',
             'notes'           => 'nullable|string',
         ]);
 
         $invoice->update($data);
-        return $invoice->fresh(['company', 'customer', 'items.product']);
+
+        return $invoice->fresh(['company', 'branch', 'customer', 'items.product']);
     }
 
     /**
@@ -152,11 +236,12 @@ class InvoiceController extends Controller
     public function destroy(Invoice $invoice)
     {
         $invoice->delete();
+
         return response()->noContent();
     }
 
     /**
-     * Create an invoice from an existing order and its items.
+     * Create an invoice from an existing order.
      */
     public function fromOrder(Request $request)
     {

@@ -65,6 +65,7 @@ function useApiCache<T>(
 type OrderStatus = 'pending' | 'confirmed' | 'shipped' | 'delivered';
 type OrderSource = 'whatsapp' | 'manual' | 'phone' | 'email';
 type PaymentMethod = 'qr' | 'bank_transfer' | 'cash' | 'card';
+type PaymentDirection = 'inward' | 'outward';
 type CustomerType = 'customer' | 'vendor' | 'dealer' | 'distributor';
 
 interface Company { id: number; name: string; }
@@ -76,6 +77,7 @@ interface Order {
   id: number; company_id: number; customer_id: number; customer?: Customer;
   quotation_id: number | null; order_no: string; total_amount: number | string; tax_amount: number | string;
   payment_amount?: number | string; is_partial?: boolean; payment_method?: PaymentMethod;
+  payment_direction?: PaymentDirection;   // optional on order
   status: OrderStatus; source: OrderSource; delivery_date: string | null;
   shipping_address: string; notes: string; items: OrderItem[];
   created_at?: string; updated_at?: string; balance_due?: number; payment_status?: string;
@@ -86,6 +88,7 @@ interface OrderFormData {
   company_id: string | number; customer_id: string | number; quotation_id: string | number;
   order_no: string; total_amount: number | string; tax_amount: number | string;
   status: OrderStatus; source: OrderSource; payment_method: PaymentMethod;
+  payment_direction: PaymentDirection;       // added
   payment_amount: number | string; is_partial: boolean; delivery_date: string;
   shipping_address: string; notes: string;
 }
@@ -152,17 +155,20 @@ const StatCard = memo(({ icon: Icon, label, value, tone }: {
 
 // ── Main Component ──
 export function OrdersPage() {
+  // ... (all existing state and logic, with modifications below)
+
+  // Existing state
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterSource, setFilterSource] = useState('all');
-
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [viewMode, setViewMode] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [formData, setFormData] = useState<OrderFormData>({
     company_id: '', customer_id: '', quotation_id: '', order_no: '',
     total_amount: '', tax_amount: '', status: 'pending', source: 'whatsapp',
-    payment_method: 'qr', payment_amount: 0, is_partial: false,
+    payment_method: 'qr', payment_direction: 'inward',   // added default inward
+    payment_amount: 0, is_partial: false,
     delivery_date: '', shipping_address: '', notes: '',
   });
   const [items, setItems] = useState<OrderItem[]>([]);
@@ -393,6 +399,7 @@ export function OrdersPage() {
       company_id: order.company_id || '', customer_id: order.customer_id || '', quotation_id: order.quotation_id || '',
       order_no: order.order_no || '', total_amount: order.total_amount ?? '', tax_amount: order.tax_amount ?? '',
       status: order.status || 'pending', source: order.source || 'whatsapp', payment_method: order.payment_method || 'qr',
+      payment_direction: order.payment_direction || 'inward',   // include direction
       payment_amount: order.payment_amount ?? 0, is_partial: order.is_partial || false,
       delivery_date: order.delivery_date || '', shipping_address: order.shipping_address || '', notes: order.notes || '',
     });
@@ -406,6 +413,7 @@ export function OrdersPage() {
       company_id: order.company_id || '', customer_id: order.customer_id || '', quotation_id: order.quotation_id || '',
       order_no: order.order_no || '', total_amount: order.total_amount ?? '', tax_amount: order.tax_amount ?? '',
       status: order.status || 'pending', source: order.source || 'whatsapp', payment_method: order.payment_method || 'qr',
+      payment_direction: order.payment_direction || 'inward',   // include direction
       payment_amount: order.payment_amount ?? 0, is_partial: order.is_partial || false,
       delivery_date: order.delivery_date || '', shipping_address: order.shipping_address || '', notes: order.notes || '',
     });
@@ -483,6 +491,11 @@ export function OrdersPage() {
       if (pmt <= 0) { errors.payment_amount = true; valid = false; }
       if (pmt >= total) { errors.payment_amount = true; valid = false; }
     }
+    // Validate payment_direction
+    if (!['inward', 'outward'].includes(formData.payment_direction)) {
+      errors.payment_direction = true;
+      valid = false;
+    }
     setFormErrors(errors);
     if (!valid) showError('Validation', 'Please fix the highlighted required fields.');
     return valid;
@@ -500,6 +513,7 @@ export function OrdersPage() {
       total_amount: total,
       tax_amount: tax,
       payment_method: formData.payment_method,
+      payment_direction: formData.payment_direction,   // include direction in payload
       payment_amount: paymentAmount,
       is_partial: isPartial,
       status: formData.status,
@@ -527,6 +541,7 @@ export function OrdersPage() {
               reference_no: savedOrder.order_no,
               amount: paymentAmount,
               payment_method: formData.payment_method,
+              payment_direction: formData.payment_direction,   // pass direction to payment
               status: isPartial ? 'partial' : 'paid',
               transaction_date: new Date().toISOString().slice(0, 10),
               remarks: `Payment for order ${savedOrder.order_no}`,
@@ -571,7 +586,7 @@ export function OrdersPage() {
     showSuccess('Export', 'Orders exported.');
   }, [filteredOrders, showSuccess, showError]);
 
-  // ── Table Columns (with Delivery Date) ──
+  // ── Table Columns ──
   const columns = useMemo(() => [
     { name: 'Order #', selector: (row: Order) => row.order_no, sortable: true, cell: (row: Order) => <span className="font-medium text-slate-800">{row.order_no}</span>, width: '140px' },
     {
@@ -635,7 +650,7 @@ export function OrdersPage() {
     },
   ], [openView, openEdit, handleDelete, handlePrint]);
 
-  // ── Render field helper (kept for other fields) ──
+  // ── Render field helper ──
   const renderField = (label: string, field: keyof OrderFormData, type: 'text' | 'number' | 'date' | 'select' | 'textarea' = 'text', options?: any[], required = false, readOnly = false) => {
     const value = (formData as any)[field] ?? '';
     const id = `field-${field}`;
@@ -703,7 +718,8 @@ export function OrdersPage() {
             setFormData({
               company_id: '', customer_id: '', quotation_id: '', order_no: generateOrderNo(),
               total_amount: '', tax_amount: '', status: 'pending', source: 'whatsapp',
-              payment_method: 'qr', payment_amount: 0, is_partial: false,
+              payment_method: 'qr', payment_direction: 'inward',   // reset with default inward
+              payment_amount: 0, is_partial: false,
               delivery_date: '', shipping_address: '', notes: '',
             });
             setItems([]); setFormErrors({}); setIsPanelOpen(true); setShowCustomerForm(false); setSelectedProductId('');
@@ -808,7 +824,7 @@ export function OrdersPage() {
             }
           >
             {showCustomerForm ? (
-              /* Full sidebar – Customer creation form (searchable selects added for company & branch) */
+              /* Full sidebar – Customer creation form */
               <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
                 <fieldset className="border rounded-lg p-4">
                   <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Customer Information</legend>
@@ -908,7 +924,7 @@ export function OrdersPage() {
                 </fieldset>
               </div>
             ) : (
-              /* Order form – searchable selects for product & customer */
+              /* Order form */
               <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
                 <fieldset className="border rounded-lg p-4">
                   <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
@@ -949,7 +965,7 @@ export function OrdersPage() {
                   </div>
                 </fieldset>
 
-                {/* Items – Searchable Product Add */}
+                {/* Items */}
                 <fieldset className="border rounded-lg p-4">
                   <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full bg-indigo-500"></span> Items
@@ -964,7 +980,7 @@ export function OrdersPage() {
                             onChange={(val) => {
                               if (val) {
                                 addItemToOrder(Number(val));
-                                setSelectedProductId(''); // reset after adding
+                                setSelectedProductId('');
                               }
                             }}
                             placeholder="Select product to add"
@@ -1012,14 +1028,40 @@ export function OrdersPage() {
                   </div>
                 </fieldset>
 
-                {/* Payment (unchanged, except using renderField where appropriate) */}
+                {/* Payment */}
                 <fieldset className="border rounded-lg p-4">
                   <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Payment
                   </legend>
                   <div className="mt-3 grid grid-cols-2 gap-4">
-                    {renderField('Payment Method', 'payment_method', 'select', [{ id: 'qr', name: 'UPI' }, { id: 'bank_transfer', name: 'Bank Transfer' }, { id: 'cash', name: 'Cash' }, { id: 'card', name: 'Card' }])}
-                    {renderField('Order Source', 'source', 'select', [{ id: 'whatsapp', name: 'WhatsApp' }, { id: 'manual', name: 'Manual' }, { id: 'phone', name: 'Phone' }, { id: 'email', name: 'Email' }])}
+                    {renderField('Payment Method', 'payment_method', 'select', [
+                      { id: 'qr', name: 'UPI' },
+                      { id: 'bank_transfer', name: 'Bank Transfer' },
+                      { id: 'cash', name: 'Cash' },
+                      { id: 'card', name: 'Card' }
+                    ])}
+                    {/* Payment Direction */}
+                    <div>
+                      <label htmlFor="field-payment_direction" className="block text-sm font-medium text-gray-700 mb-1">
+                        Payment Direction <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        id="field-payment_direction"
+                        value={formData.payment_direction}
+                        onChange={(e) => setFormData(prev => ({ ...prev, payment_direction: e.target.value as PaymentDirection }))}
+                        disabled={viewMode}
+                        className={`w-full rounded-lg border bg-white px-3 py-2 text-sm shadow-sm transition ${viewMode ? 'bg-gray-100 text-gray-500 cursor-not-allowed' : formErrors.payment_direction ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200'}`}
+                      >
+                        <option value="inward">Inward (Payment Received)</option>
+                        <option value="outward">Outward (Payment Sent)</option>
+                      </select>
+                    </div>
+                    {renderField('Order Source', 'source', 'select', [
+                      { id: 'whatsapp', name: 'WhatsApp' },
+                      { id: 'manual', name: 'Manual' },
+                      { id: 'phone', name: 'Phone' },
+                      { id: 'email', name: 'Email' }
+                    ])}
                     <div className="col-span-2">
                       {renderField('Amount Paid', 'payment_amount', 'number')}
                       <div className="mt-2 flex items-center gap-2">
@@ -1052,7 +1094,12 @@ export function OrdersPage() {
                   </legend>
                   <div className="mt-3 grid grid-cols-2 gap-4">
                     {renderField('Delivery Date', 'delivery_date', 'date')}
-                    {renderField('Status', 'status', 'select', [{ id: 'pending', name: 'Pending' }, { id: 'confirmed', name: 'Confirmed' }, { id: 'shipped', name: 'Shipped' }, { id: 'delivered', name: 'Delivered' }])}
+                    {renderField('Status', 'status', 'select', [
+                      { id: 'pending', name: 'Pending' },
+                      { id: 'confirmed', name: 'Confirmed' },
+                      { id: 'shipped', name: 'Shipped' },
+                      { id: 'delivered', name: 'Delivered' }
+                    ])}
                     <div className="col-span-2">{renderField('Shipping Address', 'shipping_address', 'textarea')}</div>
                   </div>
                 </fieldset>

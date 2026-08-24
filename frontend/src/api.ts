@@ -733,6 +733,11 @@ export const apiClient = {
     return this.request('GET', '/dashboard/invoices-amount-summary');
   },
 
+  // 🆕 Net Profit Summary
+  async getProfitSummary() {
+    return this.request('GET', '/dashboard/profit');
+  },
+
   async getTopSellingProducts(limit = 5) {
     return this.request('GET', `/reports/top-selling-products?limit=${limit}`);
   },

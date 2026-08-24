@@ -1,15 +1,16 @@
 // src/pages/EditPurchaseInvoicePage.tsx
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, lazy, Suspense } from 'react';
 import {
   FiPlus, FiTrash2, FiArrowLeft,
   FiSearch, FiDollarSign, FiFileText, FiCalendar, FiUser, FiBox,
-  FiX, FiSave, FiPrinter, FiCreditCard,
-  FiGlobe, FiLoader
+  FiX, FiSave, FiGlobe, FiLoader
 } from 'react-icons/fi';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+
+const Offcanvas = lazy(() => import('../components/Offcanvas').then(m => ({ default: m.Offcanvas })));
 
 /* ====================== TYPES ====================== */
 interface Company { id: number; name: string; }
@@ -49,6 +50,18 @@ interface PurchaseItem {
 
 interface AdditionalCharge { id: string; label: string; amount: number; }
 
+interface PaymentEntry {
+  id: string;
+  amount: number;
+  payment_method: 'UPI' | 'cash' | 'cheque' | 'bank_transfer' | 'other';
+  reference_no: string;
+  transaction_date: string;
+  bank_name: string;
+  account_number: string;
+  remarks: string;
+  payment_direction: 'inward' | 'outward';   // required
+}
+
 interface PurchaseFormData {
   company_id: number | '';
   branch: string;
@@ -72,9 +85,6 @@ interface PurchaseFormData {
   eway_no: string;
   delivery_mode: string;
   payment_type: 'credit' | 'cash' | 'cheque' | 'online' | 'bank_transfer';
-  payment_received: number;
-  keep_advance: boolean;
-  remarks: string;
   payment_term: string;
   due_date: string;
   bank_id: number | '';
@@ -88,6 +98,7 @@ interface PurchaseFormData {
   document_note: string;
   additional_charges: AdditionalCharge[];
   internal_note: string;
+  payments: PaymentEntry[];
 }
 
 /* ============ Amount to Words ============ */
@@ -165,12 +176,12 @@ export function EditPurchaseInvoicePage() {
 
   const getCompanies = useCallback(() => apiClient.getCompanies(), []);
   const getSuppliers = useCallback(() => apiClient.getSuppliers(), []);
-  const getProducts = useCallback(() => apiClient.getProducts(), []);
+  const getProducts = useCallback(() => apiClient.getAllProducts(), []);
   const getBanks = useCallback(() => apiClient.getBankAccounts(), []);
 
   const { data: companies } = useApiCache<Company[]>('companies', getCompanies);
-  const { data: suppliers } = useApiCache<Supplier[]>('suppliers', getSuppliers);
-  const { data: products } = useApiCache<Product[]>('products', getProducts);
+  const { data: suppliers, refresh: refreshSuppliers } = useApiCache<Supplier[]>('suppliers', getSuppliers);
+  const { data: products, refresh: refreshProducts } = useApiCache<Product[]>('products', getProducts);
   const { data: banks } = useApiCache<BankAccount[]>('banks', getBanks);
 
   const [availableBranches, setAvailableBranches] = useState<string[]>(['Main Branch']);
@@ -206,9 +217,6 @@ export function EditPurchaseInvoicePage() {
     eway_no: '',
     delivery_mode: '',
     payment_type: 'credit',
-    payment_received: 0,
-    keep_advance: false,
-    remarks: '',
     payment_term: '',
     due_date: '',
     bank_id: '',
@@ -222,10 +230,59 @@ export function EditPurchaseInvoicePage() {
     document_note: '',
     additional_charges: [],
     internal_note: '',
+    payments: [],
   });
 
   const [productSearch, setProductSearch] = useState('');
   const [supplierSearch, setSupplierSearch] = useState('');
+
+  // Supplier creation offcanvas state
+  const [showSupplierOffcanvas, setShowSupplierOffcanvas] = useState(false);
+  const [supplierSubmitting, setSupplierSubmitting] = useState(false);
+  const [newSupplier, setNewSupplier] = useState({
+    company_id: '',
+    name: '',
+    contact_person: '',
+    contact_no: '',
+    email: '',
+    phone: '',
+    gst_number: '',
+    pan: '',
+    billing_street: '',
+    billing_city: '',
+    billing_state: '',
+    billing_country: 'India',
+    billing_pincode: '',
+    shipping_street: '',
+    shipping_city: '',
+    shipping_state: '',
+    shipping_country: 'India',
+    shipping_pincode: '',
+    same_as_billing: true,
+    opening_balance: 0,
+    credit_limit: 0,
+    due_days: 0,
+    notes: '',
+  });
+
+  // Product creation offcanvas state
+  const [showProductOffcanvas, setShowProductOffcanvas] = useState(false);
+  const [productSubmitting, setProductSubmitting] = useState(false);
+  const [newProduct, setNewProduct] = useState({
+    company_id: '',
+    branch_id: '',
+    name: '',
+    sku: '',
+    hsn_sac_code: '',
+    unit: 'Piece',
+    sale_price: '',
+    purchase_price: '',
+    tax_rate: '0',
+    stock_quantity: '0',
+    reorder_level: '0',
+    description: '',
+  });
+  const [productFormErrors, setProductFormErrors] = useState<Record<string, boolean>>({});
 
   // Load purchase invoice by ID
   useEffect(() => {
@@ -234,6 +291,21 @@ export function EditPurchaseInvoicePage() {
       try {
         const response = await apiClient.getPurchase(Number(id));
         const inv = response.data || response;
+
+        // Map existing payments, prefix with existing_ to distinguish
+        const existingPayments: PaymentEntry[] = Array.isArray(inv.payments)
+          ? inv.payments.map((p: any) => ({
+              id: `existing_${p.id ?? Date.now()}`,
+              amount: Number(p.amount) || 0,
+              payment_method: p.payment_method || 'bank_transfer',
+              reference_no: p.reference_no || '',
+              transaction_date: p.transaction_date?.split('T')[0] || '',
+              bank_name: p.bank_name || '',
+              account_number: p.account_number || '',
+              remarks: p.remarks || '',
+              payment_direction: p.payment_direction || 'outward',
+            }))
+          : [];
 
         setForm({
           company_id: inv.company_id || '',
@@ -258,9 +330,6 @@ export function EditPurchaseInvoicePage() {
           eway_no: inv.eway_no || '',
           delivery_mode: inv.delivery_mode || '',
           payment_type: inv.payment_type || 'credit',
-          payment_received: Number(inv.payment_received) || 0,
-          keep_advance: inv.keep_advance || false,
-          remarks: inv.remarks || '',
           payment_term: inv.payment_term || '',
           due_date: inv.due_date?.split('T')[0] || '',
           bank_id: inv.bank_id || '',
@@ -274,9 +343,10 @@ export function EditPurchaseInvoicePage() {
           document_note: inv.document_note || '',
           additional_charges: inv.additional_charges || [],
           internal_note: inv.internal_note || '',
+          payments: existingPayments,
         });
 
-        // Map items to our PurchaseItem structure
+        // Map items
         const loadedItems: PurchaseItem[] = (inv.items || []).map((it: any) => {
           const qty = Number(it.quantity ?? it.qty) || 1;
           const price = Number(it.unit_price ?? it.price) || 0;
@@ -327,7 +397,7 @@ export function EditPurchaseInvoicePage() {
     })();
   }, [id, showError]);
 
-  // Fetch branches when company changes (similar to create page)
+  // Fetch branches when company changes
   useEffect(() => {
     if (!form.company_id) {
       setAvailableBranches(['Main Branch']);
@@ -353,6 +423,7 @@ export function EditPurchaseInvoicePage() {
     return () => { cancelled = true; };
   }, [form.company_id]);
 
+  // Filtered lists
   const filteredSuppliers = useMemo(() => {
     if (!suppliers) return [];
     const term = supplierSearch.toLowerCase();
@@ -369,7 +440,7 @@ export function EditPurchaseInvoicePage() {
     );
   }, [products, productSearch]);
 
-  // Auto‑fill supplier info
+  // Auto-fill supplier info
   useEffect(() => {
     if (form.supplier_id && suppliers) {
       const sup = suppliers.find(s => s.id === Number(form.supplier_id));
@@ -388,7 +459,7 @@ export function EditPurchaseInvoicePage() {
     }
   }, [form.supplier_id, suppliers]);
 
-  /* ========== ITEM MANAGEMENT (same as create) ========== */
+  /* ========== ITEM MANAGEMENT ========== */
   const addItem = useCallback((product: Product) => {
     if (items.some(item => item.product_id === product.id)) {
       showError('Duplicate', 'Product already in list.');
@@ -415,7 +486,6 @@ export function EditPurchaseInvoicePage() {
       igst_amount: 0,
       total: 0,
     };
-    // initial calculation
     const base = newItem.qty * newItem.price;
     const discount = 0;
     const afterDiscount = base - discount;
@@ -490,6 +560,163 @@ export function EditPurchaseInvoicePage() {
     additional_charges: prev.additional_charges.filter(c => c.id !== id)
   }));
 
+  /* ========== PAYMENT MANAGEMENT ========== */
+  const addPayment = () => {
+    const newPayment: PaymentEntry = {
+      id: `new_${Date.now()}`,
+      amount: 0,
+      payment_method: 'bank_transfer',
+      reference_no: '',
+      transaction_date: new Date().toISOString().split('T')[0],
+      bank_name: '',
+      account_number: '',
+      remarks: '',
+      payment_direction: 'outward',
+    };
+    setForm(prev => ({ ...prev, payments: [...prev.payments, newPayment] }));
+  };
+
+  const updatePayment = (id: string, field: keyof PaymentEntry, value: any) => {
+    setForm(prev => ({
+      ...prev,
+      payments: prev.payments.map(p => p.id === id ? { ...p, [field]: value } : p)
+    }));
+  };
+
+  const removePayment = (id: string) => {
+    setForm(prev => ({
+      ...prev,
+      payments: prev.payments.filter(p => p.id !== id)
+    }));
+  };
+
+  /* ========== SUPPLIER & PRODUCT OFFCAVAS HANDLERS ========== */
+  const openSupplierOffcanvas = () => {
+    setNewSupplier(prev => ({
+      ...prev,
+      company_id: form.company_id ? String(form.company_id) : '',
+    }));
+    setShowSupplierOffcanvas(true);
+  };
+
+  const openProductOffcanvas = () => {
+    setNewProduct(prev => ({
+      ...prev,
+      company_id: form.company_id ? String(form.company_id) : '',
+      branch_id: form.branch ? String(form.branch) : '',
+    }));
+    setProductFormErrors({});
+    setShowProductOffcanvas(true);
+  };
+
+  const createSupplier = async () => {
+    if (!newSupplier.name.trim()) { showError('Validation', 'Supplier name is required.'); return; }
+    if (!newSupplier.company_id) { showError('Validation', 'Company is required.'); return; }
+    try {
+      setSupplierSubmitting(true);
+      const payload = {
+        ...newSupplier,
+        company_id: Number(newSupplier.company_id),
+        type: 'supplier',
+        is_active: true,
+      };
+      const created = await apiClient.createSupplier(payload);
+      showSuccess('Supplier created', `${created.name} added.`);
+      refreshSuppliers();
+      setForm(prev => ({ ...prev, supplier_id: created.id }));
+      setShowSupplierOffcanvas(false);
+      // Reset
+      setNewSupplier({
+        company_id: '', name: '', contact_person: '', contact_no: '', email: '', phone: '',
+        gst_number: '', pan: '', billing_street: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
+        shipping_street: '', shipping_city: '', shipping_state: '', shipping_country: 'India', shipping_pincode: '',
+        same_as_billing: true, opening_balance: 0, credit_limit: 0, due_days: 0, notes: '',
+      });
+    } catch (err: any) {
+      const errorMsg = err.validationErrors ? Object.values(err.validationErrors).flat().join(', ') : err.message;
+      showError('Create failed', errorMsg);
+    } finally {
+      setSupplierSubmitting(false);
+    }
+  };
+
+  const createProduct = async () => {
+    const errors: Record<string, boolean> = {};
+    if (!newProduct.company_id) errors.company_id = true;
+    if (!newProduct.name.trim()) errors.name = true;
+    if (!newProduct.purchase_price || parseFloat(newProduct.purchase_price) < 0) errors.purchase_price = true;
+    if (!newProduct.unit.trim()) errors.unit = true;
+    setProductFormErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      showError('Validation', 'Please fill in required fields (Company, Name, Purchase Price, Unit).');
+      return;
+    }
+
+    let sku = newProduct.sku.trim();
+    if (!sku) {
+      const prefix = 'FU-';
+      let maxNum = 0;
+      products?.forEach(p => {
+        if (p.sku && p.sku.startsWith(prefix)) {
+          const num = parseInt(p.sku.slice(prefix.length), 10);
+          if (!isNaN(num) && num > maxNum) maxNum = num;
+        }
+      });
+      sku = `${prefix}${(maxNum + 1).toString().padStart(3, '0')}`;
+    }
+
+    const payload = {
+      company_id: Number(newProduct.company_id),
+      branch_id: newProduct.branch_id ? Number(newProduct.branch_id) : null,
+      name: newProduct.name.trim(),
+      sku,
+      hsn_sac_code: newProduct.hsn_sac_code.trim(),
+      unit: newProduct.unit.trim(),
+      sale_price: parseFloat(newProduct.sale_price || '0'),
+      purchase_price: parseFloat(newProduct.purchase_price || '0'),
+      tax_rate: parseFloat(newProduct.tax_rate || '0'),
+      stock_quantity: parseInt(newProduct.stock_quantity || '0'),
+      reorder_level: parseInt(newProduct.reorder_level || '0'),
+      description: newProduct.description.trim(),
+      active: true,
+    };
+
+    setProductSubmitting(true);
+    try {
+      const created = await apiClient.createProduct(payload);
+      showSuccess('Product created', `${created.name} added to catalog.`);
+      refreshProducts();
+      setShowProductOffcanvas(false);
+      setNewProduct({
+        company_id: '', branch_id: '', name: '', sku: '', hsn_sac_code: '', unit: 'Piece',
+        sale_price: '', purchase_price: '', tax_rate: '0', stock_quantity: '0',
+        reorder_level: '0', description: '',
+      });
+      if (created?.id && created?.name && created?.purchase_price !== undefined) {
+        const productToAdd: Product = {
+          id: created.id,
+          name: created.name,
+          hsn_sac_code: created.hsn_sac_code || '',
+          uom: created.unit || 'NOS',
+          price: created.purchase_price || 0,
+          purchase_price: created.purchase_price,
+          tax_rate: created.tax_rate,
+          igst_rate: created.tax_rate,
+          stock_quantity: created.stock_quantity,
+          unit: created.unit,
+          sku: created.sku,
+        };
+        addItem(productToAdd);
+      }
+    } catch (err: any) {
+      const errorMsg = err.validationErrors ? Object.values(err.validationErrors).flat().join(', ') : err.message;
+      showError('Product creation failed', errorMsg);
+      addAppLog({ module: 'Inventory', action: 'Create', status: 'error', message: errorMsg });
+    } finally {
+      setProductSubmitting(false);
+    }
+  };
+
   /* ========== TOTALS ========== */
   const itemSubtotal = useMemo(() => items.reduce((s, i) => s + (i.qty * i.price), 0), [items]);
   const itemDiscountTotal = useMemo(() => items.reduce((s, i) => s + (i.discount_amount || 0), 0), [items]);
@@ -513,7 +740,10 @@ export function EditPurchaseInvoicePage() {
   const grandTotal = totalBeforeRoundOff + form.round_off;
   const totalInWords = useMemo(() => numberToWordsINR(grandTotal), [grandTotal]);
 
-  /* ========== HANDLERS ========== */
+  const totalPaid = useMemo(() => form.payments.reduce((s, p) => s + (p.amount || 0), 0), [form.payments]);
+  const balanceDue = grandTotal - totalPaid;
+
+  /* ========== VALIDATION & UPDATE ========== */
   const handleSupplierSelect = (supplier: Supplier) => {
     setForm(prev => ({ ...prev, supplier_id: supplier.id }));
     setSupplierSearch('');
@@ -524,6 +754,13 @@ export function EditPurchaseInvoicePage() {
     if (!form.supplier_id) { setErrorMsg('Select a supplier.'); return false; }
     if (!form.invoice_no.trim()) { setErrorMsg('Purchase number is required.'); return false; }
     if (items.length === 0) { setErrorMsg('Add at least one product.'); return false; }
+
+    for (const payment of form.payments) {
+      if (!['inward', 'outward'].includes(payment.payment_direction)) {
+        setErrorMsg('Each payment must have a valid direction (inward or outward).');
+        return false;
+      }
+    }
     return true;
   };
 
@@ -555,9 +792,6 @@ export function EditPurchaseInvoicePage() {
       eway_no: form.eway_no,
       delivery_mode: form.delivery_mode,
       payment_type: form.payment_type,
-      payment_received: form.payment_received,
-      keep_advance: form.keep_advance,
-      remarks: form.remarks,
       payment_term: form.payment_term,
       bank_id: form.bank_id || null,
       packing_charges: form.packing_charges,
@@ -594,6 +828,31 @@ export function EditPurchaseInvoicePage() {
     setSubmitting(true);
     try {
       await apiClient.updatePurchase(Number(id), payload);
+
+      // Create new payment records for any payments added after loading (id starts with new_)
+      const newPayments = form.payments.filter(
+        (p) => p.id.startsWith('new_') && p.amount > 0
+      );
+      if (newPayments.length > 0) {
+        const paymentPromises = newPayments.map((payment, idx) =>
+          apiClient.request('POST', '/payments', {
+            company_id: Number(form.company_id),
+            invoice_id: Number(id),
+            reference_no: payment.reference_no || `PAY-${id}-${idx + 1}`,
+            amount: payment.amount,
+            payment_method: payment.payment_method,
+            status: 'completed',
+            payment_direction: payment.payment_direction || 'outward',
+            transaction_date: payment.transaction_date,
+            bank_name: payment.bank_name,
+            account_number: payment.account_number,
+            ledger_reference: payment.reference_no || `PAY-${id}-${idx + 1}`,
+            remarks: payment.remarks,
+          })
+        );
+        await Promise.all(paymentPromises);
+      }
+
       showSuccess('Purchase updated', `Purchase ${form.invoice_no} updated.`);
       addAppLog({ module: 'Purchases', action: 'Update', status: 'success', message: form.invoice_no });
       navigate('/purchases');
@@ -611,11 +870,30 @@ export function EditPurchaseInvoicePage() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800">
+      {/* Header */}
+      <div className="bg-slate-950 text-white px-6 py-5 flex items-center justify-between flex-wrap gap-4 shadow-xl rounded-b-3xl">
+        <div>
+          <h1 className="text-2xl font-bold flex items-center gap-2">
+            <FiFileText className="text-cyan-300" /> Edit Purchase Invoice
+          </h1>
+          <p className="text-sm text-slate-400">{form.invoice_no} | {form.invoice_date}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => navigate('/purchases')} className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-sm flex items-center gap-2">
+            <FiArrowLeft size={16} /> Back
+          </button>
+          <button onClick={handleUpdate} disabled={submitting} className="px-4 py-2 rounded-xl bg-cyan-400 text-slate-950 font-medium text-sm flex items-center gap-2">
+            <FiSave size={16} /> Update Purchase
+          </button>
+        </div>
+      </div>
+
       {errorMsg && (
         <div className="mx-4 md:mx-8 mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg flex items-center gap-2">
           <FiX size={18} /> {errorMsg}
         </div>
       )}
+
       <div className="max-w-full mx-auto p-4 md:p-8 space-y-6">
         {/* Supplier & Invoice Details */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -642,20 +920,35 @@ export function EditPurchaseInvoicePage() {
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">Supplier *</label>
-                <div className="relative">
-                  <input type="text" value={supplierSearch} onChange={e => setSupplierSearch(e.target.value)} placeholder="Search supplier..." className={inputClass} />
-                  {supplierSearch && (
-                    <button className="absolute right-2 top-2 text-gray-400 hover:text-gray-600" onClick={() => setSupplierSearch('')} aria-label="Clear search"><FiX size={16} /></button>
-                  )}
-                  {supplierSearch && filteredSuppliers.length > 0 && (
-                    <div className="absolute z-20 w-full bg-white border rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                      {filteredSuppliers.map(s => (
-                        <div key={s.id} className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm" onClick={() => handleSupplierSelect(s)}>
-                          {s.name} {s.code ? `(${s.code})` : ''}
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <input
+                      type="text"
+                      value={supplierSearch}
+                      onChange={e => setSupplierSearch(e.target.value)}
+                      placeholder="Search supplier..."
+                      className={inputClass}
+                    />
+                    {supplierSearch && (
+                      <button className="absolute right-2 top-2 text-gray-400 hover:text-gray-600" onClick={() => setSupplierSearch('')} aria-label="Clear search"><FiX size={16} /></button>
+                    )}
+                    {supplierSearch && filteredSuppliers.length > 0 && (
+                      <div className="absolute z-20 w-full bg-white border rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                        {filteredSuppliers.map(s => (
+                          <div key={s.id} className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm" onClick={() => handleSupplierSelect(s)}>
+                            {s.name} {s.code ? `(${s.code})` : ''}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={openSupplierOffcanvas}
+                    className="px-3 py-2 rounded-lg border text-sm text-blue-600 hover:bg-blue-50 whitespace-nowrap"
+                  >
+                    Add
+                  </button>
                 </div>
               </div>
               <div><label className="block text-sm font-medium mb-1">M/S.</label><input type="text" value={form.supplier_name} onChange={e => setForm(prev => ({ ...prev, supplier_name: e.target.value }))} className={inputClass} /></div>
@@ -699,30 +992,39 @@ export function EditPurchaseInvoicePage() {
           </div>
         </div>
 
-        {/* Items Section (identical to create) */}
+        {/* Items Section */}
         <section className="bg-white rounded-xl shadow-sm overflow-hidden">
           <div className="p-4 md:p-6 border-b">
-            <div className="relative w-full">
-              <FiSearch className="absolute left-4 top-3.5 text-gray-400 z-10" size={18} />
-              <input
-                type="text"
-                placeholder="Search product by name, HSN or SKU and press Enter to add..."
-                value={productSearch}
-                onChange={e => setProductSearch(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter' && productSearch.trim() && filteredProducts.length > 0) addItem(filteredProducts[0]); }}
-                className="w-full pl-12 pr-4 py-3 rounded-xl border-0 bg-slate-50 text-sm focus:ring-2 focus:ring-blue-200 focus:bg-white outline-none transition"
-              />
-              {productSearch && (<button className="absolute right-3 top-3 text-gray-400 hover:text-gray-600" onClick={() => setProductSearch('')} aria-label="Clear search"><FiX size={18} /></button>)}
-              {productSearch && filteredProducts.length > 0 && (
-                <div className="absolute z-20 w-full mt-1 bg-white border rounded-xl shadow-lg max-h-60 overflow-y-auto">
-                  {filteredProducts.slice(0, 10).map(p => (
-                    <div key={p.id} className="px-4 py-3 hover:bg-blue-50 cursor-pointer text-sm flex justify-between items-center border-b last:border-0" onClick={() => addItem(p)}>
-                      <div><span className="font-medium text-slate-700">{p.name}</span>{p.hsn_sac_code && <span className="ml-2 text-xs text-gray-400">HSN: {p.hsn_sac_code}</span>}</div>
-                      <span className="text-gray-600 font-medium">₹{p.purchase_price || 0}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
+            <div className="relative w-full flex gap-2">
+              <div className="relative flex-1">
+                <FiSearch className="absolute left-4 top-3.5 text-gray-400 z-10" size={18} />
+                <input
+                  type="text"
+                  placeholder="Search product by name, HSN or SKU and press Enter to add..."
+                  value={productSearch}
+                  onChange={e => setProductSearch(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && productSearch.trim() && filteredProducts.length > 0) addItem(filteredProducts[0]); }}
+                  className="w-full pl-12 pr-4 py-3 rounded-xl border-0 bg-slate-50 text-sm focus:ring-2 focus:ring-blue-200 focus:bg-white outline-none transition"
+                />
+                {productSearch && (<button className="absolute right-3 top-3 text-gray-400 hover:text-gray-600" onClick={() => setProductSearch('')} aria-label="Clear search"><FiX size={18} /></button>)}
+                {productSearch && filteredProducts.length > 0 && (
+                  <div className="absolute z-20 w-full mt-1 bg-white border rounded-xl shadow-lg max-h-60 overflow-y-auto">
+                    {filteredProducts.slice(0, 10).map(p => (
+                      <div key={p.id} className="px-4 py-3 hover:bg-blue-50 cursor-pointer text-sm flex justify-between items-center border-b last:border-0" onClick={() => addItem(p)}>
+                        <div><span className="font-medium text-slate-700">{p.name}</span>{p.hsn_sac_code && <span className="ml-2 text-xs text-gray-400">HSN: {p.hsn_sac_code}</span>}</div>
+                        <span className="text-gray-600 font-medium">₹{p.purchase_price || 0}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={openProductOffcanvas}
+                className="px-4 py-2 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1 whitespace-nowrap"
+              >
+                <FiPlus size={16} /> Add Product
+              </button>
             </div>
           </div>
 
@@ -779,7 +1081,35 @@ export function EditPurchaseInvoicePage() {
               </tbody>
             </table>
           </div>
-          {/* Mobile Cards omitted for brevity – same pattern as create page */}
+
+          {/* Mobile Cards (simplified) */}
+          <div className="md:hidden p-4 space-y-4">
+            {items.length === 0 ? (
+              <div className="text-center py-16 text-gray-400"><FiBox size={40} className="mx-auto mb-3 opacity-30" />No products added yet.</div>
+            ) : items.map((item, idx) => (
+              <div key={idx} className="bg-slate-50 rounded-xl p-4 space-y-3 border border-slate-100">
+                <div className="flex justify-between items-start"><span className="text-xs font-semibold text-gray-400">#{idx + 1}</span><button onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600"><FiTrash2 size={16} /></button></div>
+                <input type="text" value={item.product_name} onChange={e => updateItem(idx, 'product_name', e.target.value)} className="w-full bg-transparent border-0 focus:ring-0 text-sm font-medium" />
+                <div className="grid grid-cols-2 gap-2">
+                  <div><label className="text-xs text-gray-500">Qty</label><input type="number" value={item.qty} onChange={e => { updateItem(idx, 'qty', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                  <div><label className="text-xs text-gray-500">Unit</label><input type="text" value={item.uom} onChange={e => updateItem(idx, 'uom', e.target.value)} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div><label className="text-xs text-gray-500">Price</label><input type="number" step="0.01" value={item.price} onChange={e => { updateItem(idx, 'price', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                  <div><label className="text-xs text-gray-500">Disc Type</label><select value={item.discount_type} onChange={e => { updateItem(idx, 'discount_type', e.target.value as 'percent'|'amount'); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs"><option value="percent">%</option><option value="amount">₹</option></select></div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div><label className="text-xs text-gray-500">Discount %</label><input type="number" value={item.discount_percent} onChange={e => { updateItem(idx, 'discount_percent', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                  <div><label className="text-xs text-gray-500">Disc Amount</label><input type="number" step="0.01" value={item.discount_amount} onChange={e => { updateItem(idx, 'discount_amount', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div><label className="text-xs text-gray-500">GST Slab</label><select value={item.gst_slab} onChange={e => { updateItem(idx, 'gst_slab', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs"><option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option></select>{item.gst_slab === -1 && <input type="number" step="0.01" placeholder="%" onChange={e => { const val = Number(e.target.value); if (!isNaN(val)) { updateItem(idx, 'gst_slab', val); recalcItem(idx); } }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs mt-1" />}</div>
+                  <div className="flex items-center gap-2"><label className="text-xs text-gray-500 flex items-center gap-1"><input type="checkbox" checked={item.is_inter_state} onChange={e => { updateItem(idx, 'is_inter_state', e.target.checked); recalcItem(idx); }} className="rounded" />IGST</label></div>
+                </div>
+                <div className="text-right font-semibold">₹{(item.total || 0).toFixed(2)}</div>
+              </div>
+            ))}
+          </div>
         </section>
 
         {/* Invoice Info & Summary */}
@@ -824,11 +1154,12 @@ export function EditPurchaseInvoicePage() {
               <div className="flex justify-between text-base font-bold text-slate-800"><span>Grand Total</span><span>₹{grandTotal.toFixed(2)}</span></div>
               <div className="text-xs text-gray-500 mt-1">{totalInWords}</div>
 
+              {/* Default Payment Type */}
               <div className="pt-4">
-                <label className="block text-sm font-medium mb-3">Payment Type</label>
+                <label className="block text-sm font-medium mb-3">Default Payment Type</label>
                 <div className="flex flex-wrap gap-2">
                   {([
-                    { key: 'credit', label: 'Credit', icon: <FiCreditCard size={16} />, color: 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' },
+                    { key: 'credit', label: 'Credit', icon: <FiDollarSign size={16} />, color: 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' },
                     { key: 'cash', label: 'Cash', icon: <FiDollarSign size={16} />, color: 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' },
                     { key: 'cheque', label: 'Cheque', icon: <FiFileText size={16} />, color: 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100' },
                     { key: 'online', label: 'Online', icon: <FiGlobe size={16} />, color: 'bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100' },
@@ -850,13 +1181,72 @@ export function EditPurchaseInvoicePage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 mt-4">
-                <div><label className="block text-xs font-medium">Payment Received</label><input type="number" value={form.payment_received} onChange={e => setForm(prev => ({ ...prev, payment_received: Number(e.target.value) }))} className={inputClass} /></div>
-                <div className="flex items-end"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.keep_advance} onChange={e => setForm(prev => ({ ...prev, keep_advance: e.target.checked }))} />Keep as Advance</label></div>
-              </div>
-              <div className="flex justify-between font-medium mt-1">
-                <span className="text-sm">Balance Due</span>
-                <span className={`text-sm ${grandTotal - form.payment_received > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>₹{(grandTotal - form.payment_received).toFixed(2)}</span>
+              {/* Payments Section */}
+              <div className="mt-6 border-t pt-4">
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="text-sm font-semibold text-slate-700">Payments</h3>
+                  <button onClick={addPayment} className="text-blue-600 text-xs flex items-center gap-1"><FiPlus size={14} /> Add Payment</button>
+                </div>
+                {form.payments.length === 0 && (
+                  <p className="text-xs text-gray-400">No payments recorded.</p>
+                )}
+                <div className="space-y-3">
+                  {form.payments.map((pay, idx) => (
+                    <div key={pay.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200">
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="text-xs font-semibold text-gray-500">Payment #{idx + 1}</span>
+                        <button onClick={() => removePayment(pay.id)} className="text-red-400 hover:text-red-600"><FiTrash2 size={14} /></button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-xs text-gray-500">Amount</label>
+                          <input type="number" step="0.01" value={pay.amount} onChange={e => updatePayment(pay.id, 'amount', Number(e.target.value))} className="w-full border rounded px-2 py-1 text-xs" />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500">Method</label>
+                          <select value={pay.payment_method} onChange={e => updatePayment(pay.id, 'payment_method', e.target.value as any)} className="w-full border rounded px-2 py-1 text-xs">
+                            <option value="UPI">UPI</option>
+                            <option value="cash">Cash</option>
+                            <option value="cheque">Cheque</option>
+                            <option value="bank_transfer">Bank Transfer</option>
+                            <option value="other">Other</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500">Reference No</label>
+                          <input type="text" value={pay.reference_no} onChange={e => updatePayment(pay.id, 'reference_no', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500">Date</label>
+                          <input type="date" value={pay.transaction_date} onChange={e => updatePayment(pay.id, 'transaction_date', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500">Direction *</label>
+                          <select value={pay.payment_direction} onChange={e => updatePayment(pay.id, 'payment_direction', e.target.value as 'inward' | 'outward')} className="w-full border rounded px-2 py-1 text-xs">
+                            <option value="outward">Outward (Pay Supplier)</option>
+                            <option value="inward">Inward (Refund)</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500">Bank Name</label>
+                          <input type="text" value={pay.bank_name} onChange={e => updatePayment(pay.id, 'bank_name', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        </div>
+                        <div className="col-span-2">
+                          <label className="block text-xs text-gray-500">Remarks</label>
+                          <input type="text" value={pay.remarks} onChange={e => updatePayment(pay.id, 'remarks', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex justify-between mt-3 text-sm font-medium">
+                  <span>Total Paid</span>
+                  <span>₹{totalPaid.toFixed(2)}</span>
+                </div>
+                <div className="flex justify-between mt-1 text-sm font-medium">
+                  <span>Balance Due</span>
+                  <span className={balanceDue > 0 ? 'text-rose-600' : 'text-emerald-600'}>₹{balanceDue.toFixed(2)}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -869,7 +1259,130 @@ export function EditPurchaseInvoicePage() {
         <button onClick={handleUpdate} disabled={submitting} className="px-5 py-2.5 rounded-xl bg-slate-800 text-white hover:bg-slate-900 text-sm flex items-center gap-2"><FiSave size={16} /> Update Purchase</button>
       </div>
 
-      <style>{`.scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; } .scrollbar-hide::-webkit-scrollbar { display: none; }`}</style>
+      {/* Supplier Offcanvas */}
+      {showSupplierOffcanvas && (
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
+          <Offcanvas
+            isOpen={showSupplierOffcanvas}
+            title="Add Supplier"
+            onClose={() => setShowSupplierOffcanvas(false)}
+            footer={
+              <div className="flex justify-between w-full">
+                <button onClick={() => setShowSupplierOffcanvas(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={supplierSubmitting}>
+                  Close
+                </button>
+                <button onClick={createSupplier} disabled={supplierSubmitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50">
+                  {supplierSubmitting ? 'Creating...' : 'Create Supplier'}
+                </button>
+              </div>
+            }
+          >
+            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
+              <fieldset className="border rounded-lg p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Basic Information</legend>
+                <div className="mt-3 space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Company *</label>
+                    <select value={newSupplier.company_id} onChange={e => setNewSupplier(prev => ({ ...prev, company_id: e.target.value }))} className={inputClass}>
+                      <option value="">Select Company</option>
+                      {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Supplier Name *</label>
+                    <input type="text" value={newSupplier.name} onChange={e => setNewSupplier(prev => ({ ...prev, name: e.target.value }))} className={inputClass} placeholder="e.g., ABC Traders" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Contact Person</label>
+                      <input type="text" value={newSupplier.contact_person} onChange={e => setNewSupplier(prev => ({ ...prev, contact_person: e.target.value }))} className={inputClass} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Contact No</label>
+                      <input type="text" value={newSupplier.contact_no} onChange={e => setNewSupplier(prev => ({ ...prev, contact_no: e.target.value }))} className={inputClass} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">GST Number</label>
+                      <input type="text" value={newSupplier.gst_number} onChange={e => setNewSupplier(prev => ({ ...prev, gst_number: e.target.value }))} className={inputClass} />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">PAN</label>
+                      <input type="text" value={newSupplier.pan} onChange={e => setNewSupplier(prev => ({ ...prev, pan: e.target.value }))} className={inputClass} />
+                    </div>
+                  </div>
+                </div>
+              </fieldset>
+            </div>
+          </Offcanvas>
+        </Suspense>
+      )}
+
+      {/* Product Offcanvas */}
+      {showProductOffcanvas && (
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
+          <Offcanvas
+            isOpen={showProductOffcanvas}
+            title="Add Product"
+            onClose={() => setShowProductOffcanvas(false)}
+            footer={
+              <div className="flex justify-between w-full">
+                <button onClick={() => setShowProductOffcanvas(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={productSubmitting}>
+                  Close
+                </button>
+                <button onClick={createProduct} disabled={productSubmitting} className="px-5 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-50">
+                  {productSubmitting ? 'Creating...' : 'Create Product'}
+                </button>
+              </div>
+            }
+          >
+            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
+              <fieldset className="border rounded-lg p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Basic Information</legend>
+                <div className="mt-3 space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Company *</label>
+                      <select value={newProduct.company_id} onChange={e => setNewProduct(prev => ({ ...prev, company_id: e.target.value }))} className={inputClass}>
+                        <option value="">Select Company</option>
+                        {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Branch</label>
+                      <select value={newProduct.branch_id} onChange={e => setNewProduct(prev => ({ ...prev, branch_id: e.target.value }))} className={inputClass}>
+                        <option value="">Select Branch</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Product Name *</label>
+                    <input type="text" value={newProduct.name} onChange={e => setNewProduct(prev => ({ ...prev, name: e.target.value }))} className={inputClass} placeholder="e.g., Steel Rod" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Unit *</label>
+                      <input type="text" value={newProduct.unit} onChange={e => setNewProduct(prev => ({ ...prev, unit: e.target.value }))} className={inputClass} placeholder="e.g., Piece, Kg" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Purchase Price (₹) *</label>
+                      <input type="number" step="0.01" value={newProduct.purchase_price} onChange={e => setNewProduct(prev => ({ ...prev, purchase_price: e.target.value }))} className={inputClass} placeholder="0.00" />
+                    </div>
+                  </div>
+                </div>
+              </fieldset>
+            </div>
+          </Offcanvas>
+        </Suspense>
+      )}
+
+      <style>{`
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+      `}</style>
     </div>
   );
 }

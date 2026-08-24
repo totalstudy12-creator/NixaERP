@@ -72,6 +72,7 @@ function useApiCache<T>(
 // ---------- Types ----------
 type PaymentMethod = 'qr' | 'bank_transfer' | 'cash' | 'card';
 type PaymentStatus = 'pending' | 'completed' | 'failed' | 'reconciled';
+type PaymentDirection = 'inward' | 'outward';   // ← updated type
 
 interface Payment {
   id: number;
@@ -79,6 +80,7 @@ interface Payment {
   amount: number | string;
   payment_method: PaymentMethod;
   status: PaymentStatus;
+  payment_direction: PaymentDirection;   // ← updated field
   bank_name: string;
   account_number: string;
   ledger_reference: string;
@@ -92,6 +94,7 @@ interface PaymentFormData {
   amount: number | string;
   payment_method: PaymentMethod;
   status: PaymentStatus;
+  payment_direction: PaymentDirection;   // ← updated field
   bank_name: string;
   account_number: string;
   ledger_reference: string;
@@ -223,6 +226,7 @@ export function PaymentsPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [filterMethod, setFilterMethod] = useState<string>('all');
+  const [filterDirection, setFilterDirection] = useState<string>('all');   // ← filter for direction
 
   // View state
   const [isViewPanelOpen, setIsViewPanelOpen] = useState(false);
@@ -237,6 +241,7 @@ export function PaymentsPage() {
     amount: '',
     payment_method: 'qr',
     status: 'pending',
+    payment_direction: 'inward',   // default inward
     bank_name: '',
     account_number: '',
     ledger_reference: '',
@@ -282,11 +287,16 @@ export function PaymentsPage() {
     }
     if (filterStatus !== 'all') filtered = filtered.filter(p => p.status === filterStatus);
     if (filterMethod !== 'all') filtered = filtered.filter(p => p.payment_method === filterMethod);
+    if (filterDirection !== 'all') filtered = filtered.filter(p => p.payment_direction === filterDirection);
     return filtered;
-  }, [payments, searchTerm, filterStatus, filterMethod]);
+  }, [payments, searchTerm, filterStatus, filterMethod, filterDirection]);
 
   const summary = useMemo(() => {
-    if (!payments) return { total: 0, pending: 0, completed: 0, failed: 0, reconciled: 0, totalAmount: 0, completedAmount: 0 };
+    if (!payments) return {
+      total: 0, pending: 0, completed: 0, failed: 0, reconciled: 0,
+      totalAmount: 0, completedAmount: 0,
+      inwardAmount: 0, outwardAmount: 0   // ← updated names
+    };
     const safeNum = (val: any) => {
       const n = typeof val === 'number' ? val : parseFloat(val);
       return isNaN(n) ? 0 : n;
@@ -300,7 +310,17 @@ export function PaymentsPage() {
     const completedAmount = payments
       .filter(p => p.status === 'completed')
       .reduce((sum, p) => sum + safeNum(p.amount), 0);
-    return { total, pending, completed, failed, reconciled, totalAmount, completedAmount };
+    const inwardAmount = payments
+      .filter(p => p.payment_direction === 'inward')
+      .reduce((sum, p) => sum + safeNum(p.amount), 0);
+    const outwardAmount = payments
+      .filter(p => p.payment_direction === 'outward')
+      .reduce((sum, p) => sum + safeNum(p.amount), 0);
+    return {
+      total, pending, completed, failed, reconciled,
+      totalAmount, completedAmount,
+      inwardAmount, outwardAmount
+    };
   }, [payments]);
 
   // ---------- Pagination ----------
@@ -312,7 +332,7 @@ export function PaymentsPage() {
     return filteredPayments.slice(start, start + rowsPerPage);
   }, [filteredPayments, currentPage]);
 
-  useEffect(() => setCurrentPage(1), [searchTerm, filterStatus, filterMethod]);
+  useEffect(() => setCurrentPage(1), [searchTerm, filterStatus, filterMethod, filterDirection]);
 
   // ---------- Bulk actions ----------
   const handleBulkDeleteRequest = () => {
@@ -357,6 +377,7 @@ export function PaymentsPage() {
       amount: '',
       payment_method: 'qr',
       status: 'pending',
+      payment_direction: 'inward',   // default inward
       bank_name: '',
       account_number: '',
       ledger_reference: '',
@@ -372,6 +393,7 @@ export function PaymentsPage() {
       amount: payment.amount ?? '',
       payment_method: payment.payment_method || 'qr',
       status: payment.status || 'pending',
+      payment_direction: payment.payment_direction || 'inward',   // preserve existing
       bank_name: payment.bank_name || '',
       account_number: payment.account_number || '',
       ledger_reference: payment.ledger_reference || '',
@@ -438,6 +460,10 @@ export function PaymentsPage() {
       showError('Validation', 'Amount must be a positive number.');
       return false;
     }
+    if (!['inward', 'outward'].includes(formData.payment_direction)) {   // updated check
+      showError('Validation', 'Payment direction must be either inward or outward.');
+      return false;
+    }
     return true;
   };
 
@@ -497,12 +523,13 @@ export function PaymentsPage() {
       const n = typeof val === 'number' ? val : parseFloat(val);
       return isNaN(n) ? 0 : n;
     };
-    const headers = ['Reference', 'Amount', 'Method', 'Status', 'Bank', 'Account', 'Ledger', 'Remarks', 'Date'];
+    const headers = ['Reference', 'Amount', 'Method', 'Status', 'Direction', 'Bank', 'Account', 'Ledger', 'Remarks', 'Date'];
     const rows = filteredPayments.map(p => [
       p.reference_no,
       safeNum(p.amount).toFixed(2),
       p.payment_method,
       p.status,
+      p.payment_direction,   // value will be 'inward' or 'outward'
       p.bank_name || '',
       p.account_number || '',
       p.ledger_reference || '',
@@ -568,6 +595,22 @@ export function PaymentsPage() {
         return <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${s.color}`}>{s.label}</span>;
       },
       width: '130px',
+    },
+    {
+      name: 'Direction',   // ← direction column
+      selector: (row: Payment) => row.payment_direction,
+      sortable: true,
+      cell: (row: Payment) => {
+        const isInward = row.payment_direction === 'inward';
+        return (
+          <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
+            isInward ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
+          }`}>
+            {isInward ? 'INWARD' : 'OUTWARD'}
+          </span>
+        );
+      },
+      width: '120px',
     },
     {
       name: 'Bank',
@@ -739,11 +782,16 @@ export function PaymentsPage() {
             <option value="cash">Cash</option>
             <option value="card">Card</option>
           </select>
+          <select value={filterDirection} onChange={(e) => setFilterDirection(e.target.value)} className="input-field w-40 text-sm rounded-xl border-slate-200 bg-white py-2 px-3">
+            <option value="all">All Directions</option>
+            <option value="inward">Inward</option>
+            <option value="outward">Outward</option>
+          </select>
         </div>
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6">
+      {/* Summary Cards - 4+4 layout */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         {payments ? (
           <>
             <StatCard icon={FiHash} label="Total" value={summary.total} tone="blue" />
@@ -751,10 +799,12 @@ export function PaymentsPage() {
             <StatCard icon={FiCheckCircle} label="Completed" value={summary.completed} tone="emerald" />
             <StatCard icon={FiXCircle} label="Failed" value={summary.failed} tone="rose" />
             <StatCard icon={FiBook} label="Reconciled" value={summary.reconciled} tone="purple" />
+            <StatCard icon={FiDollarSign} label="Inward" value={summary.inwardAmount.toFixed(2)} tone="emerald" prefix="₹" />
+            <StatCard icon={FiDollarSign} label="Outward" value={summary.outwardAmount.toFixed(2)} tone="rose" prefix="₹" />
             <StatCard icon={FiDollarSign} label="Total Amount" value={summary.totalAmount.toFixed(2)} tone="teal" prefix="₹" />
           </>
         ) : (
-          [...Array(6)].map((_, i) => <StatCardSkeleton key={i} />)
+          [...Array(8)].map((_, i) => <StatCardSkeleton key={i} />)
         )}
       </div>
 
@@ -883,20 +933,35 @@ export function PaymentsPage() {
                   </div>
                 </div>
 
+                {/* Direction */}
                 <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">Direction</label>
+                    <div className="mt-1">
+                      <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                        viewingPayment.payment_direction === 'inward'
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-rose-100 text-rose-700'
+                      }`}>
+                        {viewingPayment.payment_direction === 'inward' ? 'INWARD' : 'OUTWARD'}
+                      </span>
+                    </div>
+                  </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700">Bank Name</label>
                     <div className="mt-1 text-gray-900">{viewingPayment.bank_name || '-'}</div>
                   </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700">Account Number</label>
                     <div className="mt-1 text-gray-900">{viewingPayment.account_number || '-'}</div>
                   </div>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Ledger Reference</label>
-                  <div className="mt-1 text-gray-900">{viewingPayment.ledger_reference || '-'}</div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">Ledger Reference</label>
+                    <div className="mt-1 text-gray-900">{viewingPayment.ledger_reference || '-'}</div>
+                  </div>
                 </div>
 
                 <div>
@@ -955,6 +1020,11 @@ export function PaymentsPage() {
                     { id: 'failed', name: 'Failed' },
                     { id: 'reconciled', name: 'Reconciled' },
                   ])}
+                  {/* Updated Direction Select */}
+                  {renderInput('Direction *', 'payment_direction', 'select', [
+                    { id: 'inward', name: 'INWARD (Money In)' },
+                    { id: 'outward', name: 'OUTWARD (Money Out)' },
+                  ])}
                 </div>
               )}
 
@@ -992,6 +1062,8 @@ export function PaymentsPage() {
         .stat-card:nth-child(4) { animation-delay: 0.15s; }
         .stat-card:nth-child(5) { animation-delay: 0.2s; }
         .stat-card:nth-child(6) { animation-delay: 0.25s; }
+        .stat-card:nth-child(7) { animation-delay: 0.3s; }
+        .stat-card:nth-child(8) { animation-delay: 0.35s; }
         @keyframes attendance-fade-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
         .animate-fadeIn { animation: fadeIn 0.3s ease-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }

@@ -155,6 +155,57 @@ class DashboardController extends Controller
         ]);
     }
 
+     /**
+     * Get net profit summary: total + monthly for current year.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function profitSummary()
+    {
+        // Total profit (all time, excluding draft invoices)
+        $totalProfit = DB::table('invoice_items as ii')
+            ->join('products as p', 'p.id', '=', 'ii.product_id')
+            ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+            ->whereNull('i.deleted_at')
+            ->whereNull('p.deleted_at')
+            ->where('i.status', '!=', 'draft')
+            ->sum(DB::raw('(ii.unit_price - p.purchase_price) * ii.quantity'));
+
+        // Monthly profit for current year
+        $monthlyRaw = DB::table('invoice_items as ii')
+            ->join('products as p', 'p.id', '=', 'ii.product_id')
+            ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+            ->whereNull('i.deleted_at')
+            ->whereNull('p.deleted_at')
+            ->where('i.status', '!=', 'draft')
+            ->whereYear('i.invoice_date', now()->year)
+            ->select(
+                DB::raw("DATE_FORMAT(i.invoice_date, '%b') as month"),
+                DB::raw('SUM((ii.unit_price - p.purchase_price) * ii.quantity) as profit')
+            )
+            ->groupBy(DB::raw("YEAR(i.invoice_date), MONTH(i.invoice_date), DATE_FORMAT(i.invoice_date, '%b')"))
+            ->orderBy(DB::raw("YEAR(i.invoice_date), MONTH(i.invoice_date)"))
+            ->get();
+
+        // Map month names to profit
+        $monthlyProfitMap = $monthlyRaw->pluck('profit', 'month')->toArray();
+
+        // Ensure all 12 months are present (Jan to Dec)
+        $allMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        $monthlyProfit = collect($allMonths)->map(function ($month) use ($monthlyProfitMap) {
+            return [
+                'month' => $month,
+                'profit' => (float) ($monthlyProfitMap[$month] ?? 0),
+            ];
+        })->values()->all();
+
+        return response()->json([
+            'total_profit' => (float) $totalProfit,
+            'monthly_profit' => $monthlyProfit,
+        ]);
+    }
+
+
     public function paymentSummary()
     {
         $inward = Payment::query()

@@ -2,7 +2,8 @@ import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   FiArrowLeft, FiEdit2, FiPrinter, FiDownload, FiCheckCircle, FiPlus,
-  FiClock, FiUser, FiMail, FiPhone, FiFileText, FiCreditCard, FiAlertCircle
+  FiClock, FiUser, FiMail, FiPhone, FiFileText, FiCreditCard, FiAlertCircle,
+  FiTrendingUp, FiDollarSign, FiCalendar, FiHash
 } from 'react-icons/fi';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
@@ -57,27 +58,31 @@ const safeNumber = (val: any): number => {
   return isNaN(num) ? 0 : num;
 };
 
-// ---------- Status badge color config ----------
-const statusConfig: Record<string, { bg: string; text: string; icon: JSX.Element }> = {
+// ---------- Status badge config ----------
+const statusConfig: Record<string, { bg: string; text: string; icon: JSX.Element; dot: string }> = {
   paid: {
     bg: 'bg-emerald-50 border-emerald-200',
     text: 'text-emerald-700',
     icon: <FiCheckCircle size={16} />,
+    dot: 'bg-emerald-500',
   },
   pending: {
     bg: 'bg-amber-50 border-amber-200',
     text: 'text-amber-700',
     icon: <FiClock size={16} />,
+    dot: 'bg-amber-500',
   },
   overdue: {
     bg: 'bg-rose-50 border-rose-200',
     text: 'text-rose-700',
     icon: <FiAlertCircle size={16} />,
+    dot: 'bg-rose-500',
   },
   draft: {
     bg: 'bg-slate-50 border-slate-200',
     text: 'text-slate-700',
     icon: <FiFileText size={16} />,
+    dot: 'bg-slate-400',
   },
 };
 
@@ -156,6 +161,11 @@ export function InvoiceDetailPage() {
     return remainingAmount <= 0.01;
   }, [remainingAmount]);
 
+  const paymentProgress = useMemo(() => {
+    if (totalAmount <= 0) return 0;
+    return Math.min(100, (paidAmount / totalAmount) * 100);
+  }, [totalAmount, paidAmount]);
+
   const createPayment = async () => {
     if (!invoice) return;
     const amount = parseFloat(payAmt);
@@ -221,7 +231,7 @@ export function InvoiceDetailPage() {
         invoice_id: invoice.id,
         reference_no: 'PAY-FULL-' + Date.now(),
         amount: remaining,
-        payment_method: 'manual', // or the currently selected method
+        payment_method: 'manual',
         status: 'completed',
       });
       await apiClient.updateInvoice(invoice.id, { status: 'paid' });
@@ -248,19 +258,18 @@ export function InvoiceDetailPage() {
   };
 
   const handlePrint = () => {
-    // For proper printing, integrate your InvoicePrint component.
-    // For now, just trigger browser print – you'll see the current page.
     window.print();
   };
 
+  // ---------- Loading State ----------
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-50 p-4 md:p-8">
+      <div className="min-h-screen bg-slate-100 p-4 md:p-8">
         <div className="animate-pulse max-w-6xl mx-auto space-y-6">
           <div className="flex items-center gap-4">
-            <div className="h-10 w-10 bg-slate-200 rounded-full"></div>
-            <div className="h-8 bg-slate-200 rounded w-48"></div>
-            <div className="h-6 bg-slate-200 rounded w-24 ml-auto"></div>
+            <div className="h-10 w-10 bg-slate-300 rounded-full"></div>
+            <div className="h-8 bg-slate-300 rounded w-48"></div>
+            <div className="h-6 bg-slate-300 rounded w-24 ml-auto"></div>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
             {[...Array(5)].map((_, i) => (
@@ -282,11 +291,12 @@ export function InvoiceDetailPage() {
     );
   }
 
+  // ---------- Error State ----------
   if (error || !invoice) {
     return (
-      <div className="min-h-screen bg-slate-50 p-4 md:p-8 flex items-center justify-center">
-        <div className="bg-white rounded-2xl shadow-sm p-8 max-w-md w-full text-center">
-          <div className="w-16 h-16 bg-rose-50 rounded-full flex items-center justify-center mx-auto mb-4">
+      <div className="min-h-screen bg-slate-100 p-4 md:p-8 flex items-center justify-center">
+        <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full text-center animate-fade-in">
+          <div className="w-16 h-16 bg-rose-50 rounded-full flex items-center justify-center mx-auto mb-4 animate-bounce">
             <FiAlertCircle size={28} className="text-rose-500" />
           </div>
           <h2 className="text-xl font-semibold text-slate-800 mb-2">Something went wrong</h2>
@@ -301,73 +311,95 @@ export function InvoiceDetailPage() {
 
   const status = invoice.status || 'draft';
   const statusStyle = statusConfig[status] || statusConfig.draft;
+  const paidPercent = paymentProgress.toFixed(0);
 
   return (
-    <div className="min-h-screen bg-slate-50 p-4 md:p-8">
-      <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => navigate('/invoices')}
-              className="p-2 hover:bg-white rounded-xl transition"
-              aria-label="Back to invoices"
-            >
-              <FiArrowLeft size={20} className="text-slate-600" />
-            </button>
-            <div>
-              <div className="flex items-center gap-3 flex-wrap">
-                <h1 className="text-2xl font-bold text-slate-800">Invoice {invoice.invoice_no}</h1>
-                <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium border ${statusStyle.bg} ${statusStyle.text}`}>
-                  {statusStyle.icon}
-                  {status.charAt(0).toUpperCase() + status.slice(1)}
-                </span>
+    <div className="min-h-screen bg-slate-100 p-4 md:p-8 print:bg-white print:p-0">
+      <div className="max-w-6xl mx-auto space-y-6 print:max-w-full print:space-y-4">
+        {/* Header Section */}
+        <div className="rounded-2xl bg-gradient-to-r from-slate-900 to-slate-800 p-6 md:p-8 text-white shadow-2xl shadow-slate-900/20 animate-fade-in">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <button
+                onClick={() => navigate('/invoices')}
+                className="p-2.5 rounded-xl bg-white/10 hover:bg-white/20 transition text-white"
+                aria-label="Back to invoices"
+              >
+                <FiArrowLeft size={20} />
+              </button>
+              <div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Invoice {invoice.invoice_no}</h1>
+                  <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-sm font-medium border ${statusStyle.bg} ${statusStyle.text} shadow-sm animate-pulse-soft`}>
+                    <span className={`w-2 h-2 rounded-full ${statusStyle.dot}`}></span>
+                    {statusStyle.icon}
+                    {status.charAt(0).toUpperCase() + status.slice(1)}
+                  </span>
+                </div>
+                <p className="text-sm text-slate-300 mt-1">
+                  Created {new Date(invoice.created_at).toLocaleDateString()} · Due {invoice.due_date ? new Date(invoice.due_date).toLocaleDateString() : '—'}
+                </p>
               </div>
-              <p className="text-sm text-slate-500 mt-1">
-                Created {new Date(invoice.created_at).toLocaleDateString()} · Due {invoice.due_date ? new Date(invoice.due_date).toLocaleDateString() : '—'}
-              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 print:hidden">
+              <button
+                onClick={handlePrint}
+                className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-sm font-medium flex items-center gap-2 transition"
+                aria-label="Print invoice"
+              >
+                <FiPrinter size={16} /> Print
+              </button>
+              <button
+                onClick={handlePrint}
+                className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-sm font-medium flex items-center gap-2 transition"
+                aria-label="Download PDF"
+              >
+                <FiDownload size={16} /> PDF
+              </button>
+              <Link
+                to={`/invoices/${invoice.id}/edit`}
+                className="px-4 py-2.5 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-900 text-sm font-semibold flex items-center gap-2 transition shadow-lg shadow-cyan-500/30"
+                aria-label="Edit invoice"
+              >
+                <FiEdit2 size={16} /> Edit
+              </Link>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={handlePrint}
-              className="px-4 py-2.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-sm font-medium flex items-center gap-2 transition"
-              aria-label="Print invoice"
-            >
-              <FiPrinter size={16} /> Print
-            </button>
-            <button
-              onClick={handlePrint}
-              className="px-4 py-2.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-sm font-medium flex items-center gap-2 transition"
-              aria-label="Download PDF"
-            >
-              <FiDownload size={16} /> PDF
-            </button>
-            <Link
-              to={`/invoices/${invoice.id}/edit`}
-              className="px-4 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium flex items-center gap-2 transition"
-              aria-label="Edit invoice"
-            >
-              <FiEdit2 size={16} /> Edit
-            </Link>
+
+          {/* Payment progress inside header */}
+          <div className="mt-6">
+            <div className="flex justify-between text-sm mb-1">
+              <span className="text-slate-300">Payment Progress</span>
+              <span className="font-medium text-white">{paidPercent}%</span>
+            </div>
+            <div className="w-full h-2 bg-white/20 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-emerald-400 to-cyan-400 rounded-full transition-all duration-1000 ease-out"
+                style={{ width: `${paymentProgress}%` }}
+              ></div>
+            </div>
+            <div className="flex justify-between mt-2 text-xs text-slate-300">
+              <span>Paid: ₹{paidAmount.toFixed(2)}</span>
+              <span>Total: ₹{totalAmount.toFixed(2)}</span>
+            </div>
           </div>
         </div>
 
-        {/* Summary Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
+        {/* Stat Cards */}
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 print:grid-cols-3 print:gap-2">
+          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200 stat-card">
             <div className="flex items-center gap-2 text-slate-500 text-sm mb-2">
-              <FiFileText size={14} /> Total
+              <FiFileText size={14} className="text-blue-500" /> Total
             </div>
             <p className="text-xl font-bold text-slate-800">₹{totalAmount.toFixed(2)}</p>
           </div>
-          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
+          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200 stat-card">
             <div className="flex items-center gap-2 text-emerald-600 text-sm mb-2">
               <FiCheckCircle size={14} /> Paid
             </div>
             <p className="text-xl font-bold text-emerald-600">₹{paidAmount.toFixed(2)}</p>
           </div>
-          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
+          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200 stat-card">
             <div className="flex items-center gap-2 text-rose-500 text-sm mb-2">
               <FiAlertCircle size={14} /> Remaining
             </div>
@@ -375,18 +407,18 @@ export function InvoiceDetailPage() {
               ₹{remainingAmount.toFixed(2)}
             </p>
           </div>
-          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
+          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200 stat-card">
             <div className="flex items-center gap-2 text-slate-500 text-sm mb-2">
-              <FiCreditCard size={14} /> Status
+              <FiTrendingUp size={14} className="text-purple-500" /> Status
             </div>
             <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-sm font-medium ${statusStyle.bg} ${statusStyle.text}`}>
               {statusStyle.icon}
               {status.charAt(0).toUpperCase() + status.slice(1)}
             </span>
           </div>
-          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-100">
+          <div className="bg-white rounded-xl p-5 shadow-sm border border-slate-200 stat-card print:hidden">
             <div className="flex items-center gap-2 text-slate-500 text-sm mb-2">
-              <FiPlus size={14} /> Action
+              <FiPlus size={14} className="text-amber-500" /> Action
             </div>
             {!isFullyPaid && invoice.status !== 'paid' && (
               <button
@@ -403,111 +435,145 @@ export function InvoiceDetailPage() {
           </div>
         </div>
 
-        {/* Invoice Details & Customer Info */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6">
-            <h2 className="text-lg font-semibold text-slate-800 mb-4 flex items-center gap-2">
-              <FiFileText className="text-blue-500" /> Invoice Details
-            </h2>
-            <dl className="space-y-3">
-              <div className="flex justify-between">
-                <dt className="text-sm text-slate-500">Invoice Number</dt>
-                <dd className="text-sm font-medium text-slate-700">{invoice.invoice_no}</dd>
+        {/* Main Content */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 print:gap-4">
+          {/* Invoice Details & Customer */}
+          <div className="space-y-6">
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 animate-slide-up">
+              <h2 className="text-lg font-semibold text-slate-800 mb-4 flex items-center gap-2">
+                <FiFileText className="text-blue-500" /> Invoice Details
+              </h2>
+              <dl className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <dt className="text-sm text-slate-500 flex items-center gap-1.5">
+                    <FiHash size={14} /> Invoice Number
+                  </dt>
+                  <dd className="text-sm font-medium text-slate-700">{invoice.invoice_no}</dd>
+                </div>
+                <div className="flex justify-between items-center">
+                  <dt className="text-sm text-slate-500 flex items-center gap-1.5">
+                    <FiCalendar size={14} /> Created At
+                  </dt>
+                  <dd className="text-sm text-slate-700">{new Date(invoice.created_at).toLocaleDateString()}</dd>
+                </div>
+                <div className="flex justify-between items-center">
+                  <dt className="text-sm text-slate-500 flex items-center gap-1.5">
+                    <FiClock size={14} /> Due Date
+                  </dt>
+                  <dd className="text-sm text-slate-700">{invoice.due_date ? new Date(invoice.due_date).toLocaleDateString() : '—'}</dd>
+                </div>
+                <div className="flex justify-between items-center">
+                  <dt className="text-sm text-slate-500 flex items-center gap-1.5">
+                    <FiTrendingUp size={14} /> Status
+                  </dt>
+                  <dd className={`text-sm font-medium ${statusStyle.text}`}>{status.charAt(0).toUpperCase() + status.slice(1)}</dd>
+                </div>
+              </dl>
+            </div>
+
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 animate-slide-up">
+              <h2 className="text-lg font-semibold text-slate-800 mb-4 flex items-center gap-2">
+                <FiUser className="text-indigo-500" /> Customer
+              </h2>
+              <div className="space-y-2">
+                <p className="text-slate-700 font-medium flex items-center gap-2">
+                  <span className="w-8 h-8 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-sm font-bold">
+                    {(invoice.customer?.name || '?')[0]?.toUpperCase()}
+                  </span>
+                  {invoice.customer?.name || '—'}
+                </p>
+                {invoice.customer?.email && (
+                  <p className="text-sm text-slate-600 flex items-center gap-2">
+                    <FiMail size={14} /> {invoice.customer.email}
+                  </p>
+                )}
+                {invoice.customer?.phone && (
+                  <p className="text-sm text-slate-600 flex items-center gap-2">
+                    <FiPhone size={14} /> {invoice.customer.phone}
+                  </p>
+                )}
               </div>
-              <div className="flex justify-between">
-                <dt className="text-sm text-slate-500">Created At</dt>
-                <dd className="text-sm text-slate-700">{new Date(invoice.created_at).toLocaleDateString()}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-sm text-slate-500">Due Date</dt>
-                <dd className="text-sm text-slate-700">{invoice.due_date ? new Date(invoice.due_date).toLocaleDateString() : '—'}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-sm text-slate-500">Status</dt>
-                <dd className={`text-sm font-medium ${statusStyle.text}`}>{status.charAt(0).toUpperCase() + status.slice(1)}</dd>
-              </div>
-            </dl>
+            </div>
           </div>
 
-          <div className="bg-white rounded-xl shadow-sm border border-slate-100 p-6">
-            <h2 className="text-lg font-semibold text-slate-800 mb-4 flex items-center gap-2">
-              <FiUser className="text-indigo-500" /> Customer
-            </h2>
-            <div className="space-y-2">
-              <p className="text-slate-700 font-medium">{invoice.customer?.name || '—'}</p>
-              {invoice.customer?.email && (
-                <p className="text-sm text-slate-600 flex items-center gap-2">
-                  <FiMail size={14} /> {invoice.customer.email}
-                </p>
-              )}
-              {invoice.customer?.phone && (
-                <p className="text-sm text-slate-600 flex items-center gap-2">
-                  <FiPhone size={14} /> {invoice.customer.phone}
-                </p>
-              )}
+          {/* Items Table */}
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden animate-slide-up">
+            <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+                <FiFileText className="text-emerald-500" /> Items
+              </h2>
+              <span className="text-sm text-slate-500">{invoice.items?.length || 0} item(s)</span>
+            </div>
+            <div className="overflow-x-auto scrollbar-hide">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs font-medium text-slate-500 uppercase tracking-wider border-b border-slate-100 bg-slate-50">
+                    <th className="py-3 px-4">Product</th>
+                    <th className="py-3 px-4 text-right">Qty</th>
+                    <th className="py-3 px-4 text-right">Unit Price</th>
+                    <th className="py-3 px-4 text-right">Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {invoice.items && invoice.items.length > 0 ? (
+                    invoice.items.map((item) => (
+                      <tr key={item.id} className="hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-0">
+                        <td className="py-3 px-4 text-slate-700">{item.product?.name || `Product #${item.product_id}`}</td>
+                        <td className="py-3 px-4 text-right text-slate-700">{item.quantity}</td>
+                        <td className="py-3 px-4 text-right text-slate-700">₹{safeNumber(item.unit_price).toFixed(2)}</td>
+                        <td className="py-3 px-4 text-right font-medium text-slate-800">₹{safeNumber(item.total).toFixed(2)}</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={4} className="py-12 text-center text-slate-400">
+                        <FiFileText size={32} className="mx-auto mb-2 opacity-30" />
+                        No items found
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-slate-200 font-medium bg-slate-50">
+                    <td colSpan={3} className="py-3 px-4 text-right text-slate-600">Items Total</td>
+                    <td className="py-3 px-4 text-right font-bold text-slate-800">₹{itemsTotal.toFixed(2)}</td>
+                  </tr>
+                  {discountAmount > 0 && (
+                    <tr className="font-medium text-rose-600">
+                      <td colSpan={3} className="py-2 px-4 text-right">Discount</td>
+                      <td className="py-2 px-4 text-right font-medium">-₹{discountAmount.toFixed(2)}</td>
+                    </tr>
+                  )}
+                  {taxAmount > 0 && (
+                    <tr className="font-medium text-slate-600">
+                      <td colSpan={3} className="py-2 px-4 text-right">Tax</td>
+                      <td className="py-2 px-4 text-right">₹{taxAmount.toFixed(2)}</td>
+                    </tr>
+                  )}
+                  <tr className="border-t-2 border-slate-300 font-bold">
+                    <td colSpan={3} className="py-3 px-4 text-right text-slate-800 text-base">Grand Total</td>
+                    <td className="py-3 px-4 text-right text-slate-800 text-base">₹{totalAmount.toFixed(2)}</td>
+                  </tr>
+                </tfoot>
+              </table>
             </div>
           </div>
         </div>
 
-        {/* Items Table */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-          <div className="p-6 border-b">
-            <h2 className="text-lg font-semibold text-slate-800">Items</h2>
-          </div>
-          <div className="overflow-x-auto scrollbar-hide">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs font-medium text-slate-500 uppercase tracking-wider border-b border-slate-100">
-                  <th className="py-3 px-4">Product</th>
-                  <th className="py-3 px-4 text-right">Qty</th>
-                  <th className="py-3 px-4 text-right">Unit Price</th>
-                  <th className="py-3 px-4 text-right">Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                {invoice.items && invoice.items.length > 0 ? (
-                  invoice.items.map((item) => (
-                    <tr key={item.id} className="hover:bg-slate-50 transition-colors border-b border-slate-50 last:border-0">
-                      <td className="py-3 px-4 text-slate-700">{item.product?.name || `Product #${item.product_id}`}</td>
-                      <td className="py-3 px-4 text-right text-slate-700">{item.quantity}</td>
-                      <td className="py-3 px-4 text-right text-slate-700">₹{safeNumber(item.unit_price).toFixed(2)}</td>
-                      <td className="py-3 px-4 text-right font-medium text-slate-800">₹{safeNumber(item.total).toFixed(2)}</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={4} className="py-12 text-center text-slate-400">
-                      <FiFileText size={32} className="mx-auto mb-2 opacity-30" />
-                      No items found
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-              <tfoot>
-                <tr className="border-t border-slate-200 font-medium">
-                  <td colSpan={3} className="py-3 px-4 text-right text-slate-600">Items Total</td>
-                  <td className="py-3 px-4 text-right font-bold text-slate-800">₹{itemsTotal.toFixed(2)}</td>
-                </tr>
-                <tr className="border-t-2 border-slate-300 font-bold">
-                  <td colSpan={3} className="py-3 px-4 text-right text-slate-800">Grand Total</td>
-                  <td className="py-3 px-4 text-right text-slate-800">₹{totalAmount.toFixed(2)}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-        </div>
-
         {/* Payments Section */}
-        <div className="bg-white rounded-xl shadow-sm border border-slate-100 overflow-hidden">
-          <div className="p-6 border-b">
-            <h2 className="text-lg font-semibold text-slate-800">Payments</h2>
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden animate-slide-up">
+          <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-slate-800 flex items-center gap-2">
+              <FiCreditCard className="text-purple-500" /> Payments
+            </h2>
+            <span className="text-sm text-slate-500">{invoice.payments?.length || 0} record(s)</span>
           </div>
           <div className="p-6">
             {invoice.payments && invoice.payments.length > 0 ? (
               <div className="overflow-x-auto scrollbar-hide">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="text-left text-xs font-medium text-slate-500 uppercase tracking-wider border-b border-slate-100">
+                    <tr className="text-left text-xs font-medium text-slate-500 uppercase tracking-wider border-b border-slate-100 bg-slate-50">
                       <th className="py-3 px-4">Reference</th>
                       <th className="py-3 px-4 text-right">Amount</th>
                       <th className="py-3 px-4">Method</th>
@@ -516,7 +582,7 @@ export function InvoiceDetailPage() {
                   </thead>
                   <tbody>
                     {invoice.payments.map((p) => (
-                      <tr key={p.id} className="hover:bg-slate-50 transition-colors border-b border-slate-50 last:border-0">
+                      <tr key={p.id} className="hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-0">
                         <td className="py-3 px-4 text-slate-700">{p.reference_no}</td>
                         <td className="py-3 px-4 text-right font-medium text-slate-800">₹{safeNumber(p.amount).toFixed(2)}</td>
                         <td className="py-3 px-4 text-slate-600 capitalize">{p.payment_method}</td>
@@ -540,7 +606,7 @@ export function InvoiceDetailPage() {
 
             {/* Add Payment Form */}
             {!isFullyPaid && invoice.status !== 'paid' && (
-              <div className="mt-8 p-4 bg-slate-50 rounded-xl border border-slate-100">
+              <div className="mt-8 p-4 bg-slate-50 rounded-xl border border-slate-200 animate-fade-in">
                 <h3 className="font-medium text-slate-700 mb-3">Record a Payment</h3>
                 <div className="flex flex-col sm:flex-row gap-3">
                   <div className="flex-1 space-y-2">
@@ -591,7 +657,7 @@ export function InvoiceDetailPage() {
               </div>
             )}
             {isFullyPaid && (
-              <div className="mt-6 p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-700 text-sm flex items-center gap-2">
+              <div className="mt-6 p-4 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-700 text-sm flex items-center gap-2 animate-fade-in">
                 <FiCheckCircle size={18} /> This invoice is fully paid.
               </div>
             )}
@@ -599,6 +665,7 @@ export function InvoiceDetailPage() {
         </div>
       </div>
 
+      {/* Styles for animations & print */}
       <style>{`
         .scrollbar-hide {
           -ms-overflow-style: none;
@@ -606,6 +673,62 @@ export function InvoiceDetailPage() {
         }
         .scrollbar-hide::-webkit-scrollbar {
           display: none;
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes fadeInUp {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes slideUp {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes pulseSoft {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.6; }
+        }
+
+        .animate-fade-in { animation: fadeIn 0.6s ease-out both; }
+        .animate-fade-in-up { animation: fadeInUp 0.6s ease-out both; }
+        .animate-slide-up { animation: slideUp 0.4s ease-out both; }
+        .animate-pulse-soft { animation: pulseSoft 2s ease-in-out infinite; }
+
+        .stat-card { animation: fadeInUp 0.5s ease-out both; }
+        .stat-card:nth-child(1) { animation-delay: 0.05s; }
+        .stat-card:nth-child(2) { animation-delay: 0.1s; }
+        .stat-card:nth-child(3) { animation-delay: 0.15s; }
+        .stat-card:nth-child(4) { animation-delay: 0.2s; }
+        .stat-card:nth-child(5) { animation-delay: 0.25s; }
+
+        /* Print styles */
+        @media print {
+          body * {
+            visibility: hidden;
+          }
+          .print\\:bg-white,
+          .print\\:p-0,
+          .print\\:max-w-full,
+          .print\\:space-y-4,
+          .print\\:grid-cols-3,
+          .print\\:gap-2 {
+            /* Tailwind print classes are handled by Tailwind, but we also add a fallback */
+          }
+          .print\\:hidden {
+            display: none !important;
+          }
+          /* Keep only the main content visible */
+          main, .invoice-print-area {
+            visibility: visible;
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+          }
         }
       `}</style>
     </div>

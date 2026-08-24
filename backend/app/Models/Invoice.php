@@ -11,6 +11,7 @@ class Invoice extends Model
 
     protected $fillable = [
         'company_id',
+        'branch_id',
         'customer_id',
         'order_id',
         'invoice_no',
@@ -22,10 +23,20 @@ class Invoice extends Model
         'paid_at',
         'notes',
 
-        // Additional fields from frontend
         'customer_name',
         'customer_address',
+        'billing_street',
+        'billing_city',
+        'billing_state',
+        'billing_country',
+        'billing_pincode',
+        'shipping_street',
+        'shipping_city',
+        'shipping_state',
+        'shipping_country',
+        'shipping_pincode',
         'contact_person',
+        'contact_no',
         'phone_no',
         'gstin',
         'pan',
@@ -44,14 +55,20 @@ class Invoice extends Model
         'payment_type',
         'payment_received',
         'keep_advance',
+        'payment_term',
         'bank_id',
         'packing_charges',
         'general_discount_percent',
         'general_discount_amount',
+        'tcs_percent',
+        'tcs_amount',
         'round_off',
         'terms_title',
         'terms_detail',
         'document_note',
+        'internal_note',
+        'additional_charges',
+        'subtotal',
     ];
 
     protected $casts = [
@@ -62,7 +79,10 @@ class Invoice extends Model
         'packing_charges'           => 'decimal:2',
         'general_discount_percent'  => 'decimal:2',
         'general_discount_amount'   => 'decimal:2',
+        'tcs_percent'               => 'decimal:2',
+        'tcs_amount'                => 'decimal:2',
         'round_off'                 => 'decimal:2',
+        'subtotal'                  => 'decimal:2',
         'due_date'                  => 'date',
         'invoice_date'              => 'date',
         'challan_date'              => 'date',
@@ -70,12 +90,17 @@ class Invoice extends Model
         'paid_at'                   => 'datetime',
         'reverse_charge'            => 'boolean',
         'keep_advance'              => 'boolean',
+        'additional_charges'        => 'array',
     ];
 
-    // ── Relationships ──
     public function company()
     {
         return $this->belongsTo(Company::class);
+    }
+
+    public function branch()
+    {
+        return $this->belongsTo(Branch::class);
     }
 
     public function customer()
@@ -98,10 +123,6 @@ class Invoice extends Model
         return $this->hasMany(Payment::class);
     }
 
-    // ── Auto‑generation ──
-    /**
-     * Generate a unique invoice number like INV-YYYYMMDD-0001
-     */
     public static function generateInvoiceNo(): string
     {
         $date = now()->format('Ymd');
