@@ -307,9 +307,9 @@ function useApiCache<T>(
       try {
         const response = await fetcherRef.current();
 
-        const result = Array.isArray(response)
+        const result = (Array.isArray(response)
           ? response
-          : ((response as any)?.data ?? []);
+          : ((response as any)?.data ?? [])) as T;   // <-- FIX: assert as T
 
         if (!Array.isArray(result)) {
           throw new Error(

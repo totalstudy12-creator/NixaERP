@@ -457,7 +457,7 @@ export function CreatePurchaseInvoicePage() {
           name: created.name,
           hsn_sac_code: created.hsn_sac_code || '',
           uom: created.unit || 'NOS',
-          price: created.purchase_price || 0,
+          
           purchase_price: created.purchase_price,
           tax_rate: created.tax_rate,
           igst_rate: created.tax_rate,

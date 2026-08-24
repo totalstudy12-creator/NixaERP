@@ -1098,4 +1098,13 @@ export const apiClient = {
     }
     return response.blob();
   },
+  // New vs Existing Customer Sales
+  async getNewVsExistingCustomerSale(companyId?: number | string, branchId?: number | string) {
+    const params = new URLSearchParams();
+    if (companyId) params.append('company_id', String(companyId));
+    if (branchId) params.append('branch_id', String(branchId));
+    const qs = params.toString();
+    return this.request('GET', `/dashboard/new-vs-existing-customers${qs ? '?' + qs : ''}`);
+  },
+
 };
