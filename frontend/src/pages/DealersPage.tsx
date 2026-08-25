@@ -70,7 +70,6 @@ type Dealer = {
   type: string;                        // 'dealer'
   company_type?: string;
   email: string;
-  phone: string;
   contact_person?: string;
   contact_no?: string;
   gst_number?: string;
@@ -221,7 +220,6 @@ export function DealersPage() {
     type: 'dealer',
     company_type: '',
     email: '',
-    phone: '',
     contact_person: '',
     contact_no: '',
     gst_number: '',
@@ -383,7 +381,7 @@ export function DealersPage() {
     setEditingId(null);
     setFormData({
       company_id: 0, branch_id: undefined, parent_id: undefined,
-      name: '', type: 'dealer', company_type: '', email: '', phone: '',
+      name: '', type: 'dealer', company_type: '', email: '',
       contact_person: '', contact_no: '', gst_number: '', registration_type: '', pan: '',
       billing_street: '', billing_landmark: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
       shipping_street: '', shipping_landmark: '', shipping_city: '', shipping_state: '', shipping_country: 'India', shipping_pincode: '',
@@ -408,7 +406,6 @@ export function DealersPage() {
       type: 'dealer',
       company_type: dealer.company_type || '',
       email: dealer.email || '',
-      phone: dealer.phone || '',
       contact_person: dealer.contact_person || '',
       contact_no: dealer.contact_no || '',
       gst_number: dealer.gst_number || '',
@@ -524,9 +521,9 @@ export function DealersPage() {
   }, [formData, editingId, refreshCustomers, showSuccess, showError]);
 
   const handleExport = useCallback(() => {
-    const headers = ['Name', 'Contact', 'Email', 'Phone', 'Territory', 'Zone', 'Status', 'Credit Limit', 'Outstanding', 'Wallet', 'Commission'];
+    const headers = ['Name', 'Contact', 'Email', 'Territory', 'Zone', 'Status', 'Credit Limit', 'Outstanding', 'Wallet', 'Commission'];
     const rows = filteredDealers.map(d => [
-      d.name, d.contact_person || '', d.email || '', d.phone || '',
+      d.name, d.contact_person || '', d.email || '',
       d.territory || '', d.zone || '', d.status || '',
       d.credit_limit || 0, d.outstanding_amount || 0, d.wallet_balance || 0, d.commission_rate || 0
     ]);
@@ -846,6 +843,7 @@ export function DealersPage() {
                         }}
                         className={`w-full rounded-lg border bg-white px-3 py-2 text-sm ${formErrors.contact_no ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300'}`}
                         placeholder="Enter Contact No"
+                        maxLength={10}
                       />
                     </div>
                   </div>
@@ -965,6 +963,7 @@ export function DealersPage() {
                             onChange={(e) => setFormData(prev => ({ ...prev, shipping_pincode: e.target.value }))}
                             className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
                             placeholder="Pincode"
+                            maxLength={6}
                           />
                         </div>
                       </div>

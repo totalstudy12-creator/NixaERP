@@ -772,6 +772,7 @@ export function SuppliersPage() {
                         onChange={(e) => { const val = e.target.value.replace(/\D/g, ''); setFormData(prev => ({ ...prev, contact_no: val })); }}
                         className={`w-full rounded-lg border bg-white px-3 py-2 text-sm ${formErrors.contact_no ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300'}`}
                         placeholder="Enter Contact No"
+                        maxLength={10}
                       />
                     </div>
                   </div>
@@ -833,7 +834,7 @@ export function SuppliersPage() {
                       </div>
                       <div className="grid grid-cols-2 gap-4">
                         <div><label className="block text-sm font-medium text-gray-700 mb-1">Country</label><input type="text" value={formData.shipping_country || ''} onChange={(e) => setFormData(prev => ({ ...prev, shipping_country: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" placeholder="Country" /></div>
-                        <div><label className="block text-sm font-medium text-gray-700 mb-1">Pincode</label><input type="text" value={formData.shipping_pincode || ''} onChange={(e) => setFormData(prev => ({ ...prev, shipping_pincode: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" placeholder="Pincode" /></div>
+                        <div><label className="block text-sm font-medium text-gray-700 mb-1">Pincode</label><input type="text" value={formData.shipping_pincode || ''} onChange={(e) => setFormData(prev => ({ ...prev, shipping_pincode: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" placeholder="Pincode" maxLength={6} /></div>
                       </div>
                     </div>
                   )}

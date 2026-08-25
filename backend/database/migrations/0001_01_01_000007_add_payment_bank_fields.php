@@ -12,6 +12,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('payments', function (Blueprint $table) {
+            // Bank payment details
             if (!Schema::hasColumn('payments', 'bank_name')) {
                 $table->string('bank_name')->nullable()->after('transaction_date');
             }
@@ -21,6 +22,27 @@ return new class extends Migration
             if (!Schema::hasColumn('payments', 'ledger_reference')) {
                 $table->string('ledger_reference')->nullable()->after('account_number');
             }
+
+            // Polymorphic relationship for payable
+            if (!Schema::hasColumn('payments', 'payable_type')) {
+                $table->string('payable_type')->nullable()->after('ledger_reference');
+            }
+            if (!Schema::hasColumn('payments', 'payable_id')) {
+                $table->unsignedBigInteger('payable_id')->nullable()->after('payable_type');
+            }
+
+            // Direct invoice references (optional - useful for quick queries)
+            if (!Schema::hasColumn('payments', 'invoice_id')) {
+                $table->foreignId('invoice_id')->nullable()->constrained('invoices')->nullOnDelete()->after('payable_id');
+            }
+            if (!Schema::hasColumn('payments', 'purchase_invoice_id')) {
+                $table->foreignId('purchase_invoice_id')->nullable()->constrained('purchase_invoices')->nullOnDelete()->after('invoice_id');
+            }
+
+            // Indexes for polymorphic relationship
+            $table->index(['payable_id', 'payable_type'], 'payments_payable_index');
+            $table->index('invoice_id', 'payments_invoice_index');
+            $table->index('purchase_invoice_id', 'payments_purchase_invoice_index');
         });
     }
 
@@ -30,6 +52,30 @@ return new class extends Migration
     public function down(): void
     {
         Schema::table('payments', function (Blueprint $table) {
+            // Drop indexes first
+            $table->dropIndex('payments_purchase_invoice_index');
+            $table->dropIndex('payments_invoice_index');
+            $table->dropIndex('payments_payable_index');
+
+            // Drop foreign keys
+            if (Schema::hasColumn('payments', 'purchase_invoice_id')) {
+                $table->dropForeign(['purchase_invoice_id']);
+                $table->dropColumn('purchase_invoice_id');
+            }
+            if (Schema::hasColumn('payments', 'invoice_id')) {
+                $table->dropForeign(['invoice_id']);
+                $table->dropColumn('invoice_id');
+            }
+
+            // Drop polymorphic columns
+            if (Schema::hasColumn('payments', 'payable_id')) {
+                $table->dropColumn('payable_id');
+            }
+            if (Schema::hasColumn('payments', 'payable_type')) {
+                $table->dropColumn('payable_type');
+            }
+
+            // Drop bank details
             if (Schema::hasColumn('payments', 'ledger_reference')) {
                 $table->dropColumn('ledger_reference');
             }

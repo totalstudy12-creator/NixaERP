@@ -423,10 +423,18 @@ export function CompaniesPage() {
   const handleSubmit = useCallback(async () => {
     if (!validateForm()) return;
 
+    // --- FIX: Explicitly construct payload with trimmed strings and proper field names ---
     const payload: CompanyFormData = {
-      ...formData,
       name: formData.name?.trim(),
       code: formData.code?.trim(),
+      email: formData.email?.trim(),
+      gst_number: formData.gst_number?.trim() || '',
+      pan_number: formData.pan_number?.trim() || '',
+      type: formData.type || '',
+      phone: formData.phone?.trim(),
+      address: formData.address?.trim(),
+      website: formData.website?.trim() || '',
+      active: formData.active ?? true,
     };
 
     setSubmitting(true);

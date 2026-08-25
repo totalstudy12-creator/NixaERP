@@ -1,13 +1,12 @@
-import { useEffect, useState, useCallback, useMemo, lazy, Suspense, memo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef, lazy, Suspense, memo } from 'react';
 import {
-  FiPlus, FiRefreshCw, FiTrash2, FiDownload, FiEye,
-  FiEdit, FiCheckCircle, FiAlertCircle, FiFilter,
-  FiSearch, FiDollarSign, FiClock, FiXCircle,
-  FiChevronDown, FiChevronRight, FiHash, FiCreditCard, FiBook
+  FiPlus, FiRefreshCw, FiTrash2, FiDownload, FiEye, FiEdit,
+  FiCheckCircle, FiAlertCircle, FiFilter, FiSearch, FiDollarSign,
+  FiClock, FiXCircle, FiHash, FiCreditCard, FiBook, FiChevronDown,
+  FiChevronRight, FiX
 } from 'react-icons/fi';
 import clsx from 'clsx';
 
-// ---------- Lazy loaded heavy components ----------
 const ModernDataTable = lazy(() =>
   import('../components/ModernDataTable').then(m => ({ default: m.ModernDataTable }))
 );
@@ -20,22 +19,19 @@ import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
 import { formatDate, formatDateTime } from '../utils/date';
 
-// ---------- Simple API Cache Hook ----------
-const cache = new Map<string, { data: any; timestamp: number }>();
-
+// ── Stable API Cache Hook (same as SuppliersPage) ──
 function useApiCache<T>(
   key: string,
   fetcher: () => Promise<T>,
   ttlMs = 300_000
-): {
-  data: T | null;
-  loading: boolean;
-  error: string | null;
-  refresh: () => Promise<void>;
-} {
+) {
+  const cache = useRef(new Map<string, { data: T; timestamp: number }>()).current;
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const fetcherRef = useRef(fetcher);
+  useEffect(() => { fetcherRef.current = fetcher; });
 
   const fetchData = useCallback(async (skipCache = false) => {
     if (!skipCache) {
@@ -49,7 +45,7 @@ function useApiCache<T>(
     setLoading(true);
     setError(null);
     try {
-      const res = await fetcher();
+      const res = await fetcherRef.current();
       const result = Array.isArray(res) ? res : (res as any).data ?? [];
       cache.set(key, { data: result, timestamp: Date.now() });
       setData(result);
@@ -60,48 +56,51 @@ function useApiCache<T>(
     } finally {
       setLoading(false);
     }
-  }, [key, fetcher, ttlMs]);
+  }, [key, ttlMs]);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
-
+  useEffect(() => { fetchData(); }, [fetchData]);
   return { data, loading, error, refresh: () => fetchData(true) };
 }
 
-// ---------- Types ----------
+// ── Types ──
 type PaymentMethod = 'qr' | 'bank_transfer' | 'cash' | 'card';
 type PaymentStatus = 'pending' | 'completed' | 'failed' | 'reconciled';
-type PaymentDirection = 'inward' | 'outward';   // ← updated type
+type PaymentDirection = 'inward' | 'outward';
 
 interface Payment {
   id: number;
+  company_id: number;
+  branch_id?: number;
   reference_no: string;
   amount: number | string;
   payment_method: PaymentMethod;
   status: PaymentStatus;
-  payment_direction: PaymentDirection;   // ← updated field
+  payment_direction: PaymentDirection;
   bank_name: string;
   account_number: string;
   ledger_reference: string;
   remarks: string;
   created_at?: string;
   updated_at?: string;
+  company_name?: string;
+  branch_name?: string;
 }
 
 interface PaymentFormData {
+  company_id: number;
+  branch_id?: number;
   reference_no: string;
   amount: number | string;
   payment_method: PaymentMethod;
   status: PaymentStatus;
-  payment_direction: PaymentDirection;   // ← updated field
+  payment_direction: PaymentDirection;
   bank_name: string;
   account_number: string;
   ledger_reference: string;
   remarks: string;
 }
 
-// ---------- Skeleton Components ----------
+// ── Skeletons ──
 const StatCardSkeleton = memo(() => (
   <div className="flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-4 animate-pulse">
     <div className="h-10 w-10 rounded-xl bg-slate-200" />
@@ -153,7 +152,7 @@ const StatCard = memo(({ icon: Icon, label, value, tone, prefix }: {
   );
 });
 
-// ---------- Delete Confirmation Modal ----------
+// ── Delete Confirmation Modal ──
 interface DeleteTarget {
   type: 'single' | 'bulk';
   payment?: Payment;
@@ -221,50 +220,11 @@ const DeleteConfirmModal = memo(({
   );
 });
 
-// ---------- Component ----------
+// ── Component ──
 export function PaymentsPage() {
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterStatus, setFilterStatus] = useState<string>('all');
-  const [filterMethod, setFilterMethod] = useState<string>('all');
-  const [filterDirection, setFilterDirection] = useState<string>('all');   // ← filter for direction
-
-  // View state
-  const [isViewPanelOpen, setIsViewPanelOpen] = useState(false);
-  const [viewingPayment, setViewingPayment] = useState<Payment | null>(null);
-
-  // Form state
-  const [isPanelOpen, setIsPanelOpen] = useState(false);
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [formData, setFormData] = useState<PaymentFormData>({
-    reference_no: '',
-    amount: '',
-    payment_method: 'qr',
-    status: 'pending',
-    payment_direction: 'inward',   // default inward
-    bank_name: '',
-    account_number: '',
-    ledger_reference: '',
-    remarks: '',
-  });
-
-  // Selection for bulk actions
-  const [selectedIds, setSelectedIds] = useState<number[]>([]);
-
-  // Delete confirmation state
-  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
-  const [deleteLoading, setDeleteLoading] = useState(false);
-
-  // UI expand sections for form
-  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
-    paymentDetails: true,
-    bankLedger: true,
-    remarks: false,
-  });
-
   const { showSuccess, showError } = useNotification();
 
-  // ---------- API Caching ----------
+  // ── Data Fetching ──
   const {
     data: payments,
     loading: payLoading,
@@ -272,10 +232,60 @@ export function PaymentsPage() {
     refresh: refreshPayments,
   } = useApiCache<Payment[]>('payments', () => apiClient.getPayments());
 
-  // ---------- Filter & Search ----------
+  const { data: companies } = useApiCache<any[]>('companies', () => apiClient.getCompanies());
+  const { data: branches } = useApiCache<any[]>('branches', () => apiClient.getBranches());
+
+  // ── UI State ──
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterStatus, setFilterStatus] = useState('all');
+  const [filterMethod, setFilterMethod] = useState('all');
+  const [filterDirection, setFilterDirection] = useState('all');
+  const [filterCompany, setFilterCompany] = useState('all');
+  const [filterBranch, setFilterBranch] = useState('all');
+
+  const [isViewPanelOpen, setIsViewPanelOpen] = useState(false);
+  const [viewingPayment, setViewingPayment] = useState<Payment | null>(null);
+
+  const [isPanelOpen, setIsPanelOpen] = useState(false);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [formErrors, setFormErrors] = useState<Record<string, boolean>>({});
+  const [formData, setFormData] = useState<PaymentFormData>({
+    company_id: 0,
+    branch_id: undefined,
+    reference_no: '',
+    amount: '',
+    payment_method: 'qr',
+    status: 'pending',
+    payment_direction: 'inward',
+    bank_name: '',
+    account_number: '',
+    ledger_reference: '',
+    remarks: '',
+  });
+
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
+    paymentDetails: true,
+    bankLedger: true,
+    remarks: false,
+  });
+
+  // ── Derived Data ──
   const filteredPayments = useMemo(() => {
     if (!payments) return [];
     let filtered = [...payments];
+
+    if (filterCompany !== 'all') {
+      filtered = filtered.filter(p => p.company_id === Number(filterCompany));
+    }
+    if (filterBranch !== 'all') {
+      filtered = filtered.filter(p => p.branch_id === Number(filterBranch));
+    }
+
     if (searchTerm.trim()) {
       const term = searchTerm.toLowerCase();
       filtered = filtered.filter(p =>
@@ -285,17 +295,20 @@ export function PaymentsPage() {
         p.remarks?.toLowerCase().includes(term)
       );
     }
+
     if (filterStatus !== 'all') filtered = filtered.filter(p => p.status === filterStatus);
     if (filterMethod !== 'all') filtered = filtered.filter(p => p.payment_method === filterMethod);
     if (filterDirection !== 'all') filtered = filtered.filter(p => p.payment_direction === filterDirection);
+
     return filtered;
-  }, [payments, searchTerm, filterStatus, filterMethod, filterDirection]);
+  }, [payments, searchTerm, filterStatus, filterMethod, filterDirection, filterCompany, filterBranch]);
 
   const summary = useMemo(() => {
     if (!payments) return {
       total: 0, pending: 0, completed: 0, failed: 0, reconciled: 0,
       totalAmount: 0, completedAmount: 0,
-      inwardAmount: 0, outwardAmount: 0   // ← updated names
+      inwardAmount: 0, outwardAmount: 0,
+      companies: 0, branches: 0
     };
     const safeNum = (val: any) => {
       const n = typeof val === 'number' ? val : parseFloat(val);
@@ -316,14 +329,16 @@ export function PaymentsPage() {
     const outwardAmount = payments
       .filter(p => p.payment_direction === 'outward')
       .reduce((sum, p) => sum + safeNum(p.amount), 0);
+    const companies = new Set(payments.map(p => p.company_id)).size;
+    const branches = new Set(payments.map(p => p.branch_id)).size;
     return {
       total, pending, completed, failed, reconciled,
-      totalAmount, completedAmount,
-      inwardAmount, outwardAmount
+      totalAmount, completedAmount, inwardAmount, outwardAmount,
+      companies, branches
     };
   }, [payments]);
 
-  // ---------- Pagination ----------
+  // Pagination
   const [currentPage, setCurrentPage] = useState(1);
   const rowsPerPage = 15;
   const totalPages = Math.ceil(filteredPayments.length / rowsPerPage);
@@ -332,9 +347,68 @@ export function PaymentsPage() {
     return filteredPayments.slice(start, start + rowsPerPage);
   }, [filteredPayments, currentPage]);
 
-  useEffect(() => setCurrentPage(1), [searchTerm, filterStatus, filterMethod, filterDirection]);
+  useEffect(() => setCurrentPage(1), [searchTerm, filterStatus, filterMethod, filterDirection, filterCompany, filterBranch]);
 
-  // ---------- Bulk actions ----------
+  // Branch filter for form (depends on selected company)
+  const filteredBranchesForm = useMemo(() => {
+    if (formData.company_id && branches) {
+      return branches.filter((b: any) => b.company_id === Number(formData.company_id));
+    }
+    return [];
+  }, [formData.company_id, branches]);
+
+  // ── Handlers ──
+  const toggleSection = useCallback((section: string) => {
+    setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
+  }, []);
+
+  const handleCreate = () => {
+    setEditingId(null);
+    setFormData({
+      company_id: 0,
+      branch_id: undefined,
+      reference_no: '',
+      amount: '',
+      payment_method: 'qr',
+      status: 'pending',
+      payment_direction: 'inward',
+      bank_name: '',
+      account_number: '',
+      ledger_reference: '',
+      remarks: '',
+    });
+    setFormErrors({});
+    setIsPanelOpen(true);
+  };
+
+  const handleEdit = useCallback((payment: Payment) => {
+    setEditingId(payment.id);
+    setFormData({
+      company_id: payment.company_id || 0,
+      branch_id: payment.branch_id,
+      reference_no: payment.reference_no || '',
+      amount: payment.amount ?? '',
+      payment_method: payment.payment_method || 'qr',
+      status: payment.status || 'pending',
+      payment_direction: payment.payment_direction || 'inward',
+      bank_name: payment.bank_name || '',
+      account_number: payment.account_number || '',
+      ledger_reference: payment.ledger_reference || '',
+      remarks: payment.remarks || '',
+    });
+    setFormErrors({});
+    setIsPanelOpen(true);
+  }, []);
+
+  const handleView = useCallback((payment: Payment) => {
+    setViewingPayment(payment);
+    setIsViewPanelOpen(true);
+  }, []);
+
+  const handleDeleteRequest = useCallback((payment: Payment) => {
+    setDeleteTarget({ type: 'single', payment });
+  }, []);
+
   const handleBulkDeleteRequest = () => {
     if (selectedIds.length === 0) return;
     setDeleteTarget({ type: 'bulk', ids: selectedIds });
@@ -362,50 +436,6 @@ export function PaymentsPage() {
       showError('Bulk update failed', err.message);
     }
   };
-
-  // ---------- View handler ----------
-  const handleView = useCallback((payment: Payment) => {
-    setViewingPayment(payment);
-    setIsViewPanelOpen(true);
-  }, []);
-
-  // ---------- Edit / Create ----------
-  const handleCreate = () => {
-    setEditingId(null);
-    setFormData({
-      reference_no: '',
-      amount: '',
-      payment_method: 'qr',
-      status: 'pending',
-      payment_direction: 'inward',   // default inward
-      bank_name: '',
-      account_number: '',
-      ledger_reference: '',
-      remarks: '',
-    });
-    setIsPanelOpen(true);
-  };
-
-  const handleEdit = useCallback((payment: Payment) => {
-    setEditingId(payment.id);
-    setFormData({
-      reference_no: payment.reference_no || '',
-      amount: payment.amount ?? '',
-      payment_method: payment.payment_method || 'qr',
-      status: payment.status || 'pending',
-      payment_direction: payment.payment_direction || 'inward',   // preserve existing
-      bank_name: payment.bank_name || '',
-      account_number: payment.account_number || '',
-      ledger_reference: payment.ledger_reference || '',
-      remarks: payment.remarks || '',
-    });
-    setIsPanelOpen(true);
-  }, []);
-
-  // ---------- Delete handlers ----------
-  const handleDeleteRequest = useCallback((payment: Payment) => {
-    setDeleteTarget({ type: 'single', payment });
-  }, []);
 
   const confirmDelete = async () => {
     if (!deleteTarget) return;
@@ -449,30 +479,43 @@ export function PaymentsPage() {
     setDeleteLoading(false);
   };
 
-  // ---------- Validation ----------
   const validateForm = (): boolean => {
+    const errors: Record<string, boolean> = {};
+    let valid = true;
+
+    if (!formData.company_id || formData.company_id === 0) {
+      errors.company_id = true;
+      valid = false;
+    }
     if (!formData.reference_no.trim()) {
-      showError('Validation', 'Reference number is required.');
-      return false;
+      errors.reference_no = true;
+      valid = false;
     }
     const amount = typeof formData.amount === 'number' ? formData.amount : parseFloat(formData.amount);
     if (isNaN(amount) || amount <= 0) {
-      showError('Validation', 'Amount must be a positive number.');
-      return false;
+      errors.amount = true;
+      valid = false;
     }
-    if (!['inward', 'outward'].includes(formData.payment_direction)) {   // updated check
-      showError('Validation', 'Payment direction must be either inward or outward.');
+    if (!['inward', 'outward'].includes(formData.payment_direction)) {
+      errors.payment_direction = true;
+      valid = false;
+    }
+
+    setFormErrors(errors);
+    if (!valid) {
+      showError('Validation', 'Please fix the highlighted required fields.');
       return false;
     }
     return true;
   };
 
-  // ---------- Submit ----------
   const handleSubmit = useCallback(async () => {
     if (!validateForm()) return;
 
     const payload = {
       ...formData,
+      company_id: Number(formData.company_id),
+      branch_id: formData.branch_id ? Number(formData.branch_id) : null,
       amount: parseFloat(String(formData.amount)),
     };
 
@@ -513,7 +556,6 @@ export function PaymentsPage() {
     }
   }, [formData, editingId, refreshPayments, showSuccess, showError]);
 
-  // ---------- Export CSV ----------
   const handleExport = useCallback(() => {
     if (filteredPayments.length === 0) {
       showError('Export failed', 'No payments to export.');
@@ -523,13 +565,15 @@ export function PaymentsPage() {
       const n = typeof val === 'number' ? val : parseFloat(val);
       return isNaN(n) ? 0 : n;
     };
-    const headers = ['Reference', 'Amount', 'Method', 'Status', 'Direction', 'Bank', 'Account', 'Ledger', 'Remarks', 'Date'];
+    const headers = ['Reference', 'Amount', 'Method', 'Status', 'Direction', 'Company', 'Branch', 'Bank', 'Account', 'Ledger', 'Remarks', 'Date'];
     const rows = filteredPayments.map(p => [
       p.reference_no,
       safeNum(p.amount).toFixed(2),
       p.payment_method,
       p.status,
-      p.payment_direction,   // value will be 'inward' or 'outward'
+      p.payment_direction,
+      p.company_name || companies?.find((c: any) => c.id === p.company_id)?.name || '',
+      p.branch_name || branches?.find((b: any) => b.id === p.branch_id)?.name || '',
       p.bank_name || '',
       p.account_number || '',
       p.ledger_reference || '',
@@ -545,9 +589,80 @@ export function PaymentsPage() {
     a.click();
     window.URL.revokeObjectURL(url);
     showSuccess('Export', 'Payments exported.');
-  }, [filteredPayments, showSuccess, showError]);
+  }, [filteredPayments, companies, branches, showSuccess, showError]);
 
-  // ---------- Table Columns ----------
+  // ── Render helpers ──
+  const renderInput = (label: string, field: keyof PaymentFormData, type: 'text' | 'number' | 'select' | 'textarea' = 'text', options?: { id: string; name: string }[]) => {
+    const value = formData[field] ?? '';
+    const id = `field-${field}`;
+    const hasError = formErrors[field];
+    return (
+      <div>
+        <label htmlFor={id} className="block text-sm font-medium text-gray-700 mb-1">
+          {label} {field === 'reference_no' || field === 'amount' || field === 'company_id' || field === 'payment_direction' ? <span className="text-red-500">*</span> : ''}
+        </label>
+        {type === 'select' ? (
+          <select
+            id={id}
+            value={value as string}
+            onChange={(e) => setFormData(prev => ({ ...prev, [field]: e.target.value }))}
+            className={`w-full rounded-lg border bg-white px-4 py-2 text-sm shadow-sm transition ${
+              hasError ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200'
+            }`}
+          >
+            {options?.map(opt => (
+              <option key={opt.id} value={opt.id}>{opt.name}</option>
+            ))}
+          </select>
+        ) : type === 'textarea' ? (
+          <textarea
+            id={id}
+            value={value as string}
+            onChange={(e) => setFormData(prev => ({ ...prev, [field]: e.target.value }))}
+            rows={3}
+            className={`w-full rounded-lg border bg-white px-4 py-2 text-sm shadow-sm transition ${
+              hasError ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200'
+            }`}
+          />
+        ) : (
+          <input
+            id={id}
+            type={type}
+            value={value as string | number}
+            onChange={(e) => setFormData(prev => ({ ...prev, [field]: e.target.value }))}
+            className={`w-full rounded-lg border bg-white px-4 py-2 text-sm shadow-sm transition ${
+              hasError ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200'
+            }`}
+            placeholder={`Enter ${label}`}
+            step={type === 'number' ? '0.01' : undefined}
+          />
+        )}
+      </div>
+    );
+  };
+
+  const renderSection = (title: string, sectionKey: string, icon: React.ReactNode, children: React.ReactNode) => (
+    <fieldset className="border rounded-lg p-4 mb-4">
+      <legend className="flex items-center gap-2 text-base font-semibold text-slate-700">
+        <button
+          type="button"
+          onClick={() => toggleSection(sectionKey)}
+          className="flex items-center gap-2"
+        >
+          {icon}
+          <span>{title}</span>
+          <span className="text-gray-400">
+            {expandedSections[sectionKey] ? <FiChevronDown size={20} /> : <FiChevronRight size={20} />}
+          </span>
+        </button>
+      </legend>
+      {expandedSections[sectionKey] && (
+        <div className="mt-3 space-y-4 animate-fadeIn">{children}</div>
+      )}
+    </fieldset>
+  );
+
+  // ── Table Columns ──
   const columns = useMemo(() => [
     {
       name: 'Reference',
@@ -597,7 +712,7 @@ export function PaymentsPage() {
       width: '130px',
     },
     {
-      name: 'Direction',   // ← direction column
+      name: 'Direction',
       selector: (row: Payment) => row.payment_direction,
       sortable: true,
       cell: (row: Payment) => {
@@ -611,6 +726,26 @@ export function PaymentsPage() {
         );
       },
       width: '120px',
+    },
+    {
+      name: 'Company',
+      selector: (row: Payment) => row.company_id,
+      cell: (row: Payment) => (
+        <span className="text-sm text-slate-600">
+          {row.company_name || companies?.find((c: any) => c.id === row.company_id)?.name || '-'}
+        </span>
+      ),
+      width: '140px',
+    },
+    {
+      name: 'Branch',
+      selector: (row: Payment) => row.branch_id,
+      cell: (row: Payment) => (
+        <span className="text-sm text-slate-600">
+          {row.branch_name || branches?.find((b: any) => b.id === row.branch_id)?.name || '-'}
+        </span>
+      ),
+      width: '140px',
     },
     {
       name: 'Bank',
@@ -658,75 +793,9 @@ export function PaymentsPage() {
       ),
       width: '120px',
     },
-  ], [handleView, handleEdit, handleDeleteRequest]);
+  ], [handleView, handleEdit, handleDeleteRequest, companies, branches]);
 
-  // ---------- UI Helpers ----------
-  const toggleSection = useCallback((section: string) => {
-    setExpandedSections(prev => ({ ...prev, [section]: !prev[section] }));
-  }, []);
-
-  const renderSection = (title: string, sectionKey: string, icon: React.ReactNode, children: React.ReactNode) => (
-    <div className="border-b border-gray-200 pb-4 mb-4 last:border-0">
-      <button
-        type="button"
-        onClick={() => toggleSection(sectionKey)}
-        className="flex items-center justify-between w-full text-left group"
-      >
-        <div className="flex items-center gap-2 text-base font-semibold text-gray-800">
-          {icon}
-          <span>{title}</span>
-        </div>
-        <span className="text-gray-400 group-hover:text-gray-600 transition-transform duration-200">
-          {expandedSections[sectionKey] ? <FiChevronDown size={20} /> : <FiChevronRight size={20} />}
-        </span>
-      </button>
-      {expandedSections[sectionKey] && (
-        <div className="mt-4 space-y-4 animate-fadeIn">{children}</div>
-      )}
-    </div>
-  );
-
-  const renderInput = (label: string, field: keyof PaymentFormData, type: 'text' | 'number' | 'select' | 'textarea' = 'text', options?: { id: string; name: string }[]) => {
-    const value = formData[field] ?? '';
-    const id = `field-${field}`;
-    return (
-      <div>
-        <label htmlFor={id} className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
-        {type === 'select' ? (
-          <select
-            id={id}
-            value={value as string}
-            onChange={(e) => setFormData(prev => ({ ...prev, [field]: e.target.value }))}
-            className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm shadow-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all duration-200"
-          >
-            {options?.map(opt => (
-              <option key={opt.id} value={opt.id}>{opt.name}</option>
-            ))}
-          </select>
-        ) : type === 'textarea' ? (
-          <textarea
-            id={id}
-            value={value as string}
-            onChange={(e) => setFormData(prev => ({ ...prev, [field]: e.target.value }))}
-            rows={3}
-            className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm shadow-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all duration-200"
-          />
-        ) : (
-          <input
-            id={id}
-            type={type}
-            value={value as string | number}
-            onChange={(e) => setFormData(prev => ({ ...prev, [field]: e.target.value }))}
-            className="w-full rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm shadow-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-all duration-200"
-            placeholder={`Enter ${label}`}
-            step={type === 'number' ? '0.01' : undefined}
-          />
-        )}
-      </div>
-    );
-  };
-
-  // ---------- Render ----------
+  // ── Render ──
   return (
     <div className="min-h-screen bg-[#f5f7fb] p-4 md:p-7 text-slate-800">
       {/* Header */}
@@ -741,70 +810,96 @@ export function PaymentsPage() {
           </h1>
           <p className="text-sm text-slate-300">Record and reconcile payments, bank transfers, and QR payments</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={refreshPayments} disabled={payLoading} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 transition hover:bg-white/20 disabled:opacity-60">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Company Selector */}
+          <select
+            value={filterCompany}
+            onChange={(e) => setFilterCompany(e.target.value)}
+            className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 focus:ring-cyan-300 focus:bg-white/20 transition"
+          >
+            <option value="all">All Companies</option>
+            {(companies || []).map((c: any) => (
+              <option key={c.id} value={c.id} className="text-slate-900">{c.name}</option>
+            ))}
+          </select>
+          {/* Branch Selector */}
+          <select
+            value={filterBranch}
+            onChange={(e) => setFilterBranch(e.target.value)}
+            className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 focus:ring-cyan-300 focus:bg-white/20 transition"
+          >
+            <option value="all">All Branches</option>
+            {(branches || [])
+              .filter((b: any) => filterCompany === 'all' || b.company_id === Number(filterCompany))
+              .map((b: any) => (
+                <option key={b.id} value={b.id} className="text-slate-900">{b.name}</option>
+              ))}
+          </select>
+          <button onClick={refreshPayments} disabled={payLoading} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20 disabled:opacity-60">
             <FiRefreshCw className={payLoading ? 'animate-spin inline mr-1' : 'inline mr-1'} size={14} /> Refresh
           </button>
-          <button onClick={handleExport} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 transition hover:bg-white/20">
+          <button onClick={handleExport} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20">
             <FiDownload className="inline mr-1" size={14} /> Export
           </button>
-          <button onClick={handleCreate} className="rounded-xl bg-cyan-400 text-slate-950 px-3 py-2 text-sm font-medium transition hover:bg-cyan-300 shadow-md shadow-cyan-500/20">
+          <button onClick={handleCreate} className="rounded-xl bg-cyan-400 text-slate-950 px-3 py-2 text-sm font-medium hover:bg-cyan-300 shadow-md shadow-cyan-500/20">
             <FiPlus className="inline mr-1" size={14} /> New Payment
           </button>
         </div>
       </div>
 
       {/* Search & Filters */}
-      <div className="flex flex-col sm:flex-row gap-4 mb-6">
-        <div className="relative flex-1 max-w-md">
-          <FiSearch className="absolute left-3 top-2.5 text-slate-400" size={18} />
-          <input
-            type="text"
-            placeholder="Search by reference, bank, account, remarks..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm outline-none placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 transition-all duration-200"
-          />
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <FiFilter size={16} className="text-slate-500" />
-          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="input-field w-36 text-sm rounded-xl border-slate-200 bg-white py-2 px-3 focus:ring-cyan-100">
-            <option value="all">All Status</option>
-            <option value="pending">Pending</option>
-            <option value="completed">Completed</option>
-            <option value="failed">Failed</option>
-            <option value="reconciled">Reconciled</option>
-          </select>
-          <select value={filterMethod} onChange={(e) => setFilterMethod(e.target.value)} className="input-field w-36 text-sm rounded-xl border-slate-200 bg-white py-2 px-3">
-            <option value="all">All Methods</option>
-            <option value="qr">QR</option>
-            <option value="bank_transfer">Bank Transfer</option>
-            <option value="cash">Cash</option>
-            <option value="card">Card</option>
-          </select>
-          <select value={filterDirection} onChange={(e) => setFilterDirection(e.target.value)} className="input-field w-40 text-sm rounded-xl border-slate-200 bg-white py-2 px-3">
-            <option value="all">All Directions</option>
-            <option value="inward">Inward</option>
-            <option value="outward">Outward</option>
-          </select>
+      <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 mb-6">
+        <div className="flex flex-col lg:flex-row gap-4 items-start lg:items-center">
+          <div className="relative flex-1 min-w-[200px]">
+            <FiSearch className="absolute left-3 top-2.5 text-slate-400" size={18} />
+            <input
+              type="text"
+              placeholder="Search by reference, bank, account, remarks..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm outline-none placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 transition"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <FiFilter size={16} className="text-slate-500" />
+            <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm">
+              <option value="all">All Status</option>
+              <option value="pending">Pending</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+              <option value="reconciled">Reconciled</option>
+            </select>
+            <select value={filterMethod} onChange={(e) => setFilterMethod(e.target.value)} className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm">
+              <option value="all">All Methods</option>
+              <option value="qr">QR</option>
+              <option value="bank_transfer">Bank Transfer</option>
+              <option value="cash">Cash</option>
+              <option value="card">Card</option>
+            </select>
+            <select value={filterDirection} onChange={(e) => setFilterDirection(e.target.value)} className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm">
+              <option value="all">All Directions</option>
+              <option value="inward">Inward</option>
+              <option value="outward">Outward</option>
+            </select>
+          </div>
         </div>
       </div>
 
-      {/* Summary Cards - 4+4 layout */}
+      {/* Summary Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        {payments ? (
+        {payLoading ? (
+          [...Array(8)].map((_, i) => <StatCardSkeleton key={i} />)
+        ) : (
           <>
-            <StatCard icon={FiHash} label="Total" value={summary.total} tone="blue" />
+            <StatCard icon={FiHash} label="Total Payments" value={summary.total} tone="blue" />
             <StatCard icon={FiClock} label="Pending" value={summary.pending} tone="amber" />
             <StatCard icon={FiCheckCircle} label="Completed" value={summary.completed} tone="emerald" />
             <StatCard icon={FiXCircle} label="Failed" value={summary.failed} tone="rose" />
             <StatCard icon={FiBook} label="Reconciled" value={summary.reconciled} tone="purple" />
-            <StatCard icon={FiDollarSign} label="Inward" value={summary.inwardAmount.toFixed(2)} tone="emerald" prefix="₹" />
-            <StatCard icon={FiDollarSign} label="Outward" value={summary.outwardAmount.toFixed(2)} tone="rose" prefix="₹" />
+            <StatCard icon={FiDollarSign} label="Inward Amount" value={summary.inwardAmount.toFixed(2)} tone="emerald" prefix="₹" />
+            <StatCard icon={FiDollarSign} label="Outward Amount" value={summary.outwardAmount.toFixed(2)} tone="rose" prefix="₹" />
             <StatCard icon={FiDollarSign} label="Total Amount" value={summary.totalAmount.toFixed(2)} tone="teal" prefix="₹" />
           </>
-        ) : (
-          [...Array(8)].map((_, i) => <StatCardSkeleton key={i} />)
         )}
       </div>
 
@@ -875,13 +970,9 @@ export function PaymentsPage() {
         </Suspense>
       </div>
 
-      {/* View Payment Offcanvas */}
+      {/* View Offcanvas */}
       {isViewPanelOpen && (
-        <Suspense fallback={
-          <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
-            <div className="bg-white p-8 rounded-2xl">Loading details...</div>
-          </div>
-        }>
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading details...</div></div>}>
           <Offcanvas
             isOpen={isViewPanelOpen}
             title={`Payment ${viewingPayment?.reference_no || ''}`}
@@ -933,7 +1024,7 @@ export function PaymentsPage() {
                   </div>
                 </div>
 
-                {/* Direction */}
+                {/* Direction & Company/Branch */}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700">Direction</label>
@@ -950,6 +1041,21 @@ export function PaymentsPage() {
                   <div>
                     <label className="block text-sm font-medium text-gray-700">Bank Name</label>
                     <div className="mt-1 text-gray-900">{viewingPayment.bank_name || '-'}</div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">Company</label>
+                    <div className="mt-1 text-gray-900">
+                      {viewingPayment.company_name || companies?.find((c: any) => c.id === viewingPayment.company_id)?.name || '-'}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">Branch</label>
+                    <div className="mt-1 text-gray-900">
+                      {viewingPayment.branch_name || branches?.find((b: any) => b.id === viewingPayment.branch_id)?.name || '-'}
+                    </div>
                   </div>
                 </div>
 
@@ -981,32 +1087,52 @@ export function PaymentsPage() {
         </Suspense>
       )}
 
-      {/* Form Offcanvas (Create/Edit) */}
+      {/* Create/Edit Offcanvas */}
       {isPanelOpen && (
-        <Suspense fallback={
-          <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
-            <div className="bg-white p-8 rounded-2xl">Loading form...</div>
-          </div>
-        }>
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading form...</div></div>}>
           <Offcanvas
             isOpen={isPanelOpen}
             title={editingId ? 'Edit Payment' : 'Create Payment'}
             onClose={() => setIsPanelOpen(false)}
             footer={
-              <div className="flex flex-col sm:flex-row sm:justify-end gap-3">
-                <button onClick={() => setIsPanelOpen(false)} className="btn btn-secondary w-full sm:w-auto" disabled={submitting}>
-                  Cancel
+              <div className="flex justify-between w-full">
+                <button onClick={() => setIsPanelOpen(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={submitting}>
+                  <FiX className="inline mr-1" /> Close
                 </button>
-                <button onClick={handleSubmit} disabled={submitting} className="btn btn-primary w-full sm:w-auto">
-                  {submitting ? 'Saving...' : editingId ? 'Update Payment' : 'Create Payment'}
+                <button onClick={handleSubmit} disabled={submitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50">
+                  {submitting ? 'Saving...' : 'Save Payment'}
                 </button>
               </div>
             }
           >
-            <div className="space-y-6 max-h-[70vh] overflow-y-auto pr-2 custom-scrollbar">
+            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
               {renderSection('Payment Details', 'paymentDetails', <FiDollarSign size={18} className="text-blue-500" />,
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {renderInput('Reference *', 'reference_no')}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Company *</label>
+                    <select
+                      value={formData.company_id}
+                      onChange={(e) => setFormData(prev => ({ ...prev, company_id: Number(e.target.value), branch_id: undefined }))}
+                      className={`w-full rounded-lg border bg-white px-3 py-2 text-sm ${
+                        formErrors.company_id ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300'
+                      }`}
+                    >
+                      <option value={0}>Select Company</option>
+                      {(companies || []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
+                    <select
+                      value={formData.branch_id || ''}
+                      onChange={(e) => setFormData(prev => ({ ...prev, branch_id: e.target.value ? Number(e.target.value) : undefined }))}
+                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
+                    >
+                      <option value="">None</option>
+                      {filteredBranchesForm.map((b: any) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                    </select>
+                  </div>
+                  {renderInput('Reference No *', 'reference_no')}
                   {renderInput('Amount *', 'amount', 'number')}
                   {renderInput('Method', 'payment_method', 'select', [
                     { id: 'qr', name: 'QR' },
@@ -1020,7 +1146,6 @@ export function PaymentsPage() {
                     { id: 'failed', name: 'Failed' },
                     { id: 'reconciled', name: 'Reconciled' },
                   ])}
-                  {/* Updated Direction Select */}
                   {renderInput('Direction *', 'payment_direction', 'select', [
                     { id: 'inward', name: 'INWARD (Money In)' },
                     { id: 'outward', name: 'OUTWARD (Money Out)' },
@@ -1056,23 +1181,12 @@ export function PaymentsPage() {
 
       {/* Styles */}
       <style>{`
-        .stat-card { animation: attendance-fade-up 0.38s ease-out both; }
-        .stat-card:nth-child(2) { animation-delay: 0.05s; }
-        .stat-card:nth-child(3) { animation-delay: 0.1s; }
-        .stat-card:nth-child(4) { animation-delay: 0.15s; }
-        .stat-card:nth-child(5) { animation-delay: 0.2s; }
-        .stat-card:nth-child(6) { animation-delay: 0.25s; }
-        .stat-card:nth-child(7) { animation-delay: 0.3s; }
-        .stat-card:nth-child(8) { animation-delay: 0.35s; }
-        @keyframes attendance-fade-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
         .animate-fadeIn { animation: fadeIn 0.3s ease-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
         .animate-shake { animation: shake 0.4s ease-in-out; }
         @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
         @media (max-width: 640px) {
           .rdt_TableCol, .rdt_TableCell { white-space: nowrap; }
         }

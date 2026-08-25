@@ -15,7 +15,7 @@ import {
 } from 'recharts';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
-// ----- Map imports (only if you want the map) -----
+// ----- Map imports -----
 import { ComposableMap, Geographies, Geography } from 'react-simple-maps';
 import { Tooltip } from 'react-tooltip';
 import 'react-tooltip/dist/react-tooltip.css';
@@ -140,7 +140,6 @@ interface PurchaseDueInvoice {
 }
 interface LoginActivityItem { day: string; count: number }
 
-// 🆕 New vs Existing Customer Sale response
 interface NewVsExistingCustomerSale {
   new_customers: number;
   existing_customers: number;
@@ -154,7 +153,6 @@ const EMPTY_PAYMENT_SUMMARY: PaymentSummary = {
   outward: { total: 0, online: 0, cash: 0 },
 };
 
-// 🆕 Fallback sample data for new vs existing customers (when API unavailable)
 const FALLBACK_NEW_VS_EXISTING: NewVsExistingCustomerSale = {
   new_customers: 15,
   existing_customers: 85,
@@ -585,7 +583,7 @@ export function DashboardPage() {
             <StatCard
               icon={FiTrendingUp}
               label="Net Profit"
-              value={profitData ? `₹${profitData.total_profit.toFixed(0)}` : '—'}
+              value={profitData?.total_profit != null ? `₹${profitData.total_profit.toFixed(0)}` : '—'}
               tone="emerald"
             />
           </>
@@ -696,8 +694,8 @@ export function DashboardPage() {
           <h3 className="text-sm font-semibold text-slate-500">Invoice Count</h3>
           {invCntLoading ? <StatCardSkeleton /> : (
             <div className="mt-2 space-y-1 text-sm">
-              <div className="flex justify-between"><span>Sale</span><span className="font-bold text-emerald-600">{invoiceCountSummary?.sale || 0}</span></div>
-              <div className="flex justify-between"><span>Purchase</span><span className="font-bold text-blue-600">{invoiceCountSummary?.purchase || 0}</span></div>
+              <div className="flex justify-between"><span>Sale</span><span className="font-bold text-emerald-600">{invoiceCountSummary?.sale ?? 0}</span></div>
+              <div className="flex justify-between"><span>Purchase</span><span className="font-bold text-blue-600">{invoiceCountSummary?.purchase ?? 0}</span></div>
             </div>
           )}
         </div>
@@ -705,8 +703,8 @@ export function DashboardPage() {
           <h3 className="text-sm font-semibold text-slate-500">Invoice Amount</h3>
           {invAmtLoading ? <StatCardSkeleton /> : (
             <div className="mt-2 space-y-1 text-sm">
-              <div className="flex justify-between"><span>Sale</span><span className="font-bold text-emerald-600">₹{invoiceAmtSummary?.sale.toLocaleString()}</span></div>
-              <div className="flex justify-between"><span>Purchase</span><span className="font-bold text-blue-600">₹{invoiceAmtSummary?.purchase.toLocaleString()}</span></div>
+              <div className="flex justify-between"><span>Sale</span><span className="font-bold text-emerald-600">₹{invoiceAmtSummary?.sale?.toLocaleString() ?? 0}</span></div>
+              <div className="flex justify-between"><span>Purchase</span><span className="font-bold text-blue-600">₹{invoiceAmtSummary?.purchase?.toLocaleString() ?? 0}</span></div>
             </div>
           )}
         </div>
@@ -903,6 +901,34 @@ export function DashboardPage() {
               <Area type="monotone" dataKey="value" stroke="#10B981" fill="#10B981" fillOpacity={0.2} strokeWidth={2} />
             </AreaChart>
           </ResponsiveContainer>
+        </ChartCard>
+
+        {/* ===== NEW: Monthly Sales Bar ===== */}
+        <ChartCard title="🛒 Monthly Sales (Bar)">
+          <ResponsiveContainer width="100%" height={250}>
+            <BarChart data={revenueTrend}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+              <XAxis dataKey="month" />
+              <YAxis />
+              <RechartsTooltip />
+              <Bar dataKey="value" fill="#10B981" radius={[6,6,0,0]} name="Sales" />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartCard>
+
+        {/* ===== NEW: Monthly Purchase Bar ===== */}
+        <ChartCard title="🛍️ Monthly Purchases (Bar)">
+          {purchasesLoading ? <div className="h-40 bg-slate-200 rounded animate-pulse" /> : (
+            <ResponsiveContainer width="100%" height={250}>
+              <BarChart data={purchaseTrend}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                <XAxis dataKey="month" />
+                <YAxis />
+                <RechartsTooltip />
+                <Bar dataKey="value" fill="#F59E0B" radius={[6,6,0,0]} name="Purchases" />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </ChartCard>
 
         <ChartCard title="📊 Monthly Order Volume">

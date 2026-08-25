@@ -283,5 +283,4 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('settings/export', [SettingsController::class, 'export']);
     Route::post('settings/import', [SettingsController::class, 'import']);
     Route::post('settings/cache/clear', [SettingsController::class, 'clearCache']);
-    Route::get('/dashboard/profit', [DashboardController::class, 'profitSummary']);
 });
