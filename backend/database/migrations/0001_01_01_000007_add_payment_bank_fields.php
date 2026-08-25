@@ -32,11 +32,12 @@ return new class extends Migration
             }
 
             // Direct invoice references (optional - useful for quick queries)
+            // Use unsignedBigInteger without foreign constraints to avoid compatibility issues
             if (!Schema::hasColumn('payments', 'invoice_id')) {
-                $table->foreignId('invoice_id')->nullable()->constrained('invoices')->nullOnDelete()->after('payable_id');
+                $table->unsignedBigInteger('invoice_id')->nullable()->after('payable_id');
             }
             if (!Schema::hasColumn('payments', 'purchase_invoice_id')) {
-                $table->foreignId('purchase_invoice_id')->nullable()->constrained('purchase_invoices')->nullOnDelete()->after('invoice_id');
+                $table->unsignedBigInteger('purchase_invoice_id')->nullable()->after('invoice_id');
             }
 
             // Indexes for polymorphic relationship
@@ -57,13 +58,11 @@ return new class extends Migration
             $table->dropIndex('payments_invoice_index');
             $table->dropIndex('payments_payable_index');
 
-            // Drop foreign keys
+            // Drop columns (no foreign keys were added)
             if (Schema::hasColumn('payments', 'purchase_invoice_id')) {
-                $table->dropForeign(['purchase_invoice_id']);
                 $table->dropColumn('purchase_invoice_id');
             }
             if (Schema::hasColumn('payments', 'invoice_id')) {
-                $table->dropForeign(['invoice_id']);
                 $table->dropColumn('invoice_id');
             }
 
