@@ -101,7 +101,6 @@ interface NewCustomerForm {
   contact_person: string;
   contact_no: string;
   email: string;
-  phone: string;
   gst_number: string;
   registration_type: string;
   pan: string;
@@ -185,7 +184,6 @@ export function OrdersPage() {
     contact_person: '',
     contact_no: '',
     email: '',
-    phone: '',
     gst_number: '',
     registration_type: '',
     pan: '',
@@ -454,7 +452,7 @@ export function OrdersPage() {
       setShowCustomerForm(false);
       setNewCustomer({
         company_id: '', branch_id: '', type: 'customer', name: '', contact_person: '',
-        contact_no: '', email: '', phone: '', gst_number: '', registration_type: '', pan: '',
+        contact_no: '', email: '', gst_number: '', registration_type: '', pan: '',
         billing_street: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
       });
     } catch (err: any) { showError('Create failed', err.message); }
@@ -797,7 +795,7 @@ export function OrdersPage() {
             footer={
               showCustomerForm ? (
                 <div className="flex justify-between w-full">
-                  <button onClick={() => { setShowCustomerForm(false); setNewCustomer({ company_id: '', branch_id: '', type: 'customer', name: '', contact_person: '', contact_no: '', email: '', phone: '', gst_number: '', registration_type: '', pan: '', billing_street: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '' }); }} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50">
+                  <button onClick={() => { setShowCustomerForm(false); setNewCustomer({ company_id: '', branch_id: '', type: 'customer', name: '', contact_person: '', contact_no: '', email: '', gst_number: '', registration_type: '', pan: '', billing_street: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '' }); }} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50">
                     <FiArrowLeft className="inline mr-1" /> Back to Order
                   </button>
                   <button onClick={createCustomerInline} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700">

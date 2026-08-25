@@ -151,8 +151,8 @@ class PayrollController extends Controller
 
         // --- Configurable values (with defaults) ---
         $graceMinutes      = (int) ($employee->grace_period_minutes ?? $this->getConfig('grace_period_minutes', 10));
-        $halfDayHours      = (float) $this->getConfig('half_day_hours', 4);
-        $workingHoursPerDay = (float) $this->getConfig('working_hours_per_day', 8);
+        $halfDayHours      = (float) $this->getConfig('half_day_hours', 6);
+        $workingHoursPerDay = (float) $this->getConfig('working_hours_per_day', 12);
 
         // Shift times – use employee's assigned shift or company defaults
         $shiftStart = $employee->shift_start_time ?: $this->getConfig('default_shift_start', '09:00:00');
