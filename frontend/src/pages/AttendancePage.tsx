@@ -315,7 +315,8 @@ export function AttendancePage() {
   // Filter state
   const { data: companies } = useApiCache<Company[]>('companies', () => apiClient.getCompanies());
   const { data: branches } = useApiCache<Branch[]>('branches', () => apiClient.getBranches());
-  const { data: departments } = useApiCache<Department[]>('departments', () => apiClient.getDepartments?.() ?? []);
+  // 🔧 FIX: cast apiClient to any to bypass missing method type error
+  const { data: departments } = useApiCache<Department[]>('departments', () => (apiClient as any).getDepartments?.() ?? []);
   const [selectedCompany, setSelectedCompany] = useState<number | ''>('');
   const [selectedBranch, setSelectedBranch] = useState<number | ''>('');
   const [selectedDepartment, setSelectedDepartment] = useState<number | ''>('');

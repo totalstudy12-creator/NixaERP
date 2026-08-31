@@ -3,7 +3,8 @@ import {
   FiPlus, FiRefreshCw, FiTrash2, FiDownload, FiEye, FiEdit,
   FiCheckCircle, FiXCircle, FiFilter, FiSearch, FiAlertCircle,
   FiPackage, FiBox, FiTruck, FiX, FiUpload, FiChevronDown,
-  FiFile, FiCheck, FiAlertTriangle, FiDollarSign
+  FiFile, FiCheck, FiAlertTriangle, FiDollarSign, FiMoreVertical,
+  FiExternalLink
 } from 'react-icons/fi';
 
 const ModernDataTable = lazy(() =>
@@ -179,6 +180,62 @@ const StatCard = memo(({ icon: Icon, label, value, tone, prefix }: {
   );
 });
 
+// ── Action Dropdown Component ──
+const ActionDropdown = memo(({ item, onView, onEdit, onDelete }: {
+  item: InventoryItem;
+  onView: (item: InventoryItem) => void;
+  onEdit: (item: InventoryItem) => void;
+  onDelete: (item: InventoryItem) => void;
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-100 transition"
+        title="Actions"
+      >
+        <FiMoreVertical size={16} />
+      </button>
+      {isOpen && (
+        <div className="absolute right-0 mt-1 w-40 bg-white rounded-xl shadow-lg border border-slate-200 py-1 z-50">
+          <button
+            onClick={() => { setIsOpen(false); onView(item); }}
+            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+          >
+            <FiEye size={14} className="text-slate-500" /> View
+          </button>
+          <button
+            onClick={() => { setIsOpen(false); onEdit(item); }}
+            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+          >
+            <FiEdit size={14} className="text-blue-500" /> Edit
+          </button>
+          <div className="border-t border-slate-100 my-1"></div>
+          <button
+            onClick={() => { setIsOpen(false); onDelete(item); }}
+            className="w-full flex items-center gap-2 px-4 py-2 text-sm text-rose-600 hover:bg-rose-50"
+          >
+            <FiTrash2 size={14} /> Delete
+          </button>
+        </div>
+      )}
+    </div>
+  );
+});
+
 // ── Main Component ──
 export function InventoryPage() {
   const [searchTerm, setSearchTerm] = useState('');
@@ -235,7 +292,6 @@ export function InventoryPage() {
   // ── API Caching ──
   const { data: companies, refresh: refreshComps } = useApiCache<Company[]>('companies', () => apiClient.getCompanies());
   const { data: branches, refresh: refreshBranches } = useApiCache<Branch[]>('branches', () => apiClient.getBranches());
-  // ✅ CHANGED: Use getAllProducts() to load all items (per_page=all) for client-side filtering
   const { data: items, loading: itemsLoading, error: itemsError, refresh: refreshItems } = useApiCache<InventoryItem[]>('inventory', () => apiClient.getAllProducts());
 
   // ── Next SKU generator ──
@@ -547,13 +603,11 @@ export function InventoryPage() {
     setDragOver(false);
   };
 
-  // ✅ FIXED: use response directly, not response.data
   const handlePreview = async (file: File = importFile!) => {
     if (!file) return;
     setImportLoading(true);
     try {
       const response = await apiClient.importInventory(file, duplicateAction, true);
-      // response is { preview, errors, total, valid, invalid }
       setImportPreview(response.preview || []);
       setImportSummary({ total: response.total, valid: response.valid, invalid: response.invalid });
       setImportErrors(response.errors || []);
@@ -566,13 +620,11 @@ export function InventoryPage() {
     }
   };
 
-  // ✅ FIXED: use response directly
   const handleImport = async () => {
     if (!importFile) return;
     setImportLoading(true);
     try {
       const response = await apiClient.importInventory(importFile, duplicateAction, false);
-      // response is { success, message, summary, errors }
       setImportSummary(response.summary);
       setImportErrors(response.errors || []);
       setImportResultMessage(response.message);
@@ -628,8 +680,18 @@ export function InventoryPage() {
     window.URL.revokeObjectURL(url);
   };
 
-  // ── Table Columns ──
+  // ── Table Columns with ID and Three-dot Action ──
   const columns = useMemo(() => [
+    {
+      name: 'ID',
+      selector: (row: InventoryItem) => row.id,
+      sortable: true,
+      cell: (row: InventoryItem) => (
+        <span className="text-sm text-slate-500 font-mono">#{row.id}</span>
+      ),
+      width: '70px',
+      center: true,
+    },
     {
       name: 'Name',
       selector: (row: InventoryItem) => row.name,
@@ -700,13 +762,15 @@ export function InventoryPage() {
     {
       name: 'Actions',
       cell: (row: InventoryItem) => (
-        <div className="flex items-center gap-1">
-          <button onClick={() => handleView(row)} className="p-1.5 rounded-lg text-slate-600 hover:bg-slate-50" title="View"><FiEye size={16} /></button>
-          <button onClick={() => handleEdit(row)} className="p-1.5 rounded-lg text-blue-600 hover:bg-blue-50" title="Edit"><FiEdit size={16} /></button>
-          <button onClick={() => handleDelete(row)} className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50" title="Delete"><FiTrash2 size={16} /></button>
-        </div>
+        <ActionDropdown
+          item={row}
+          onView={handleView}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+        />
       ),
-      width: '120px',
+      width: '70px',
+      center: true,
     },
   ], [handleView, handleEdit, handleDelete]);
 
@@ -909,16 +973,16 @@ export function InventoryPage() {
                 pointerOnHover
               />
               {totalPages > 1 && (
-                <div className="flex items-center justify-between px-6 py-3 border-t">
+                <div className="flex items-center justify-between px-6 py-3 border-t border-slate-200">
                   <span className="text-sm text-slate-600">
                     Showing {((currentPage - 1) * rowsPerPage) + 1} to {Math.min(currentPage * rowsPerPage, filteredItems.length)} of {filteredItems.length}
                   </span>
                   <div className="flex gap-1">
-                    <button onClick={() => setCurrentPage(1)} disabled={currentPage === 1} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">««</button>
-                    <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">‹</button>
-                    <span className="px-3 py-1 text-sm font-medium">{currentPage} / {totalPages}</span>
-                    <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">›</button>
-                    <button onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">»»</button>
+                    <button onClick={() => setCurrentPage(1)} disabled={currentPage === 1} className="px-3 py-1 text-sm rounded-lg border border-slate-200 disabled:opacity-40 hover:bg-slate-50">««</button>
+                    <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-3 py-1 text-sm rounded-lg border border-slate-200 disabled:opacity-40 hover:bg-slate-50">‹</button>
+                    <span className="px-3 py-1 text-sm font-medium bg-slate-100 rounded-lg">{currentPage} / {totalPages}</span>
+                    <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-3 py-1 text-sm rounded-lg border border-slate-200 disabled:opacity-40 hover:bg-slate-50">›</button>
+                    <button onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages} className="px-3 py-1 text-sm rounded-lg border border-slate-200 disabled:opacity-40 hover:bg-slate-50">»»</button>
                   </div>
                 </div>
               )}
@@ -941,6 +1005,7 @@ export function InventoryPage() {
                 <fieldset className="border rounded-lg p-4">
                   <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Basic Info</legend>
                   <div className="grid grid-cols-2 gap-4 mt-3">
+                    <div><label className="block text-sm font-medium text-gray-700">ID</label><div className="font-mono">#{viewingItem.id}</div></div>
                     <div><label className="block text-sm font-medium text-gray-700">Name</label><div className="font-semibold">{viewingItem.name}</div></div>
                     <div><label className="block text-sm font-medium text-gray-700">SKU</label><div>{viewingItem.sku}</div></div>
                     <div><label className="block text-sm font-medium text-gray-700">Barcode</label><div>{viewingItem.barcode || '-'}</div></div>
@@ -1056,17 +1121,6 @@ export function InventoryPage() {
                   <div className="flex items-center gap-2 col-span-2">
                     <input type="checkbox" id="active" checked={formData.active} onChange={(e) => setFormData(prev => ({ ...prev, active: e.target.checked }))} className="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
                     <label htmlFor="active" className="text-sm text-gray-700">Active</label>
-                  </div>
-                </div>
-              </fieldset>
-
-              <fieldset className="border rounded-lg p-4 opacity-60">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-gray-400"></span> Images</legend>
-                <div className="mt-3">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Product Image</label>
-                  <div className="flex items-center gap-2">
-                    <input type="file" disabled className="w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm text-gray-500 cursor-not-allowed" />
-                    <span className="text-xs text-gray-500 whitespace-nowrap">Coming Soon</span>
                   </div>
                 </div>
               </fieldset>
@@ -1261,6 +1315,12 @@ export function InventoryPage() {
       <style>{`
         .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         .hide-scrollbar::-webkit-scrollbar { display: none; }
+        /* Hide ModernDataTable's built-in search and pagination */
+        .rdt_TableHeader .search-container,
+        .rdt_TableHeader input[type="text"] { display: none !important; }
+        .rdt_TableHeader > div:last-child { display: none !important; }
+        .rdt_TableCol:first-child, .rdt_TableCell:first-child { display: none !important; }
+        .rdt_Pagination { display: none !important; }
       `}</style>
     </div>
   );

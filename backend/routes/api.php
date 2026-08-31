@@ -29,12 +29,24 @@ use App\Http\Controllers\Api\BackupController;
 use App\Http\Controllers\Api\WarehouseController;
 use App\Http\Controllers\Api\SupplierController;
 use App\Http\Controllers\Api\MarketingController;
+use App\Http\Controllers\Api\SocialAuthController;
+use App\Http\Controllers\Api\InboxController;
+use App\Http\Controllers\Api\WhatsAppWebhookController;
+use App\Http\Controllers\Api\EmailWebhookController;
+use App\Http\Controllers\Api\GeminiVoiceController;
+use App\Http\Middleware\ApiTokenMiddleware;
 use Illuminate\Support\Facades\Route;
+
+/*
+|--------------------------------------------------------------------------
+| API Routes
+|--------------------------------------------------------------------------
+*/
 
 // ---------- Health check ----------
 Route::get('status', fn() => response()->json(['status' => 'ok', 'service' => 'Business OS API']));
 
-// ---------- Auth ----------
+// ---------- Auth (Public) ----------
 Route::post('login', [AuthController::class, 'login'])->name('login');
 Route::post('logout', [AuthController::class, 'logout'])->middleware('auth:sanctum');
 Route::get('me', [AuthController::class, 'me'])->middleware('auth:sanctum');
@@ -47,44 +59,56 @@ Route::post('biometric/device/heartbeat', [BiometricDeviceController::class, 'he
 Route::post('biometric/attendance', [BiometricAttendanceController::class, 'store']);
 Route::post('biometric/offline/sync', [OfflineSyncController::class, 'batchSync']);
 
-// NOTE: This is public – consider moving inside auth group if suppliers should be protected
+// Public suppliers
 Route::apiResource('suppliers', SupplierController::class);
 
-// Public enrollment check (ESP32 polls this without token)
+// Public enrollment check
 Route::get('biometric/device/pending-enrollment', [BiometricDeviceController::class, 'pendingEnrollment']);
 
-// Enrollment status reporting also public (ESP32 calls it)
+// Enrollment status reporting
 Route::post('biometric/device/{device}/enroll', [BiometricDeviceController::class, 'startEnrollment']);
 Route::post('biometric/device/{device}/enroll-status', [BiometricDeviceController::class, 'updateEnrollmentStatus']);
 
 // ---------- Protected routes (frontend + admin) ----------
 Route::middleware(['auth:sanctum'])->group(function () {
 
-    // ---------- Dashboard & report endpoints ----------
-    Route::get('dashboard/analytics', [DashboardController::class, 'analytics']);
-    Route::get('dashboard/payments-summary', [DashboardController::class, 'paymentSummary']);
-    Route::get('dashboard/inventory-summary', [DashboardController::class, 'inventorySummary']);
-    Route::get('dashboard/invoices-count-summary', [DashboardController::class, 'invoiceCountSummary']);
-    Route::get('dashboard/invoices-amount-summary', [DashboardController::class, 'invoiceAmountSummary']);
-    Route::get('dashboard/business-health', [DashboardController::class, 'businessHealth']);
-    Route::get('dashboard/forecast', [DashboardController::class, 'forecast']);
-    Route::get('dashboard/risks', [DashboardController::class, 'risks']);
-    Route::get('dashboard/anomalies', [DashboardController::class, 'anomalies']);
-    Route::get('dashboard/rankings', [DashboardController::class, 'rankings']);
-    Route::get('dashboard/hero-product', [DashboardController::class, 'heroProduct']);
-    Route::get('dashboard/hero-customer', [DashboardController::class, 'heroCustomer']);
-    Route::get('dashboard/district-sales', [DashboardController::class, 'districtSales']);
-    Route::get('reports/top-selling-products', [DashboardController::class, 'topSellingProducts']);
-    Route::get('reports/least-selling-products', [DashboardController::class, 'leastSellingProducts']);
-    Route::get('dashboard/low-stock', [DashboardController::class, 'lowStockProducts']);
+    // ---------- Dashboard & Report endpoints ----------
+    Route::prefix('dashboard')->group(function () {
+        Route::get('analytics', [DashboardController::class, 'analytics']);
+        Route::get('payments-summary', [DashboardController::class, 'paymentSummary']);
+        Route::get('inventory-summary', [DashboardController::class, 'inventorySummary']);
+        Route::get('invoices-count-summary', [DashboardController::class, 'invoiceCountSummary']);
+        Route::get('invoices-amount-summary', [DashboardController::class, 'invoiceAmountSummary']);
+        Route::get('business-health', [DashboardController::class, 'businessHealth']);
+        Route::get('forecast', [DashboardController::class, 'forecast']);
+        Route::get('risks', [DashboardController::class, 'risks']);
+        Route::get('anomalies', [DashboardController::class, 'anomalies']);
+        Route::get('rankings', [DashboardController::class, 'rankings']);
+        Route::get('hero-product', [DashboardController::class, 'heroProduct']);
+        Route::get('hero-customer', [DashboardController::class, 'heroCustomer']);
+        Route::get('district-sales', [DashboardController::class, 'districtSales']);
+        Route::get('new-vs-existing-customers', [DashboardController::class, 'newVsExistingCustomers']);
+        Route::get('profit', [DashboardController::class, 'profit']);
+        Route::get('profit-summary', [DashboardController::class, 'profitSummary']);
+        Route::get('low-stock', [DashboardController::class, 'lowStockProducts']);
+        Route::get('top-customers', [DashboardController::class, 'topCustomers']);
+        Route::get('top-vendors', [DashboardController::class, 'topVendors']);
+        Route::get('purchase-due', [DashboardController::class, 'purchaseDueInvoices']);
+        Route::get('login-activity', [DashboardController::class, 'loginActivity']);
+    });
+
+    // Reports
+    Route::prefix('reports')->group(function () {
+        Route::get('all', [DashboardController::class, 'allReports']);
+        Route::get('top-selling-products', [DashboardController::class, 'topSellingProducts']);
+        Route::get('least-selling-products', [DashboardController::class, 'leastSellingProducts']);
+    });
+
+    // Alternative dashboard endpoints
     Route::get('products/low-stock', [DashboardController::class, 'lowStockProducts']);
-    Route::get('dashboard/top-customers', [DashboardController::class, 'topCustomers']);
     Route::get('customers/top', [DashboardController::class, 'topCustomers']);
-    Route::get('dashboard/top-vendors', [DashboardController::class, 'topVendors']);
     Route::get('vendors/top', [DashboardController::class, 'topVendors']);
-    Route::get('dashboard/purchase-due', [DashboardController::class, 'purchaseDueInvoices']);
     Route::get('purchases/due', [DashboardController::class, 'purchaseDueInvoices']);
-    Route::get('dashboard/login-activity', [DashboardController::class, 'loginActivity']);
     Route::get('admin/login-activity', [DashboardController::class, 'loginActivity']);
 
     // Core business resources
@@ -96,9 +120,13 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('orders', OrderController::class);
     Route::apiResource('payments', PaymentController::class);
     Route::apiResource('dealers', DealerController::class);
+
+    // Invoice routes - IMPORTANT: next-number MUST be before apiResource
+    Route::get('invoices/next-number', [InvoiceController::class, 'nextNumber']);
+    Route::post('invoices/from-order', [InvoiceController::class, 'fromOrder']);
     Route::apiResource('invoices', InvoiceController::class);
+
     Route::apiResource('purchase-invoices', PurchaseInvoiceController::class);
-    // Additional purchase invoice routes
     Route::post('purchase-invoices/{purchase_invoice}/payments', [PurchaseInvoiceController::class, 'addPayment']);
     Route::apiResource('employees', EmployeeController::class);
 
@@ -127,7 +155,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('sales/returns', [SalesController::class, 'storeReturn']);
     Route::get('sales/reports', [SalesController::class, 'reports']);
 
-    // Purchases (legacy endpoints still used by some frontend parts)
+    // Purchases
     Route::get('purchases/summary', [SalesController::class, 'purchaseSummary']);
     Route::get('purchases/orders', [SalesController::class, 'purchaseOrders']);
     Route::post('purchases/orders', [SalesController::class, 'storePurchaseOrder']);
@@ -154,35 +182,30 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::post('/', [PayrollController::class, 'store']);
         Route::post('/run', [PayrollController::class, 'runPayroll']);
 
-        // Advances
         Route::get('/advances', [PayrollController::class, 'advances']);
         Route::post('/advances', [PayrollController::class, 'storeAdvance']);
         Route::get('/advances/{advance}', [PayrollController::class, 'showAdvance']);
         Route::match(['put', 'patch'], '/advances/{advance}', [PayrollController::class, 'updateAdvance']);
         Route::delete('/advances/{advance}', [PayrollController::class, 'destroyAdvance']);
 
-        // Leaves
         Route::get('/leaves', [PayrollController::class, 'leaves']);
         Route::post('/leaves', [PayrollController::class, 'storeLeave']);
         Route::get('/leaves/{leave}', [PayrollController::class, 'showLeave']);
         Route::match(['put', 'patch'], '/leaves/{leave}', [PayrollController::class, 'updateLeave']);
         Route::delete('/leaves/{leave}', [PayrollController::class, 'destroyLeave']);
 
-        // Shifts
         Route::get('/shifts', [PayrollController::class, 'shifts']);
         Route::post('/shifts', [PayrollController::class, 'storeShift']);
         Route::get('/shifts/{shift}', [PayrollController::class, 'showShift']);
         Route::match(['put', 'patch'], '/shifts/{shift}', [PayrollController::class, 'updateShift']);
         Route::delete('/shifts/{shift}', [PayrollController::class, 'destroyShift']);
 
-        // Loans
         Route::get('/loans', [PayrollController::class, 'loans']);
         Route::post('/loans', [PayrollController::class, 'storeLoan']);
         Route::get('/loans/{loan}', [PayrollController::class, 'showLoan']);
         Route::match(['put', 'patch'], '/loans/{loan}', [PayrollController::class, 'updateLoan']);
         Route::delete('/loans/{loan}', [PayrollController::class, 'destroyLoan']);
 
-        // Payslips
         Route::get('/payslips', [PayrollController::class, 'payslips']);
         Route::post('/payslips', [PayrollController::class, 'storePayslip']);
         Route::get('/payslips/{payslip}', [PayrollController::class, 'showPayslip']);
@@ -202,37 +225,53 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::post('biometric/templates/download', [FingerprintController::class, 'downloadAll']);
     Route::delete('biometric/templates/{id}', [FingerprintController::class, 'destroy']);
 
-    // Live scan data
     Route::get('biometric/scans', [BiometricScanController::class, 'liveFeed']);
     Route::get('biometric/offline/pending', [BiometricScanController::class, 'pendingQueue']);
     Route::get('biometric/unknown-fingers', [BiometricScanController::class, 'unknownFingers']);
 
-    // Biometric device control
     Route::post('biometric/device/{device}/sync', [BiometricDeviceController::class, 'sync']);
     Route::post('biometric/device/{device}/settings', [BiometricDeviceController::class, 'updateSettings']);
     Route::post('biometric/device/{device}/restart', [BiometricDeviceController::class, 'restart']);
     Route::put('biometric/device/{device}', [BiometricDeviceController::class, 'update']);
     Route::delete('biometric/device/{device}', [BiometricDeviceController::class, 'destroy']);
 
-    // File uploads, roles, settings, backups, etc.
+    // File uploads
     Route::get('uploads', [UploadController::class, 'index']);
     Route::post('uploads', [UploadController::class, 'store']);
     Route::post('uploads/folders', [UploadController::class, 'createFolder']);
     Route::post('uploads/delete', [UploadController::class, 'destroy']);
+    
+    // User Access Management
     Route::get('roles', [UserAccessController::class, 'roles']);
     Route::post('roles', [UserAccessController::class, 'storeRole']);
-    Route::match(['put', 'patch'], 'roles/{roleId}', [UserAccessController::class, 'updateRole']);
+    Route::put('roles/{roleId}', [UserAccessController::class, 'updateRole']);
     Route::delete('roles/{roleId}', [UserAccessController::class, 'destroyRole']);
     Route::get('permissions', [UserAccessController::class, 'permissions']);
     Route::post('permissions', [UserAccessController::class, 'storePermission']);
     Route::get('users', [UserAccessController::class, 'users']);
     Route::post('users', [UserAccessController::class, 'storeUser']);
     Route::post('users/{userId}/roles', [UserAccessController::class, 'assignRolesToUser']);
+
+    // Settings routes
     Route::get('settings', [SettingsController::class, 'index']);
-    Route::get('settings/{key}', [SettingsController::class, 'show']);
     Route::post('settings', [SettingsController::class, 'store']);
-    Route::put('settings/{key}', [SettingsController::class, 'update']);
+    Route::get('settings/export', [SettingsController::class, 'export']);
+    Route::post('settings/import', [SettingsController::class, 'import']);
+    Route::post('settings/bulk', [SettingsController::class, 'bulkUpdate']);
     Route::get('settings/quickstart', [SettingsController::class, 'quickstart']);
+    Route::get('settings/cache/clear', [SettingsController::class, 'clearCache']);
+    Route::get('settings/{key}', [SettingsController::class, 'show']);
+    Route::put('settings/{key}', [SettingsController::class, 'update']);
+    Route::delete('settings/{key}', [SettingsController::class, 'destroy']);
+
+    // API Token management routes
+    Route::prefix('api-tokens')->group(function () {
+        Route::get('/', [SettingsController::class, 'listTokens']);
+        Route::post('/generate', [SettingsController::class, 'generateToken']);
+        Route::delete('/{id}', [SettingsController::class, 'revokeToken']);
+        Route::delete('/', [SettingsController::class, 'revokeAllTokens']);
+    });
+
     Route::get('health/cron', [HealthController::class, 'cron']);
     Route::get('health/backups', [BackupController::class, 'index']);
     Route::post('health/backup', [BackupController::class, 'store']);
@@ -254,15 +293,24 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('inbox', [MarketingController::class, 'inbox']);
     });
 
+    // Social OAuth
+    Route::get('/auth/{provider}/redirect-url', [SocialAuthController::class, 'redirectUrl']);
+    Route::get('/auth/{provider}/redirect', [SocialAuthController::class, 'redirect']);
+    Route::post('/auth/{provider}/disconnect', [SocialAuthController::class, 'disconnect']);
+
+    // Unified Inbox
+    Route::get('/inbox', [InboxController::class, 'index']);
+    Route::post('/inbox/{message}/read', [InboxController::class, 'markAsRead']);
+    Route::post('/inbox/email/send', [InboxController::class, 'sendEmail']);
+    Route::post('/inbox/whatsapp/send', [InboxController::class, 'sendWhatsApp']);
+
     // AI Assistant
     Route::get('ai/assistant/insights', [\App\Http\Controllers\Api\AiController::class, 'insights']);
     Route::post('ai/assistant/chat', [\App\Http\Controllers\Api\AiController::class, 'chat']);
-    // Dashboard AI
     Route::post('dashboard/ai/ask', [\App\Http\Controllers\Api\DashboardAiController::class, 'ask']);
     Route::post('dashboard/ai/business-health', [\App\Http\Controllers\Api\DashboardAiController::class, 'businessHealth']);
     Route::post('dashboard/ai/forecast', [\App\Http\Controllers\Api\DashboardAiController::class, 'forecast']);
     Route::post('dashboard/ai/generic', [\App\Http\Controllers\Api\DashboardAiController::class, 'genericAnalysis']);
-    // Provider management (admin)
     Route::get('ai/providers', [\App\Http\Controllers\Api\AiProviderController::class, 'index']);
     Route::post('ai/providers', [\App\Http\Controllers\Api\AiProviderController::class, 'store']);
     Route::put('ai/providers/{provider}', [\App\Http\Controllers\Api\AiProviderController::class, 'update']);
@@ -277,10 +325,21 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('customers/template', [CustomerController::class, 'template']);
     Route::post('customers/import', [CustomerController::class, 'import']);
 
-    Route::apiResource('settings', SettingsController::class);
-    // Additional endpoints if needed
-    Route::post('settings/bulk-update', [SettingsController::class, 'bulkUpdate']);
-    Route::get('settings/export', [SettingsController::class, 'export']);
-    Route::post('settings/import', [SettingsController::class, 'import']);
-    Route::post('settings/cache/clear', [SettingsController::class, 'clearCache']);
+    // Email webhook
+    Route::post('/webhooks/email', [EmailWebhookController::class, 'handle']);
+});
+
+// ---------- Public OAuth callback ----------
+Route::get('/auth/{provider}/callback', [SocialAuthController::class, 'callback']);
+
+// ---------- Public webhooks ----------
+Route::post('/webhooks/whatsapp', [WhatsAppWebhookController::class, 'handle']);
+Route::get('marketing/gbp-locations', [MarketingController::class, 'gbpLocations']);
+// In routes/api.php, inside auth:sanctum middleware group:
+
+Route::prefix('gemini')->group(function () {
+    Route::post('voice', [GeminiVoiceController::class, 'processVoice']);
+    Route::post('chat', [GeminiVoiceController::class, 'chat']);
+    Route::get('insights', [GeminiVoiceController::class, 'dashboardInsights']);
+    Route::get('test', [GeminiVoiceController::class, 'testConnection']);
 });

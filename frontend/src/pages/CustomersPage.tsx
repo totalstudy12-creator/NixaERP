@@ -1,9 +1,11 @@
 import { useEffect, useState, useCallback, useMemo, lazy, Suspense, memo, useRef, DragEvent } from 'react';
+import { createPortal } from 'react-dom';
 import {
   FiPlus, FiRefreshCw, FiTrash2, FiEdit, FiDownload, FiUpload,
   FiUsers, FiShoppingBag, FiTruck, FiPackage, FiAlertCircle,
   FiFilter, FiSearch, FiX, FiBriefcase, FiMapPin,
-  FiFile, FiCheck, FiAlertTriangle, FiChevronDown, FiEye, FiEyeOff
+  FiFile, FiCheck, FiAlertTriangle, FiChevronDown, FiEye, FiEyeOff,
+  FiMoreVertical
 } from 'react-icons/fi';
 
 // ---------- Lazy loaded heavy components ----------
@@ -68,7 +70,7 @@ function useApiCache<T>(
 }
 
 // ---------- Types ----------
-type CustomerType = 'customer' | 'dealer' | 'distributor';   // vendor removed
+type CustomerType = 'customer' | 'dealer' | 'distributor';
 type DuplicateAction = 'skip' | 'update' | 'stop';
 
 interface Company { id: number; name: string; }
@@ -223,6 +225,98 @@ const StatCard = memo(({ icon: Icon, label, value, tone }: {
         <p className="text-2xl font-bold text-slate-900">{value}</p>
       </div>
     </div>
+  );
+});
+
+// ---------- Action Dropdown Component (Portal-based) ----------
+const ActionDropdown = memo(({ customer, onEdit, onDelete }: {
+  customer: Customer;
+  onEdit: (customer: Customer) => void;
+  onDelete: (customer: Customer) => void;
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [position, setPosition] = useState({ top: 0, right: 0 });
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        dropdownRef.current && 
+        !dropdownRef.current.contains(event.target as Node) &&
+        buttonRef.current &&
+        !buttonRef.current.contains(event.target as Node)
+      ) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const handleToggle = () => {
+    if (buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      setPosition({
+        top: rect.bottom + 4,
+        right: window.innerWidth - rect.right,
+      });
+    }
+    setIsOpen(!isOpen);
+  };
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          handleToggle();
+        }}
+        className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 transition"
+        title="Actions"
+      >
+        <FiMoreVertical size={16} />
+      </button>
+      
+      {isOpen && createPortal(
+        <div
+          ref={dropdownRef}
+          style={{
+            position: 'fixed',
+            top: position.top,
+            right: position.right,
+            zIndex: 9999,
+          }}
+          className="w-40 bg-white rounded-xl shadow-2xl border border-slate-200 py-1"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setIsOpen(false);
+              onEdit(customer);
+            }}
+            className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition"
+          >
+            <FiEdit size={14} className="text-blue-500" /> Edit
+          </button>
+          <div className="border-t border-slate-100 my-1"></div>
+          <button
+            type="button"
+            onClick={() => {
+              setIsOpen(false);
+              onDelete(customer);
+            }}
+            className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-rose-600 hover:bg-rose-50 transition"
+          >
+            <FiTrash2 size={14} /> Delete
+          </button>
+        </div>,
+        document.body
+      )}
+    </>
   );
 });
 
@@ -387,7 +481,7 @@ export function CustomersPage() {
     return branches || [];
   }, [filterCompany, branches]);
 
-  // ---------- GST Auto‑fill ----------
+  // ---------- GST Auto-fill ----------
   const { lookupGst, lookingUp } = useGstLookup();
 
   const handleGstChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -409,7 +503,7 @@ export function CustomersPage() {
         registration_type: data.registration_type || prev.registration_type,
         pan: data.pan || prev.pan,
       }));
-      showSuccess('GSTIN details auto‑filled');
+      showSuccess('GSTIN details auto-filled');
     } else {
       showError('Unable to fetch GSTIN details. Check the number and try again.');
     }
@@ -614,9 +708,9 @@ export function CustomersPage() {
       showError('Export failed', 'No customers to export.');
       return;
     }
-    const headers = ['Name', 'Type', 'Email', 'Contact No', 'Company', 'Branch', 'GST', 'City', 'State', 'Outstanding'];
+    const headers = ['ID', 'Name', 'Type', 'Email', 'Contact No', 'Company', 'Branch', 'GST', 'City', 'State', 'Outstanding'];
     const rows = filteredCustomers.map(c => [
-      c.name, c.type, c.email, c.contact_no,
+      c.id, c.name, c.type, c.email, c.contact_no,
       c.company?.name || '', c.branch?.name || '',
       c.gst_number || '', c.billing_city || '', c.billing_state || '',
       c.outstanding_amount ?? 0
@@ -805,6 +899,16 @@ export function CustomersPage() {
   // ---------- Table Columns ----------
   const columns = useMemo(() => [
     {
+      name: 'ID',
+      selector: (row: Customer) => row.id,
+      sortable: true,
+      cell: (row: Customer) => (
+        <span className="text-sm text-slate-500 font-mono">#{row.id}</span>
+      ),
+      width: '70px',
+      center: true,
+    },
+    {
       name: 'Name',
       selector: (row: Customer) => row.name,
       sortable: true,
@@ -879,20 +983,16 @@ export function CustomersPage() {
       width: '140px',
     },
     {
-      name: 'Branch',
-      selector: (row: Customer) => row.branch?.name || '-',
-      cell: (row: Customer) => <span className="text-sm">{row.branch?.name || '-'}</span>,
-      width: '140px',
-    },
-    {
       name: 'Actions',
       cell: (row: Customer) => (
-        <div className="flex items-center gap-2">
-          <button onClick={() => handleEdit(row)} className="p-1.5 rounded-lg text-blue-600 hover:bg-blue-50" title="Edit"><FiEdit size={16} /></button>
-          <button onClick={() => handleDelete(row)} className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50" title="Delete"><FiTrash2 size={16} /></button>
-        </div>
+        <ActionDropdown
+          customer={row}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+        />
       ),
-      width: '100px',
+      width: '70px',
+      center: true,
     },
   ], [handleEdit, handleDelete, outstandingVisibleIds, toggleOutstandingVisibility]);
 
@@ -1039,7 +1139,7 @@ export function CustomersPage() {
         </Suspense>
       </div>
 
-      {/* Offcanvas – Full Form with all features */}
+      {/* Offcanvas – Full Form */}
       {isPanelOpen && (
         <Suspense fallback={
           <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
@@ -1412,7 +1512,7 @@ export function CustomersPage() {
         </div>
       )}
 
-      {/* ── IMPORT OFFCANVAS ── */}
+      {/* Import Offcanvas */}
       {isImportOpen && (
         <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
           <Offcanvas

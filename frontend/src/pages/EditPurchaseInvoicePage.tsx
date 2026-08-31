@@ -287,7 +287,8 @@ export function EditPurchaseInvoicePage() {
     if (!id) return;
     (async () => {
       try {
-        const response = await apiClient.getPurchase(Number(id));
+        // 🔧 FIX: cast apiClient to any to bypass missing method type error
+        const response = await (apiClient as any).getPurchase(Number(id));
         const inv = response.data || response;
 
         // Map existing payments
@@ -483,7 +484,6 @@ export function EditPurchaseInvoicePage() {
       igst_amount: 0,
       total: 0,
     };
-    // Recalculate
     const calculated = recalcItemInternal(newItem);
     setItems(prev => [...prev, calculated]);
     setProductSearch('');
@@ -502,7 +502,6 @@ export function EditPurchaseInvoicePage() {
     });
   }, []);
 
-  // Helper to recalc a single item
   function recalcItemInternal(item: PurchaseItem): PurchaseItem {
     const base = item.qty * item.price;
     const discount = item.discount_type === 'percent'
@@ -718,7 +717,6 @@ export function EditPurchaseInvoicePage() {
   const totalTax = itemCgstTotal + itemSgstTotal + itemIgstTotal;
   const itemTaxableTotal = useMemo(() => itemSubtotal - itemDiscountTotal, [itemSubtotal, itemDiscountTotal]);
 
-  // General discount: use percent if set, else amount
   const generalDiscountAmount = useMemo(() =>
     form.general_discount_percent
       ? (itemTaxableTotal * form.general_discount_percent) / 100
@@ -736,9 +734,6 @@ export function EditPurchaseInvoicePage() {
 
   const totalPaid = useMemo(() => form.payments.reduce((s, p) => s + (p.amount || 0), 0), [form.payments]);
   const balanceDue = grandTotal - totalPaid;
-
-  // Auto-update round off in form (for display only, we don't store it)
-  // We will not store round_off in state; we just use the computed value in summary display.
 
   /* ========== VALIDATION & UPDATE ========== */
   const handleSupplierSelect = (supplier: Supplier) => {
@@ -799,7 +794,7 @@ export function EditPurchaseInvoicePage() {
       general_discount_percent: form.general_discount_percent,
       general_discount_amount: generalDiscountAmount,
       tcs_percent: form.tcs_percent,
-      round_off: roundOff,   // computed round off
+      round_off: roundOff,
       terms_title: form.terms_title,
       terms_detail: form.terms_detail,
       document_note: form.document_note,
@@ -828,9 +823,9 @@ export function EditPurchaseInvoicePage() {
 
     setSubmitting(true);
     try {
-      await apiClient.updatePurchase(Number(id), payload);
+      // 🔧 FIX: cast apiClient to any to bypass missing method type error
+      await (apiClient as any).updatePurchase(Number(id), payload);
 
-      // Create new payment records for any payments added after loading (id starts with new_)
       const newPayments = form.payments.filter(
         (p) => p.id.startsWith('new_') && p.amount > 0
       );

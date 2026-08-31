@@ -142,7 +142,7 @@ class PurchaseInvoiceController extends Controller
                     }
                 }
             }
-
+ 
             // Record payment if amount > 0
             if (!empty($validated['payment_amount']) && $validated['payment_amount'] > 0) {
                 $purchase->payments()->create([
@@ -150,8 +150,9 @@ class PurchaseInvoiceController extends Controller
                     'amount'           => $validated['payment_amount'],
                     'payment_method'   => $validated['payment_method'],
                     'transaction_date' => $validated['payment_date'] ?? now(),
-                    'reference_no'     => $validated['payment_reference'] ?? null,   // ← saved here
+                    'reference_no'     => $validated['payment_reference'] ?? 'Purchase',   // ← saved here
                     'status'           => 'completed',
+                    'payment_direction'=> 'outward',
                 ]);
                 $totalPaid = $purchase->payments()->sum('amount');
                 $purchase->update([

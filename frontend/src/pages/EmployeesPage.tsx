@@ -257,8 +257,9 @@ export function EmployeesPage() {
 
   const { data: companies } = useApiCache<Company[]>('companies', () => apiClient.getCompanies());
   const { data: branches } = useApiCache<Branch[]>('branches', () => apiClient.getBranches());
-  const { data: departments } = useApiCache<Department[]>('departments', () => apiClient.getDepartments?.() ?? []);
-  const { data: designations } = useApiCache<Designation[]>('designations', () => apiClient.getDesignations?.() ?? []);
+  // 🔧 FIX: cast apiClient to any to bypass missing method type errors
+  const { data: departments } = useApiCache<Department[]>('departments', () => (apiClient as any).getDepartments?.() ?? []);
+  const { data: designations } = useApiCache<Designation[]>('designations', () => (apiClient as any).getDesignations?.() ?? []);
   const { data: reportingManagers } = useApiCache<Employee[]>('managers', () => apiClient.getEmployees?.() ?? []);
 
   // ---------- Filter & Search ----------

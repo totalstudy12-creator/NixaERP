@@ -35,29 +35,45 @@ return [
         ],
     ],
 
-];
-
-return [
+    
 
     /*
     |--------------------------------------------------------------------------
-    | Other services
+    | Socialite Providers
     |--------------------------------------------------------------------------
     */
 
+    'facebook' => [
+        'client_id' => env('FACEBOOK_CLIENT_ID'),
+        'client_secret' => env('FACEBOOK_CLIENT_SECRET'),
+        'redirect' => env('FACEBOOK_REDIRECT_URI'),
+    ],
+
+    'twitter' => [
+        'client_id' => env('TWITTER_CLIENT_ID'),
+        'client_secret' => env('TWITTER_CLIENT_SECRET'),
+        'redirect' => env('TWITTER_REDIRECT_URI'),
+    ],
+
+    'instagram' => [
+        'client_id' => env('INSTAGRAM_CLIENT_ID'),
+        'client_secret' => env('INSTAGRAM_CLIENT_SECRET'),
+        'redirect' => env('INSTAGRAM_REDIRECT_URI'),
+    ],
+
+    'linkedin' => [
+        'client_id' => env('LINKEDIN_CLIENT_ID'),
+        'client_secret' => env('LINKEDIN_CLIENT_SECRET'),
+        'redirect' => env('LINKEDIN_REDIRECT_URI'),
+    ],
+
+    'google' => [
+        'client_id' => env('GOOGLE_CLIENT_ID'),
+        'client_secret' => env('GOOGLE_CLIENT_SECRET'),
+        'redirect' => env('GOOGLE_REDIRECT_URI'),
+    ],
     'gemini' => [
-
-        'api_key' => env('GEMINI_API_KEY'),
-
-        'model' => env(
-            'GEMINI_MODEL',
-            'gemini-2.5-flash'
-        ),
-
-        'url' => env(
-            'GEMINI_API_URL',
-            'https://generativelanguage.googleapis.com/v1beta'
-        ),
-
+    'api_key' => env('GEMINI_API_KEY'),
+    'model' => env('GEMINI_MODEL', 'gemini-1.5-flash'),
     ],
 ];

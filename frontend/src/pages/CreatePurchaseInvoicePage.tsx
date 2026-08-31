@@ -8,7 +8,7 @@ import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
-
+ 
 const Offcanvas = lazy(() => import('../components/Offcanvas').then(m => ({ default: m.Offcanvas })));
 
 // ── Types ──────────────────────────────────────────

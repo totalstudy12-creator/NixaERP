@@ -2,7 +2,8 @@
 import { useEffect, useState, useCallback, useMemo, lazy, Suspense, useRef } from 'react';
 import {
   FiPlus, FiTrash2, FiSearch, FiDollarSign, FiFileText, FiCalendar, FiUser, FiBox,
-  FiX, FiSave, FiPrinter, FiCreditCard, FiGlobe, FiLoader, FiPackage, FiUsers
+  FiX, FiSave, FiPrinter, FiCreditCard, FiGlobe, FiLoader, FiPackage, FiUsers,
+  FiRefreshCw
 } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
@@ -92,7 +93,6 @@ interface InvoiceFormData {
   payments: PaymentEntry[];
 }
 
-// Extended customer creation interface (matching CustomersPage)
 interface CustomerFormData {
   name: string;
   type: 'customer' | 'dealer' | 'distributor';
@@ -305,10 +305,38 @@ export function CreateInvoicePage() {
   const [availableBranches, setAvailableBranches] = useState<Branch[]>([]);
   const [branchLoading, setBranchLoading] = useState(false);
 
-  const generateInvoicePlaceholder = useCallback(() => {
-    const y = new Date().getFullYear();
-    return `INV-${y}-${Math.floor(1000 + Math.random() * 9000)}`;
+  // ── Generate Invoice Number from DB ──
+  const [invoiceNumberLoading, setInvoiceNumberLoading] = useState(true);
+  const [invoiceNumberError, setInvoiceNumberError] = useState<string | null>(null);
+
+  const generateInvoiceNumber = useCallback(async () => {
+    setInvoiceNumberLoading(true);
+    setInvoiceNumberError(null);
+    try {
+      const res = await apiClient.getNextInvoiceNumber();
+      const nextNumber = res?.next_invoice_no || res?.data?.next_invoice_no;
+      
+      if (nextNumber) {
+        setForm(prev => ({ ...prev, invoice_no: nextNumber }));
+      } else {
+        const year = new Date().getFullYear();
+        const fallbackNo = `INV-${year}-${String(Date.now()).slice(-6)}`;
+        setForm(prev => ({ ...prev, invoice_no: fallbackNo }));
+      }
+    } catch (err: any) {
+      const year = new Date().getFullYear();
+      const fallbackNo = `INV-${year}-${String(Date.now()).slice(-6)}`;
+      setForm(prev => ({ ...prev, invoice_no: fallbackNo }));
+      setInvoiceNumberError('Could not fetch invoice number. Using temporary number.');
+    } finally {
+      setInvoiceNumberLoading(false);
+    }
   }, []);
+
+  // Generate invoice number on mount
+  useEffect(() => {
+    generateInvoiceNumber();
+  }, [generateInvoiceNumber]);
 
   const [items, setItems] = useState<InvoiceItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -324,7 +352,7 @@ export function CreateInvoicePage() {
     contact_person: '', contact_no: '',
     gstin_pan: '',
     invoice_type: 'tax_invoice',
-    invoice_no: generateInvoicePlaceholder(),
+    invoice_no: '',
     invoice_date: new Date().toISOString().split('T')[0],
     challan_no: '', challan_date: '',
     po_no: '', po_date: '',
@@ -346,7 +374,7 @@ export function CreateInvoicePage() {
   const [productSearch, setProductSearch] = useState('');
   const [customerSearch, setCustomerSearch] = useState('');
 
-  // ── Customer creation offcanvas state (comprehensive) ──
+  // ── Customer creation offcanvas state ──
   const [showCustomerOffcanvas, setShowCustomerOffcanvas] = useState(false);
   const [newCustomer, setNewCustomer] = useState<CustomerFormData>({
     name: '',
@@ -551,9 +579,8 @@ export function CreateInvoicePage() {
     }
   }, [form.customer_id, customers]);
 
-  // ── Create Customer (comprehensive) ──
+  // ── Create Customer ──
   const createCustomer = async () => {
-    // Validation
     const errors: Record<string, boolean> = {};
     if (!newCustomer.name.trim()) errors.name = true;
     if (!newCustomer.company_id) errors.company_id = true;
@@ -585,7 +612,6 @@ export function CreateInvoicePage() {
       refreshCustomers();
       setForm(prev => ({ ...prev, customer_id: created.id }));
       setShowCustomerOffcanvas(false);
-      // Reset form
       setNewCustomer({
         name: '', type: 'customer', company_type: '', email: '', contact_no: '', contact_person: '',
         gst_number: '', registration_type: '', pan: '',
@@ -1045,7 +1071,30 @@ export function CreateInvoicePage() {
                 </div>
                 <div>
                   <label className="block text-sm font-medium mb-1">Invoice No. *</label>
-                  <input type="text" value={form.invoice_no} onChange={e => setForm(prev => ({ ...prev, invoice_no: e.target.value }))} className={inputClass} />
+                  <div className="relative">
+                    <input 
+                      type="text" 
+                      value={form.invoice_no} 
+                      onChange={e => setForm(prev => ({ ...prev, invoice_no: e.target.value }))} 
+                      className={`${inputClass} ${invoiceNumberLoading ? 'pr-10' : ''}`}
+                      placeholder="Auto-generated"
+                    />
+                    {invoiceNumberLoading && (
+                      <div className="absolute right-3 top-2.5">
+                        <FiLoader className="animate-spin text-gray-400" size={16} />
+                      </div>
+                    )}
+                  </div>
+                  {invoiceNumberError && (
+                    <div className="text-xs text-amber-600 mt-1">{invoiceNumberError}</div>
+                  )}
+                  <button 
+                    type="button" 
+                    onClick={generateInvoiceNumber}
+                    className="text-xs text-blue-600 hover:underline mt-1"
+                  >
+                    <FiRefreshCw className="inline mr-1" size={12} /> Regenerate
+                  </button>
                 </div>
                 <div>
                   <label className="block text-sm font-medium mb-1">Invoice Date *</label>
@@ -1369,7 +1418,6 @@ export function CreateInvoicePage() {
                         <label className="block text-xs text-gray-500">Date</label>
                         <input type="date" value={pay.transaction_date} onChange={e => updatePayment(pay.id, 'transaction_date', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
                       </div>
-                    
                       <div className="col-span-2">
                         <label className="block text-xs text-gray-500">Remarks</label>
                         <input type="text" value={pay.remarks} onChange={e => updatePayment(pay.id, 'remarks', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
@@ -1399,7 +1447,7 @@ export function CreateInvoicePage() {
         <button onClick={() => handleSubmit('save_print')} disabled={submitting} className="px-5 py-2.5 rounded-xl bg-cyan-500 text-white hover:bg-cyan-600 text-sm flex items-center gap-2"><FiPrinter size={16} /> Print Invoice</button>
       </div>
 
-      {/* Comprehensive Customer Creation Offcanvas (same as CustomersPage) */}
+      {/* Customer Offcanvas */}
       {showCustomerOffcanvas && (
         <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
           <Offcanvas
@@ -1418,9 +1466,8 @@ export function CreateInvoicePage() {
             }
           >
             <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
-              {/* Customer / Vendor Detail */}
               <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Customer / Vendor Detail</legend>
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Customer Detail</legend>
                 <div className="mt-3 space-y-4">
                   <div>
                     <label className="block text-sm font-medium mb-1">Type</label>
@@ -1444,11 +1491,7 @@ export function CreateInvoicePage() {
                     </div>
                     <div>
                       <label className="block text-sm font-medium mb-1">Branch</label>
-                      <select
-                        value={newCustomer.branch_id as string}
-                        onChange={e => setNewCustomer(prev => ({ ...prev, branch_id: e.target.value }))}
-                        className={inputClass}
-                      >
+                      <select value={newCustomer.branch_id as string} onChange={e => setNewCustomer(prev => ({ ...prev, branch_id: e.target.value }))} className={inputClass}>
                         <option value="">Select Branch</option>
                         {availableBranches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                       </select>
@@ -1457,209 +1500,53 @@ export function CreateInvoicePage() {
                   <div>
                     <label className="block text-sm font-medium mb-1">GSTIN</label>
                     <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={newCustomer.gst_number}
-                        onChange={handleGstChange}
-                        className={inputClass}
-                        placeholder="Enter GSTIN"
-                      />
-                      <button
-                        type="button"
-                        onClick={handleGstAutoFill}
-                        disabled={lookingUpGst || !newCustomer.gst_number}
-                        className="rounded-lg bg-blue-500 px-4 py-2 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50 whitespace-nowrap"
-                      >
+                      <input type="text" value={newCustomer.gst_number} onChange={handleGstChange} className={inputClass} placeholder="Enter GSTIN" />
+                      <button type="button" onClick={handleGstAutoFill} disabled={lookingUpGst || !newCustomer.gst_number} className="rounded-lg bg-blue-500 px-4 py-2 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50 whitespace-nowrap">
                         {lookingUpGst ? 'Fetching...' : 'Auto Fill'}
                       </button>
                     </div>
                   </div>
                   <div>
                     <label className="block text-sm font-medium mb-1">Company Name *</label>
-                    <input
-                      type="text"
-                      value={newCustomer.name}
-                      onChange={e => setNewCustomer(prev => ({ ...prev, name: e.target.value }))}
-                      className={`${inputClass} ${customerFormErrors.name ? 'border-red-400 ring-2 ring-red-200' : ''}`}
-                      placeholder="Enter Company Name"
-                    />
+                    <input type="text" value={newCustomer.name} onChange={e => setNewCustomer(prev => ({ ...prev, name: e.target.value }))} className={`${inputClass} ${customerFormErrors.name ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter Company Name" />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Contact Person</label>
-                      <input type="text" value={newCustomer.contact_person} onChange={e => setNewCustomer(prev => ({ ...prev, contact_person: e.target.value }))} className={inputClass} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Contact No</label>
-                      <input
-                        type="tel"
-                        value={newCustomer.contact_no}
-                        onChange={e => { const val = e.target.value.replace(/\D/g, ''); setNewCustomer(prev => ({ ...prev, contact_no: val })); }}
-                        className={`${inputClass} ${customerFormErrors.contact_no ? 'border-red-400 ring-2 ring-red-200' : ''}`}
-                        placeholder="Enter Contact No"
-                      />
-                    </div>
+                    <div><label className="block text-sm font-medium mb-1">Contact Person</label><input type="text" value={newCustomer.contact_person} onChange={e => setNewCustomer(prev => ({ ...prev, contact_person: e.target.value }))} className={inputClass} /></div>
+                    <div><label className="block text-sm font-medium mb-1">Contact No</label><input type="tel" value={newCustomer.contact_no} onChange={e => { const val = e.target.value.replace(/\D/g, ''); setNewCustomer(prev => ({ ...prev, contact_no: val })); }} className={`${inputClass} ${customerFormErrors.contact_no ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter Contact No" /></div>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Email</label>
-                    <input
-                      type="email"
-                      value={newCustomer.email}
-                      onChange={e => setNewCustomer(prev => ({ ...prev, email: e.target.value }))}
-                      className={`${inputClass} ${customerFormErrors.email ? 'border-red-400 ring-2 ring-red-200' : ''}`}
-                      placeholder="Enter Email"
-                    />
-                  </div>
+                  <div><label className="block text-sm font-medium mb-1">Email</label><input type="email" value={newCustomer.email} onChange={e => setNewCustomer(prev => ({ ...prev, email: e.target.value }))} className={`${inputClass} ${customerFormErrors.email ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter Email" /></div>
                 </div>
               </fieldset>
 
-              {/* Registration Details */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-indigo-500"></span> Registration Details</legend>
-                <div className="mt-3 grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Registration Type</label>
-                    <select value={newCustomer.registration_type} onChange={e => setNewCustomer(prev => ({ ...prev, registration_type: e.target.value }))} className={inputClass}>
-                      <option value="">Select</option>
-                      <option value="Registered">Registered</option>
-                      <option value="Unregistered">Unregistered</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium mb-1">PAN</label>
-                    <input type="text" value={newCustomer.pan} onChange={e => setNewCustomer(prev => ({ ...prev, pan: e.target.value }))} className={inputClass} />
-                  </div>
-                </div>
-              </fieldset>
-
-              {/* Billing Address */}
               <fieldset className="border rounded-lg p-4">
                 <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Billing Address</legend>
                 <div className="mt-3 space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Address</label>
-                    <textarea rows={2} value={newCustomer.billing_street} onChange={e => setNewCustomer(prev => ({ ...prev, billing_street: e.target.value }))} className={inputClass} placeholder="Enter Address" />
+                  <textarea rows={2} value={newCustomer.billing_street} onChange={e => setNewCustomer(prev => ({ ...prev, billing_street: e.target.value }))} className={inputClass} placeholder="Enter Address" />
+                  <div className="grid grid-cols-2 gap-4">
+                    <div><label className="block text-sm font-medium mb-1">City *</label><input type="text" value={newCustomer.billing_city} onChange={e => setNewCustomer(prev => ({ ...prev, billing_city: e.target.value }))} className={`${inputClass} ${customerFormErrors.billing_city ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter City" /></div>
+                    <div><label className="block text-sm font-medium mb-1">State</label><input type="text" value={newCustomer.billing_state} onChange={e => setNewCustomer(prev => ({ ...prev, billing_state: e.target.value }))} className={inputClass} /></div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium mb-1">City *</label>
-                      <input
-                        type="text"
-                        value={newCustomer.billing_city}
-                        onChange={e => setNewCustomer(prev => ({ ...prev, billing_city: e.target.value }))}
-                        className={`${inputClass} ${customerFormErrors.billing_city ? 'border-red-400 ring-2 ring-red-200' : ''}`}
-                        placeholder="Enter City"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-1">State</label>
-                      <input type="text" value={newCustomer.billing_state} onChange={e => setNewCustomer(prev => ({ ...prev, billing_state: e.target.value }))} className={inputClass} />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Country</label>
-                      <input type="text" value={newCustomer.billing_country} onChange={e => setNewCustomer(prev => ({ ...prev, billing_country: e.target.value }))} className={inputClass} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Pincode</label>
-                      <input type="text" value={newCustomer.billing_pincode} onChange={e => setNewCustomer(prev => ({ ...prev, billing_pincode: e.target.value }))} className={inputClass} />
-                    </div>
+                    <div><label className="block text-sm font-medium mb-1">Country</label><input type="text" value={newCustomer.billing_country} onChange={e => setNewCustomer(prev => ({ ...prev, billing_country: e.target.value }))} className={inputClass} /></div>
+                    <div><label className="block text-sm font-medium mb-1">Pincode</label><input type="text" value={newCustomer.billing_pincode} onChange={e => setNewCustomer(prev => ({ ...prev, billing_pincode: e.target.value }))} className={inputClass} /></div>
                   </div>
                 </div>
               </fieldset>
 
-              {/* Shipping Address */}
               <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-teal-500"></span> Shipping Address</legend>
-                <div className="mt-3">
-                  <label className="flex items-center gap-2 cursor-pointer mb-3">
-                    <input
-                      type="checkbox"
-                      checked={newCustomer.same_as_billing}
-                      onChange={(e) => handleSameAsBillingToggle(e.target.checked)}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-sm text-gray-600">Same as Billing Address</span>
-                  </label>
-                  {!newCustomer.same_as_billing && (
-                    <div className="space-y-4">
-                      <textarea rows={2} value={newCustomer.shipping_street} onChange={e => setNewCustomer(prev => ({ ...prev, shipping_street: e.target.value }))} className={inputClass} placeholder="Shipping Address" />
-                      <div className="grid grid-cols-2 gap-4">
-                        <input type="text" placeholder="City" value={newCustomer.shipping_city} onChange={e => setNewCustomer(prev => ({ ...prev, shipping_city: e.target.value }))} className={inputClass} />
-                        <input type="text" placeholder="State" value={newCustomer.shipping_state} onChange={e => setNewCustomer(prev => ({ ...prev, shipping_state: e.target.value }))} className={inputClass} />
-                      </div>
-                      <div className="grid grid-cols-2 gap-4">
-                        <input type="text" placeholder="Country" value={newCustomer.shipping_country} onChange={e => setNewCustomer(prev => ({ ...prev, shipping_country: e.target.value }))} className={inputClass} />
-                        <input type="text" placeholder="Pincode" value={newCustomer.shipping_pincode} onChange={e => setNewCustomer(prev => ({ ...prev, shipping_pincode: e.target.value }))} className={inputClass} />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </fieldset>
-
-              {/* Group & Balance */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-purple-500"></span> Group & Balance</legend>
-                <div className="mt-3 space-y-4">
-                  <div className="flex items-end gap-2">
-                    <div className="flex-1">
-                      <label className="block text-sm font-medium mb-1">Group</label>
-                      <select value={newCustomer.group_id as string} onChange={e => setNewCustomer(prev => ({ ...prev, group_id: e.target.value }))} className={inputClass}>
-                        <option value="">Select Group</option>
-                        {customerGroups?.map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
-                      </select>
-                    </div>
-                    <button type="button" onClick={() => setShowGroupModal(true)} className="mb-0.5 text-blue-600 text-sm hover:underline whitespace-nowrap">+ Add Group</button>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Opening Balance</label>
-                      <input type="number" value={newCustomer.opening_balance} onChange={e => setNewCustomer(prev => ({ ...prev, opening_balance: e.target.value }))} className={inputClass} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Outstanding Amount</label>
-                      <input type="number" value={newCustomer.outstanding_amount} onChange={e => setNewCustomer(prev => ({ ...prev, outstanding_amount: e.target.value }))} className={inputClass} />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Credit Limit</label>
-                      <input type="number" value={newCustomer.credit_limit} onChange={e => setNewCustomer(prev => ({ ...prev, credit_limit: e.target.value }))} className={inputClass} />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Due Days</label>
-                      <input type="number" value={newCustomer.due_days} onChange={e => setNewCustomer(prev => ({ ...prev, due_days: e.target.value }))} className={inputClass} />
-                    </div>
-                  </div>
-                </div>
-              </fieldset>
-
-              {/* Custom Fields */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span> Custom Fields</legend>
-                <div className="mt-3 grid grid-cols-3 gap-4">
-                  <div><label className="block text-sm font-medium mb-1">License No.</label><input type="text" value={newCustomer.license_no} onChange={e => setNewCustomer(prev => ({ ...prev, license_no: e.target.value }))} className={inputClass} /></div>
-                  <div><label className="block text-sm font-medium mb-1">Custom Field 1</label><input type="text" value={newCustomer.custom_field_1} onChange={e => setNewCustomer(prev => ({ ...prev, custom_field_1: e.target.value }))} className={inputClass} /></div>
-                  <div><label className="block text-sm font-medium mb-1">Custom Field 2</label><input type="text" value={newCustomer.custom_field_2} onChange={e => setNewCustomer(prev => ({ ...prev, custom_field_2: e.target.value }))} className={inputClass} /></div>
-                </div>
-              </fieldset>
-
-              {/* Additional Details */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Additional Details</legend>
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-purple-500"></span> Additional Details</legend>
                 <div className="mt-3 space-y-4">
                   <div className="grid grid-cols-2 gap-4">
-                    <div><label className="block text-sm font-medium mb-1">Fax No</label><input type="text" value={newCustomer.fax} onChange={e => setNewCustomer(prev => ({ ...prev, fax: e.target.value }))} className={inputClass} /></div>
-                    <div><label className="block text-sm font-medium mb-1">Website</label><input type="text" value={newCustomer.website} onChange={e => setNewCustomer(prev => ({ ...prev, website: e.target.value }))} className={inputClass} /></div>
+                    <div><label className="block text-sm font-medium mb-1">PAN</label><input type="text" value={newCustomer.pan} onChange={e => setNewCustomer(prev => ({ ...prev, pan: e.target.value }))} className={inputClass} /></div>
+                    <div><label className="block text-sm font-medium mb-1">Registration Type</label><select value={newCustomer.registration_type} onChange={e => setNewCustomer(prev => ({ ...prev, registration_type: e.target.value }))} className={inputClass}><option value="">Select</option><option value="Registered">Registered</option><option value="Unregistered">Unregistered</option></select></div>
                   </div>
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Note</label>
-                    <textarea rows={2} value={newCustomer.note} onChange={e => setNewCustomer(prev => ({ ...prev, note: e.target.value }))} className={inputClass} placeholder="Enter Note" />
+                  <div className="grid grid-cols-2 gap-4">
+                    <div><label className="block text-sm font-medium mb-1">Opening Balance</label><input type="number" value={newCustomer.opening_balance} onChange={e => setNewCustomer(prev => ({ ...prev, opening_balance: e.target.value }))} className={inputClass} /></div>
+                    <div><label className="block text-sm font-medium mb-1">Credit Limit</label><input type="number" value={newCustomer.credit_limit} onChange={e => setNewCustomer(prev => ({ ...prev, credit_limit: e.target.value }))} className={inputClass} /></div>
                   </div>
                   <div className="flex items-center gap-2">
                     <input type="checkbox" checked={newCustomer.is_active} onChange={e => setNewCustomer(prev => ({ ...prev, is_active: e.target.checked }))} className="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-                    <label className="text-sm text-gray-700">Enable – Company will be visible on all documents</label>
+                    <label className="text-sm text-gray-700">Active</label>
                   </div>
                 </div>
               </fieldset>
@@ -1673,13 +1560,7 @@ export function CreateInvoicePage() {
         <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center">
           <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-md">
             <h3 className="text-lg font-semibold mb-4">Add Customer Group</h3>
-            <input
-              type="text"
-              value={newGroupName}
-              onChange={(e) => setNewGroupName(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm mb-4"
-              placeholder="Group name"
-            />
+            <input type="text" value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm mb-4" placeholder="Group name" />
             <div className="flex justify-end gap-3">
               <button onClick={() => { setShowGroupModal(false); setNewGroupName(''); }} className="px-4 py-2 rounded-lg border text-sm" disabled={addingGroup}>Cancel</button>
               <button onClick={handleAddGroup} disabled={addingGroup || !newGroupName.trim()} className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
@@ -1690,7 +1571,7 @@ export function CreateInvoicePage() {
         </div>
       )}
 
-      {/* Product Offcanvas (unchanged) */}
+      {/* Product Offcanvas */}
       {showProductOffcanvas && (
         <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
           <Offcanvas
@@ -1733,46 +1614,20 @@ export function CreateInvoicePage() {
                     <input type="text" value={newProduct.name} onChange={e => setNewProduct(prev => ({ ...prev, name: e.target.value }))} className={`${inputClass} ${productFormErrors.name ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="e.g., Steel Rod" />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium mb-1">SKU (leave blank to auto-generate)</label>
-                      <input type="text" value={newProduct.sku} onChange={e => setNewProduct(prev => ({ ...prev, sku: e.target.value }))} className={inputClass} placeholder="Auto" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-1">HSN/SAC Code</label>
-                      <input type="text" value={newProduct.hsn_sac_code} onChange={e => setNewProduct(prev => ({ ...prev, hsn_sac_code: e.target.value }))} className={inputClass} placeholder="e.g., 7308" />
-                    </div>
+                    <div><label className="block text-sm font-medium mb-1">SKU (auto if blank)</label><input type="text" value={newProduct.sku} onChange={e => setNewProduct(prev => ({ ...prev, sku: e.target.value }))} className={inputClass} placeholder="Auto" /></div>
+                    <div><label className="block text-sm font-medium mb-1">HSN/SAC Code</label><input type="text" value={newProduct.hsn_sac_code} onChange={e => setNewProduct(prev => ({ ...prev, hsn_sac_code: e.target.value }))} className={inputClass} placeholder="e.g., 7308" /></div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Unit *</label>
-                      <input type="text" value={newProduct.unit} onChange={e => setNewProduct(prev => ({ ...prev, unit: e.target.value }))} className={`${inputClass} ${productFormErrors.unit ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="e.g., Piece, Kg" />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Sale Price (₹) *</label>
-                      <input type="number" step="0.01" value={newProduct.sale_price} onChange={e => setNewProduct(prev => ({ ...prev, sale_price: e.target.value }))} className={`${inputClass} ${productFormErrors.sale_price ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="0.00" />
-                    </div>
+                    <div><label className="block text-sm font-medium mb-1">Unit *</label><input type="text" value={newProduct.unit} onChange={e => setNewProduct(prev => ({ ...prev, unit: e.target.value }))} className={`${inputClass} ${productFormErrors.unit ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="e.g., Piece, Kg" /></div>
+                    <div><label className="block text-sm font-medium mb-1">Sale Price (₹) *</label><input type="number" step="0.01" value={newProduct.sale_price} onChange={e => setNewProduct(prev => ({ ...prev, sale_price: e.target.value }))} className={`${inputClass} ${productFormErrors.sale_price ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="0.00" /></div>
                   </div>
                 </div>
               </fieldset>
               <fieldset className="border rounded-lg p-4">
                 <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Tax & Stock</legend>
                 <div className="mt-3 grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Tax Rate (%)</label>
-                    <input type="number" step="0.01" value={newProduct.tax_rate} onChange={e => setNewProduct(prev => ({ ...prev, tax_rate: e.target.value }))} className={inputClass} />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Stock Quantity</label>
-                    <input type="number" value={newProduct.stock_quantity} onChange={e => setNewProduct(prev => ({ ...prev, stock_quantity: e.target.value }))} className={inputClass} />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Purchase Price (₹)</label>
-                    <input type="number" step="0.01" value={newProduct.purchase_price} onChange={e => setNewProduct(prev => ({ ...prev, purchase_price: e.target.value }))} className={inputClass} />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium mb-1">Reorder Level</label>
-                    <input type="number" value={newProduct.reorder_level} onChange={e => setNewProduct(prev => ({ ...prev, reorder_level: e.target.value }))} className={inputClass} />
-                  </div>
+                  <div><label className="block text-sm font-medium mb-1">Tax Rate (%)</label><input type="number" step="0.01" value={newProduct.tax_rate} onChange={e => setNewProduct(prev => ({ ...prev, tax_rate: e.target.value }))} className={inputClass} /></div>
+                  <div><label className="block text-sm font-medium mb-1">Stock Quantity</label><input type="number" value={newProduct.stock_quantity} onChange={e => setNewProduct(prev => ({ ...prev, stock_quantity: e.target.value }))} className={inputClass} /></div>
                 </div>
               </fieldset>
               <div>
