@@ -161,6 +161,23 @@ export const apiClient = {
     }
   },
 
+  // ─── Generic HTTP helpers ───
+  async get<T = any>(endpoint: string): Promise<T> {
+    return this.request<T>('GET', endpoint);
+  },
+
+  async post<T = any>(endpoint: string, data?: any): Promise<T> {
+    return this.request<T>('POST', endpoint, data);
+  },
+
+  async put<T = any>(endpoint: string, data?: any): Promise<T> {
+    return this.request<T>('PUT', endpoint, data);
+  },
+
+  async delete<T = any>(endpoint: string): Promise<T> {
+    return this.request<T>('DELETE', endpoint);
+  },
+
   // ── Auth ──
   async login(email: string, password: string) {
     return this.request('POST', '/login', { email, password });
@@ -1054,40 +1071,36 @@ export const apiClient = {
   async createSupplierGroup(data: { name: string }) {
     return this.request('POST', '/supplier-groups', data);
   },
+
   async getAllReports(params?: any) {
-  const query = params ? `?${new URLSearchParams(params).toString()}` : '';
-  return this.request('GET', `/reports/all${query}`);
-},
+    const query = params ? `?${new URLSearchParams(params).toString()}` : '';
+    return this.request('GET', `/reports/all${query}`);
+  },
 
-// Add these methods to apiClient:
+  // ─── Gemini Voice AI ───
+  async processGeminiVoice(text: string) {
+    return this.request('POST', '/gemini/voice', { text });
+  },
 
-// ─── Gemini Voice AI ───
-async processGeminiVoice(text: string) {
-  return this.request('POST', '/gemini/voice', { text });
-},
+  async getGeminiInsights() {
+    return this.request('GET', '/gemini/insights');
+  },
 
-async getGeminiInsights() {
-  return this.request('GET', '/gemini/insights');
-},
+  async geminiChat(message: string, history?: Array<{ role: string; text: string }>) {
+    return this.request('POST', '/gemini/chat', { message, history });
+  },
 
-// Add these methods to apiClient:
+  async geminiVoice(text: string) {
+    return this.request('POST', '/gemini/voice', { text });
+  },
 
-async geminiChat(message: string, history?: Array<{ role: string; text: string }>) {
-  return this.request('POST', '/gemini/chat', { message, history });
-},
-async geminiVoice(text: string) {
-  return this.request('POST', '/gemini/voice', { text });
-},
-async geminiInsights() {
-  return this.request('GET', '/gemini/insights');
-},
-async geminiTest() {
-  return this.request('GET', '/gemini/test');
-},
+  async geminiInsights() {
+    return this.request('GET', '/gemini/insights');
+  },
 
-
-
+  async geminiTest() {
+    return this.request('GET', '/gemini/test');
+  },
 };
-
 
 export default apiClient;

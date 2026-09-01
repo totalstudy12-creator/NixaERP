@@ -45,4 +45,20 @@ class Product extends Model
     {
         return $this->belongsTo(Branch::class);
     }
+    // Inside Product class
+
+    public function warehouseStocks()
+    {
+        return $this->hasMany(ProductWarehouseStock::class);
+    }
+
+    public function stockMovements()
+    {
+        return $this->hasMany(StockMovement::class);
+    }
+
+    public function purchasePriceHistory()
+    {
+        return $this->hasMany(ProductPurchasePriceHistory::class);
+    }
 }

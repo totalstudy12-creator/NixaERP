@@ -72,7 +72,7 @@ return new class extends Migration
             $table->integer('delivered')->default(0);          // delivered qty
             $table->decimal('unit_price', 10, 2);
             $table->decimal('tax_rate', 5, 2)->default(0);    // percentage
-            $table->decimal('subtotal', 10, 2)->storedAs('quantity * unit_price'); // optional: DB computed
+            $table->integer('subtotal')->default(0);  // optional: DB computed
             $table->timestamps();
         });
 

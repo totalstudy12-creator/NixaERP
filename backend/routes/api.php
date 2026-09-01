@@ -343,3 +343,15 @@ Route::prefix('gemini')->group(function () {
     Route::get('insights', [GeminiVoiceController::class, 'dashboardInsights']);
     Route::get('test', [GeminiVoiceController::class, 'testConnection']);
 });
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/products/{product}/inventory-summary', [ProductController::class, 'inventorySummary']);
+    Route::get('/products/{product}/warehouse-stock', [ProductController::class, 'warehouseStock']);
+    Route::get('/products/{product}/stock-movements', [ProductController::class, 'stockMovements']);
+    Route::get('/products/{product}/purchase-price-history', [ProductController::class, 'purchasePriceHistory']);
+    Route::get('/products/{product}/transactions', [ProductController::class, 'transactions']);
+    Route::get('/products/{product}/party-transactions', [ProductController::class, 'partyTransactions']);
+    Route::get('/products/{product}/price-list', [ProductController::class, 'priceList']);
+    Route::post('/products/{product}/stock-in', [ProductController::class, 'stockIn']);
+    Route::post('/products/{product}/stock-out', [ProductController::class, 'stockOut']);
+    Route::post('/products/{product}/transfer', [ProductController::class, 'transfer']);
+});

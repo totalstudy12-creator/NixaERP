@@ -3,7 +3,8 @@ import { useEffect, useState, useCallback, useMemo, lazy, Suspense, useRef } fro
 import {
   FiPlus, FiTrash2, FiSearch, FiDollarSign, FiFileText, FiCalendar, FiUser, FiBox,
   FiX, FiSave, FiPrinter, FiCreditCard, FiGlobe, FiLoader, FiPackage, FiUsers,
-  FiRefreshCw
+  FiRefreshCw, FiChevronDown, FiCheckCircle, FiAlertCircle, FiChevronUp, FiChevronLeft,
+  FiChevronRight, FiCopy
 } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
@@ -21,11 +22,13 @@ interface Customer {
   billing_street?: string; billing_city?: string; billing_state?: string; billing_country?: string; billing_pincode?: string;
   shipping_street?: string; shipping_city?: string; shipping_state?: string; shipping_country?: string; shipping_pincode?: string;
   contact_person?: string; contact_no?: string;
+  type?: string;
+  company_id?: number;
 }
 interface Product {
   id: number; name: string; hsn_sac_code?: string; uom?: string;
-  price: number; sale_price?: number; tax_rate?: number; igst_rate?: number;
-  stock_quantity?: number; unit?: string; sku?: string;
+  price: number | string; sale_price?: number | string; tax_rate?: number | string; igst_rate?: number | string;
+  stock_quantity?: number | string; unit?: string; sku?: string; barcode?: string;
 }
 interface BankAccount { id: number; bank_name: string; account_no: string; }
 
@@ -169,6 +172,9 @@ function calculateSummary(items: InvoiceItem[], form: InvoiceFormData) {
   const itemSubtotal = items.reduce((s, i) => s + i.qty * i.price, 0);
   const itemDiscountTotal = items.reduce((s, i) => s + i.discount_amount, 0);
   const totalTax = items.reduce((s, i) => s + i.cgst_amount + i.sgst_amount + i.igst_amount, 0);
+  const cgstTotal = items.reduce((s, i) => s + i.cgst_amount, 0);
+  const sgstTotal = items.reduce((s, i) => s + i.sgst_amount, 0);
+  const igstTotal = items.reduce((s, i) => s + i.igst_amount, 0);
   const itemTaxableTotal = itemSubtotal - itemDiscountTotal;
 
   const generalDiscountAmount = form.general_discount_percent
@@ -188,6 +194,9 @@ function calculateSummary(items: InvoiceItem[], form: InvoiceFormData) {
     itemSubtotal,
     itemDiscountTotal,
     totalTax,
+    cgstTotal,
+    sgstTotal,
+    igstTotal,
     itemTaxableTotal,
     generalDiscountAmount,
     additionalChargesTotal,
@@ -250,6 +259,7 @@ function extractArray<T>(res: any): T[] {
   if (res?.data && Array.isArray(res.data)) return res.data as T[];
   if (res?.data && typeof res.data === 'object' && Array.isArray(res.data.data)) return res.data.data as T[];
   if (res?.results && Array.isArray(res.results)) return res.results as T[];
+  if (res?.data && res.data.results && Array.isArray(res.data.results)) return res.data.results as T[];
   return [];
 }
 function useApiCache<T>(key: string, fetcher: () => Promise<T[]>, ttlMs = 300_000) {
@@ -267,10 +277,36 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T[]>, ttlMs = 300_00
       const result = extractArray<T>(res);
       cache.set(key, { data: result, timestamp: Date.now() });
       setData(result);
-    } catch (err: any) { setError(err.message); } finally { setLoading(false); }
+    } catch (err: any) {
+      console.error('API error:', err);
+      setError('Unable to load data. Please try again.');
+    } finally { setLoading(false); }
   }, [key, fetcher, ttlMs]);
   useEffect(() => { fetchData(); }, [fetchData]);
   return { data, loading, error, refresh: () => fetchData(true) };
+}
+
+// ── Helper: sanitize API error message ──
+function getUserFriendlyError(error: any, fallback = 'Something went wrong. Please try again.'): string {
+  if (!error) return fallback;
+  if (typeof error === 'string') return error;
+  if (error.validationErrors) {
+    const messages = Object.values(error.validationErrors).flat();
+    return messages.join(', ') || fallback;
+  }
+  if (error.message && typeof error.message === 'string') {
+    if (error.message.includes('TypeError') || error.message.includes('Cannot read')) {
+      return fallback;
+    }
+    return error.message;
+  }
+  return fallback;
+}
+
+// Helper to safely format currency
+function formatCurrency(value: number | string | undefined | null): string {
+  const num = Number(value);
+  return isNaN(num) ? '0.00' : num.toFixed(2);
 }
 
 // ── Main Component ──
@@ -278,6 +314,7 @@ export function CreateInvoicePage() {
   const navigate = useNavigate();
   const { showSuccess, showError } = useNotification();
 
+  // ── API data hooks ──
   const getProducts = useCallback(async () => {
     return await apiClient.getAllProducts();
   }, []);
@@ -296,52 +333,19 @@ export function CreateInvoicePage() {
     try { return await apiClient.getCustomerGroups(); } catch { return []; }
   }, []);
 
-  const { data: companies } = useApiCache<Company>('companies', getCompanies);
-  const { data: customers, refresh: refreshCustomers } = useApiCache<Customer>('customers', getCustomers);
-  const { data: products, refresh: refreshProducts } = useApiCache<Product>('products', getProducts);
+  const { data: companies, loading: companiesLoading } = useApiCache<Company>('companies', getCompanies);
+  const { data: customers, loading: customersLoading, error: customersError, refresh: refreshCustomers } = useApiCache<Customer>('customers', getCustomers);
+  const { data: products, loading: productsLoading, error: productsError, refresh: refreshProducts } = useApiCache<Product>('products', getProducts);
   const { data: banks } = useApiCache<BankAccount>('banks', getBanks);
   const { data: customerGroups, refresh: refreshGroups } = useApiCache<any>('customerGroups', getCustomerGroups);
 
-  const [availableBranches, setAvailableBranches] = useState<Branch[]>([]);
-  const [branchLoading, setBranchLoading] = useState(false);
-
-  // ── Generate Invoice Number from DB ──
-  const [invoiceNumberLoading, setInvoiceNumberLoading] = useState(true);
-  const [invoiceNumberError, setInvoiceNumberError] = useState<string | null>(null);
-
-  const generateInvoiceNumber = useCallback(async () => {
-    setInvoiceNumberLoading(true);
-    setInvoiceNumberError(null);
-    try {
-      const res = await apiClient.getNextInvoiceNumber();
-      const nextNumber = res?.next_invoice_no || res?.data?.next_invoice_no;
-      
-      if (nextNumber) {
-        setForm(prev => ({ ...prev, invoice_no: nextNumber }));
-      } else {
-        const year = new Date().getFullYear();
-        const fallbackNo = `INV-${year}-${String(Date.now()).slice(-6)}`;
-        setForm(prev => ({ ...prev, invoice_no: fallbackNo }));
-      }
-    } catch (err: any) {
-      const year = new Date().getFullYear();
-      const fallbackNo = `INV-${year}-${String(Date.now()).slice(-6)}`;
-      setForm(prev => ({ ...prev, invoice_no: fallbackNo }));
-      setInvoiceNumberError('Could not fetch invoice number. Using temporary number.');
-    } finally {
-      setInvoiceNumberLoading(false);
-    }
-  }, []);
-
-  // Generate invoice number on mount
-  useEffect(() => {
-    generateInvoiceNumber();
-  }, [generateInvoiceNumber]);
-
+  // ── State declarations (order matters) ──
   const [items, setItems] = useState<InvoiceItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
 
+  // Main form state
   const [form, setForm] = useState<InvoiceFormData>({
     company_id: '',
     branch_id: '',
@@ -371,10 +375,109 @@ export function CreateInvoicePage() {
     payments: [],
   });
 
+  // Dirty state initial refs (now after form/items)
+  const [isDirty, setIsDirty] = useState(false);
+  const initialForm = useRef(JSON.stringify(form));
+  const initialItems = useRef(JSON.stringify(items));
+
+  useEffect(() => {
+    const currentForm = JSON.stringify(form);
+    const currentItems = JSON.stringify(items);
+    setIsDirty(currentForm !== initialForm.current || currentItems !== initialItems.current);
+  }, [form, items]);
+
+  // Warn before leaving page
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isDirty) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isDirty]);
+
+  // ── Invoice number generation ──
+  const [invoiceNumberLoading, setInvoiceNumberLoading] = useState(true);
+  const [invoiceNumberError, setInvoiceNumberError] = useState<string | null>(null);
+
+  const generateInvoiceNumber = useCallback(async () => {
+    setInvoiceNumberLoading(true);
+    setInvoiceNumberError(null);
+    try {
+      const res = await apiClient.getNextInvoiceNumber();
+      const nextNumber = res?.next_invoice_no || res?.data?.next_invoice_no;
+      
+      if (nextNumber) {
+        setForm(prev => ({ ...prev, invoice_no: nextNumber }));
+      } else {
+        const year = new Date().getFullYear();
+        const fallbackNo = `INV-${year}-${String(Date.now()).slice(-6)}`;
+        setForm(prev => ({ ...prev, invoice_no: fallbackNo }));
+      }
+    } catch (err: any) {
+      const year = new Date().getFullYear();
+      const fallbackNo = `INV-${year}-${String(Date.now()).slice(-6)}`;
+      setForm(prev => ({ ...prev, invoice_no: fallbackNo }));
+      setInvoiceNumberError('Could not fetch invoice number. Using temporary number.');
+    } finally {
+      setInvoiceNumberLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    generateInvoiceNumber();
+  }, [generateInvoiceNumber]);
+
+  // Branches state and fetch
+  const [availableBranches, setAvailableBranches] = useState<Branch[]>([]);
+  const [branchLoading, setBranchLoading] = useState(false);
+  const [branchError, setBranchError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!form.company_id) {
+      setAvailableBranches([]);
+      setForm(prev => ({ ...prev, branch_id: '' }));
+      return;
+    }
+    setBranchLoading(true);
+    setBranchError(null);
+    apiClient.getBranchesByCompany(Number(form.company_id))
+      .then(res => {
+        const branchList = Array.isArray(res) ? res : (res?.data ?? []);
+        setAvailableBranches(branchList);
+        setForm(prev => ({
+          ...prev,
+          branch_id: branchList.length ? branchList[0].id : ''
+        }));
+      })
+      .catch((err) => {
+        setAvailableBranches([]);
+        setForm(prev => ({ ...prev, branch_id: '' }));
+        setBranchError('Unable to load branches.');
+      })
+      .finally(() => setBranchLoading(false));
+  }, [form.company_id]);
+
+  // Clear customer if it doesn't belong to new company
+  useEffect(() => {
+    if (form.company_id && form.customer_id && customers) {
+      const selectedCustomer = customers.find(c => c.id === Number(form.customer_id));
+      if (selectedCustomer && selectedCustomer.company_id && selectedCustomer.company_id !== Number(form.company_id)) {
+        setForm(prev => ({ ...prev, customer_id: '', customer_name: '' }));
+      }
+    }
+  }, [form.company_id, customers, form.customer_id]);
+
+  // Search states
   const [productSearch, setProductSearch] = useState('');
   const [customerSearch, setCustomerSearch] = useState('');
+  const [showProductDropdown, setShowProductDropdown] = useState(false);
+  const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
+  const [highlightIndex, setHighlightIndex] = useState(-1);
 
-  // ── Customer creation offcanvas state ──
+  // Customer creation offcanvas state
   const [showCustomerOffcanvas, setShowCustomerOffcanvas] = useState(false);
   const [newCustomer, setNewCustomer] = useState<CustomerFormData>({
     name: '',
@@ -461,7 +564,6 @@ export function CreateInvoicePage() {
     }
   };
 
-  // Same as billing toggle
   const handleSameAsBillingToggle = (checked: boolean) => {
     setNewCustomer(prev => ({
       ...prev,
@@ -477,7 +579,6 @@ export function CreateInvoicePage() {
     }));
   };
 
-  // Group creation
   const handleAddGroup = async () => {
     if (!newGroupName.trim()) return;
     setAddingGroup(true);
@@ -488,37 +589,12 @@ export function CreateInvoicePage() {
       setShowGroupModal(false);
       showSuccess('Group added');
     } catch (err: any) {
-      showError('Failed to add group', err.message);
+      showError('Failed to add group', getUserFriendlyError(err));
     } finally {
       setAddingGroup(false);
     }
   };
 
-  // ── Fetch branches when company changes ──
-  useEffect(() => {
-    if (!form.company_id) {
-      setAvailableBranches([]);
-      setForm(prev => ({ ...prev, branch_id: '' }));
-      return;
-    }
-    setBranchLoading(true);
-    apiClient.getBranchesByCompany(Number(form.company_id))
-      .then(res => {
-        const branchList = Array.isArray(res) ? res : (res?.data ?? []);
-        setAvailableBranches(branchList);
-        setForm(prev => ({
-          ...prev,
-          branch_id: branchList.length ? branchList[0].id : ''
-        }));
-      })
-      .catch(() => {
-        setAvailableBranches([]);
-        setForm(prev => ({ ...prev, branch_id: '' }));
-      })
-      .finally(() => setBranchLoading(false));
-  }, [form.company_id]);
-
-  // Auto-set company/branch in product offcanvas
   const openProductOffcanvas = () => {
     setNewProduct(prev => ({
       ...prev,
@@ -529,30 +605,45 @@ export function CreateInvoicePage() {
     setShowProductOffcanvas(true);
   };
 
-  // Warn when switching company with items
   const handleCompanyChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newCompanyId = e.target.value ? Number(e.target.value) : '';
     if (items.length > 0 && newCompanyId !== form.company_id) {
       if (!window.confirm('Changing company will remove all invoice items. Continue?')) return;
       setItems([]);
     }
-    setForm(prev => ({ ...prev, company_id: newCompanyId }));
+    setForm(prev => ({ ...prev, company_id: newCompanyId, customer_id: '' }));
   };
 
   // Filtered lists
   const filteredCustomers = useMemo(() => {
-    if (!customers) return [];
-    const term = customerSearch.toLowerCase();
-    return customers.filter(c => c.name.toLowerCase().includes(term) || (c.code && c.code.toLowerCase().includes(term)));
-  }, [customers, customerSearch]);
+    if (!customers || !Array.isArray(customers)) return [];
+    let list = customers;
+    if (form.company_id) {
+      list = list.filter(c => !c.company_id || c.company_id === Number(form.company_id));
+    }
+    const term = customerSearch.toLowerCase().trim();
+    if (!term) return list;
+    return list.filter(c => 
+      c.name?.toLowerCase().includes(term) ||
+      (c.code && c.code.toLowerCase().includes(term)) ||
+      (c.gstin && c.gstin.toLowerCase().includes(term)) ||
+      (c.contact_no && c.contact_no.includes(term))
+    );
+  }, [customers, customerSearch, form.company_id]);
 
   const filteredProducts = useMemo(() => {
-    if (!products) return [];
-    const term = productSearch.toLowerCase();
-    return products.filter(p => p.name.toLowerCase().includes(term) || (p.hsn_sac_code && p.hsn_sac_code.toLowerCase().includes(term)) || (p.sku && p.sku.toLowerCase().includes(term)));
+    if (!products || !Array.isArray(products)) return [];
+    const term = productSearch.toLowerCase().trim();
+    if (!term) return products;
+    return products.filter(p => 
+      p.name?.toLowerCase().includes(term) ||
+      (p.sku && p.sku.toLowerCase().includes(term)) ||
+      (p.barcode && p.barcode.toLowerCase().includes(term)) ||
+      (p.hsn_sac_code && p.hsn_sac_code.toLowerCase().includes(term))
+    );
   }, [products, productSearch]);
 
-  // Auto-fill customer info when selected
+  // Auto-fill customer info
   useEffect(() => {
     if (form.customer_id && customers) {
       const cust = customers.find(c => c.id === Number(form.customer_id));
@@ -579,7 +670,7 @@ export function CreateInvoicePage() {
     }
   }, [form.customer_id, customers]);
 
-  // ── Create Customer ──
+  // Create customer
   const createCustomer = async () => {
     const errors: Record<string, boolean> = {};
     if (!newCustomer.name.trim()) errors.name = true;
@@ -609,6 +700,10 @@ export function CreateInvoicePage() {
     try {
       const created = await apiClient.createCustomer(payload);
       showSuccess('Customer created', `${created.name} added.`);
+      if (customers) {
+        const newList = [...customers, created];
+        cache.set('customers', { data: newList, timestamp: Date.now() });
+      }
       refreshCustomers();
       setForm(prev => ({ ...prev, customer_id: created.id }));
       setShowCustomerOffcanvas(false);
@@ -622,14 +717,14 @@ export function CreateInvoicePage() {
         company_id: '', branch_id: '', same_as_billing: true,
       });
     } catch (err: any) {
-      const errorMsg = err.validationErrors ? Object.values(err.validationErrors).flat().join(', ') : err.message;
+      const errorMsg = getUserFriendlyError(err, 'Customer creation failed.');
       showError('Create failed', errorMsg);
     } finally {
       setCustomerSubmitting(false);
     }
   };
 
-  // ── Generate SKU ──
+  // Generate SKU
   const generateProductSKU = useCallback(() => {
     if (!products) return 'FU-001';
     const prefix = 'FU-';
@@ -643,7 +738,7 @@ export function CreateInvoicePage() {
     return `${prefix}${(maxNum + 1).toString().padStart(3, '0')}`;
   }, [products]);
 
-  // ── Product creation state ──
+  // Product creation state
   const [showProductOffcanvas, setShowProductOffcanvas] = useState(false);
   const [productSubmitting, setProductSubmitting] = useState(false);
   const [newProduct, setNewProduct] = useState({
@@ -662,7 +757,6 @@ export function CreateInvoicePage() {
   });
   const [productFormErrors, setProductFormErrors] = useState<Record<string, boolean>>({});
 
-  // Create product
   const createProduct = async () => {
     const errors: Record<string, boolean> = {};
     if (!newProduct.company_id) errors.company_id = true;
@@ -722,7 +816,7 @@ export function CreateInvoicePage() {
         addItem(productToAdd);
       }
     } catch (err: any) {
-      const errorMsg = err.validationErrors ? Object.values(err.validationErrors).flat().join(', ') : err.message;
+      const errorMsg = getUserFriendlyError(err, 'Product creation failed.');
       showError('Product creation failed', errorMsg);
       addAppLog({ module: 'Inventory', action: 'Create', status: 'error', message: errorMsg });
     } finally {
@@ -730,7 +824,7 @@ export function CreateInvoicePage() {
     }
   };
 
-  // ── Item Management ──
+  // Item management
   const addItem = useCallback((product: Product) => {
     if (items.some(item => item.product_id === product.id)) { showError('Duplicate', 'Product already in list.'); return; }
     const baseItem = {
@@ -739,16 +833,17 @@ export function CreateInvoicePage() {
       hsn_sac_code: product.hsn_sac_code || '',
       qty: 1,
       uom: product.uom || product.unit || 'NOS',
-      price: product.sale_price || product.price || 0,
+      price: Number(product.sale_price || product.price || 0),
       discount_type: 'percent' as const,
       discount_percent: 0,
       discount_amount: 0,
-      gst_slab: product.igst_rate || product.tax_rate || 0,
+      gst_slab: Number(product.igst_rate || product.tax_rate || 0),
       is_inter_state: true,
     };
     const calculatedItem = calculateItem(baseItem);
     setItems(prev => [...prev, calculatedItem]);
     setProductSearch('');
+    setShowProductDropdown(false);
   }, [items, showError]);
 
   const removeItem = useCallback((index: number) => setItems(prev => prev.filter((_, i) => i !== index)), []);
@@ -762,12 +857,12 @@ export function CreateInvoicePage() {
     });
   }, []);
 
-  // ── Additional Charges ──
+  // Additional charges
   const addAdditionalCharge = () => setForm(prev => ({ ...prev, additional_charges: [...prev.additional_charges, { id: Date.now().toString(), label: '', amount: 0 }] }));
   const updateAdditionalCharge = (id: string, field: 'label' | 'amount', value: any) => setForm(prev => ({ ...prev, additional_charges: prev.additional_charges.map(c => c.id === id ? { ...c, [field]: value } : c) }));
   const removeAdditionalCharge = (id: string) => setForm(prev => ({ ...prev, additional_charges: prev.additional_charges.filter(c => c.id !== id) }));
 
-  // ── Payment Management ──
+  // Payments
   const addPayment = () => {
     const newPayment: PaymentEntry = {
       id: Date.now().toString(),
@@ -794,23 +889,41 @@ export function CreateInvoicePage() {
     setForm(prev => ({ ...prev, payments: prev.payments.filter(p => p.id !== id) }));
   };
 
-  // ── Derived summary ──
+  // Summary
   const summary = useMemo(() => calculateSummary(items, form), [items, form]);
   const totalInWords = useMemo(() => numberToWordsINR(summary.grandTotal), [summary.grandTotal]);
 
-  // ── Handlers ──
-  const validate = () => {
-    if (!form.company_id) { setErrorMsg('Select a company.'); return false; }
-    if (!form.branch_id) { setErrorMsg('Select a branch.'); return false; }
-    if (!form.customer_id) { setErrorMsg('Select a customer.'); return false; }
-    if (!form.invoice_no.trim()) { setErrorMsg('Invoice number is required.'); return false; }
-    if (items.length === 0) { setErrorMsg('Add at least one product.'); return false; }
-    return true;
+  // Validation
+  const validateMainForm = () => {
+    const errors: Record<string, string> = {};
+    if (!form.company_id) errors.company_id = 'Select a company.';
+    if (!form.branch_id) errors.branch_id = 'Select a branch.';
+    if (!form.customer_id) errors.customer_id = 'Select a customer.';
+    if (!form.invoice_no.trim()) errors.invoice_no = 'Invoice number is required.';
+    if (items.length === 0) errors.items = 'Add at least one product.';
+    setFormErrors(errors);
+    return Object.keys(errors).length === 0;
   };
 
+  const clearFieldError = (field: string) => {
+    setFormErrors(prev => {
+      if (!prev[field]) return prev;
+      const newErrors = { ...prev };
+      delete newErrors[field];
+      return newErrors;
+    });
+  };
+
+  // Submit
   const handleSubmit = useCallback(async (action: 'save' | 'save_print' | 'save_draft' = 'save') => {
     setErrorMsg(null);
-    if (action !== 'save_draft' && !validate()) return;
+    if (action !== 'save_draft') {
+      const valid = validateMainForm();
+      if (!valid) {
+        showError('Validation', 'Please fill all required fields.');
+        return;
+      }
+    }
 
     const invoicePayload = {
       company_id: Number(form.company_id),
@@ -903,7 +1016,7 @@ export function CreateInvoicePage() {
       if (action === 'save_print') navigate(`/invoices/${newInvoice.id}?print=1`);
       else navigate(`/invoices/${newInvoice.id}`);
     } catch (err: any) {
-      const errorMsg = err.validationErrors ? Object.values(err.validationErrors).flat().join(', ') : err.message;
+      const errorMsg = getUserFriendlyError(err, 'Invoice could not be saved.');
       showError('Error', errorMsg);
       setErrorMsg(errorMsg);
     } finally {
@@ -911,158 +1024,285 @@ export function CreateInvoicePage() {
     }
   }, [form, items, navigate, showSuccess, showError]);
 
-  const inputClass = "w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-200 focus:border-blue-500 outline-none transition bg-white";
+  // Keyboard navigation
+  const handleProductKeyDown = (e: React.KeyboardEvent) => {
+    if (!filteredProducts.length) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlightIndex(prev => (prev + 1) % filteredProducts.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightIndex(prev => (prev - 1 + filteredProducts.length) % filteredProducts.length);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (highlightIndex >= 0 && highlightIndex < filteredProducts.length) {
+        addItem(filteredProducts[highlightIndex]);
+        setHighlightIndex(-1);
+      }
+    } else if (e.key === 'Escape') {
+      setShowProductDropdown(false);
+      setHighlightIndex(-1);
+    }
+  };
+
+  const handleCustomerKeyDown = (e: React.KeyboardEvent) => {
+    if (!filteredCustomers.length) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlightIndex(prev => (prev + 1) % filteredCustomers.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightIndex(prev => (prev - 1 + filteredCustomers.length) % filteredCustomers.length);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (highlightIndex >= 0 && highlightIndex < filteredCustomers.length) {
+        const c = filteredCustomers[highlightIndex];
+        setForm(prev => ({ ...prev, customer_id: c.id }));
+        setCustomerSearch('');
+        setShowCustomerDropdown(false);
+        setHighlightIndex(-1);
+      }
+    } else if (e.key === 'Escape') {
+      setShowCustomerDropdown(false);
+      setHighlightIndex(-1);
+    }
+  };
+
+  // Click outside
+  const productDropdownRef = useRef<HTMLDivElement>(null);
+  const customerDropdownRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (productDropdownRef.current && !productDropdownRef.current.contains(event.target as Node)) {
+        setShowProductDropdown(false);
+      }
+      if (customerDropdownRef.current && !customerDropdownRef.current.contains(event.target as Node)) {
+        setShowCustomerDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // State for shipping address visibility
+  const [showShipping, setShowShipping] = useState(false);
+
+  // Toggle shipping address and copy billing if needed
+  const toggleShipping = () => {
+    if (!showShipping) {
+      // When showing, copy billing to shipping
+      setForm(prev => ({
+        ...prev,
+        shipping_street: prev.billing_street,
+        shipping_city: prev.billing_city,
+        shipping_state: prev.billing_state,
+        shipping_country: prev.billing_country,
+        shipping_pincode: prev.billing_pincode,
+      }));
+    }
+    setShowShipping(prev => !prev);
+  };
+
+  // CSS classes
+  const inputClass = "w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 focus:bg-white outline-none transition-all duration-200 placeholder-slate-400";
+  const labelClass = "block text-xs font-medium text-slate-600 mb-1.5";
+  const cardClass = "bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-slate-200/50 border border-slate-100 p-6 hover:shadow-xl transition-shadow";
+  const sectionTitleClass = "text-lg font-semibold mb-5 flex items-center gap-2 text-slate-800";
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800">
-      {errorMsg && <div className="mx-4 md:mx-8 mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg flex items-center gap-2"><FiX size={18} /> {errorMsg}</div>}
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 text-slate-800">
+      {errorMsg && (
+        <div className="mx-4 md:mx-8 mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center gap-2 shadow-sm">
+          <FiX size={18} /> {errorMsg}
+        </div>
+      )}
 
       <div className="max-w-full mx-auto p-4 md:p-8 space-y-6">
         {/* Customer & Invoice Details */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Left: Customer Info */}
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 text-blue-600"><FiUser /> Customer Information</h2>
-            <div className="space-y-4">
+          <div className={cardClass}>
+            <h2 className={`${sectionTitleClass} text-blue-700`}><FiUser /> Customer Information</h2>
+            <div className="space-y-5">
               <div>
-                <label className="block text-sm font-medium mb-1">Company *</label>
-                <select value={form.company_id} onChange={handleCompanyChange} className={inputClass}>
+                <label className={labelClass}>Company *</label>
+                <select 
+                  value={form.company_id} 
+                  onChange={handleCompanyChange} 
+                  className={`${inputClass} ${formErrors.company_id ? 'border-red-400 ring-2 ring-red-200' : ''}`}
+                >
                   <option value="">Select Company</option>
                   {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
+                {formErrors.company_id && <p className="text-xs text-red-500 mt-1">{formErrors.company_id}</p>}
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Branch *</label>
+                <label className={labelClass}>Branch *</label>
                 <div className="relative">
                   <select
                     value={form.branch_id}
-                    onChange={e => setForm(prev => ({ ...prev, branch_id: e.target.value ? Number(e.target.value) : '' }))}
-                    className={inputClass}
+                    onChange={e => { setForm(prev => ({ ...prev, branch_id: e.target.value ? Number(e.target.value) : '' })); clearFieldError('branch_id'); }}
+                    className={`${inputClass} ${formErrors.branch_id ? 'border-red-400 ring-2 ring-red-200' : ''}`}
                     disabled={branchLoading || !form.company_id}
                   >
                     <option value="">Select Branch</option>
                     {availableBranches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                   </select>
-                  {branchLoading && <div className="absolute right-8 top-2.5"><FiLoader className="animate-spin text-gray-400" size={16} /></div>}
+                  {branchLoading && <div className="absolute right-8 top-3"><FiLoader className="animate-spin text-slate-400" size={16} /></div>}
                 </div>
-                {form.company_id && !branchLoading && availableBranches.length === 0 && (
-                  <div className="text-xs text-red-500 mt-1">No branches found for this company.</div>
-                )}
+                {branchError && <p className="text-xs text-red-500 mt-1">{branchError}</p>}
+                {formErrors.branch_id && <p className="text-xs text-red-500 mt-1">{formErrors.branch_id}</p>}
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">Customer *</label>
+              <div ref={customerDropdownRef}>
+                <label className={labelClass}>Customer *</label>
                 <div className="flex gap-2">
                   <div className="relative flex-1">
                     <input
                       type="text"
                       value={customerSearch}
-                      onChange={e => setCustomerSearch(e.target.value)}
+                      onChange={e => { setCustomerSearch(e.target.value); setShowCustomerDropdown(true); setHighlightIndex(-1); }}
+                      onFocus={() => setShowCustomerDropdown(true)}
+                      onKeyDown={handleCustomerKeyDown}
                       placeholder="Search customer..."
                       className={inputClass}
+                      aria-label="Search customer"
                     />
-                    {customerSearch && filteredCustomers.length > 0 && (
-                      <div className="absolute z-20 w-full bg-white border rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                        {filteredCustomers.map(c => (
-                          <div
-                            key={c.id}
-                            className="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm"
-                            onClick={() => { setForm(prev => ({ ...prev, customer_id: c.id })); setCustomerSearch(''); }}
-                          >
-                            {c.name} {c.code ? `(${c.code})` : ''}
-                          </div>
-                        ))}
+                    {customerSearch && (
+                      <button 
+                        onClick={() => { setCustomerSearch(''); setShowCustomerDropdown(false); }}
+                        className="absolute right-3 top-3 text-slate-400 hover:text-slate-600"
+                        aria-label="Clear search"
+                      >
+                        <FiX size={18} />
+                      </button>
+                    )}
+                    {showCustomerDropdown && customerSearch && (
+                      <div className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-60 overflow-y-auto">
+                        {customersLoading ? (
+                          <div className="p-4 text-sm text-slate-500 flex items-center justify-center"><FiLoader className="animate-spin mr-2" /> Loading...</div>
+                        ) : customersError ? (
+                          <div className="p-4 text-sm text-red-500">Unable to load customers.</div>
+                        ) : filteredCustomers.length === 0 ? (
+                          <div className="p-4 text-sm text-slate-500">No customers found.</div>
+                        ) : (
+                          filteredCustomers.map((c, idx) => (
+                            <div
+                              key={c.id}
+                              className={`px-4 py-2.5 cursor-pointer text-sm flex items-center justify-between ${idx === highlightIndex ? 'bg-blue-50' : 'hover:bg-blue-50'}`}
+                              onMouseEnter={() => setHighlightIndex(idx)}
+                              onClick={() => { setForm(prev => ({ ...prev, customer_id: c.id })); setCustomerSearch(''); setShowCustomerDropdown(false); }}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="font-medium text-slate-800 truncate">{c.name}</div>
+                                <div className="text-xs text-slate-500 truncate">
+                                  {c.gstin && <span className="mr-2">GST: {c.gstin}</span>}
+                                  {c.contact_no && <span className="mr-2">📞 {c.contact_no}</span>}
+                                  {c.type && <span className="uppercase">{c.type}</span>}
+                                </div>
+                              </div>
+                              {idx === highlightIndex && <FiChevronRight className="text-blue-500" size={16} />}
+                            </div>
+                          ))
+                        )}
                       </div>
                     )}
                   </div>
-                  <button type="button" onClick={() => setShowCustomerOffcanvas(true)} className="px-3 py-2 rounded-lg border text-sm text-blue-600 hover:bg-blue-50">Add</button>
+                  <button
+                    type="button"
+                    onClick={() => setShowCustomerOffcanvas(true)}
+                    className="px-4 py-2 rounded-xl border border-slate-200 text-sm text-blue-600 hover:bg-blue-50 hover:border-blue-300 transition-colors"
+                  >
+                    Add
+                  </button>
                 </div>
+                {formErrors.customer_id && <p className="text-xs text-red-500 mt-1">{formErrors.customer_id}</p>}
                 {form.customer_id && customers?.find(c => c.id === Number(form.customer_id)) && (
-                  <div className="text-xs text-emerald-600 font-medium mt-1">
-                    ✓ Selected: {customers.find(c => c.id === Number(form.customer_id))!.name}
+                  <div className="text-xs text-emerald-600 font-medium mt-1 flex items-center gap-1">
+                    <FiCheckCircle size={14} /> Selected: {customers.find(c => c.id === Number(form.customer_id))!.name}
                   </div>
                 )}
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">M/S.</label>
-                <input type="text" value={form.customer_name} onChange={e => setForm(prev => ({ ...prev, customer_name: e.target.value }))} className={inputClass} />
-              </div>
-
               {/* Billing Address */}
-              <div className="border-t pt-4">
-                <h3 className="text-sm font-semibold mb-2">Billing Address</h3>
+              <div className="border-t border-slate-100 pt-4">
+                <h3 className="text-sm font-semibold mb-3 text-slate-700">Billing Address</h3>
                 <textarea rows={2} value={form.billing_street} onChange={e => setForm(prev => ({ ...prev, billing_street: e.target.value }))} className={inputClass} placeholder="Street Address" />
-                <div className="grid grid-cols-2 gap-3 mt-2">
+                <div className="grid grid-cols-2 gap-3 mt-3">
                   <div>
-                    <label className="block text-xs font-medium mb-1">City *</label>
+                    <label className={labelClass}>City *</label>
                     <input type="text" value={form.billing_city} onChange={e => setForm(prev => ({ ...prev, billing_city: e.target.value }))} className={inputClass} placeholder="Enter City" />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium mb-1">State</label>
+                    <label className={labelClass}>State</label>
                     <input type="text" value={form.billing_state} onChange={e => setForm(prev => ({ ...prev, billing_state: e.target.value }))} className={inputClass} placeholder="Enter State" />
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3 mt-2">
+                <div className="grid grid-cols-2 gap-3 mt-3">
                   <div>
-                    <label className="block text-xs font-medium mb-1">Country</label>
+                    <label className={labelClass}>Country</label>
                     <input type="text" value={form.billing_country} onChange={e => setForm(prev => ({ ...prev, billing_country: e.target.value }))} className={inputClass} placeholder="India" />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium mb-1">Pincode</label>
+                    <label className={labelClass}>Pincode</label>
                     <input type="text" value={form.billing_pincode} onChange={e => setForm(prev => ({ ...prev, billing_pincode: e.target.value }))} className={inputClass} placeholder="Enter Pincode" />
                   </div>
                 </div>
               </div>
 
-              {/* Shipping Address */}
-              <div className="border-t pt-4">
-                <h3 className="text-sm font-semibold mb-2">Shipping Address</h3>
-                <textarea rows={2} value={form.shipping_street} onChange={e => setForm(prev => ({ ...prev, shipping_street: e.target.value }))} className={inputClass} placeholder="Street Address" />
-                <div className="grid grid-cols-2 gap-3 mt-2">
-                  <div>
-                    <label className="block text-xs font-medium mb-1">City</label>
-                    <input type="text" value={form.shipping_city} onChange={e => setForm(prev => ({ ...prev, shipping_city: e.target.value }))} className={inputClass} placeholder="Enter City" />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium mb-1">State</label>
-                    <input type="text" value={form.shipping_state} onChange={e => setForm(prev => ({ ...prev, shipping_state: e.target.value }))} className={inputClass} placeholder="Enter State" />
-                  </div>
+              {/* Shipping Address Toggle */}
+              <div className="border-t border-slate-100 pt-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-slate-700">Shipping Address</h3>
+                  <button
+                    type="button"
+                    onClick={toggleShipping}
+                    className="text-xs text-blue-600 hover:underline flex items-center gap-1"
+                  >
+                    {showShipping ? <FiChevronUp size={14} /> : <FiChevronDown size={14} />}
+                    {showShipping ? 'Hide' : 'Add'}
+                  </button>
                 </div>
-                <div className="grid grid-cols-2 gap-3 mt-2">
-                  <div>
-                    <label className="block text-xs font-medium mb-1">Country</label>
-                    <input type="text" value={form.shipping_country} onChange={e => setForm(prev => ({ ...prev, shipping_country: e.target.value }))} className={inputClass} placeholder="India" />
+                {showShipping && (
+                  <div className="mt-3">
+                    <textarea rows={2} value={form.shipping_street} onChange={e => setForm(prev => ({ ...prev, shipping_street: e.target.value }))} className={inputClass} placeholder="Street Address" />
+                    <div className="grid grid-cols-2 gap-3 mt-3">
+                      <div>
+                        <label className={labelClass}>City</label>
+                        <input type="text" value={form.shipping_city} onChange={e => setForm(prev => ({ ...prev, shipping_city: e.target.value }))} className={inputClass} placeholder="Enter City" />
+                      </div>
+                      <div>
+                        <label className={labelClass}>State</label>
+                        <input type="text" value={form.shipping_state} onChange={e => setForm(prev => ({ ...prev, shipping_state: e.target.value }))} className={inputClass} placeholder="Enter State" />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 mt-3">
+                      <div>
+                        <label className={labelClass}>Country</label>
+                        <input type="text" value={form.shipping_country} onChange={e => setForm(prev => ({ ...prev, shipping_country: e.target.value }))} className={inputClass} placeholder="India" />
+                      </div>
+                      <div>
+                        <label className={labelClass}>Pincode</label>
+                        <input type="text" value={form.shipping_pincode} onChange={e => setForm(prev => ({ ...prev, shipping_pincode: e.target.value }))} className={inputClass} placeholder="Enter Pincode" />
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-medium mb-1">Pincode</label>
-                    <input type="text" value={form.shipping_pincode} onChange={e => setForm(prev => ({ ...prev, shipping_pincode: e.target.value }))} className={inputClass} placeholder="Enter Pincode" />
-                  </div>
-                </div>
+                )}
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium mb-1">Contact Person</label>
-                  <input type="text" value={form.contact_person} onChange={e => setForm(prev => ({ ...prev, contact_person: e.target.value }))} className={inputClass} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Contact No</label>
-                  <input type="text" value={form.contact_no} onChange={e => setForm(prev => ({ ...prev, contact_no: e.target.value }))} className={inputClass} />
-                </div>
-              </div>
+             
               <div>
-                <label className="block text-sm font-medium mb-1">GSTIN / PAN</label>
+                <label className={labelClass}>GSTIN / PAN</label>
                 <input type="text" value={form.gstin_pan} onChange={e => setForm(prev => ({ ...prev, gstin_pan: e.target.value }))} className={inputClass} />
               </div>
             </div>
           </div>
 
           {/* Right: Invoice Details */}
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 text-indigo-600"><FiFileText /> Invoice Details</h2>
-            <div className="space-y-4">
+          <div className={cardClass}>
+            <h2 className={`${sectionTitleClass} text-indigo-700`}><FiFileText /> Invoice Details</h2>
+            <div className="space-y-5">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-sm font-medium mb-1">Invoice Type</label>
+                  <label className={labelClass}>Invoice Type</label>
                   <select value={form.invoice_type} onChange={e => setForm(prev => ({ ...prev, invoice_type: e.target.value as any }))} className={inputClass}>
                     <option value="tax_invoice">Tax Invoice</option>
                     <option value="retail_invoice">Retail Invoice</option>
@@ -1070,51 +1310,47 @@ export function CreateInvoicePage() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium mb-1">Invoice No. *</label>
+                  <label className={labelClass}>Invoice No. *</label>
                   <div className="relative">
                     <input 
                       type="text" 
                       value={form.invoice_no} 
-                      onChange={e => setForm(prev => ({ ...prev, invoice_no: e.target.value }))} 
-                      className={`${inputClass} ${invoiceNumberLoading ? 'pr-10' : ''}`}
+                      onChange={e => { setForm(prev => ({ ...prev, invoice_no: e.target.value })); clearFieldError('invoice_no'); }} 
+                      className={`${inputClass} pr-10 ${invoiceNumberLoading ? 'pr-12' : ''} ${formErrors.invoice_no ? 'border-red-400 ring-2 ring-red-200' : ''}`}
                       placeholder="Auto-generated"
                     />
-                    {invoiceNumberLoading && (
-                      <div className="absolute right-3 top-2.5">
-                        <FiLoader className="animate-spin text-gray-400" size={16} />
-                      </div>
-                    )}
+                    <button
+                      type="button"
+                      onClick={generateInvoiceNumber}
+                      className="absolute right-3 top-2.5 text-slate-400 hover:text-blue-500 transition-colors"
+                      title="Regenerate invoice number"
+                      aria-label="Regenerate invoice number"
+                    >
+                      {invoiceNumberLoading ? <FiLoader className="animate-spin" size={16} /> : <FiRefreshCw size={16} />}
+                    </button>
                   </div>
-                  {invoiceNumberError && (
-                    <div className="text-xs text-amber-600 mt-1">{invoiceNumberError}</div>
-                  )}
-                  <button 
-                    type="button" 
-                    onClick={generateInvoiceNumber}
-                    className="text-xs text-blue-600 hover:underline mt-1"
-                  >
-                    <FiRefreshCw className="inline mr-1" size={12} /> Regenerate
-                  </button>
+                  {invoiceNumberError && <div className="text-xs text-amber-600 mt-1">{invoiceNumberError}</div>}
+                  {formErrors.invoice_no && <p className="text-xs text-red-500 mt-1">{formErrors.invoice_no}</p>}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium mb-1">Invoice Date *</label>
+                  <label className={labelClass}>Invoice Date *</label>
                   <input type="date" value={form.invoice_date} onChange={e => setForm(prev => ({ ...prev, invoice_date: e.target.value }))} className={inputClass} />
                 </div>
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">PO Number</label>
+                <label className={labelClass}>PO Number</label>
                 <input type="text" value={form.po_no} onChange={e => setForm(prev => ({ ...prev, po_no: e.target.value }))} className={inputClass} />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">PO Date</label>
+                <label className={labelClass}>PO Date</label>
                 <input type="date" value={form.po_date} onChange={e => setForm(prev => ({ ...prev, po_date: e.target.value }))} className={inputClass} />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Payment Terms</label>
+                <label className={labelClass}>Payment Terms</label>
                 <input type="text" value={form.payment_term} onChange={e => setForm(prev => ({ ...prev, payment_term: e.target.value }))} className={inputClass} placeholder="e.g., Net 30" />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">E-Way Bill</label>
+                <label className={labelClass}>E-Way Bill</label>
                 <input type="text" value={form.eway_no} onChange={e => setForm(prev => ({ ...prev, eway_no: e.target.value }))} className={inputClass} />
               </div>
             </div>
@@ -1122,100 +1358,159 @@ export function CreateInvoicePage() {
         </div>
 
         {/* Items Section */}
-        <section className="bg-white rounded-xl shadow-sm overflow-hidden">
-          <div className="p-4 md:p-6 border-b">
+        <section className={`${cardClass} p-0 overflow-hidden`}>
+          <div className="p-4 md:p-6 border-b border-slate-100 bg-slate-50/50" ref={productDropdownRef}>
             <div className="relative w-full flex gap-2">
               <div className="relative flex-1">
-                <FiSearch className="absolute left-4 top-3.5 text-gray-400 z-10" size={18} />
+                <FiSearch className="absolute left-4 top-3.5 text-slate-400 z-10" size={18} />
                 <input
                   type="text"
-                  placeholder="Search product by name, HSN or SKU and press Enter to add..."
+                  placeholder="Search product by name, SKU, barcode or HSN..."
                   value={productSearch}
-                  onChange={e => setProductSearch(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter' && productSearch.trim() && filteredProducts.length > 0) addItem(filteredProducts[0]); }}
-                  className="w-full pl-12 pr-4 py-3 rounded-xl border-0 bg-slate-50 text-sm focus:ring-2 focus:ring-blue-200 focus:bg-white outline-none transition"
+                  onChange={e => { setProductSearch(e.target.value); setShowProductDropdown(true); setHighlightIndex(-1); }}
+                  onFocus={() => setShowProductDropdown(true)}
+                  onKeyDown={handleProductKeyDown}
+                  className="w-full pl-12 pr-10 py-3 rounded-xl border-0 bg-white text-sm focus:ring-2 focus:ring-blue-500/30 outline-none transition shadow-sm"
+                  aria-label="Search product"
                 />
-                {productSearch && <button className="absolute right-3 top-3 text-gray-400 hover:text-gray-600" onClick={() => setProductSearch('')}><FiX size={18} /></button>}
-                {productSearch && filteredProducts.length > 0 && (
-                  <div className="absolute z-20 w-full mt-1 bg-white border rounded-xl shadow-lg max-h-60 overflow-y-auto">
-                    {filteredProducts.map(p => (
-                      <div
-                        key={p.id}
-                        className="px-4 py-3 hover:bg-blue-50 cursor-pointer text-sm flex justify-between items-center border-b last:border-0"
-                        onClick={() => addItem(p)}
-                      >
-                        <div>
-                          <span className="font-medium text-slate-700">{p.name}</span>
-                          {p.hsn_sac_code && <span className="ml-2 text-xs text-gray-400">HSN: {p.hsn_sac_code}</span>}
+                {productSearch && (
+                  <button 
+                    onClick={() => { setProductSearch(''); setShowProductDropdown(false); }}
+                    className="absolute right-3 top-3 text-slate-400 hover:text-slate-600"
+                    aria-label="Clear product search"
+                  >
+                    <FiX size={18} />
+                  </button>
+                )}
+                {showProductDropdown && productSearch && (
+                  <div className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-60 overflow-y-auto">
+                    {productsLoading ? (
+                      <div className="p-4 text-sm text-slate-500 flex items-center justify-center"><FiLoader className="animate-spin mr-2" /> Loading...</div>
+                    ) : productsError ? (
+                      <div className="p-4 text-sm text-red-500">Unable to load products.</div>
+                    ) : filteredProducts.length === 0 ? (
+                      <div className="p-4 text-sm text-slate-500">No products found.</div>
+                    ) : (
+                      filteredProducts.map((p, idx) => (
+                        <div
+                          key={p.id}
+                          className={`px-4 py-3 cursor-pointer text-sm flex justify-between items-center border-b border-slate-100 last:border-0 ${idx === highlightIndex ? 'bg-blue-50' : 'hover:bg-blue-50'}`}
+                          onMouseEnter={() => setHighlightIndex(idx)}
+                          onClick={() => { addItem(p); setHighlightIndex(-1); }}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="font-medium text-slate-800 truncate">{p.name}</div>
+                            <div className="text-xs text-slate-500 truncate">
+                              {p.sku && <span className="mr-2">SKU: {p.sku}</span>}
+                              {p.stock_quantity != null && <span className="mr-2">Stock: {p.stock_quantity}</span>}
+                              {p.uom && <span className="mr-2">UOM: {p.uom}</span>}
+                              {p.barcode && <span>Barcode: {p.barcode}</span>}
+                            </div>
+                          </div>
+                          <span className="text-slate-600 font-medium ml-3">₹{formatCurrency(p.sale_price ?? p.price)}</span>
                         </div>
-                        <span className="text-gray-600 font-medium">₹{p.sale_price || p.price}</span>
-                      </div>
-                    ))}
+                      ))
+                    )}
                   </div>
                 )}
               </div>
               <button
                 type="button"
                 onClick={openProductOffcanvas}
-                className="px-4 py-2 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1 whitespace-nowrap"
+                className="px-4 py-2 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1 whitespace-nowrap transition-colors"
               >
                 <FiPlus size={16} /> Add Product
               </button>
             </div>
           </div>
+
           {/* Desktop Table */}
           <div className="hidden md:block overflow-x-auto scrollbar-hide">
             <table className="w-full text-sm min-w-[1000px]">
               <thead>
-                <tr className="text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <tr className="text-left text-xs font-medium text-slate-500 uppercase tracking-wider bg-slate-50/80">
                   <th className="py-3 px-3">Item</th>
                   <th className="py-3 px-3 text-center">Qty</th>
                   <th className="py-3 px-3 text-center">Unit</th>
                   <th className="py-3 px-3 text-right">Price</th>
-                  <th className="py-3 px-3 text-center">Disc Type</th>
-                  <th className="py-3 px-3 text-center">Discount</th>
-                  <th className="py-3 px-3 text-center">GST Slab</th>
+                  <th className="py-3 px-3 text-center">Disc</th>
+                  <th className="py-3 px-3 text-center">GST</th>
                   <th className="py-3 px-3 text-center">Inter</th>
-                  <th className="py-3 px-3 text-right">Amount</th>
+                  <th className="py-3 px-3 text-right">Total</th>
                   <th className="w-10"></th>
                 </tr>
               </thead>
               <tbody>
                 {items.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="text-center py-16 text-gray-400">
+                    <td colSpan={9} className="text-center py-16 text-slate-400">
                       <FiBox size={40} className="mx-auto mb-3 opacity-30" />No products added yet.
                     </td>
                   </tr>
                 ) : items.map((item, idx) => (
                   <tr key={idx} className="hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-0">
-                    <td className="py-2 px-3">
-                      <input type="text" value={item.product_name} onChange={e => updateItem(idx, 'product_name', e.target.value)} className="w-full bg-transparent border-0 focus:ring-0 text-sm p-1" />
+                    <td className="py-2 px-3 max-w-[200px]">
+                      <input 
+                        type="text" 
+                        value={item.product_name} 
+                        onChange={e => updateItem(idx, 'product_name', e.target.value)} 
+                        className="w-full bg-transparent border-0 focus:ring-0 text-sm p-1 truncate"
+                        title={item.product_name}
+                      />
                     </td>
                     <td className="py-2 px-3">
-                      <input type="number" min="1" value={item.qty} onChange={e => { updateItem(idx, 'qty', Number(e.target.value)); }} className="w-16 bg-transparent border-0 focus:ring-0 text-center p-1" />
-                      {products?.find(p => p.id === item.product_id)?.stock_quantity != null && (
-                        <div className="text-xs text-gray-400 text-center -mt-0.5">Stock: {products.find(p => p.id === item.product_id)?.stock_quantity}</div>
-                      )}
+                      <input 
+                        type="number" 
+                        min="1" 
+                        step="1" 
+                        inputMode="numeric"
+                        value={item.qty} 
+                        onChange={e => { updateItem(idx, 'qty', Number(e.target.value)); }} 
+                        className={`w-16 bg-transparent border-0 focus:ring-0 text-center p-1 ${item.qty <= 0 ? 'text-red-500' : ''}`}
+                      />
+                      {item.qty <= 0 && <div className="text-xs text-red-500 text-center">Min 1</div>}
                     </td>
                     <td className="py-2 px-3">
                       <input type="text" value={item.uom} onChange={e => updateItem(idx, 'uom', e.target.value)} className="w-14 bg-transparent border-0 focus:ring-0 text-center p-1" />
                     </td>
                     <td className="py-2 px-3">
-                      <input type="number" step="0.01" value={item.price} onChange={e => { updateItem(idx, 'price', Number(e.target.value)); }} className="w-20 bg-transparent border-0 focus:ring-0 text-right p-1" />
+                      <input 
+                        type="number" 
+                        min="0" 
+                        step="0.01" 
+                        inputMode="decimal"
+                        value={item.price} 
+                        onChange={e => { updateItem(idx, 'price', Number(e.target.value)); }} 
+                        className={`w-20 bg-transparent border-0 focus:ring-0 text-right p-1 ${item.price < 0 ? 'text-red-500' : ''}`}
+                      />
+                      {item.price < 0 && <div className="text-xs text-red-500 text-right">Invalid</div>}
                     </td>
                     <td className="py-2 px-3">
-                      <select value={item.discount_type} onChange={e => { updateItem(idx, 'discount_type', e.target.value as 'percent' | 'amount'); }} className="bg-transparent border-0 focus:ring-0 text-center p-1 text-sm">
-                        <option value="percent">%</option>
-                        <option value="amount">₹</option>
-                      </select>
-                    </td>
-                    <td className="py-2 px-3">
-                      {item.discount_type === 'percent' ? (
-                        <input type="number" value={item.discount_percent} onChange={e => { updateItem(idx, 'discount_percent', Number(e.target.value)); }} className="w-14 bg-transparent border-0 focus:ring-0 text-center p-1" />
-                      ) : (
-                        <input type="number" step="0.01" value={item.discount_amount} onChange={e => { updateItem(idx, 'discount_amount', Number(e.target.value)); }} className="w-20 bg-transparent border-0 focus:ring-0 text-center p-1" />
-                      )}
+                      <div className="flex items-center gap-1">
+                        <select value={item.discount_type} onChange={e => { updateItem(idx, 'discount_type', e.target.value as 'percent' | 'amount'); }} className="bg-transparent border-0 focus:ring-0 text-center p-1 text-sm">
+                          <option value="percent">%</option>
+                          <option value="amount">₹</option>
+                        </select>
+                        {item.discount_type === 'percent' ? (
+                          <input 
+                            type="number" 
+                            min="0" 
+                            step="0.01" 
+                            value={item.discount_percent} 
+                            onChange={e => { updateItem(idx, 'discount_percent', Number(e.target.value)); }} 
+                            className={`w-14 bg-transparent border-0 focus:ring-0 text-center p-1 ${item.discount_percent < 0 ? 'text-red-500' : ''}`}
+                          />
+                        ) : (
+                          <input 
+                            type="number" 
+                            min="0" 
+                            step="0.01" 
+                            value={item.discount_amount} 
+                            onChange={e => { updateItem(idx, 'discount_amount', Number(e.target.value)); }} 
+                            className={`w-16 bg-transparent border-0 focus:ring-0 text-center p-1 ${item.discount_amount < 0 || item.discount_amount > item.qty * item.price ? 'text-red-500' : ''}`}
+                          />
+                        )}
+                      </div>
                     </td>
                     <td className="py-2 px-3">
                       <select value={item.gst_slab} onChange={e => { updateItem(idx, 'gst_slab', Number(e.target.value)); }} className="bg-transparent border-0 focus:ring-0 text-center p-1 text-sm">
@@ -1227,63 +1522,55 @@ export function CreateInvoicePage() {
                         <option value={-1}>Custom</option>
                       </select>
                       {item.gst_slab === -1 && (
-                        <input
-                          type="number"
-                          step="0.01"
-                          placeholder="%"
-                          onChange={e => {
-                            const val = Number(e.target.value);
-                            if (!isNaN(val)) {
-                              updateItem(idx, 'gst_slab', val);
-                            }
-                          }}
-                          className="w-12 bg-transparent border-0 focus:ring-0 text-center p-1 ml-1"
-                        />
+                        <input type="number" step="0.01" onChange={e => { const val = Number(e.target.value); if (!isNaN(val)) updateItem(idx, 'gst_slab', val); }} className="w-12 bg-transparent border-0 focus:ring-0 text-center p-1 ml-1" />
                       )}
                     </td>
                     <td className="py-2 px-3">
                       <label className="inline-flex items-center gap-1 text-xs cursor-pointer">
-                        <input type="checkbox" checked={item.is_inter_state} onChange={e => { updateItem(idx, 'is_inter_state', e.target.checked); }} className="rounded border-gray-300" />
+                        <input type="checkbox" checked={item.is_inter_state} onChange={e => { updateItem(idx, 'is_inter_state', e.target.checked); }} className="rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
                         IGST
                       </label>
                     </td>
-                    <td className="py-2 px-3 text-right font-semibold text-slate-700">₹{(item.total || 0).toFixed(2)}</td>
+                    <td className="py-2 px-3 text-right font-semibold text-slate-700">₹{formatCurrency(item.total)}</td>
                     <td className="py-2 px-3">
-                      <button onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600"><FiTrash2 size={16} /></button>
+                      <button onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600 transition-colors" aria-label="Remove item">
+                        <FiTrash2 size={16} />
+                      </button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+
           {/* Mobile Cards */}
           <div className="md:hidden p-4 space-y-4">
             {items.length === 0 ? (
-              <div className="text-center py-16 text-gray-400"><FiBox size={40} className="mx-auto mb-3 opacity-30" />No products added yet.</div>
+              <div className="text-center py-16 text-slate-400"><FiBox size={40} className="mx-auto mb-3 opacity-30" />No products added yet.</div>
             ) : items.map((item, idx) => (
-              <div key={idx} className="bg-slate-50 rounded-xl p-4 space-y-3 border border-slate-100">
+              <div key={idx} className="bg-slate-50 rounded-xl p-4 space-y-3 border border-slate-200 shadow-sm">
                 <div className="flex justify-between items-start">
-                  <span className="text-xs font-semibold text-gray-400">#{idx + 1}</span>
-                  <button onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600"><FiTrash2 size={16} /></button>
+                  <span className="text-xs font-semibold text-slate-400">#{idx + 1}</span>
+                  <button onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600" aria-label="Remove item"><FiTrash2 size={16} /></button>
                 </div>
                 <input type="text" value={item.product_name} onChange={e => updateItem(idx, 'product_name', e.target.value)} className="w-full bg-transparent border-0 focus:ring-0 text-sm font-medium" />
                 <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-gray-500">Qty</label><input type="number" value={item.qty} onChange={e => updateItem(idx, 'qty', Number(e.target.value))} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
-                  <div><label className="text-xs text-gray-500">Unit</label><input type="text" value={item.uom} onChange={e => updateItem(idx, 'uom', e.target.value)} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                  <div><label className="text-xs text-slate-500">Qty</label><input type="number" min="1" value={item.qty} onChange={e => updateItem(idx, 'qty', Number(e.target.value))} className={`w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs ${item.qty <= 0 ? 'border-red-400' : ''}`} /></div>
+                  <div><label className="text-xs text-slate-500">Unit</label><input type="text" value={item.uom} onChange={e => updateItem(idx, 'uom', e.target.value)} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs" /></div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-gray-500">Price</label><input type="number" step="0.01" value={item.price} onChange={e => updateItem(idx, 'price', Number(e.target.value))} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
-                  <div><label className="text-xs text-gray-500">Disc Type</label><select value={item.discount_type} onChange={e => updateItem(idx, 'discount_type', e.target.value as 'percent' | 'amount')} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs"><option value="percent">%</option><option value="amount">₹</option></select></div>
+                  <div><label className="text-xs text-slate-500">Price</label><input type="number" min="0" step="0.01" value={item.price} onChange={e => updateItem(idx, 'price', Number(e.target.value))} className={`w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs ${item.price < 0 ? 'border-red-400' : ''}`} /></div>
+                  <div><label className="text-xs text-slate-500">Disc Type</label><select value={item.discount_type} onChange={e => updateItem(idx, 'discount_type', e.target.value as 'percent' | 'amount')} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="percent">%</option><option value="amount">₹</option></select></div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-gray-500">Discount %</label><input type="number" value={item.discount_percent} onChange={e => updateItem(idx, 'discount_percent', Number(e.target.value))} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
-                  <div><label className="text-xs text-gray-500">Disc Amount</label><input type="number" step="0.01" value={item.discount_amount} onChange={e => updateItem(idx, 'discount_amount', Number(e.target.value))} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs" /></div>
+                  <div><label className="text-xs text-slate-500">Discount %</label><input type="number" min="0" value={item.discount_percent} onChange={e => updateItem(idx, 'discount_percent', Number(e.target.value))} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs" /></div>
+                  <div><label className="text-xs text-slate-500">Disc Amount</label><input type="number" min="0" step="0.01" value={item.discount_amount} onChange={e => updateItem(idx, 'discount_amount', Number(e.target.value))} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs" /></div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-gray-500">GST Slab</label><select value={item.gst_slab} onChange={e => updateItem(idx, 'gst_slab', Number(e.target.value))} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs"><option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option></select>{item.gst_slab === -1 && <input type="number" step="0.01" placeholder="%" onChange={e => { const val = Number(e.target.value); if (!isNaN(val)) updateItem(idx, 'gst_slab', val); }} className="w-full bg-white border border-gray-200 rounded px-2 py-1 text-xs mt-1" />}</div>
-                  <div className="flex items-center gap-2"><label className="text-xs text-gray-500 flex items-center gap-1"><input type="checkbox" checked={item.is_inter_state} onChange={e => updateItem(idx, 'is_inter_state', e.target.checked)} className="rounded" />IGST</label></div>
+                  <div><label className="text-xs text-slate-500">GST Slab</label><select value={item.gst_slab} onChange={e => updateItem(idx, 'gst_slab', Number(e.target.value))} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option></select>{item.gst_slab === -1 && <input type="number" step="0.01" onChange={e => { const val = Number(e.target.value); if (!isNaN(val)) updateItem(idx, 'gst_slab', val); }} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs mt-1" />}</div>
+                  <div className="flex items-center gap-2"><label className="text-xs text-slate-500 flex items-center gap-1"><input type="checkbox" checked={item.is_inter_state} onChange={e => updateItem(idx, 'is_inter_state', e.target.checked)} className="rounded border-slate-300" />IGST</label></div>
                 </div>
-                <div className="text-right font-semibold">₹{(item.total || 0).toFixed(2)}</div>
+                <div className="text-right font-semibold">₹{formatCurrency(item.total)}</div>
               </div>
             ))}
           </div>
@@ -1291,119 +1578,85 @@ export function CreateInvoicePage() {
 
         {/* Invoice Info & Summary */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="text-lg font-semibold mb-4 text-slate-700">Invoice Information</h2>
-            <div className="space-y-4">
+          <div className={cardClass}>
+            <h2 className={sectionTitleClass}>Invoice Information</h2>
+            <div className="space-y-5">
               <div>
-                <label className="block text-sm font-medium mb-1">Bank</label>
+                <label className={labelClass}>Bank</label>
                 <select value={form.bank_id} onChange={e => setForm(prev => ({ ...prev, bank_id: e.target.value ? Number(e.target.value) : '' }))} className={inputClass}>
                   <option value="">Select Bank</option>
                   {banks?.map(b => <option key={b.id} value={b.id}>{b.bank_name} ({b.account_no})</option>)}
                 </select>
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Terms & Conditions</label>
+                <label className={labelClass}>Terms & Conditions</label>
                 <input type="text" value={form.terms_title} onChange={e => setForm(prev => ({ ...prev, terms_title: e.target.value }))} className={inputClass} />
                 <textarea rows={4} value={form.terms_detail} onChange={e => setForm(prev => ({ ...prev, terms_detail: e.target.value }))} className={`${inputClass} mt-2`} />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Document Note</label>
+                <label className={labelClass}>Document Note</label>
                 <textarea rows={2} value={form.document_note} onChange={e => setForm(prev => ({ ...prev, document_note: e.target.value }))} className={inputClass} />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Internal Note</label>
+                <label className={labelClass}>Internal Note</label>
                 <textarea rows={2} value={form.internal_note} onChange={e => setForm(prev => ({ ...prev, internal_note: e.target.value }))} className={inputClass} />
               </div>
             </div>
           </div>
 
-          <div className="bg-white rounded-xl shadow-sm p-6">
-            <h2 className="text-lg font-semibold mb-4 text-slate-700">Invoice Summary</h2>
+          <div className={cardClass}>
+            <h2 className={sectionTitleClass}>Invoice Summary</h2>
             <div className="space-y-3 text-sm">
-              <div className="flex justify-between"><span>Taxable Amount</span><span className="font-medium">₹{summary.itemTaxableTotal.toFixed(2)}</span></div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs font-medium">General Discount %</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={form.general_discount_percent}
-                    onChange={e => {
-                      const val = Number(e.target.value);
-                      setForm(prev => ({ ...prev, general_discount_percent: val, general_discount_amount: 0 }));
-                    }}
-                    className={inputClass}
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium">Or Amount</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={form.general_discount_amount}
-                    onChange={e => {
-                      const val = Number(e.target.value);
-                      setForm(prev => ({ ...prev, general_discount_amount: val, general_discount_percent: 0 }));
-                    }}
-                    className={inputClass}
-                  />
-                </div>
-              </div>
-              <div className="flex justify-between"><span>Packing Charges</span><input type="number" step="0.01" value={form.packing_charges} onChange={e => setForm(prev => ({ ...prev, packing_charges: Number(e.target.value) }))} className="w-24 text-right border rounded px-2 py-1" /></div>
-              <div className="space-y-2">
-                <div className="flex justify-between items-center">
-                  <span>Additional Charges</span>
-                  <button onClick={addAdditionalCharge} className="text-blue-600 text-xs flex items-center gap-1"><FiPlus size={14} /> Add</button>
-                </div>
-                {form.additional_charges.map(c => (
-                  <div key={c.id} className="flex gap-2 items-center">
-                    <input type="text" placeholder="Charge name" value={c.label} onChange={e => updateAdditionalCharge(c.id, 'label', e.target.value)} className="flex-1 border rounded px-2 py-1 text-xs" />
-                    <input type="number" placeholder="Amount" value={c.amount} onChange={e => updateAdditionalCharge(c.id, 'amount', Number(e.target.value))} className="w-20 border rounded px-2 py-1 text-xs text-right" />
-                    <button onClick={() => removeAdditionalCharge(c.id)} className="text-red-500"><FiX size={14} /></button>
-                  </div>
-                ))}
-              </div>
-              <div className="flex justify-between"><span>Total Taxable</span><span>₹{(summary.itemTaxableTotal - summary.generalDiscountAmount).toFixed(2)}</span></div>
-              <div className="flex justify-between"><span>General Discount</span><span className="text-red-500">-₹{summary.generalDiscountAmount.toFixed(2)}</span></div>
-              <div className="flex justify-between items-center"><span>TCS %</span><input type="number" step="0.01" value={form.tcs_percent} onChange={e => setForm(prev => ({ ...prev, tcs_percent: Number(e.target.value) }))} className="w-20 text-right border rounded px-2 py-1" /></div>
-              <div className="flex justify-between"><span>TCS Amount</span><span>₹{summary.tcsAmount.toFixed(2)}</span></div>
-              <div className="flex justify-between"><span>Total Tax</span><span>₹{summary.totalTax.toFixed(2)}</span></div>
-              <div className="flex justify-between">
-                <span>Round Off</span>
-                <span className={`font-medium ${summary.roundOff >= 0 ? 'text-emerald-600' : 'text-red-500'}`}>{summary.roundOff >= 0 ? '+' : ''}{summary.roundOff.toFixed(2)}</span>
-              </div>
+              <div className="flex justify-between"><span className="text-slate-500">Subtotal</span><span>₹{formatCurrency(summary.itemSubtotal)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Discount</span><span className="text-red-500">-₹{formatCurrency(summary.itemDiscountTotal)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Taxable Amount</span><span>₹{formatCurrency(summary.itemTaxableTotal)}</span></div>
+              {!items.every(i => i.is_inter_state) && (
+                <>
+                  <div className="flex justify-between"><span className="text-slate-500">CGST</span><span>₹{formatCurrency(summary.cgstTotal)}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">SGST</span><span>₹{formatCurrency(summary.sgstTotal)}</span></div>
+                </>
+              )}
+              {items.some(i => i.is_inter_state) && (
+                <div className="flex justify-between"><span className="text-slate-500">IGST</span><span>₹{formatCurrency(summary.igstTotal)}</span></div>
+              )}
+              <div className="flex justify-between"><span className="text-slate-500">Additional Charges</span><span>₹{formatCurrency(summary.additionalChargesTotal)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Packing Charges</span><span>₹{formatCurrency(form.packing_charges)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">TCS</span><span>₹{formatCurrency(summary.tcsAmount)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Round Off</span><span>{summary.roundOff >= 0 ? '+' : ''}{formatCurrency(summary.roundOff)}</span></div>
               <hr className="border-slate-200" />
               <div className="flex justify-between text-base font-bold text-slate-800">
                 <span>Grand Total</span>
-                <span>₹{summary.grandTotal.toFixed(2)}</span>
+                <span>₹{formatCurrency(summary.grandTotal)}</span>
               </div>
-              <div className="text-xs text-gray-500 mt-1">{totalInWords}</div>
+              <div className="text-xs text-slate-500 mt-1">{totalInWords}</div>
             </div>
 
-            {/* Payment Section */}
-            <div className="mt-6 border-t pt-4">
+            {/* Payments */}
+            <div className="mt-6 border-t border-slate-100 pt-4">
               <div className="flex justify-between items-center mb-3">
                 <h3 className="text-sm font-semibold text-slate-700">Payments</h3>
-                <button onClick={addPayment} className="text-blue-600 text-xs flex items-center gap-1"><FiPlus size={14} /> Add Payment</button>
+                <button onClick={addPayment} className="text-blue-600 text-xs flex items-center gap-1 hover:underline" aria-label="Add payment">
+                  <FiPlus size={14} /> Add Payment
+                </button>
               </div>
-              {form.payments.length === 0 && (
-                <p className="text-xs text-gray-400">No payments recorded.</p>
-              )}
+              {form.payments.length === 0 && <p className="text-xs text-slate-400">No payments recorded.</p>}
               <div className="space-y-3">
                 {form.payments.map((pay, idx) => (
                   <div key={pay.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200">
                     <div className="flex justify-between items-start mb-2">
-                      <span className="text-xs font-semibold text-gray-500">Payment #{idx + 1}</span>
-                      <button onClick={() => removePayment(pay.id)} className="text-red-400 hover:text-red-600"><FiTrash2 size={14} /></button>
+                      <span className="text-xs font-semibold text-slate-500">Payment #{idx + 1}</span>
+                      <button onClick={() => removePayment(pay.id)} className="text-red-400 hover:text-red-600" aria-label="Remove payment">
+                        <FiTrash2 size={14} />
+                      </button>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <div>
-                        <label className="block text-xs text-gray-500">Amount</label>
-                        <input type="number" step="0.01" value={pay.amount} onChange={e => updatePayment(pay.id, 'amount', Number(e.target.value))} className="w-full border rounded px-2 py-1 text-xs" />
+                        <label className="block text-xs text-slate-500">Amount</label>
+                        <input type="number" min="0" step="0.01" inputMode="decimal" value={pay.amount} onChange={e => updatePayment(pay.id, 'amount', Number(e.target.value))} className={`w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none ${pay.amount < 0 ? 'border-red-400' : ''}`} />
                       </div>
                       <div>
-                        <label className="block text-xs text-gray-500">Method</label>
-                        <select value={pay.payment_method} onChange={e => updatePayment(pay.id, 'payment_method', e.target.value as any)} className="w-full border rounded px-2 py-1 text-xs">
+                        <label className="block text-xs text-slate-500">Method</label>
+                        <select value={pay.payment_method} onChange={e => updatePayment(pay.id, 'payment_method', e.target.value as any)} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none">
                           <option value="UPI">UPI</option>
                           <option value="cash">Cash</option>
                           <option value="cheque">Cheque</option>
@@ -1411,28 +1664,28 @@ export function CreateInvoicePage() {
                         </select>
                       </div>
                       <div>
-                        <label className="block text-xs text-gray-500">Reference No</label>
-                        <input type="text" value={pay.reference_no} onChange={e => updatePayment(pay.id, 'reference_no', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        <label className="block text-xs text-slate-500">Reference No</label>
+                        <input type="text" value={pay.reference_no} onChange={e => updatePayment(pay.id, 'reference_no', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none" />
                       </div>
                       <div>
-                        <label className="block text-xs text-gray-500">Date</label>
-                        <input type="date" value={pay.transaction_date} onChange={e => updatePayment(pay.id, 'transaction_date', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        <label className="block text-xs text-slate-500">Date</label>
+                        <input type="date" value={pay.transaction_date} onChange={e => updatePayment(pay.id, 'transaction_date', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none" />
                       </div>
                       <div className="col-span-2">
-                        <label className="block text-xs text-gray-500">Remarks</label>
-                        <input type="text" value={pay.remarks} onChange={e => updatePayment(pay.id, 'remarks', e.target.value)} className="w-full border rounded px-2 py-1 text-xs" />
+                        <label className="block text-xs text-slate-500">Remarks</label>
+                        <input type="text" value={pay.remarks} onChange={e => updatePayment(pay.id, 'remarks', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none" />
                       </div>
                     </div>
                   </div>
                 ))}
               </div>
               <div className="flex justify-between mt-3 text-sm font-medium">
-                <span>Total Paid</span>
-                <span>₹{summary.totalPaid.toFixed(2)}</span>
+                <span className="text-slate-600">Total Paid</span>
+                <span>₹{formatCurrency(summary.totalPaid)}</span>
               </div>
               <div className="flex justify-between mt-1 text-sm font-medium">
-                <span>Balance Due</span>
-                <span className={summary.balanceDue > 0 ? 'text-red-600' : 'text-emerald-600'}>₹{summary.balanceDue.toFixed(2)}</span>
+                <span className="text-slate-600">Balance Due</span>
+                <span className={summary.balanceDue > 0 ? 'text-red-600' : 'text-emerald-600'}>₹{formatCurrency(summary.balanceDue)}</span>
               </div>
             </div>
           </div>
@@ -1440,37 +1693,39 @@ export function CreateInvoicePage() {
       </div>
 
       {/* Sticky Bottom Bar */}
-      <div className="sticky bottom-0 bg-white border-t shadow-xl p-4 flex flex-wrap justify-end gap-3 z-30">
-        <button onClick={() => navigate('/invoices')} className="px-5 py-2.5 rounded-xl border border-gray-300 text-sm hover:bg-gray-50">Cancel</button>
-        <button onClick={() => handleSubmit('save_draft')} disabled={submitting} className="px-5 py-2.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-sm">Save Draft</button>
-        <button onClick={() => handleSubmit('save')} disabled={submitting} className="px-5 py-2.5 rounded-xl bg-slate-800 text-white hover:bg-slate-900 text-sm flex items-center gap-2"><FiSave size={16} /> Save Invoice</button>
-        <button onClick={() => handleSubmit('save_print')} disabled={submitting} className="px-5 py-2.5 rounded-xl bg-cyan-500 text-white hover:bg-cyan-600 text-sm flex items-center gap-2"><FiPrinter size={16} /> Print Invoice</button>
+      <div className="sticky bottom-0 bg-white/80 backdrop-blur-md border-t border-slate-200 shadow-2xl p-4 flex flex-wrap justify-end gap-3 z-30">
+        <button onClick={() => navigate('/invoices')} className="px-5 py-2.5 rounded-xl border border-slate-300 text-sm hover:bg-slate-50 transition-colors">Cancel</button>
+        
+        
+        <button onClick={() => handleSubmit('save_print')} disabled={submitting} className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:from-cyan-600 hover:to-blue-700 text-sm flex items-center gap-2 shadow-lg shadow-cyan-400/30 transition-all disabled:opacity-50">
+          {submitting ? <FiLoader className="animate-spin" size={16} /> : <FiPrinter size={16} />} Print & Save
+        </button>
       </div>
 
       {/* Customer Offcanvas */}
       {showCustomerOffcanvas && (
-        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
           <Offcanvas
             isOpen={showCustomerOffcanvas}
             title="Add Customer"
             onClose={() => setShowCustomerOffcanvas(false)}
             footer={
               <div className="flex justify-between w-full">
-                <button onClick={() => setShowCustomerOffcanvas(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={customerSubmitting}>
+                <button onClick={() => setShowCustomerOffcanvas(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50 transition-colors" disabled={customerSubmitting}>
                   Close
                 </button>
-                <button onClick={createCustomer} disabled={customerSubmitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50">
+                <button onClick={createCustomer} disabled={customerSubmitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
                   {customerSubmitting ? 'Creating...' : 'Create Customer'}
                 </button>
               </div>
             }
           >
             <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Customer Detail</legend>
+              <fieldset className="border border-slate-200 rounded-xl p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2 px-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Customer Detail</legend>
                 <div className="mt-3 space-y-4">
                   <div>
-                    <label className="block text-sm font-medium mb-1">Type</label>
+                    <label className={labelClass}>Type</label>
                     <select value={newCustomer.type} onChange={e => setNewCustomer(prev => ({ ...prev, type: e.target.value as any }))} className={inputClass}>
                       <option value="customer">Customer</option>
                       <option value="dealer">Dealer</option>
@@ -1479,7 +1734,7 @@ export function CreateInvoicePage() {
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-sm font-medium mb-1">Company *</label>
+                      <label className={labelClass}>Company *</label>
                       <select
                         value={newCustomer.company_id as string}
                         onChange={e => setNewCustomer(prev => ({ ...prev, company_id: e.target.value }))}
@@ -1490,7 +1745,7 @@ export function CreateInvoicePage() {
                       </select>
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Branch</label>
+                      <label className={labelClass}>Branch</label>
                       <select value={newCustomer.branch_id as string} onChange={e => setNewCustomer(prev => ({ ...prev, branch_id: e.target.value }))} className={inputClass}>
                         <option value="">Select Branch</option>
                         {availableBranches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
@@ -1498,55 +1753,55 @@ export function CreateInvoicePage() {
                     </div>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium mb-1">GSTIN</label>
+                    <label className={labelClass}>GSTIN</label>
                     <div className="flex gap-2">
                       <input type="text" value={newCustomer.gst_number} onChange={handleGstChange} className={inputClass} placeholder="Enter GSTIN" />
-                      <button type="button" onClick={handleGstAutoFill} disabled={lookingUpGst || !newCustomer.gst_number} className="rounded-lg bg-blue-500 px-4 py-2 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50 whitespace-nowrap">
+                      <button type="button" onClick={handleGstAutoFill} disabled={lookingUpGst || !newCustomer.gst_number} className="rounded-lg bg-blue-500 px-4 py-2 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50 whitespace-nowrap transition-colors">
                         {lookingUpGst ? 'Fetching...' : 'Auto Fill'}
                       </button>
                     </div>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium mb-1">Company Name *</label>
+                    <label className={labelClass}>Company Name *</label>
                     <input type="text" value={newCustomer.name} onChange={e => setNewCustomer(prev => ({ ...prev, name: e.target.value }))} className={`${inputClass} ${customerFormErrors.name ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter Company Name" />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div><label className="block text-sm font-medium mb-1">Contact Person</label><input type="text" value={newCustomer.contact_person} onChange={e => setNewCustomer(prev => ({ ...prev, contact_person: e.target.value }))} className={inputClass} /></div>
-                    <div><label className="block text-sm font-medium mb-1">Contact No</label><input type="tel" value={newCustomer.contact_no} onChange={e => { const val = e.target.value.replace(/\D/g, ''); setNewCustomer(prev => ({ ...prev, contact_no: val })); }} className={`${inputClass} ${customerFormErrors.contact_no ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter Contact No" /></div>
+                    <div><label className={labelClass}>Contact Person</label><input type="text" value={newCustomer.contact_person} onChange={e => setNewCustomer(prev => ({ ...prev, contact_person: e.target.value }))} className={inputClass} /></div>
+                    <div><label className={labelClass}>Contact No</label><input type="tel" value={newCustomer.contact_no} onChange={e => { const val = e.target.value.replace(/\D/g, ''); setNewCustomer(prev => ({ ...prev, contact_no: val })); }} className={`${inputClass} ${customerFormErrors.contact_no ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter Contact No" /></div>
                   </div>
-                  <div><label className="block text-sm font-medium mb-1">Email</label><input type="email" value={newCustomer.email} onChange={e => setNewCustomer(prev => ({ ...prev, email: e.target.value }))} className={`${inputClass} ${customerFormErrors.email ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter Email" /></div>
+                  <div><label className={labelClass}>Email</label><input type="email" value={newCustomer.email} onChange={e => setNewCustomer(prev => ({ ...prev, email: e.target.value }))} className={`${inputClass} ${customerFormErrors.email ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter Email" /></div>
                 </div>
               </fieldset>
 
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Billing Address</legend>
+              <fieldset className="border border-slate-200 rounded-xl p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2 px-2"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Billing Address</legend>
                 <div className="mt-3 space-y-4">
                   <textarea rows={2} value={newCustomer.billing_street} onChange={e => setNewCustomer(prev => ({ ...prev, billing_street: e.target.value }))} className={inputClass} placeholder="Enter Address" />
                   <div className="grid grid-cols-2 gap-4">
-                    <div><label className="block text-sm font-medium mb-1">City *</label><input type="text" value={newCustomer.billing_city} onChange={e => setNewCustomer(prev => ({ ...prev, billing_city: e.target.value }))} className={`${inputClass} ${customerFormErrors.billing_city ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter City" /></div>
-                    <div><label className="block text-sm font-medium mb-1">State</label><input type="text" value={newCustomer.billing_state} onChange={e => setNewCustomer(prev => ({ ...prev, billing_state: e.target.value }))} className={inputClass} /></div>
+                    <div><label className={labelClass}>City *</label><input type="text" value={newCustomer.billing_city} onChange={e => setNewCustomer(prev => ({ ...prev, billing_city: e.target.value }))} className={`${inputClass} ${customerFormErrors.billing_city ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="Enter City" /></div>
+                    <div><label className={labelClass}>State</label><input type="text" value={newCustomer.billing_state} onChange={e => setNewCustomer(prev => ({ ...prev, billing_state: e.target.value }))} className={inputClass} /></div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div><label className="block text-sm font-medium mb-1">Country</label><input type="text" value={newCustomer.billing_country} onChange={e => setNewCustomer(prev => ({ ...prev, billing_country: e.target.value }))} className={inputClass} /></div>
-                    <div><label className="block text-sm font-medium mb-1">Pincode</label><input type="text" value={newCustomer.billing_pincode} onChange={e => setNewCustomer(prev => ({ ...prev, billing_pincode: e.target.value }))} className={inputClass} /></div>
+                    <div><label className={labelClass}>Country</label><input type="text" value={newCustomer.billing_country} onChange={e => setNewCustomer(prev => ({ ...prev, billing_country: e.target.value }))} className={inputClass} /></div>
+                    <div><label className={labelClass}>Pincode</label><input type="text" value={newCustomer.billing_pincode} onChange={e => setNewCustomer(prev => ({ ...prev, billing_pincode: e.target.value }))} className={inputClass} /></div>
                   </div>
                 </div>
               </fieldset>
 
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-purple-500"></span> Additional Details</legend>
+              <fieldset className="border border-slate-200 rounded-xl p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2 px-2"><span className="w-2.5 h-2.5 rounded-full bg-purple-500"></span> Additional Details</legend>
                 <div className="mt-3 space-y-4">
                   <div className="grid grid-cols-2 gap-4">
-                    <div><label className="block text-sm font-medium mb-1">PAN</label><input type="text" value={newCustomer.pan} onChange={e => setNewCustomer(prev => ({ ...prev, pan: e.target.value }))} className={inputClass} /></div>
-                    <div><label className="block text-sm font-medium mb-1">Registration Type</label><select value={newCustomer.registration_type} onChange={e => setNewCustomer(prev => ({ ...prev, registration_type: e.target.value }))} className={inputClass}><option value="">Select</option><option value="Registered">Registered</option><option value="Unregistered">Unregistered</option></select></div>
+                    <div><label className={labelClass}>PAN</label><input type="text" value={newCustomer.pan} onChange={e => setNewCustomer(prev => ({ ...prev, pan: e.target.value }))} className={inputClass} /></div>
+                    <div><label className={labelClass}>Registration Type</label><select value={newCustomer.registration_type} onChange={e => setNewCustomer(prev => ({ ...prev, registration_type: e.target.value }))} className={inputClass}><option value="">Select</option><option value="Registered">Registered</option><option value="Unregistered">Unregistered</option></select></div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div><label className="block text-sm font-medium mb-1">Opening Balance</label><input type="number" value={newCustomer.opening_balance} onChange={e => setNewCustomer(prev => ({ ...prev, opening_balance: e.target.value }))} className={inputClass} /></div>
-                    <div><label className="block text-sm font-medium mb-1">Credit Limit</label><input type="number" value={newCustomer.credit_limit} onChange={e => setNewCustomer(prev => ({ ...prev, credit_limit: e.target.value }))} className={inputClass} /></div>
+                    <div><label className={labelClass}>Opening Balance</label><input type="number" value={newCustomer.opening_balance} onChange={e => setNewCustomer(prev => ({ ...prev, opening_balance: e.target.value }))} className={inputClass} /></div>
+                    <div><label className={labelClass}>Credit Limit</label><input type="number" value={newCustomer.credit_limit} onChange={e => setNewCustomer(prev => ({ ...prev, credit_limit: e.target.value }))} className={inputClass} /></div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <input type="checkbox" checked={newCustomer.is_active} onChange={e => setNewCustomer(prev => ({ ...prev, is_active: e.target.checked }))} className="rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-                    <label className="text-sm text-gray-700">Active</label>
+                    <input type="checkbox" checked={newCustomer.is_active} onChange={e => setNewCustomer(prev => ({ ...prev, is_active: e.target.checked }))} className="rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+                    <label className="text-sm text-slate-700">Active</label>
                   </div>
                 </div>
               </fieldset>
@@ -1557,13 +1812,13 @@ export function CreateInvoicePage() {
 
       {/* Add Group Modal */}
       {showGroupModal && (
-        <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center">
-          <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-md">
-            <h3 className="text-lg font-semibold mb-4">Add Customer Group</h3>
-            <input type="text" value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm mb-4" placeholder="Group name" />
+        <div className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-sm flex items-center justify-center">
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md border border-slate-100">
+            <h3 className="text-lg font-semibold mb-4 text-slate-800">Add Customer Group</h3>
+            <input type="text" value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm mb-4 focus:ring-2 focus:ring-blue-500/30 outline-none" placeholder="Group name" />
             <div className="flex justify-end gap-3">
-              <button onClick={() => { setShowGroupModal(false); setNewGroupName(''); }} className="px-4 py-2 rounded-lg border text-sm" disabled={addingGroup}>Cancel</button>
-              <button onClick={handleAddGroup} disabled={addingGroup || !newGroupName.trim()} className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+              <button onClick={() => { setShowGroupModal(false); setNewGroupName(''); }} className="px-4 py-2 rounded-lg border border-slate-200 text-sm hover:bg-slate-50 transition-colors" disabled={addingGroup}>Cancel</button>
+              <button onClick={handleAddGroup} disabled={addingGroup || !newGroupName.trim()} className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
                 {addingGroup ? 'Adding...' : 'Add Group'}
               </button>
             </div>
@@ -1573,36 +1828,36 @@ export function CreateInvoicePage() {
 
       {/* Product Offcanvas */}
       {showProductOffcanvas && (
-        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
+        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
           <Offcanvas
             isOpen={showProductOffcanvas}
             title="Add Product"
             onClose={() => setShowProductOffcanvas(false)}
             footer={
               <div className="flex justify-between w-full">
-                <button onClick={() => setShowProductOffcanvas(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={productSubmitting}>
+                <button onClick={() => setShowProductOffcanvas(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50 transition-colors" disabled={productSubmitting}>
                   Close
                 </button>
-                <button onClick={createProduct} disabled={productSubmitting} className="px-5 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-50">
+                <button onClick={createProduct} disabled={productSubmitting} className="px-5 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-50 transition-colors">
                   {productSubmitting ? 'Creating...' : 'Create Product'}
                 </button>
               </div>
             }
           >
             <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Basic Information</legend>
+              <fieldset className="border border-slate-200 rounded-xl p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2 px-2"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Basic Information</legend>
                 <div className="mt-3 space-y-4">
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-sm font-medium mb-1">Company *</label>
+                      <label className={labelClass}>Company *</label>
                       <select value={newProduct.company_id} onChange={e => setNewProduct(prev => ({ ...prev, company_id: e.target.value }))} className={`${inputClass} ${productFormErrors.company_id ? 'border-red-400 ring-2 ring-red-200' : ''}`}>
                         <option value="">Select Company</option>
                         {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                       </select>
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Branch</label>
+                      <label className={labelClass}>Branch</label>
                       <select value={newProduct.branch_id} onChange={e => setNewProduct(prev => ({ ...prev, branch_id: e.target.value }))} className={inputClass}>
                         <option value="">Select Branch</option>
                         {availableBranches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
@@ -1610,28 +1865,28 @@ export function CreateInvoicePage() {
                     </div>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium mb-1">Product Name *</label>
+                    <label className={labelClass}>Product Name *</label>
                     <input type="text" value={newProduct.name} onChange={e => setNewProduct(prev => ({ ...prev, name: e.target.value }))} className={`${inputClass} ${productFormErrors.name ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="e.g., Steel Rod" />
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div><label className="block text-sm font-medium mb-1">SKU (auto if blank)</label><input type="text" value={newProduct.sku} onChange={e => setNewProduct(prev => ({ ...prev, sku: e.target.value }))} className={inputClass} placeholder="Auto" /></div>
-                    <div><label className="block text-sm font-medium mb-1">HSN/SAC Code</label><input type="text" value={newProduct.hsn_sac_code} onChange={e => setNewProduct(prev => ({ ...prev, hsn_sac_code: e.target.value }))} className={inputClass} placeholder="e.g., 7308" /></div>
+                    <div><label className={labelClass}>SKU (auto if blank)</label><input type="text" value={newProduct.sku} onChange={e => setNewProduct(prev => ({ ...prev, sku: e.target.value }))} className={inputClass} placeholder="Auto" /></div>
+                    <div><label className={labelClass}>HSN/SAC Code</label><input type="text" value={newProduct.hsn_sac_code} onChange={e => setNewProduct(prev => ({ ...prev, hsn_sac_code: e.target.value }))} className={inputClass} placeholder="e.g., 7308" /></div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div><label className="block text-sm font-medium mb-1">Unit *</label><input type="text" value={newProduct.unit} onChange={e => setNewProduct(prev => ({ ...prev, unit: e.target.value }))} className={`${inputClass} ${productFormErrors.unit ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="e.g., Piece, Kg" /></div>
-                    <div><label className="block text-sm font-medium mb-1">Sale Price (₹) *</label><input type="number" step="0.01" value={newProduct.sale_price} onChange={e => setNewProduct(prev => ({ ...prev, sale_price: e.target.value }))} className={`${inputClass} ${productFormErrors.sale_price ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="0.00" /></div>
+                    <div><label className={labelClass}>Unit *</label><input type="text" value={newProduct.unit} onChange={e => setNewProduct(prev => ({ ...prev, unit: e.target.value }))} className={`${inputClass} ${productFormErrors.unit ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="e.g., Piece, Kg" /></div>
+                    <div><label className={labelClass}>Sale Price (₹) *</label><input type="number" step="0.01" value={newProduct.sale_price} onChange={e => setNewProduct(prev => ({ ...prev, sale_price: e.target.value }))} className={`${inputClass} ${productFormErrors.sale_price ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="0.00" /></div>
                   </div>
                 </div>
               </fieldset>
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Tax & Stock</legend>
+              <fieldset className="border border-slate-200 rounded-xl p-4">
+                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2 px-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Tax & Stock</legend>
                 <div className="mt-3 grid grid-cols-2 gap-4">
-                  <div><label className="block text-sm font-medium mb-1">Tax Rate (%)</label><input type="number" step="0.01" value={newProduct.tax_rate} onChange={e => setNewProduct(prev => ({ ...prev, tax_rate: e.target.value }))} className={inputClass} /></div>
-                  <div><label className="block text-sm font-medium mb-1">Stock Quantity</label><input type="number" value={newProduct.stock_quantity} onChange={e => setNewProduct(prev => ({ ...prev, stock_quantity: e.target.value }))} className={inputClass} /></div>
+                  <div><label className={labelClass}>Tax Rate (%)</label><input type="number" step="0.01" value={newProduct.tax_rate} onChange={e => setNewProduct(prev => ({ ...prev, tax_rate: e.target.value }))} className={inputClass} /></div>
+                  <div><label className={labelClass}>Stock Quantity</label><input type="number" value={newProduct.stock_quantity} onChange={e => setNewProduct(prev => ({ ...prev, stock_quantity: e.target.value }))} className={inputClass} /></div>
                 </div>
               </fieldset>
               <div>
-                <label className="block text-sm font-medium mb-1">Description</label>
+                <label className={labelClass}>Description</label>
                 <textarea rows={2} value={newProduct.description} onChange={e => setNewProduct(prev => ({ ...prev, description: e.target.value }))} className={inputClass} placeholder="Optional description" />
               </div>
             </div>
