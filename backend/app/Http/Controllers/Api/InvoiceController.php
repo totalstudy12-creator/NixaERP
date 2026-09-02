@@ -25,31 +25,9 @@ class InvoiceController extends Controller
      */
     public function nextNumber()
     {
-        $year = date('Y');
-        
-        // Get the latest invoice for the current year
-        $lastInvoice = Invoice::whereYear('created_at', $year)
-            ->orderBy('id', 'desc')
-            ->first();
-        
-        if ($lastInvoice && $lastInvoice->invoice_no) {
-            // Try to extract the numeric part
-            // Format examples: INV-2025-000001, INV-2025-000123
-            if (preg_match('/(\d+)$/', $lastInvoice->invoice_no, $matches)) {
-                $lastNumber = intval($matches[1]);
-            } else {
-                $lastNumber = $lastInvoice->id;
-            }
-            $nextNumber = $lastNumber + 1;
-        } else {
-            $nextNumber = 1;
-        }
-        
-        $invoiceNo = sprintf('INV-%s-%06d', $year, $nextNumber);
-        
         return response()->json([
             'success' => true,
-            'next_invoice_no' => $invoiceNo,
+            'next_invoice_no' => $this->resolveInvoiceNumber(),
         ]);
     }
 
@@ -105,7 +83,7 @@ class InvoiceController extends Controller
             // Items array
             'items'               => 'required|array|min:1',
             'items.*.product_id'  => 'required|exists:products,id',
-            'items.*.quantity'    => 'required|integer|min:1',
+            'items.*.quantity'    => 'required|numeric|min:0.01',
             'items.*.unit_price'  => 'required|numeric|min:0',
             'items.*.discount_type' => 'nullable|string|in:percent,amount',
             'items.*.discount_percent' => 'nullable|numeric|min:0',
@@ -121,15 +99,7 @@ class InvoiceController extends Controller
             'items.*.total'       => 'nullable|numeric|min:0',
         ]);
 
-        // Auto-generate invoice number if not provided
-        if (empty($data['invoice_no'])) {
-            $data['invoice_no'] = $this->generateInvoiceNo();
-        } else {
-            $exists = Invoice::withTrashed()->where('invoice_no', $data['invoice_no'])->exists();
-            if ($exists) {
-                $data['invoice_no'] = $this->generateInvoiceNo();
-            }
-        }
+        $data['invoice_no'] = $this->resolveInvoiceNumber($data['invoice_no'] ?? null);
 
         if (empty($data['invoice_date'])) {
             $data['invoice_date'] = now()->toDateString();
@@ -314,21 +284,25 @@ class InvoiceController extends Controller
     }
 
     /**
-     * Generate the next invoice number.
+     * Resolve an invoice number, auto-generating one when missing or already taken.
      * Format: INV-YYYY-XXXXXX (e.g., INV-2025-000001)
      */
-    private function generateInvoiceNo(): string
+    private function resolveInvoiceNumber(?string $invoiceNo = null): string
     {
+        $invoiceNo = trim((string) ($invoiceNo ?? ''));
+
+        if ($invoiceNo !== '' && ! Invoice::withTrashed()->where('invoice_no', $invoiceNo)->exists()) {
+            return $invoiceNo;
+        }
+
         $year = date('Y');
-        
-        // Get the latest invoice for the current year
+
         $lastInvoice = Invoice::withTrashed()
             ->whereYear('created_at', $year)
             ->orderBy('id', 'desc')
             ->first();
-        
+
         if ($lastInvoice && $lastInvoice->invoice_no) {
-            // Try to extract the numeric part
             if (preg_match('/(\d+)$/', $lastInvoice->invoice_no, $matches)) {
                 $lastNumber = intval($matches[1]);
             } else {
@@ -338,7 +312,14 @@ class InvoiceController extends Controller
         } else {
             $nextNumber = 1;
         }
-        
-        return sprintf('INV-%s-%06d', $year, $nextNumber);
+
+        $generated = sprintf('INV-%s-%06d', $year, $nextNumber);
+
+        while (Invoice::withTrashed()->where('invoice_no', $generated)->exists()) {
+            $nextNumber++;
+            $generated = sprintf('INV-%s-%06d', $year, $nextNumber);
+        }
+
+        return $generated;
     }
 }

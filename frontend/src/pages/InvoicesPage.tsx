@@ -579,7 +579,7 @@ const InvoiceImportModal = memo(
         return;
       }
 
-      const requiredFields = ['invoice_no', 'total_amount'];
+      const requiredFields = ['total_amount'];
       const firstRow = parsedRows[0];
       const keys = Object.keys(firstRow).map(k => k.toLowerCase());
       const missingFields = requiredFields.filter(f => !keys.includes(f));
@@ -615,7 +615,6 @@ const InvoiceImportModal = memo(
           const invoiceBranchId = normalizedRow.branch_id ? Number(normalizedRow.branch_id) : (defaultBranchId ? Number(defaultBranchId) : undefined);
 
           const invoicePayload: any = {
-            invoice_no: normalizedRow.invoice_no,
             customer_id: customerId,
             invoice_date: normalizedRow.invoice_date || new Date().toISOString().split('T')[0],
             due_date: normalizedRow.due_date || null,
@@ -623,6 +622,10 @@ const InvoiceImportModal = memo(
             tax_amount: parseFloat(normalizedRow.tax_amount || '0'),
             status: (normalizedRow.status as Invoice['status']) || 'pending',
           };
+
+          if (normalizedRow.invoice_no && String(normalizedRow.invoice_no).trim()) {
+            invoicePayload.invoice_no = String(normalizedRow.invoice_no).trim();
+          }
 
           if (invoiceCompanyId) invoicePayload.company_id = invoiceCompanyId;
           if (invoiceBranchId) invoicePayload.branch_id = invoiceBranchId;

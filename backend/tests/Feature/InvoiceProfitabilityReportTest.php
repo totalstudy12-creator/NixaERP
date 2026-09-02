@@ -135,6 +135,83 @@ class InvoiceProfitabilityReportTest extends TestCase
         $this->assertSame(250.0, round((float) $response->json('data.0.gross_profit'), 2));
     }
 
+    public function test_invoice_api_accepts_decimal_quantity_items_for_imports(): void
+    {
+        $company = Company::create([
+            'name' => 'Nixa ERP',
+            'code' => 'NIXA-DEC',
+            'email' => 'decimal@nixaerp.com',
+            'phone' => '9999999997',
+            'active' => true,
+        ]);
+
+        $branch = Branch::create([
+            'company_id' => $company->id,
+            'name' => 'Main Branch',
+            'code' => 'MB-DEC',
+            'active' => true,
+        ]);
+
+        $customer = Customer::create([
+            'company_id' => $company->id,
+            'branch_id' => $branch->id,
+            'name' => 'Decimal Import Customer',
+            'email' => 'decimal.customer@example.com',
+            'phone' => '9876543212',
+            'status' => 'active',
+            'is_active' => true,
+        ]);
+
+        $product = Product::create([
+            'company_id' => $company->id,
+            'branch_id' => $branch->id,
+            'name' => 'Imported Item',
+            'sku' => 'IMP-DEC-01',
+            'purchase_price' => 10.00,
+            'sale_price' => 18.50,
+            'tax_rate' => 0,
+            'stock_quantity' => 2000,
+            'reorder_level' => 10,
+            'active' => true,
+        ]);
+
+        $user = User::factory()->create();
+
+        $response = $this->actingAs($user, 'sanctum')
+            ->postJson('/api/invoices', [
+                'company_id' => $company->id,
+                'branch_id' => $branch->id,
+                'customer_id' => $customer->id,
+                'invoice_no' => 'INV-DEC-001',
+                'invoice_date' => '2026-04-25',
+                'due_date' => '2026-04-25',
+                'total_amount' => 22874.63,
+                'tax_amount' => 0,
+                'status' => 'pending',
+                'items' => [[
+                    'product_id' => $product->id,
+                    'quantity' => 1020.25,
+                    'unit_price' => 18.50,
+                    'discount_type' => 'percent',
+                    'discount_percent' => 0,
+                    'discount_amount' => 0,
+                    'gst_slab' => 0,
+                    'is_inter_state' => false,
+                    'cgst_percent' => 0,
+                    'sgst_percent' => 0,
+                    'igst_percent' => 0,
+                    'cgst_amount' => 0,
+                    'sgst_amount' => 0,
+                    'igst_amount' => 0,
+                    'total' => 18874.63,
+                ]],
+            ]);
+
+        $response->assertStatus(201);
+        $this->assertDatabaseHas('invoices', ['invoice_no' => 'INV-DEC-001']);
+        $this->assertDatabaseHas('invoice_items', ['product_id' => $product->id, 'quantity' => 1020.25]);
+    }
+
     public function test_purchase_register_vendor_and_ledger_reports_return_real_transaction_rows(): void
     {
         $company = Company::create([
