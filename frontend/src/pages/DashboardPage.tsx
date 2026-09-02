@@ -155,10 +155,29 @@ const GeminiAIAssistant = memo(() => {
   const [inputText, setInputText] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [showVoiceSettings, setShowVoiceSettings] = useState(false);
+  const [ttsSource, setTtsSource] = useState<'browser' | 'cloud'>('browser');
+  const [voiceProvider, setVoiceProvider] = useState<'browser' | 'cloud'>('cloud');
+  const [voiceLanguage, setVoiceLanguage] = useState<'en-US' | 'hi-IN'>('en-US');
+  const [voiceSpeed, setVoiceSpeed] = useState(0.96);
 
   const recognitionRef = useRef<any>(null);
   const synthesisRef = useRef<SpeechSynthesis | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const pickBestVoice = useCallback(() => {
+    if (!('speechSynthesis' in window)) return null;
+
+    const voices = window.speechSynthesis.getVoices();
+    const preferred = voices.find((voice) => {
+      const name = voice.name.toLowerCase();
+      const lang = voice.lang.toLowerCase();
+      return /female|samantha|aria|zira|susan|jenny|olivia|danielle|google uk english female|google us english|female voice|woman/i.test(name)
+        || /en-us|en-gb|en-in|hi-in/i.test(lang);
+    }) ?? voices.find((voice) => /en-us|en-gb|en-in/i.test(voice.lang.toLowerCase())) ?? voices[0] ?? null;
+
+    return preferred;
+  }, []);
 
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -180,29 +199,74 @@ const GeminiAIAssistant = memo(() => {
 
     if ('speechSynthesis' in window) {
       synthesisRef.current = window.speechSynthesis;
+      const loadVoices = () => {
+        const voices = window.speechSynthesis.getVoices();
+        if (voices.length > 0) pickBestVoice();
+      };
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
     }
 
     return () => {
       if (recognitionRef.current) recognitionRef.current.abort();
       if (synthesisRef.current) synthesisRef.current.cancel();
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.onvoiceschanged = null;
+      }
     };
-  }, []);
+  }, [pickBestVoice]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
-  const speakResponse = (text: string) => {
-    if (!synthesisRef.current) return;
+  const speakResponse = async (text: string) => {
+    if (!text) return;
+
+    try {
+      const res = await apiClient.generateAiSpeech(text, voiceProvider, voiceLanguage);
+      const voicePayload = (res as any)?.data ?? res;
+      if (voicePayload?.source === 'cloud' && voicePayload?.audio_base64) {
+        setTtsSource('cloud');
+        const audio = new Audio(`data:audio/mpeg;base64,${voicePayload.audio_base64}`);
+        audio.onplay = () => setIsSpeaking(true);
+        audio.onended = () => setIsSpeaking(false);
+        audio.onerror = () => setIsSpeaking(false);
+        audio.play();
+        return;
+      }
+    } catch {
+      // fallback to browser TTS below
+    }
+
+    setTtsSource('browser');
+    if (!synthesisRef.current || !('speechSynthesis' in window)) return;
+
+    const cleanText = text.replace(/[*#_`]/g, '').trim();
+    if (!cleanText) return;
+
     synthesisRef.current.cancel();
-    const cleanText = text.replace(/[*#_`]/g, '');
     const utterance = new SpeechSynthesisUtterance(cleanText);
-    utterance.lang = 'en-US';
-    utterance.rate = 1;
+    const preferredVoice = pickBestVoice();
+
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+      utterance.lang = preferredVoice.lang || voiceLanguage;
+    } else {
+      utterance.lang = voiceLanguage;
+    }
+
+    utterance.rate = voiceSpeed;
+    utterance.pitch = 1.15;
+    utterance.volume = 1;
     utterance.onstart = () => setIsSpeaking(true);
     utterance.onend = () => setIsSpeaking(false);
     utterance.onerror = () => setIsSpeaking(false);
     synthesisRef.current.speak(utterance);
+  };
+
+  const previewVoice = async () => {
+    await speakResponse('Hello! This is a preview of my voice. I sound natural and clear.');
   };
 
   const handleSendMessage = async (textToSend: string = inputText) => {
@@ -222,7 +286,7 @@ const GeminiAIAssistant = memo(() => {
       
       const geminiMessage: ChatMessage = { id: (Date.now() + 1).toString(), sender: 'gemini', text: aiResponse };
       setMessages((prev) => [...prev, geminiMessage]);
-      speakResponse(aiResponse);
+      await speakResponse(aiResponse);
       
     } catch (err: any) {
       const errorMessage: ChatMessage = { 
@@ -279,6 +343,26 @@ const GeminiAIAssistant = memo(() => {
                   <p className="text-xs text-violet-200">Powered by Google AI</p>
                 </div>
               </div>
+              <div className="flex items-center gap-2 text-white">
+                <select
+                  value={voiceProvider}
+                  onChange={(e) => setVoiceProvider(e.target.value as 'browser' | 'cloud')}
+                  className="rounded-lg border border-white/20 bg-white/10 px-2 py-1 text-[10px] text-white outline-none"
+                  title="Voice provider"
+                >
+                  <option value="cloud" className="text-slate-800">Premium voice</option>
+                  <option value="browser" className="text-slate-800">Browser voice</option>
+                </select>
+                <select
+                  value={voiceLanguage}
+                  onChange={(e) => setVoiceLanguage(e.target.value as 'en-US' | 'hi-IN')}
+                  className="rounded-lg border border-white/20 bg-white/10 px-2 py-1 text-[10px] text-white outline-none"
+                  title="Voice language"
+                >
+                  <option value="en-US" className="text-slate-800">English</option>
+                  <option value="hi-IN" className="text-slate-800">Hindi</option>
+                </select>
+              </div>
               <button
                 onClick={() => {
                   setIsOpen(false);
@@ -291,6 +375,46 @@ const GeminiAIAssistant = memo(() => {
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+              <div className="flex items-center justify-between gap-2 pb-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowVoiceSettings((prev) => !prev)}
+                    className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    Voice settings
+                  </button>
+                  <button
+                    type="button"
+                    onClick={previewVoice}
+                    className="rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[10px] font-medium text-violet-700 hover:bg-violet-100"
+                  >
+                    Preview voice
+                  </button>
+                </div>
+                <span className="text-[10px] uppercase tracking-[0.16em] text-slate-400">
+                  {ttsSource === 'cloud' ? 'Premium' : 'Browser'}
+                </span>
+              </div>
+
+              {showVoiceSettings && (
+                <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                  <div className="flex items-center justify-between text-[11px] text-slate-600 mb-2">
+                    <span>Voice speed</span>
+                    <span>{voiceSpeed.toFixed(2)}x</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0.75"
+                    max="1.4"
+                    step="0.05"
+                    value={voiceSpeed}
+                    onChange={(e) => setVoiceSpeed(Number(e.target.value))}
+                    className="w-full accent-violet-600"
+                  />
+                </div>
+              )}
+
               {messages.length === 0 && (
                 <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-3">
                   <FiMessageSquare size={40} className="opacity-20" />

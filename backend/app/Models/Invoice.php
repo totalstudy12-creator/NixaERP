@@ -123,6 +123,17 @@ class Invoice extends Model
         return $this->hasMany(Payment::class);
     }
 
+    public function getPaymentReceivedAttribute()
+    {
+        return $this->attributes['payment_received'] ?? $this->attributes['paid_amount'] ?? 0;
+    }
+
+    public function setPaymentReceivedAttribute($value)
+    {
+        $this->attributes['payment_received'] = $value;
+        $this->attributes['paid_amount'] = $value;
+    }
+
     public static function generateInvoiceNo(): string
     {
         $date = now()->format('Ymd');

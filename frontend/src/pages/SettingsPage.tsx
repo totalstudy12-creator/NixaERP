@@ -74,6 +74,18 @@ const SkeletonTable = () => (
   </div>
 );
 
+const DEFAULT_VOICE_SETTINGS = {
+  voice_tts_provider: 'auto',
+  voice_default_language: 'en-US',
+  voice_browser_enabled: 'true',
+  voice_paid_enabled: 'true',
+  voice_auto_read_enabled: 'true',
+  voice_speed: '0.96',
+  elevenlabs_api_key: '',
+  elevenlabs_voice_id: 'EXAVITQu4vr4xnSDxMaL',
+  elevenlabs_model_id: 'eleven_multilingual_v2',
+};
+
 export function SettingsPage() {
   const [settings, setSettings] = useState<SettingItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -85,6 +97,7 @@ export function SettingsPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [showAuthToken, setShowAuthToken] = useState(false);
   const [activeTab, setActiveTab] = useState<'settings' | 'api'>('settings');
+  const [voiceConfig, setVoiceConfig] = useState(DEFAULT_VOICE_SETTINGS);
   const [newSetting, setNewSetting] = useState({
     key: '',
     value: '',
@@ -116,11 +129,21 @@ export function SettingsPage() {
 
       const enriched = rawData.map((item: SettingItem) => ({
         ...item,
+        value: String(item.value ?? ''),
         type: inferType(item.key),
         options: DEFAULT_OPTIONS[item.key.toLowerCase()] || [],
-        defaultValue: item.value,
+        defaultValue: String(item.value ?? ''),
       }));
       setSettings(enriched);
+
+      const mergedVoiceConfig = { ...DEFAULT_VOICE_SETTINGS };
+      rawData.forEach((item: any) => {
+        if (item && typeof item.key === 'string' && Object.prototype.hasOwnProperty.call(mergedVoiceConfig, item.key)) {
+          mergedVoiceConfig[item.key as keyof typeof mergedVoiceConfig] = String(item.value ?? mergedVoiceConfig[item.key as keyof typeof mergedVoiceConfig]);
+        }
+      });
+      setVoiceConfig(mergedVoiceConfig);
+
       setExpandedGroups(prev => {
         const firstGroup = enriched[0]?.group || 'general';
         return { ...prev, [firstGroup]: true };
@@ -185,7 +208,7 @@ export function SettingsPage() {
       showError('Save failed', msg);
       setSettings(current =>
         current.map(item =>
-          item.id === setting.id ? { ...item, value: setting.defaultValue || '' } : item
+          item.id === setting.id ? { ...item, value: String(setting.defaultValue ?? '') } : item
         )
       );
     } finally {
@@ -253,6 +276,28 @@ export function SettingsPage() {
     }
   }, [showSuccess, showError, loadSettings]);
 
+const saveVoiceSettings = useCallback(async () => {
+    const voiceEntries = Object.entries(voiceConfig).map(([key, value]) => ({
+      key,
+      value,
+      group: 'voice',
+      description: 'AI voice configuration for free and paid TTS providers.',
+      is_public: false,
+    }));
+
+    try {
+      setSaving(prev => ({ ...prev, voice: true }));
+      await apiClient.request('POST', '/settings/bulk', { settings: voiceEntries });
+      showSuccess('Voice settings saved', 'The AI voice connection settings were updated.');
+      await loadSettings();
+    } catch (err: any) {
+      const msg = err?.backendMessage || err?.message || 'Unable to save voice settings.';
+      showError('Voice settings failed', msg);
+    } finally {
+      setSaving(prev => ({ ...prev, voice: false }));
+    }
+  }, [voiceConfig, showSuccess, showError, loadSettings]);
+
   const copyToClipboard = useCallback((key: string, value: string) => {
     navigator.clipboard.writeText(value).then(() => {
       setCopiedKey(key);
@@ -278,6 +323,7 @@ export function SettingsPage() {
 
   const renderInput = (setting: SettingItem) => {
     const commonClasses = "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-200 focus:border-blue-400 outline-none transition";
+    const safeValue = String(setting.value ?? '');
 
     switch (setting.type) {
       case 'boolean':
@@ -294,13 +340,13 @@ export function SettingsPage() {
           <div className="flex items-center gap-2">
             <input
               type="color"
-              value={setting.value.startsWith('#') ? setting.value : '#000000'}
+              value={safeValue.startsWith('#') ? safeValue : '#000000'}
               onChange={e => handleValueChange(setting.id, e.target.value)}
               className="h-10 w-14 cursor-pointer rounded border border-slate-300"
             />
             <input
               type="text"
-              value={setting.value}
+              value={safeValue}
               onChange={e => handleValueChange(setting.id, e.target.value)}
               className={commonClasses}
             />
@@ -310,7 +356,7 @@ export function SettingsPage() {
         return (
           <input
             type="number"
-            value={setting.value}
+            value={safeValue}
             onChange={e => handleValueChange(setting.id, e.target.value)}
             className={commonClasses}
           />
@@ -319,7 +365,7 @@ export function SettingsPage() {
         return (
           <textarea
             rows={3}
-            value={setting.value}
+            value={safeValue}
             onChange={e => handleValueChange(setting.id, e.target.value)}
             className={`${commonClasses} font-mono text-xs`}
           />
@@ -327,7 +373,7 @@ export function SettingsPage() {
       case 'select':
         return (
           <select
-            value={setting.value}
+            value={safeValue}
             onChange={e => handleValueChange(setting.id, e.target.value)}
             className={commonClasses}
           >
@@ -338,7 +384,7 @@ export function SettingsPage() {
         return (
           <input
             type="text"
-            value={setting.value}
+            value={safeValue}
             onChange={e => handleValueChange(setting.id, e.target.value)}
             className={commonClasses}
           />
@@ -423,6 +469,126 @@ export function SettingsPage() {
           </div>
         ) : (
           <div className="space-y-6">
+            <div className="rounded-2xl border border-violet-200 bg-gradient-to-r from-violet-50 via-white to-indigo-50 p-5 shadow-sm">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-600">AI Voice Connection</p>
+                  <h2 className="mt-1 text-xl font-bold text-slate-800">Free and paid TTS setup</h2>
+                  <p className="text-sm text-slate-600">Use browser speech for free or ElevenLabs for premium voice output.</p>
+                </div>
+                <button
+                  onClick={() => void saveVoiceSettings()}
+                  disabled={saving.voice}
+                  className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-60"
+                >
+                  {saving.voice ? 'Saving...' : 'Save voice config'}
+                </button>
+              </div>
+
+              <div className="mt-5 grid gap-4 md:grid-cols-2">
+                <label className="text-sm text-slate-700">
+                  <span className="mb-1 block font-medium">Provider</span>
+                  <select
+                    value={voiceConfig.voice_tts_provider}
+                    onChange={(e) => setVoiceConfig(prev => ({ ...prev, voice_tts_provider: e.target.value }))}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
+                  >
+                    <option value="auto">Auto (use premium if available)</option>
+                    <option value="browser">Browser (free)</option>
+                    <option value="cloud">Premium</option>
+                    <option value="elevenlabs">ElevenLabs</option>
+                  </select>
+                </label>
+
+                <label className="text-sm text-slate-700">
+                  <span className="mb-1 block font-medium">Default language</span>
+                  <select
+                    value={voiceConfig.voice_default_language}
+                    onChange={(e) => setVoiceConfig(prev => ({ ...prev, voice_default_language: e.target.value }))}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
+                  >
+                    <option value="en-US">English (US)</option>
+                    <option value="hi-IN">Hindi</option>
+                    <option value="en-GB">English (UK)</option>
+                  </select>
+                </label>
+
+                <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={voiceConfig.voice_browser_enabled === 'true'}
+                    onChange={(e) => setVoiceConfig(prev => ({ ...prev, voice_browser_enabled: String(e.target.checked) }))}
+                    className="h-4 w-4 accent-violet-600"
+                  />
+                  Browser TTS enabled (free)
+                </label>
+
+                <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={voiceConfig.voice_paid_enabled === 'true'}
+                    onChange={(e) => setVoiceConfig(prev => ({ ...prev, voice_paid_enabled: String(e.target.checked) }))}
+                    className="h-4 w-4 accent-violet-600"
+                  />
+                  Premium provider enabled
+                </label>
+
+                <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={voiceConfig.voice_auto_read_enabled === 'true'}
+                    onChange={(e) => setVoiceConfig(prev => ({ ...prev, voice_auto_read_enabled: String(e.target.checked) }))}
+                    className="h-4 w-4 accent-violet-600"
+                  />
+                  Auto-read assistant replies
+                </label>
+
+                <label className="text-sm text-slate-700">
+                  <span className="mb-1 block font-medium">Voice speed</span>
+                  <input
+                    type="number"
+                    min="0.6"
+                    max="1.4"
+                    step="0.05"
+                    value={voiceConfig.voice_speed}
+                    onChange={(e) => setVoiceConfig(prev => ({ ...prev, voice_speed: e.target.value }))}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
+                  />
+                </label>
+
+                <label className="md:col-span-2 text-sm text-slate-700">
+                  <span className="mb-1 block font-medium">ElevenLabs API key</span>
+                  <input
+                    type="password"
+                    value={voiceConfig.elevenlabs_api_key}
+                    onChange={(e) => setVoiceConfig(prev => ({ ...prev, elevenlabs_api_key: e.target.value }))}
+                    placeholder="Enter your ElevenLabs API key"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
+                  />
+                </label>
+
+                <label className="text-sm text-slate-700">
+                  <span className="mb-1 block font-medium">ElevenLabs voice ID</span>
+                  <input
+                    type="text"
+                    value={voiceConfig.elevenlabs_voice_id}
+                    onChange={(e) => setVoiceConfig(prev => ({ ...prev, elevenlabs_voice_id: e.target.value }))}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
+                  />
+                </label>
+
+                <label className="text-sm text-slate-700">
+                  <span className="mb-1 block font-medium">ElevenLabs model ID</span>
+                  <input
+                    type="text"
+                    value={voiceConfig.elevenlabs_model_id}
+                    onChange={(e) => setVoiceConfig(prev => ({ ...prev, elevenlabs_model_id: e.target.value }))}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
+                  />
+                </label>
+              </div>
+            </div>
+
             {settings.length === 0 ? (
               <div className="rounded-xl bg-white p-12 text-center shadow-sm">
                 <FiSettings className="mx-auto mb-4 text-slate-300" size={48} />

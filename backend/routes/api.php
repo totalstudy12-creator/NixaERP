@@ -34,6 +34,7 @@ use App\Http\Controllers\Api\InboxController;
 use App\Http\Controllers\Api\WhatsAppWebhookController;
 use App\Http\Controllers\Api\EmailWebhookController;
 use App\Http\Controllers\Api\GeminiVoiceController;
+use App\Http\Controllers\Api\ReportController;
 use App\Http\Middleware\ApiTokenMiddleware;
 use Illuminate\Support\Facades\Route;
 
@@ -102,6 +103,41 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get('all', [DashboardController::class, 'allReports']);
         Route::get('top-selling-products', [DashboardController::class, 'topSellingProducts']);
         Route::get('least-selling-products', [DashboardController::class, 'leastSellingProducts']);
+
+        // Advanced reports
+        Route::get('summary', [ReportController::class, 'summary']);
+
+        // Sales reports
+        Route::get('sales-summary', [ReportController::class, 'salesSummary']);
+        Route::get('sales-register', [ReportController::class, 'salesRegister']);
+        Route::get('sales-by-customer', [ReportController::class, 'salesByCustomer']);
+        Route::get('sales-by-product', [ReportController::class, 'salesByProduct']);
+        Route::get('gst-sales', [ReportController::class, 'gstSalesReport']);
+        Route::get('outstanding-sales', [ReportController::class, 'outstandingSales']);
+
+        // Purchase reports
+        Route::get('purchase-summary', [ReportController::class, 'purchaseSummary']);
+        Route::get('purchase-register', [ReportController::class, 'purchaseRegister']);
+        Route::get('purchase-by-vendor', [ReportController::class, 'purchaseByVendor']);
+        Route::get('outstanding-purchases', [ReportController::class, 'outstandingPurchases']);
+
+        // Accounting reports
+        Route::get('general-ledger', [ReportController::class, 'generalLedger']);
+        Route::get('customer-ledger', [ReportController::class, 'customerLedger']);
+        Route::get('profit-loss', [ReportController::class, 'profitLoss']);
+        Route::get('profit-loss/summary', [ReportController::class, 'profitLossSummary']);
+        Route::get('profit-loss/products', [ReportController::class, 'profitLossProducts']);
+        Route::get('profit-loss/customers', [ReportController::class, 'profitLossCustomers']);
+        Route::get('profit-loss/branches', [ReportController::class, 'profitLossBranches']);
+        Route::get('profit-loss/monthly', [ReportController::class, 'profitLossMonthly']);
+        Route::get('profit-loss/yearly', [ReportController::class, 'profitLossYearly']);
+        Route::get('profit-loss/comparison', [ReportController::class, 'profitLossComparison']);
+        Route::get('profit-loss/invoices', [ReportController::class, 'invoiceProfitability']);
+        Route::get('profit-loss/invoices/{invoice}', [ReportController::class, 'invoiceProfitabilityDetail']);
+        Route::get('product-profitability', [ReportController::class, 'productProfitability']);
+
+        // GST reports
+        Route::get('gst-summary', [ReportController::class, 'gstSummary']);
     });
 
     // Alternative dashboard endpoints
@@ -307,6 +343,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     // AI Assistant
     Route::get('ai/assistant/insights', [\App\Http\Controllers\Api\AiController::class, 'insights']);
     Route::post('ai/assistant/chat', [\App\Http\Controllers\Api\AiController::class, 'chat']);
+    Route::post('ai/assistant/voice', [\App\Http\Controllers\Api\AiController::class, 'voice']);
     Route::post('dashboard/ai/ask', [\App\Http\Controllers\Api\DashboardAiController::class, 'ask']);
     Route::post('dashboard/ai/business-health', [\App\Http\Controllers\Api\DashboardAiController::class, 'businessHealth']);
     Route::post('dashboard/ai/forecast', [\App\Http\Controllers\Api\DashboardAiController::class, 'forecast']);

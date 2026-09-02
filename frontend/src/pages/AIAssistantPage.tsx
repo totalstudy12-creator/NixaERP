@@ -41,19 +41,41 @@ const ConversationListSkeleton = () => (
 );
 
 // ─── Gemini AI Chat Panel ───
-const GeminiChatPanel = memo(({ conversation, onUpdateConversation }: {
+const GeminiChatPanel = memo(({ conversation, onUpdateConversation, autoRead, voiceProvider, voiceLanguage, voiceSpeed, onVoiceSpeedChange }: {
   conversation: Conversation | null;
   onUpdateConversation: (conv: Conversation) => void;
+  autoRead: boolean;
+  voiceProvider: 'browser' | 'cloud';
+  voiceLanguage: 'en-US' | 'hi-IN';
+  voiceSpeed: number;
+  onVoiceSpeedChange: (value: number) => void;
 }) => {
   const [messages, setMessages] = useState<Message[]>(conversation?.messages || []);
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [showVoiceSettings, setShowVoiceSettings] = useState(false);
+  const [ttsSource, setTtsSource] = useState<'browser' | 'cloud'>('browser');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
   const synthesisRef = useRef<SpeechSynthesis | null>(null);
   const { showError } = useNotification();
+
+  const pickBestVoice = useCallback(() => {
+    if (!('speechSynthesis' in window)) return null;
+
+    const voices = window.speechSynthesis.getVoices();
+
+    const preferred = voices.find((voice) => {
+      const name = voice.name.toLowerCase();
+      const lang = voice.lang.toLowerCase();
+      return /female|samantha|aria|zira|susan|jenny|olivia|danielle|google uk english female|google us english|female voice|woman/i.test(name)
+        || /en-us|en-gb|en-in|hi-in/i.test(lang);
+    }) ?? voices.find((voice) => /en-us|en-gb|en-in/i.test(voice.lang.toLowerCase())) ?? voices[0] ?? null;
+
+    return preferred;
+  }, []);
 
   // Update messages when conversation changes
   useEffect(() => {
@@ -78,28 +100,72 @@ const GeminiChatPanel = memo(({ conversation, onUpdateConversation }: {
     }
     if ('speechSynthesis' in window) {
       synthesisRef.current = window.speechSynthesis;
+      const loadVoices = () => {
+        const voices = window.speechSynthesis.getVoices();
+        if (voices.length > 0) {
+          pickBestVoice();
+        }
+      };
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
     }
     return () => {
       recognitionRef.current?.abort();
       synthesisRef.current?.cancel();
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.onvoiceschanged = null;
+      }
     };
-  }, []);
+  }, [pickBestVoice]);
 
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
-  const speakResponse = (text: string) => {
-    if (!synthesisRef.current) return;
+  const speakResponse = async (text: string) => {
+    if (!text) return;
+
+    try {
+      const res = await apiClient.generateAiSpeech(text, voiceProvider, voiceLanguage);
+      const voicePayload = (res as any)?.data ?? res;
+      if (voicePayload?.source === 'cloud' && voicePayload?.audio_base64) {
+        setTtsSource('cloud');
+        const audio = new Audio(`data:audio/mpeg;base64,${voicePayload.audio_base64}`);
+        audio.onplay = () => setIsSpeaking(true);
+        audio.onended = () => setIsSpeaking(false);
+        audio.onerror = () => setIsSpeaking(false);
+        audio.play();
+        return;
+      }
+    } catch {
+      // fallback to browser TTS below
+    }
+
+    setTtsSource('browser');
+    if (!synthesisRef.current || !('speechSynthesis' in window)) return;
+
+    const cleanText = text.replace(/[*#_`]/g, '').trim();
+    if (!cleanText) return;
+
     synthesisRef.current.cancel();
-    const cleanText = text.replace(/[*#_`]/g, '');
     const utterance = new SpeechSynthesisUtterance(cleanText);
-    utterance.lang = 'en-US';
-    utterance.rate = 1;
+    const preferredVoice = pickBestVoice();
+
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+      utterance.lang = preferredVoice.lang || voiceLanguage;
+    } else {
+      utterance.lang = voiceLanguage;
+    }
+
+    utterance.rate = voiceSpeed;
+    utterance.pitch = 1.15;
+    utterance.volume = 1;
     utterance.onstart = () => setIsSpeaking(true);
     utterance.onend = () => setIsSpeaking(false);
     utterance.onerror = () => setIsSpeaking(false);
+
     synthesisRef.current.speak(utterance);
   };
 
@@ -134,7 +200,9 @@ const GeminiChatPanel = memo(({ conversation, onUpdateConversation }: {
 
       const finalMessages = [...updatedMessages, aiMsg];
       setMessages(finalMessages);
-      speakResponse(reply);
+      if (autoRead) {
+        await speakResponse(reply);
+      }
 
       // Update conversation
       if (conversation) {
@@ -246,6 +314,48 @@ const GeminiChatPanel = memo(({ conversation, onUpdateConversation }: {
 
       {/* Input Area */}
       <div className="p-4 border-t border-slate-100 bg-slate-50">
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowVoiceSettings(!showVoiceSettings)}
+              className="px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-100"
+            >
+              Voice settings
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                await speakResponse('Hello! This is a preview of my voice. I sound natural and clear.');
+              }}
+              className="px-2.5 py-1.5 rounded-lg border border-violet-200 bg-violet-50 text-xs font-medium text-violet-700 hover:bg-violet-100"
+            >
+              Preview voice
+            </button>
+          </div>
+          <span className="text-[10px] uppercase tracking-[0.16em] text-slate-400">
+            {ttsSource === 'cloud' ? 'Premium' : 'Browser'} voice
+          </span>
+        </div>
+
+        {showVoiceSettings && (
+          <div className="mb-3 rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+            <div className="flex items-center justify-between text-xs text-slate-600 mb-2">
+              <span>Voice speed</span>
+              <span>{voiceSpeed.toFixed(2)}x</span>
+            </div>
+            <input
+              type="range"
+              min="0.75"
+              max="1.4"
+              step="0.05"
+              value={voiceSpeed}
+              onChange={(e) => onVoiceSpeedChange(Number(e.target.value))}
+              className="w-full accent-violet-600"
+            />
+          </div>
+        )}
+
         <div className="flex gap-2 items-center">
           <button
             onClick={toggleVoice}
@@ -297,6 +407,9 @@ export function AIAssistantPage() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [autoRead, setAutoRead] = useState(true);
+  const [voiceProvider, setVoiceProvider] = useState<'browser' | 'cloud'>('cloud');
+  const [voiceLanguage, setVoiceLanguage] = useState<'en-US' | 'hi-IN'>('en-US');
+  const [voiceSpeed, setVoiceSpeed] = useState(0.96);
 
   // Initialize with a default conversation
   useEffect(() => {
@@ -391,6 +504,24 @@ export function AIAssistantPage() {
             <input type="checkbox" checked={autoRead} onChange={(e) => setAutoRead(e.target.checked)} />
             Auto Read
           </label>
+          <select
+            value={voiceProvider}
+            onChange={(e) => setVoiceProvider(e.target.value as 'browser' | 'cloud')}
+            className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
+            title="Voice provider"
+          >
+            <option value="cloud">Premium voice</option>
+            <option value="browser">Browser voice</option>
+          </select>
+          <select
+            value={voiceLanguage}
+            onChange={(e) => setVoiceLanguage(e.target.value as 'en-US' | 'hi-IN')}
+            className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-200"
+            title="Voice language"
+          >
+            <option value="en-US">English</option>
+            <option value="hi-IN">Hindi</option>
+          </select>
           <button onClick={handleExportChat} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20">
             <FiDownload className="inline mr-1" size={14} /> Export
           </button>
@@ -454,6 +585,11 @@ export function AIAssistantPage() {
           <GeminiChatPanel
             conversation={activeConversation}
             onUpdateConversation={handleUpdateConversation}
+            autoRead={autoRead}
+            voiceProvider={voiceProvider}
+            voiceLanguage={voiceLanguage}
+            voiceSpeed={voiceSpeed}
+            onVoiceSpeedChange={setVoiceSpeed}
           />
         </div>
       </div>

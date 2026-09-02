@@ -1843,7 +1843,7 @@ export function InventoryPage() {
             <StatCard icon={FiXCircle} label="Inactive" value={summary.inactive} tone="rose" />
             <StatCard icon={FiAlertCircle} label="Low Stock" value={summary.lowStock} tone="amber" />
             <StatCard icon={FiTruck} label="Out of Stock" value={summary.outOfStock} tone="rose" />
-            <StatCard icon={FiDollarSign} label="Total Value (Est.)" value={summary.totalValue.toFixed(2)} tone="teal" prefix="₹" />
+            <StatCard icon={FiDollarSign} label="Total Value (Est.)" value={`₹${summary.totalValue.toFixed(2)}`} tone="teal" />
           </>
         ) : (
           [...Array(6)].map((_, i) => <div key={i} className="flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-4 animate-pulse">

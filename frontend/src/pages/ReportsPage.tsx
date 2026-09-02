@@ -44,6 +44,16 @@ import clsx from 'clsx';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
+import type {
+  SalesSummaryReport,
+  ProfitLossReport,
+  ProfitLossSummaryReport,
+  ProductProfitabilityReport,
+  InvoiceProfitabilityReport,
+  GstSummaryReport,
+  OutstandingSalesReport,
+  DashboardSummary,
+} from '../types/reports';
 
 // ============================================================
 // TYPES
@@ -66,6 +76,9 @@ interface Invoice {
   total_amount: number | string;
   status: string;
   created_at?: string;
+  // Optional fields for branch/company filtering
+  branch_name?: string;
+  company_name?: string;
 }
 
 interface PurchaseInvoice {
@@ -75,6 +88,8 @@ interface PurchaseInvoice {
   grand_total: number | string;
   status: string;
   purchase_date: string;
+  branch_name?: string;
+  company_name?: string;
 }
 
 interface Payment {
@@ -117,8 +132,6 @@ interface ApiErrorState {
   payments: string | null;
   ledger: string | null;
   gstr1: string | null;
-  gstr2: string | null;
-  gstr3b: string | null;
 }
 
 // ============================================================
@@ -187,16 +200,17 @@ const SUB_REPORTS: Record<
     { label: 'General Ledger', icon: <FiFileText size={14} /> },
     { label: 'Trial Balance', icon: <FiFileText size={14} /> },
     { label: 'Profit & Loss', icon: <FiTrendingUp size={14} /> },
+    { label: 'Profitability Overview', icon: <FiBarChart2 size={14} /> },
+    { label: 'Bill-wise Profitability', icon: <FiFileText size={14} /> },
+    { label: 'Product Profitability', icon: <FiPackage size={14} /> },
+    { label: 'Customer Profitability', icon: <FiUser size={14} /> },
+    { label: 'Branch Profitability', icon: <FiGrid size={14} /> },
     { label: 'Balance Sheet', icon: <FiFileText size={14} /> },
     { label: 'Cash Flow', icon: <FiDollarSign size={14} /> },
     { label: 'Outstanding Receivable', icon: <FiAlertTriangle size={14} /> },
   ],
   gst: [
     { label: 'GSTR-1', icon: <FiFileText size={14} /> },
-    { label: 'GSTR-2', icon: <FiFileText size={14} /> },
-    { label: 'GSTR-3B', icon: <FiFileText size={14} /> },
-    { label: 'Input Tax Credit', icon: <FiFileText size={14} /> },
-    { label: 'GST Rate-wise Report', icon: <FiFileText size={14} /> },
   ],
   expenses: [
     { label: 'Expense Summary', icon: <FiCreditCard size={14} /> },
@@ -251,29 +265,53 @@ function useApiCache<T>(
       try {
         const response = await fetcherRef.current();
 
-        const result = (Array.isArray(response)
-          ? response
-          : ((response as any)?.data ?? [])) as T;
+        // Preserve full API response objects for wrapped report payloads such as:
+        // { success: true, data: [...], meta: {...} }
+        // Some pages still use plain object wrappers without success/meta; those are unwrapped
+        // only when their `data` value is a plain object rather than a report array.
+        let result: T = response as T;
 
-        if (!Array.isArray(result)) {
-          throw new Error(
-            'Invalid API response. Expected an array.'
-          );
+        if (response && typeof response === 'object') {
+          const payload = response as Record<string, any>;
+          const hasData = 'data' in payload && payload.data !== undefined;
+          const hasSummary = 'summary' in payload && payload.summary !== undefined;
+
+          // Preserve real accounting report envelopes like:
+          // { success: true, data: [...], meta: {...}, summary: {...} }
+          // But unwrap generic list wrappers such as:
+          // { data: [...], meta: {...} }
+          if (hasData && !hasSummary && Array.isArray(payload.data)) {
+            result = payload.data as T;
+          } else if (
+            hasData &&
+            !hasSummary &&
+            payload.data &&
+            typeof payload.data === 'object' &&
+            !Array.isArray(payload.data) &&
+            !('data' in payload.data) &&
+            !('success' in payload.data) &&
+            !('meta' in payload.data) &&
+            !('summary' in payload.data)
+          ) {
+            result = payload.data as T;
+          }
         }
 
         cache.set(key, {
-          data: result,
+          data: result as T,
           timestamp: Date.now(),
         });
 
-        setData(result);
+        setData(result as T);
       } catch (error: any) {
         const message =
+          error?.backendMessage ||
           error?.response?.data?.message ||
           error?.message ||
           'Unable to load report data.';
 
         setError(message);
+        setData(null);
       } finally {
         setLoading(false);
       }
@@ -421,6 +459,9 @@ export function ReportsPage() {
   const [filterBranch, setFilterBranch] =
     useState('all');
 
+  const [filterCompany, setFilterCompany] =
+    useState('all');
+
   const [filterCategory, setFilterCategory] =
     useState('all');
 
@@ -436,12 +477,44 @@ export function ReportsPage() {
   const [search, setSearch] =
     useState('');
 
+  // Data for filter dropdowns (branches, companies)
+  const [branches, setBranches] = useState<
+    { id: number; name: string }[]
+  >([]);
+  const [companies, setCompanies] = useState<
+    { id: number; name: string }[]
+  >([]);
+
   const printRef =
     useRef<HTMLDivElement>(null);
 
   // ============================================================
   // API
   // ============================================================
+
+  // Fetch branches and companies for filter dropdowns
+  const fetchBranches = useCallback(async () => {
+    try {
+      const response = await apiClient.request('GET', '/branches');
+      setBranches(Array.isArray(response) ? response : response.data || []);
+    } catch (error) {
+      console.error('Failed to fetch branches', error);
+    }
+  }, []);
+
+  const fetchCompanies = useCallback(async () => {
+    try {
+      const response = await apiClient.request('GET', '/companies');
+      setCompanies(Array.isArray(response) ? response : response.data || []);
+    } catch (error) {
+      console.error('Failed to fetch companies', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchBranches();
+    fetchCompanies();
+  }, [fetchBranches, fetchCompanies]);
 
   const invoicesFetcher = useCallback(
     () =>
@@ -476,45 +549,24 @@ export function ReportsPage() {
     [dateFrom, dateTo]
   );
 
+  // Replace ledger with accounting/statements
   const ledgerFetcher = useCallback(
     () =>
       apiClient.request(
         'GET',
-        `/ledger?from=${encodeURIComponent(
+        `/accounting/statements?from=${encodeURIComponent(
           dateFrom
         )}&to=${encodeURIComponent(dateTo)}`
       ),
     [dateFrom, dateTo]
   );
 
-  // GST fetchers
+  // GST fetcher: only gst-sales (GSTR-1)
   const gstr1Fetcher = useCallback(
     () =>
       apiClient.request(
         'GET',
-        `/reports/gstr1?from=${encodeURIComponent(
-          dateFrom
-        )}&to=${encodeURIComponent(dateTo)}`
-      ),
-    [dateFrom, dateTo]
-  );
-
-  const gstr2Fetcher = useCallback(
-    () =>
-      apiClient.request(
-        'GET',
-        `/reports/gstr2?from=${encodeURIComponent(
-          dateFrom
-        )}&to=${encodeURIComponent(dateTo)}`
-      ),
-    [dateFrom, dateTo]
-  );
-
-  const gstr3bFetcher = useCallback(
-    () =>
-      apiClient.request(
-        'GET',
-        `/reports/gstr3b?from=${encodeURIComponent(
+        `/reports/gst-sales?from=${encodeURIComponent(
           dateFrom
         )}&to=${encodeURIComponent(dateTo)}`
       ),
@@ -571,24 +623,342 @@ export function ReportsPage() {
     gstr1Fetcher
   );
 
-  const {
-    data: gstr2Data,
-    loading: gstr2Loading,
-    error: gstr2Error,
-    refresh: refreshGstr2,
-  } = useApiCache<GstReportEntry[]>(
-    `reports-gstr2-${dateFrom}-${dateTo}`,
-    gstr2Fetcher
+  // ============================================================
+  // ADVANCED REPORT FETCHERS (NEW REPORTS API)
+  // ============================================================
+
+  const advancedSalesSummaryFetcher = useCallback(
+    () =>
+      apiClient.getSalesSummary({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 100,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedProfitLossFetcher = useCallback(
+    () =>
+      apiClient.getProfitLossReport({
+        from: dateFrom,
+        to: dateTo,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedProfitLossSummaryFetcher = useCallback(
+    () =>
+      apiClient.getProfitLossSummary({
+        from: dateFrom,
+        to: dateTo,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedInvoiceProfitabilityFetcher = useCallback(
+    () =>
+      apiClient.getInvoiceProfitabilityReport({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 25,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedProductProfitabilityFetcher = useCallback(
+    () =>
+      apiClient.getProductProfitabilityReport({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 10,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedCustomerProfitabilityFetcher = useCallback(
+    () =>
+      apiClient.getProfitLossCustomers({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 10,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedBranchProfitabilityFetcher = useCallback(
+    () =>
+      apiClient.getProfitLossBranches({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 10,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedGstSummaryFetcher = useCallback(
+    () =>
+      apiClient.getGstSummary({
+        from: dateFrom,
+        to: dateTo,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedOutstandingSalesFetcher = useCallback(
+    () =>
+      apiClient.getOutstandingSales({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 100,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedSalesRegisterFetcher = useCallback(
+    () =>
+      apiClient.getSalesRegister({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 100,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedSalesByCustomerFetcher = useCallback(
+    () =>
+      apiClient.getSalesByCustomer({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 100,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedSalesByProductFetcher = useCallback(
+    () =>
+      apiClient.getSalesByProduct({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 100,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedPurchaseSummaryFetcher = useCallback(
+    () =>
+      apiClient.getPurchaseSummary({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 100,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedOutstandingPurchasesFetcher = useCallback(
+    () =>
+      apiClient.getOutstandingPurchases({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 100,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedPurchaseRegisterFetcher = useCallback(
+    () =>
+      apiClient.getPurchaseRegister({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 100,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedPurchaseByVendorFetcher = useCallback(
+    () =>
+      apiClient.getPurchaseByVendor({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 100,
+      }),
+    [dateFrom, dateTo]
+  );
+
+  const advancedGeneralLedgerFetcher = useCallback(
+    () =>
+      apiClient.getGeneralLedger({
+        from: dateFrom,
+        to: dateTo,
+        page: 1,
+        per_page: 100,
+      }),
+    [dateFrom, dateTo]
   );
 
   const {
-    data: gstr3bData,
-    loading: gstr3bLoading,
-    error: gstr3bError,
-    refresh: refreshGstr3b,
-  } = useApiCache<GstReportEntry[]>(
-    `reports-gstr3b-${dateFrom}-${dateTo}`,
-    gstr3bFetcher
+    data: advancedSalesSummary,
+    loading: advancedSalesSummaryLoading,
+    error: advancedSalesSummaryError,
+  } = useApiCache<SalesSummaryReport>(
+    `reports-advanced-sales-${dateFrom}-${dateTo}`,
+    advancedSalesSummaryFetcher
+  );
+
+  const {
+    data: advancedProfitLoss,
+    loading: advancedProfitLossLoading,
+    error: advancedProfitLossError,
+  } = useApiCache<ProfitLossReport>(
+    `reports-advanced-pl-${dateFrom}-${dateTo}`,
+    advancedProfitLossFetcher
+  );
+
+  const {
+    data: advancedProfitLossSummary,
+    loading: advancedProfitLossSummaryLoading,
+    error: advancedProfitLossSummaryError,
+  } = useApiCache<ProfitLossSummaryReport>(
+    `reports-advanced-pl-summary-${dateFrom}-${dateTo}`,
+    advancedProfitLossSummaryFetcher
+  );
+
+  const {
+    data: advancedInvoiceProfitability,
+    loading: advancedInvoiceProfitabilityLoading,
+    error: advancedInvoiceProfitabilityError,
+  } = useApiCache<InvoiceProfitabilityReport>(
+    `reports-advanced-invoice-profitability-${dateFrom}-${dateTo}`,
+    advancedInvoiceProfitabilityFetcher
+  );
+
+  const {
+    data: advancedProductProfitability,
+    loading: advancedProductProfitabilityLoading,
+    error: advancedProductProfitabilityError,
+  } = useApiCache<ProductProfitabilityReport>(
+    `reports-advanced-product-profitability-${dateFrom}-${dateTo}`,
+    advancedProductProfitabilityFetcher
+  );
+
+  const {
+    data: advancedCustomerProfitability,
+    loading: advancedCustomerProfitabilityLoading,
+    error: advancedCustomerProfitabilityError,
+  } = useApiCache<any>(
+    `reports-advanced-customer-profitability-${dateFrom}-${dateTo}`,
+    advancedCustomerProfitabilityFetcher
+  );
+
+  const {
+    data: advancedBranchProfitability,
+    loading: advancedBranchProfitabilityLoading,
+    error: advancedBranchProfitabilityError,
+  } = useApiCache<any>(
+    `reports-advanced-branch-profitability-${dateFrom}-${dateTo}`,
+    advancedBranchProfitabilityFetcher
+  );
+
+  const {
+    data: advancedGstSummary,
+    loading: advancedGstSummaryLoading,
+    error: advancedGstSummaryError,
+  } = useApiCache<GstSummaryReport>(
+    `reports-advanced-gst-${dateFrom}-${dateTo}`,
+    advancedGstSummaryFetcher
+  );
+
+  const {
+    data: advancedOutstandingSales,
+    loading: advancedOutstandingSalesLoading,
+    error: advancedOutstandingSalesError,
+  } = useApiCache<OutstandingSalesReport>(
+    `reports-advanced-outstanding-${dateFrom}-${dateTo}`,
+    advancedOutstandingSalesFetcher
+  );
+
+  const {
+    data: advancedSalesRegister,
+    loading: advancedSalesRegisterLoading,
+    error: advancedSalesRegisterError,
+  } = useApiCache<any>(
+    `reports-sales-register-${dateFrom}-${dateTo}`,
+    advancedSalesRegisterFetcher
+  );
+
+  const {
+    data: advancedSalesByCustomer,
+    loading: advancedSalesByCustomerLoading,
+    error: advancedSalesByCustomerError,
+  } = useApiCache<any>(
+    `reports-sales-by-customer-${dateFrom}-${dateTo}`,
+    advancedSalesByCustomerFetcher
+  );
+
+  const {
+    data: advancedSalesByProduct,
+    loading: advancedSalesByProductLoading,
+    error: advancedSalesByProductError,
+  } = useApiCache<any>(
+    `reports-sales-by-product-${dateFrom}-${dateTo}`,
+    advancedSalesByProductFetcher
+  );
+
+  const {
+    data: advancedPurchaseSummary,
+    loading: advancedPurchaseSummaryLoading,
+    error: advancedPurchaseSummaryError,
+  } = useApiCache<any>(
+    `reports-purchase-summary-${dateFrom}-${dateTo}`,
+    advancedPurchaseSummaryFetcher
+  );
+
+  const {
+    data: advancedOutstandingPurchases,
+    loading: advancedOutstandingPurchasesLoading,
+    error: advancedOutstandingPurchasesError,
+  } = useApiCache<any>(
+    `reports-outstanding-purchases-${dateFrom}-${dateTo}`,
+    advancedOutstandingPurchasesFetcher
+  );
+
+  const {
+    data: advancedPurchaseRegister,
+    loading: advancedPurchaseRegisterLoading,
+    error: advancedPurchaseRegisterError,
+  } = useApiCache<any>(
+    `reports-purchase-register-${dateFrom}-${dateTo}`,
+    advancedPurchaseRegisterFetcher
+  );
+
+  const {
+    data: advancedPurchaseByVendor,
+    loading: advancedPurchaseByVendorLoading,
+    error: advancedPurchaseByVendorError,
+  } = useApiCache<any>(
+    `reports-purchase-by-vendor-${dateFrom}-${dateTo}`,
+    advancedPurchaseByVendorFetcher
+  );
+
+  const {
+    data: advancedGeneralLedger,
+    loading: advancedGeneralLedgerLoading,
+    error: advancedGeneralLedgerError,
+  } = useApiCache<any>(
+    `reports-general-ledger-${dateFrom}-${dateTo}`,
+    advancedGeneralLedgerFetcher
   );
 
   // ============================================================
@@ -601,8 +971,15 @@ export function ReportsPage() {
     paymentLoading ||
     ledgerLoading ||
     gstr1Loading ||
-    gstr2Loading ||
-    gstr3bLoading;
+    advancedSalesSummaryLoading ||
+    advancedProfitLossLoading ||
+    advancedProfitLossSummaryLoading ||
+    advancedInvoiceProfitabilityLoading ||
+    advancedProductProfitabilityLoading ||
+    advancedCustomerProfitabilityLoading ||
+    advancedBranchProfitabilityLoading ||
+    advancedGstSummaryLoading ||
+    advancedOutstandingSalesLoading;
 
   const refreshAll = () => {
     refreshInvoices();
@@ -610,8 +987,6 @@ export function ReportsPage() {
     refreshPayments();
     refreshLedger();
     refreshGstr1();
-    refreshGstr2();
-    refreshGstr3b();
   };
 
   // ============================================================
@@ -701,7 +1076,7 @@ export function ReportsPage() {
   // ============================================================
 
   const filteredInvoices = useMemo(() => {
-    if (!invoices) return [];
+    if (!invoices || !Array.isArray(invoices)) return [];
 
     const query =
       search.trim().toLowerCase();
@@ -726,10 +1101,20 @@ export function ReportsPage() {
         invoice.customer?.name ===
           filterCustomer;
 
+      const matchesBranch =
+        filterBranch === 'all' ||
+        (invoice as any).branch_name === filterBranch;
+
+      const matchesCompany =
+        filterCompany === 'all' ||
+        (invoice as any).company_name === filterCompany;
+
       return (
         matchesSearch &&
         matchesStatus &&
-        matchesCustomer
+        matchesCustomer &&
+        matchesBranch &&
+        matchesCompany
       );
     });
   }, [
@@ -737,10 +1122,12 @@ export function ReportsPage() {
     search,
     filterStatus,
     filterCustomer,
+    filterBranch,
+    filterCompany,
   ]);
 
   const filteredPurchases = useMemo(() => {
-    if (!purchaseInvoices) return [];
+    if (!purchaseInvoices || !Array.isArray(purchaseInvoices)) return [];
 
     const query =
       search.trim().toLowerCase();
@@ -767,10 +1154,20 @@ export function ReportsPage() {
           purchase.supplier?.name ===
             filterVendor;
 
+        const matchesBranch =
+          filterBranch === 'all' ||
+          (purchase as any).branch_name === filterBranch;
+
+        const matchesCompany =
+          filterCompany === 'all' ||
+          (purchase as any).company_name === filterCompany;
+
         return (
           matchesSearch &&
           matchesStatus &&
-          matchesVendor
+          matchesVendor &&
+          matchesBranch &&
+          matchesCompany
         );
       }
     );
@@ -779,10 +1176,12 @@ export function ReportsPage() {
     search,
     filterStatus,
     filterVendor,
+    filterBranch,
+    filterCompany,
   ]);
 
   const filteredLedger = useMemo(() => {
-    if (!ledger) return [];
+    if (!ledger || !Array.isArray(ledger)) return [];
 
     const query =
       search.trim().toLowerCase();
@@ -801,9 +1200,8 @@ export function ReportsPage() {
     });
   }, [ledger, search]);
 
-  // Filter GST data
   const filteredGstr1 = useMemo(() => {
-    if (!gstr1Data) return [];
+    if (!gstr1Data || !Array.isArray(gstr1Data)) return [];
     const query = search.trim().toLowerCase();
     return gstr1Data.filter((entry) => {
       if (!query) return true;
@@ -813,30 +1211,6 @@ export function ReportsPage() {
       );
     });
   }, [gstr1Data, search]);
-
-  const filteredGstr2 = useMemo(() => {
-    if (!gstr2Data) return [];
-    const query = search.trim().toLowerCase();
-    return gstr2Data.filter((entry) => {
-      if (!query) return true;
-      return (
-        entry.invoice_no?.toLowerCase().includes(query) ||
-        entry.customer_name?.toLowerCase().includes(query)
-      );
-    });
-  }, [gstr2Data, search]);
-
-  const filteredGstr3b = useMemo(() => {
-    if (!gstr3bData) return [];
-    const query = search.trim().toLowerCase();
-    return gstr3bData.filter((entry) => {
-      if (!query) return true;
-      return (
-        entry.invoice_no?.toLowerCase().includes(query) ||
-        entry.customer_name?.toLowerCase().includes(query)
-      );
-    });
-  }, [gstr3bData, search]);
 
   // ============================================================
   // UNIQUE FILTER VALUES FROM REAL API DATA
@@ -887,6 +1261,14 @@ export function ReportsPage() {
     invoices,
     purchaseInvoices,
   ]);
+
+  const branchOptions = useMemo(() => {
+    return branches.map((branch) => branch.name);
+  }, [branches]);
+
+  const companyOptions = useMemo(() => {
+    return companies.map((company) => company.name);
+  }, [companies]);
 
   // ============================================================
   // CSV
@@ -1047,6 +1429,7 @@ export function ReportsPage() {
     setFilterVendor('all');
     setFilterProduct('all');
     setFilterBranch('all');
+    setFilterCompany('all');
     setFilterCategory('all');
     setFilterPaymentMode('all');
     setFilterStatus('all');
@@ -1064,8 +1447,6 @@ export function ReportsPage() {
     payments: paymentError,
     ledger: ledgerError,
     gstr1: gstr1Error,
-    gstr2: gstr2Error,
-    gstr3b: gstr3bError,
   };
 
   const hasApiError =
@@ -1308,6 +1689,21 @@ export function ReportsPage() {
                   className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-500"
                 >
                   <option value="all">All Branches</option>
+                  {branchOptions.map((branch) => (
+                    <option key={branch} value={branch}>{branch}</option>
+                  ))}
+                </select>
+              </FilterField>
+              <FilterField label="Company">
+                <select
+                  value={filterCompany}
+                  onChange={(event) => setFilterCompany(event.target.value)}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-500"
+                >
+                  <option value="all">All Companies</option>
+                  {companyOptions.map((company) => (
+                    <option key={company} value={company}>{company}</option>
+                  ))}
                 </select>
               </FilterField>
               <FilterField label="Product">
@@ -1340,7 +1736,7 @@ export function ReportsPage() {
             </div>
             <div className="mt-4 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-700">
               <FiAlertTriangle size={14} />
-              Customer and vendor filters use values returned by the current APIs.
+              Customer, vendor, branch, and company filters use values returned by the current APIs.
             </div>
           </div>
         )}
@@ -1360,9 +1756,7 @@ export function ReportsPage() {
                 {purchaseError && <p>Purchases: {purchaseError}</p>}
                 {paymentError && <p>Payments: {paymentError}</p>}
                 {ledgerError && <p>Ledger: {ledgerError}</p>}
-                {gstr1Error && <p>GSTR-1: {gstr1Error}</p>}
-                {gstr2Error && <p>GSTR-2: {gstr2Error}</p>}
-                {gstr3bError && <p>GSTR-3B: {gstr3bError}</p>}
+                {gstr1Error && <p>GST Sales: {gstr1Error}</p>}
               </div>
             </div>
           </div>
@@ -1425,19 +1819,56 @@ export function ReportsPage() {
                 />
               )}
               {activeSubReport === 'Sales Summary' && (
-                <SalesTable
-                  invoices={filteredInvoices}
-                  loading={invLoading}
+                <SalesSummaryApiReport
+                  data={advancedSalesSummary}
+                  loading={advancedSalesSummaryLoading}
+                  error={advancedSalesSummaryError}
+                />
+              )}
+              {activeSubReport === 'Sales Register' && (
+                <SalesRegisterApiTable
+                  data={advancedSalesRegister}
+                  loading={advancedSalesRegisterLoading}
+                  error={advancedSalesRegisterError}
+                />
+              )}
+              {activeSubReport === 'Sales by Customer' && (
+                <SalesByCustomerApiTable
+                  data={advancedSalesByCustomer}
+                  loading={advancedSalesByCustomerLoading}
+                  error={advancedSalesByCustomerError}
+                />
+              )}
+              {activeSubReport === 'Sales by Product' && (
+                <SalesByProductApiTable
+                  data={advancedSalesByProduct}
+                  loading={advancedSalesByProductLoading}
+                  error={advancedSalesByProductError}
+                />
+              )}
+              {activeSubReport === 'Outstanding Sales' && (
+                <OutstandingSalesApiTable
+                  data={advancedOutstandingSales}
+                  loading={advancedOutstandingSalesLoading}
+                  error={advancedOutstandingSalesError}
+                />
+              )}
+              {activeSubReport === 'GST Sales Report' && (
+                <GstReportTable
+                  title="GST Sales Report"
+                  description="Outward supplies (sales) returns"
+                  data={filteredGstr1}
+                  loading={gstr1Loading}
                   onCSV={() =>
                     exportCSV(
-                      filteredInvoices,
-                      ['invoice_no', 'customer.name', 'total_amount', 'created_at', 'status'],
-                      'sales-summary.csv'
+                      filteredGstr1,
+                      ['invoice_no', 'invoice_date', 'customer_name', 'gstin', 'taxable_value', 'cgst', 'sgst', 'igst', 'cess', 'total_tax', 'total_value'],
+                      'gst-sales.csv'
                     )
                   }
                 />
               )}
-              {activeSubReport && activeSubReport !== 'Sales Summary' && (
+              {activeSubReport && !['Sales Summary', 'Sales Register', 'Sales by Customer', 'Sales by Product', 'GST Sales Report', 'Outstanding Sales'].includes(activeSubReport) && (
                 <ComingSoonReport title={activeSubReport} />
               )}
             </>
@@ -1454,19 +1885,34 @@ export function ReportsPage() {
                 />
               )}
               {activeSubReport === 'Purchase Summary' && (
-                <PurchaseTable
-                  purchases={filteredPurchases}
-                  loading={purchaseLoading}
-                  onCSV={() =>
-                    exportCSV(
-                      filteredPurchases,
-                      ['purchase_number', 'supplier.name', 'grand_total', 'purchase_date', 'status'],
-                      'purchase-summary.csv'
-                    )
-                  }
+                <PurchaseSummaryApiTable
+                  data={advancedPurchaseSummary}
+                  loading={advancedPurchaseSummaryLoading}
+                  error={advancedPurchaseSummaryError}
                 />
               )}
-              {activeSubReport && activeSubReport !== 'Purchase Summary' && (
+              {activeSubReport === 'Purchase Register' && (
+                <PurchaseRegisterApiTable
+                  data={advancedPurchaseRegister}
+                  loading={advancedPurchaseRegisterLoading}
+                  error={advancedPurchaseRegisterError}
+                />
+              )}
+              {activeSubReport === 'Purchase by Vendor' && (
+                <PurchaseByVendorApiTable
+                  data={advancedPurchaseByVendor}
+                  loading={advancedPurchaseByVendorLoading}
+                  error={advancedPurchaseByVendorError}
+                />
+              )}
+              {activeSubReport === 'Outstanding Purchase' && (
+                <OutstandingPurchasesApiTable
+                  data={advancedOutstandingPurchases}
+                  loading={advancedOutstandingPurchasesLoading}
+                  error={advancedOutstandingPurchasesError}
+                />
+              )}
+              {activeSubReport && !['Purchase Summary', 'Purchase Register', 'Purchase by Vendor', 'Outstanding Purchase'].includes(activeSubReport) && (
                 <ComingSoonReport title={activeSubReport} />
               )}
             </>
@@ -1483,19 +1929,64 @@ export function ReportsPage() {
                 />
               )}
               {activeSubReport === 'General Ledger' && (
-                <LedgerTable
-                  ledger={filteredLedger}
-                  loading={ledgerLoading}
-                  onCSV={() =>
-                    exportCSV(
-                      filteredLedger,
-                      ['date', 'description', 'debit', 'credit', 'balance'],
-                      'general-ledger.csv'
-                    )
-                  }
+                <GeneralLedgerApiTable
+                  data={advancedGeneralLedger}
+                  loading={advancedGeneralLedgerLoading}
+                  error={advancedGeneralLedgerError}
                 />
               )}
-              {activeSubReport && activeSubReport !== 'General Ledger' && (
+              {activeSubReport === 'Profit & Loss' && (
+                <ProfitLossStatement
+                  data={advancedProfitLossSummary || advancedProfitLoss}
+                  loading={advancedProfitLossSummaryLoading || advancedProfitLossLoading}
+                  error={advancedProfitLossSummaryError || advancedProfitLossError}
+                  onRefresh={() => {
+                    // Trigger refresh by clearing cache - will re-fetch
+                  }}
+                />
+              )}
+              {activeSubReport === 'Profitability Overview' && (
+                <ProfitabilityOverviewPanel
+                  data={advancedProfitLossSummary}
+                  loading={advancedProfitLossSummaryLoading}
+                  error={advancedProfitLossSummaryError}
+                />
+              )}
+              {activeSubReport === 'Bill-wise Profitability' && (
+                <InvoiceProfitabilityTable
+                  data={advancedInvoiceProfitability}
+                  loading={advancedInvoiceProfitabilityLoading}
+                  error={advancedInvoiceProfitabilityError}
+                />
+              )}
+              {activeSubReport === 'Product Profitability' && (
+                <ProductProfitabilityTable
+                  data={advancedProductProfitability}
+                  loading={advancedProductProfitabilityLoading}
+                  error={advancedProductProfitabilityError}
+                />
+              )}
+              {activeSubReport === 'Customer Profitability' && (
+                <DimensionProfitabilityTable
+                  title="Customer Profitability"
+                  data={advancedCustomerProfitability?.data ?? []}
+                  loading={advancedCustomerProfitabilityLoading}
+                  error={advancedCustomerProfitabilityError}
+                  valueKey="gross_profit"
+                  labelKey="customer"
+                />
+              )}
+              {activeSubReport === 'Branch Profitability' && (
+                <DimensionProfitabilityTable
+                  title="Branch Profitability"
+                  data={advancedBranchProfitability?.data ?? []}
+                  loading={advancedBranchProfitabilityLoading}
+                  error={advancedBranchProfitabilityError}
+                  valueKey="gross_profit"
+                  labelKey="branch"
+                />
+              )}
+              {activeSubReport && !['General Ledger', 'Profit & Loss', 'Profitability Overview', 'Bill-wise Profitability', 'Product Profitability', 'Customer Profitability', 'Branch Profitability'].includes(activeSubReport) && (
                 <ComingSoonReport title={activeSubReport} />
               )}
             </>
@@ -1513,7 +2004,7 @@ export function ReportsPage() {
               )}
               {activeSubReport === 'GSTR-1' && (
                 <GstReportTable
-                  title="GSTR-1"
+                  title="GST Sales Report"
                   description="Outward supplies (sales) returns"
                   data={filteredGstr1}
                   loading={gstr1Loading}
@@ -1521,42 +2012,12 @@ export function ReportsPage() {
                     exportCSV(
                       filteredGstr1,
                       ['invoice_no', 'invoice_date', 'customer_name', 'gstin', 'taxable_value', 'cgst', 'sgst', 'igst', 'cess', 'total_tax', 'total_value'],
-                      'gstr1.csv'
+                      'gst-sales.csv'
                     )
                   }
                 />
               )}
-              {activeSubReport === 'GSTR-2' && (
-                <GstReportTable
-                  title="GSTR-2"
-                  description="Inward supplies (purchase) returns"
-                  data={filteredGstr2}
-                  loading={gstr2Loading}
-                  onCSV={() =>
-                    exportCSV(
-                      filteredGstr2,
-                      ['invoice_no', 'invoice_date', 'customer_name', 'gstin', 'taxable_value', 'cgst', 'sgst', 'igst', 'cess', 'total_tax', 'total_value'],
-                      'gstr2.csv'
-                    )
-                  }
-                />
-              )}
-              {activeSubReport === 'GSTR-3B' && (
-                <GstReportTable
-                  title="GSTR-3B"
-                  description="Monthly summary return"
-                  data={filteredGstr3b}
-                  loading={gstr3bLoading}
-                  onCSV={() =>
-                    exportCSV(
-                      filteredGstr3b,
-                      ['invoice_no', 'invoice_date', 'customer_name', 'gstin', 'taxable_value', 'cgst', 'sgst', 'igst', 'cess', 'total_tax', 'total_value'],
-                      'gstr3b.csv'
-                    )
-                  }
-                />
-              )}
-              {activeSubReport && !['GSTR-1', 'GSTR-2', 'GSTR-3B'].includes(activeSubReport) && (
+              {activeSubReport && !['GSTR-1'].includes(activeSubReport) && (
                 <ComingSoonReport title={activeSubReport} />
               )}
             </>
@@ -1815,8 +2276,8 @@ function GstReportTable({
             ) : !data.length ? (
               <EmptyRow colSpan={11} />
             ) : (
-              data.map((entry) => (
-                <tr key={entry.id} className="border-b border-slate-100 transition hover:bg-slate-50">
+              data.map((entry, index) => (
+                <tr key={`${entry.invoice_no || 'gst'}-${entry.invoice_date || 'date'}-${index}`} className="border-b border-slate-100 transition hover:bg-slate-50">
                   <td className="px-4 py-3.5 font-bold text-slate-900">{entry.invoice_no || '-'}</td>
                   <td className="px-4 py-3.5 text-slate-500">{formatDate(entry.invoice_date)}</td>
                   <td className="px-4 py-3.5 text-slate-600">{entry.customer_name || '-'}</td>
@@ -2151,7 +2612,7 @@ function LedgerTable({
   return (
     <ReportSection
       title="General Ledger"
-      description="Ledger transactions returned by the ledger API for the selected period."
+      description="Ledger transactions returned by the accounting statements API for the selected period."
       count={ledger.length}
     >
       <div className="overflow-x-auto">
@@ -2420,6 +2881,889 @@ function EmptyReport({
         Choose a report above
       </div>
     </div>
+  );
+}
+
+// ============================================================
+// PROFIT & LOSS REPORT
+// ============================================================
+
+function ProfitLossStatement({
+  data,
+  loading,
+  error,
+  onRefresh,
+}: {
+  data: ProfitLossReport | ProfitLossSummaryReport | null;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
+  if (error) {
+    return (
+      <div className="flex min-h-[440px] flex-col items-center justify-center rounded-2xl border border-dashed border-rose-200 bg-rose-50/40 px-5 text-center">
+        <div className="grid h-16 w-16 place-items-center rounded-2xl border border-rose-100 bg-white text-rose-500 shadow-sm">
+          <FiAlertTriangle size={24} />
+        </div>
+        <h3 className="mt-5 text-lg font-black text-slate-800">Unable to Load Report</h3>
+        <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">{error}</p>
+        <button
+          onClick={onRefresh}
+          className="mt-5 rounded-lg bg-rose-100 px-4 py-2 text-sm font-semibold text-rose-700 transition hover:bg-rose-200"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (loading || !data) {
+    return (
+      <div className="flex min-h-[440px] items-center justify-center">
+        <div className="text-center">
+          <div className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-4 py-2">
+            <div className="h-2 w-2 animate-pulse rounded-full bg-slate-400"></div>
+            Loading Profit & Loss...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const payload = (data as any)?.data ?? data;
+  const isDetailed = !!payload && typeof payload === 'object' && 'revenue' in payload && payload.revenue && typeof payload.revenue === 'object';
+  const formatCurr = (val: number) => formatCurrency(val);
+  const formatPct = (val: number) => `${Number(val || 0).toFixed(2)}%`;
+
+  if (!isDetailed) {
+    const summary = payload && typeof payload === 'object' ? (payload as ProfitLossSummaryReport['data']) : null;
+
+    if (!summary) {
+      return (
+        <div className="flex min-h-[440px] items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 px-5 text-center">
+          <div className="text-sm text-slate-500">No P&amp;L summary data is available for the selected range.</div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-6">
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+          <KpiCard label="Gross Revenue" value={formatCurr(Number(summary.gross_revenue || 0))} />
+          <KpiCard label="COGS" value={formatCurr(Number(summary.cogs || 0))} />
+          <KpiCard label="Gross Profit" value={formatCurr(Number(summary.gross_profit || 0))} />
+          <KpiCard label="Net Profit" value={formatCurr(Number(summary.net_profit || 0))} highlight />
+        </div>
+
+        <ReportSection title="Profitability Summary" description="Real API summary data for the selected period">
+          <div className="space-y-3 p-6">
+            <div className="flex justify-between text-sm"><span className="text-slate-600">Net Revenue</span><span className="font-semibold">{formatCurr(Number(summary.net_revenue || 0))}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-slate-600">Gross Margin</span><span className="font-semibold">{formatPct(Number(summary.gross_margin || 0))}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-slate-600">Operating Profit</span><span className="font-semibold">{formatCurr(Number(summary.operating_profit || 0))}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-slate-600">Net Margin</span><span className="font-semibold">{formatPct(Number(summary.net_margin || 0))}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-slate-600">Contribution Margin</span><span className="font-semibold">{formatCurr(Number(summary.contribution_margin || 0))}</span></div>
+          </div>
+        </ReportSection>
+      </div>
+    );
+  }
+
+  const pl = payload && typeof payload === 'object' ? (payload as ProfitLossReport['data']) : null;
+
+  if (!pl) {
+    return (
+      <div className="flex min-h-[440px] items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 px-5 text-center">
+        <div className="text-sm text-slate-500">No detailed P&amp;L data is available for the selected range.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+        <KpiCard label="Net Sales" value={formatCurr(pl.revenue.net_sales)} />
+        <KpiCard label="COGS" value={formatCurr(pl.cogs.cost_of_goods_sold)} />
+        <KpiCard label="Gross Profit" value={formatCurr(pl.gross_profit)} />
+        <KpiCard label="Net Profit" value={formatCurr(pl.net_profit)} highlight />
+      </div>
+
+      <ReportSection title="Income Statement" description="Detailed profit and loss statement">
+        <div className="space-y-6 rounded-lg border border-slate-200 bg-white p-6">
+          <div>
+            <h4 className="font-bold text-slate-900">Revenue</h4>
+            <div className="mt-3 space-y-2 border-b border-slate-200 pb-4">
+              <div className="flex justify-between text-sm"><span className="text-slate-600">Gross Sales</span><span className="font-semibold">{formatCurr(pl.revenue.gross_sales)}</span></div>
+              <div className="flex justify-between text-sm"><span className="text-slate-600">Less: Sales Returns</span><span className="font-semibold text-rose-600">({formatCurr(pl.revenue.sales_returns)})</span></div>
+              <div className="flex justify-between text-sm"><span className="text-slate-600">Less: Discounts</span><span className="font-semibold text-rose-600">({formatCurr(pl.revenue.sales_discounts)})</span></div>
+              <div className="flex justify-between text-base font-bold"><span>Net Sales</span><span>{formatCurr(pl.revenue.net_sales)}</span></div>
+            </div>
+          </div>
+
+          <div>
+            <h4 className="font-bold text-slate-900">Cost of Goods Sold</h4>
+            <div className="mt-3 space-y-2 border-b border-slate-200 pb-4">
+              <div className="flex justify-between text-sm"><span className="text-slate-600">Opening Stock</span><span>{formatCurr(pl.cogs.opening_stock)}</span></div>
+              <div className="flex justify-between text-sm"><span className="text-slate-600">Add: Purchases</span><span>{formatCurr(pl.cogs.purchases)}</span></div>
+              <div className="flex justify-between text-sm"><span className="text-slate-600">Less: Purchase Returns</span><span className="text-rose-600">({formatCurr(pl.cogs.purchase_returns)})</span></div>
+              <div className="flex justify-between text-sm"><span className="text-slate-600">Less: Closing Stock</span><span className="text-rose-600">({formatCurr(pl.cogs.closing_stock)})</span></div>
+              <div className="flex justify-between text-base font-bold"><span>COGS</span><span>{formatCurr(pl.cogs.cost_of_goods_sold)}</span></div>
+            </div>
+          </div>
+
+          <div className="rounded-lg bg-emerald-50 p-3">
+            <div className="flex justify-between text-base font-bold text-emerald-900"><span>Gross Profit</span><span>{formatCurr(pl.gross_profit)}</span></div>
+            <div className="mt-1 flex justify-between text-sm text-emerald-600"><span>Gross Margin</span><span>{formatPct(pl.gross_margin)}</span></div>
+          </div>
+
+          <div>
+            <h4 className="font-bold text-slate-900">Operating Expenses</h4>
+            <div className="mt-3 space-y-2 border-b border-slate-200 pb-4">
+              {pl.operating_expenses.length > 0 ? (
+                pl.operating_expenses.map((exp, idx) => (
+                  <div key={idx} className="flex justify-between text-sm"><span className="text-slate-600">{exp.name || `Expense ${idx + 1}`}</span><span>{formatCurr(exp.amount)}</span></div>
+                ))
+              ) : (
+                <div className="text-sm text-slate-500">No expenses recorded</div>
+              )}
+              <div className="flex justify-between text-base font-bold"><span>Total Operating Expenses</span><span>{formatCurr(pl.total_operating_expenses)}</span></div>
+            </div>
+          </div>
+
+          <div className="rounded-lg bg-blue-50 p-3">
+            <div className="flex justify-between text-base font-bold text-blue-900"><span>Operating Profit</span><span>{formatCurr(pl.operating_profit)}</span></div>
+          </div>
+
+          <div>
+            <div className="flex justify-between text-sm"><span className="text-slate-600">Add: Other Income</span><span className="font-semibold text-emerald-600">+{formatCurr(pl.other_income)}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-slate-600">Less: Other Expenses</span><span className="font-semibold text-rose-600">({formatCurr(pl.other_expenses)})</span></div>
+          </div>
+
+          <div className="rounded-lg bg-gradient-to-r from-emerald-50 to-cyan-50 p-4">
+            <div className="flex justify-between text-lg font-black text-slate-900"><span>Net Profit</span><span className={pl.net_profit >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{formatCurr(pl.net_profit)}</span></div>
+            <div className="mt-2 flex justify-between text-sm text-slate-600"><span>Net Margin</span><span className={pl.net_margin >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{formatPct(pl.net_margin)}</span></div>
+          </div>
+        </div>
+      </ReportSection>
+    </div>
+  );
+}
+
+function ProfitabilityOverviewPanel({
+  data,
+  loading,
+  error,
+}: {
+  data: ProfitLossSummaryReport | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) {
+    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  }
+
+  if (loading || !data?.data) {
+    return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading profitability overview...</div>;
+  }
+
+  const d = data.data;
+
+  return (
+    <ReportSection title="Profitability Overview" description="Real backend profitability snapshot for the selected period">
+      <div className="space-y-5 p-5">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <KpiCard label="Gross Revenue" value={formatCurrency(d.gross_revenue)} />
+          <KpiCard label="COGS" value={formatCurrency(d.cogs)} />
+          <KpiCard label="Gross Profit" value={formatCurrency(d.gross_profit)} />
+          <KpiCard label="Net Profit" value={formatCurrency(d.net_profit)} highlight />
+        </div>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <KpiCard label="Net Revenue" value={formatCurrency(d.net_revenue)} />
+          <KpiCard label="Operating Profit" value={formatCurrency(d.operating_profit)} />
+          <KpiCard label="Contribution Margin" value={formatCurrency(d.contribution_margin)} />
+          <KpiCard label="Net Margin" value={`${Number(d.net_margin || 0).toFixed(2)}%`} />
+        </div>
+      </div>
+    </ReportSection>
+  );
+}
+
+function InvoiceProfitabilityTable({
+  data,
+  loading,
+  error,
+}: {
+  data: InvoiceProfitabilityReport | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) {
+    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  }
+
+  if (loading || !data?.data) {
+    return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading bill-wise profitability...</div>;
+  }
+
+  return (
+    <ReportSection title="Bill-wise Profitability" description="Profitability by invoice using actual item sales and historical purchase cost" count={data.data.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[1100px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Invoice</TableHeader>
+              <TableHeader>Date</TableHeader>
+              <TableHeader>Customer</TableHeader>
+              <TableHeader align="right">Revenue</TableHeader>
+              <TableHeader align="right">COGS</TableHeader>
+              <TableHeader align="right">Gross Profit</TableHeader>
+              <TableHeader align="right">Margin</TableHeader>
+              <TableHeader align="right">Status</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {data.data.map((item) => (
+              <tr key={item.invoice_id} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{item.invoice_no}</td>
+                <td className="px-4 py-3.5 text-slate-600">{formatDate(item.invoice_date || undefined)}</td>
+                <td className="px-4 py-3.5 text-slate-700">{item.customer_name || '-'}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(item.revenue)}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(item.cogs)}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-emerald-700">{formatCurrency(item.gross_profit)}</td>
+                <td className="px-4 py-3.5 text-right font-semibold text-slate-700">{Number(item.profit_margin || 0).toFixed(2)}%</td>
+                <td className="px-4 py-3.5 text-right text-slate-600">{item.status}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function ProductProfitabilityTable({
+  data,
+  loading,
+  error,
+}: {
+  data: ProductProfitabilityReport | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) {
+    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  }
+
+  if (loading || !data?.data) {
+    return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading product profitability...</div>;
+  }
+
+  return (
+    <ReportSection title="Product Profitability" description="Gross profit by sold product from real invoice data" count={data.data.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[900px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Product</TableHeader>
+              <TableHeader>SKU</TableHeader>
+              <TableHeader align="right">Qty Sold</TableHeader>
+              <TableHeader align="right">Sales</TableHeader>
+              <TableHeader align="right">Cost</TableHeader>
+              <TableHeader align="right">Gross Profit</TableHeader>
+              <TableHeader align="right">Margin</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {data.data.map((item) => (
+              <tr key={item.product_id} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{item.product_name}</td>
+                <td className="px-4 py-3.5 text-slate-600">{item.sku || '-'}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{Number(item.quantity_sold || 0).toLocaleString()}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(item.sales_value)}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(item.cost_value)}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-emerald-700">{formatCurrency(item.gross_profit)}</td>
+                <td className="px-4 py-3.5 text-right font-semibold text-slate-700">{Number(item.margin_percent || 0).toFixed(2)}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function DimensionProfitabilityTable({
+  title,
+  data,
+  loading,
+  error,
+  valueKey,
+  labelKey,
+}: {
+  title: string;
+  data: Array<Record<string, any>>;
+  loading: boolean;
+  error: string | null;
+  valueKey: string;
+  labelKey: string;
+}) {
+  if (error) {
+    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  }
+
+  if (loading) {
+    return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading {title.toLowerCase()}...</div>;
+  }
+
+  return (
+    <ReportSection title={title} description="Profitability by dimension across the selected period" count={data.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[700px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>{title.replace('Profitability', '').trim() || 'Dimension'}</TableHeader>
+              <TableHeader align="right">Gross Profit</TableHeader>
+              <TableHeader align="right">Margin</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {data.length === 0 ? (
+              <EmptyRow colSpan={3} />
+            ) : (
+              data.map((row, index) => (
+                <tr key={`${row[labelKey] || index}`} className="border-b border-slate-100 hover:bg-slate-50">
+                  <td className="px-4 py-3.5 font-semibold text-slate-800">{row[labelKey] || '-'}</td>
+                  <td className="px-4 py-3.5 text-right font-bold text-emerald-700">{formatCurrency(Number(row[valueKey] || 0))}</td>
+                  <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.margin_percent || 0).toFixed(2)}%</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+// ============================================================
+// KPI CARD
+// ============================================================
+
+function KpiCard({
+  label,
+  value,
+  highlight = false,
+}: {
+  label: string;
+  value: string;
+  highlight?: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-lg border p-4 ${
+        highlight
+          ? 'border-emerald-200 bg-emerald-50'
+          : 'border-slate-200 bg-white'
+      }`}
+    >
+      <div className="text-xs font-semibold text-slate-500">{label}</div>
+      <div
+        className={`mt-2 text-lg font-bold ${
+          highlight ? 'text-emerald-700' : 'text-slate-900'
+        }`}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function SalesSummaryApiReport({
+  data,
+  loading,
+  error,
+}: {
+  data: SalesSummaryReport | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading sales summary...</div>;
+
+  return (
+    <ReportSection title="Sales Summary" description="Sales totals from the live backend report endpoint" count={data.data.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Invoice</TableHeader>
+              <TableHeader>Date</TableHeader>
+              <TableHeader>Customer</TableHeader>
+              <TableHeader align="right">Taxable</TableHeader>
+              <TableHeader align="right">Tax</TableHeader>
+              <TableHeader align="right">Total</TableHeader>
+              <TableHeader align="right">Due</TableHeader>
+              <TableHeader align="right">Status</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {data.data.map((row) => (
+              <tr key={row.id} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.invoice_number}</td>
+                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.invoice_date)}</td>
+                <td className="px-4 py-3.5 text-slate-700">{row.customer || '-'}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.tax || 0))}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.due_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function SalesRegisterApiTable({
+  data,
+  loading,
+  error,
+}: {
+  data: any | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading sales register...</div>;
+
+  const rows = data.data as Array<any>;
+
+  return (
+    <ReportSection title="Sales Register" description="Transaction-level sales register from the API" count={rows.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Date</TableHeader>
+              <TableHeader>Invoice</TableHeader>
+              <TableHeader>Customer</TableHeader>
+              <TableHeader align="right">Items</TableHeader>
+              <TableHeader align="right">Taxable</TableHeader>
+              <TableHeader align="right">GST</TableHeader>
+              <TableHeader align="right">Total</TableHeader>
+              <TableHeader align="right">Status</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.invoice_number || 'invoice'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.date)}</td>
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.invoice_number}</td>
+                <td className="px-4 py-3.5 text-slate-700">{row.customer || '-'}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.item_count || 0)}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_value || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.gst || 0))}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total || 0))}</td>
+                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function SalesByCustomerApiTable({
+  data,
+  loading,
+  error,
+}: {
+  data: any | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading sales by customer...</div>;
+
+  const rows = data.data as Array<any>;
+
+  return (
+    <ReportSection title="Sales by Customer" description="Customer-wise sales totals from the live API" count={rows.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[900px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Customer</TableHeader>
+              <TableHeader align="right">Invoices</TableHeader>
+              <TableHeader align="right">Taxable</TableHeader>
+              <TableHeader align="right">GST</TableHeader>
+              <TableHeader align="right">Total Sales</TableHeader>
+              <TableHeader align="right">Paid</TableHeader>
+              <TableHeader align="right">Outstanding</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.customer || 'customer'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.customer || '-'}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.invoice_count || 0)}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_sales || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.gst || 0))}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total_sales || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-emerald-700">{formatCurrency(Number(row.paid || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-amber-700">{formatCurrency(Number(row.outstanding || 0))}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function SalesByProductApiTable({
+  data,
+  loading,
+  error,
+}: {
+  data: any | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading sales by product...</div>;
+
+  const rows = data.data as Array<any>;
+
+  return (
+    <ReportSection title="Sales by Product" description="Product-wise sales totals from the live API" count={rows.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[900px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Product</TableHeader>
+              <TableHeader>SKU</TableHeader>
+              <TableHeader align="right">Qty</TableHeader>
+              <TableHeader align="right">Taxable</TableHeader>
+              <TableHeader align="right"> GST </TableHeader>
+              <TableHeader align="right">Total Sales</TableHeader>
+              <TableHeader align="right">Avg Price</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.product || 'product'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.product || '-'}</td>
+                <td className="px-4 py-3.5 text-slate-600">{row.sku || '-'}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.quantity || 0)}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_sales || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.gst || 0))}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total_sales || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.avg_selling_price || 0))}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function OutstandingSalesApiTable({
+  data,
+  loading,
+  error,
+}: {
+  data: any | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading outstanding sales...</div>;
+
+  const rows = data.data as Array<any>;
+
+  return (
+    <ReportSection title="Outstanding Sales" description="Unpaid sales invoice balances from the API" count={rows.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Customer</TableHeader>
+              <TableHeader>Invoice</TableHeader>
+              <TableHeader>Date</TableHeader>
+              <TableHeader>Due Date</TableHeader>
+              <TableHeader align="right">Invoice Amount</TableHeader>
+              <TableHeader align="right">Paid</TableHeader>
+              <TableHeader align="right">Outstanding</TableHeader>
+              <TableHeader align="right">Days</TableHeader>
+              <TableHeader align="right">Status</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.invoice || 'invoice'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.customer || '-'}</td>
+                <td className="px-4 py-3.5 text-slate-700">{row.invoice || '-'}</td>
+                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.invoice_date)}</td>
+                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.due_date)}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.invoice_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-emerald-700">{formatCurrency(Number(row.paid_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-amber-700">{formatCurrency(Number(row.outstanding_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.overdue_days || 0)}</td>
+                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function PurchaseSummaryApiTable({
+  data,
+  loading,
+  error,
+}: {
+  data: any | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading purchase summary...</div>;
+
+  const rows = data.data as Array<any>;
+
+  return (
+    <ReportSection title="Purchase Summary" description="Purchase totals from the live backend report endpoint" count={rows.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Purchase</TableHeader>
+              <TableHeader>Date</TableHeader>
+              <TableHeader>Supplier</TableHeader>
+              <TableHeader align="right">Taxable</TableHeader>
+              <TableHeader align="right">Tax</TableHeader>
+              <TableHeader align="right">Total</TableHeader>
+              <TableHeader align="right">Due</TableHeader>
+              <TableHeader align="right">Status</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.purchase_number || 'purchase'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.purchase_number}</td>
+                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.purchase_date)}</td>
+                <td className="px-4 py-3.5 text-slate-700">{row.supplier || '-'}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.tax || 0))}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.due_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function OutstandingPurchasesApiTable({
+  data,
+  loading,
+  error,
+}: {
+  data: any | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading outstanding purchases...</div>;
+
+  const rows = data.data as Array<any>;
+
+  return (
+    <ReportSection title="Outstanding Purchase" description="Unpaid purchase invoice balances from the API" count={rows.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Supplier</TableHeader>
+              <TableHeader>Purchase</TableHeader>
+              <TableHeader>Date</TableHeader>
+              <TableHeader>Due Date</TableHeader>
+              <TableHeader align="right">Purchase Amount</TableHeader>
+              <TableHeader align="right">Paid</TableHeader>
+              <TableHeader align="right">Outstanding</TableHeader>
+              <TableHeader align="right">Days</TableHeader>
+              <TableHeader align="right">Status</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.purchase_number || 'purchase'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.supplier || '-'}</td>
+                <td className="px-4 py-3.5 text-slate-700">{row.purchase_number || '-'}</td>
+                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.purchase_date)}</td>
+                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.due_date)}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.purchase_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-emerald-700">{formatCurrency(Number(row.paid_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-amber-700">{formatCurrency(Number(row.outstanding_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.overdue_days || 0)}</td>
+                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function PurchaseRegisterApiTable({
+  data,
+  loading,
+  error,
+}: {
+  data: any | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading purchase register...</div>;
+
+  const rows = data.data as Array<any>;
+
+  return (
+    <ReportSection title="Purchase Register" description="Transaction-level purchase register from the live API" count={rows.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Date</TableHeader>
+              <TableHeader>Bill No.</TableHeader>
+              <TableHeader>Supplier</TableHeader>
+              <TableHeader align="right">Items</TableHeader>
+              <TableHeader align="right">Tax</TableHeader>
+              <TableHeader align="right">Total</TableHeader>
+              <TableHeader align="right">Due</TableHeader>
+              <TableHeader align="right">Status</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.purchase_number || 'purchase'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.purchase_date)}</td>
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.purchase_number}</td>
+                <td className="px-4 py-3.5 text-slate-700">{row.supplier || '-'}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.item_count || 0)}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.tax || 0))}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.due_amount || 0))}</td>
+                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function PurchaseByVendorApiTable({
+  data,
+  loading,
+  error,
+}: {
+  data: any | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading purchase by vendor...</div>;
+
+  const rows = data.data as Array<any>;
+
+  return (
+    <ReportSection title="Purchase by Vendor" description="Supplier-wise purchase totals from the live API" count={rows.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[900px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Vendor</TableHeader>
+              <TableHeader align="right">Bills</TableHeader>
+              <TableHeader align="right">Taxable</TableHeader>
+              <TableHeader align="right">GST</TableHeader>
+              <TableHeader align="right">Total Purchases</TableHeader>
+              <TableHeader align="right">Paid</TableHeader>
+              <TableHeader align="right">Outstanding</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${row.supplier || 'supplier'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.supplier || '-'}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.purchase_count || 0)}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_purchases || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.gst || 0))}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total_purchases || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-emerald-700">{formatCurrency(Number(row.paid || 0))}</td>
+                <td className="px-4 py-3.5 text-right text-amber-700">{formatCurrency(Number(row.outstanding || 0))}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
+  );
+}
+
+function GeneralLedgerApiTable({
+  data,
+  loading,
+  error,
+}: {
+  data: any | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading general ledger...</div>;
+
+  const rows = data.data as Array<any>;
+
+  return (
+    <ReportSection title="General Ledger" description="Ledger transactions built from actual sales, payments, and purchase entries for the selected period." count={rows.length}>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[900px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 bg-slate-50">
+              <TableHeader>Date</TableHeader>
+              <TableHeader>Description</TableHeader>
+              <TableHeader align="right">Debit</TableHeader>
+              <TableHeader align="right">Credit</TableHeader>
+              <TableHeader align="right">Balance</TableHeader>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((entry) => (
+              <tr key={entry.id} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 text-slate-500">{formatDate(entry.date)}</td>
+                <td className="px-4 py-3.5 font-semibold text-slate-800">{entry.description}</td>
+                <td className="px-4 py-3.5 text-right font-medium text-rose-600">{formatCurrency(Number(entry.debit || 0))}</td>
+                <td className="px-4 py-3.5 text-right font-medium text-emerald-600">{formatCurrency(Number(entry.credit || 0))}</td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(entry.balance || 0))}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </ReportSection>
   );
 }
 

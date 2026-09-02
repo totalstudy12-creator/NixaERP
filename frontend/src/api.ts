@@ -29,12 +29,31 @@ const normalizeApiPayload = <T>(payload: unknown, fallback: T): T => {
   if (typeof payload !== 'object') return fallback;
 
   const record = payload as Record<string, unknown>;
-  if ('data' in record && record.data !== undefined) {
-    return normalizeApiPayload(record.data, fallback);
+
+  const hasSummary = 'summary' in record && record.summary !== undefined;
+
+  if (hasSummary) {
+    return payload as T;
   }
 
-  if ('success' in record && record.success === true && 'data' in record) {
-    return normalizeApiPayload(record.data, fallback);
+  if ('data' in record && record.data !== undefined) {
+    const data = record.data;
+
+    if (Array.isArray(data)) {
+      return data as T;
+    }
+
+    if (data && typeof data === 'object') {
+      const nested = data as Record<string, unknown>;
+      const nestedHasOwnData = 'data' in nested;
+      const nestedHasSuccess = 'success' in nested;
+      const nestedHasMeta = 'meta' in nested;
+      const nestedHasSummary = 'summary' in nested;
+
+      if (!nestedHasOwnData && !nestedHasSuccess && !nestedHasMeta && !nestedHasSummary) {
+        return normalizeApiPayload(data, fallback);
+      }
+    }
   }
 
   return payload as T;
@@ -162,8 +181,8 @@ export const apiClient = {
   },
 
   // ─── Generic HTTP helpers ───
-  async get<T = any>(endpoint: string): Promise<T> {
-    return this.request<T>('GET', endpoint);
+  async get<T = any>(endpoint: string, options?: any): Promise<T> {
+    return this.request<T>('GET', endpoint, undefined, options);
   },
 
   async post<T = any>(endpoint: string, data?: any): Promise<T> {
@@ -419,10 +438,6 @@ export const apiClient = {
   },
 
   // ── Sales ──
-  async getSalesSummary() {
-    return this.request('GET', '/sales/summary');
-  },
-
   async getSalesOrders() {
     return this.request('GET', '/sales/orders');
   },
@@ -468,9 +483,9 @@ export const apiClient = {
   },
 
   // ── Purchases ──
-  async getPurchaseSummary() {
-    return this.request('GET', '/purchases/summary');
-  },
+  // async getPurchaseSummary() {
+  //   return this.request('GET', '/purchases/summary');
+  // },
 
   async getPurchaseOrders() {
     return this.request('GET', '/purchases/orders');
@@ -931,6 +946,10 @@ export const apiClient = {
     return this.request('POST', '/ai/assistant/chat', payload);
   },
 
+  async generateAiSpeech(text: string, provider: 'browser' | 'cloud' | 'auto' = 'auto', language = 'en-US') {
+    return this.request('POST', '/ai/assistant/voice', { text, provider, language });
+  },
+
   // ── Dashboard ──
   async getDashboardAnalytics(params?: any) {
     const query = params ? `?${new URLSearchParams(params).toString()}` : '';
@@ -1077,7 +1096,133 @@ export const apiClient = {
     return this.request('GET', `/reports/all${query}`);
   },
 
-  // ─── Gemini Voice AI ───
+  // REPORTS API
+  async getReportSummary(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/summary${query ? '?' + query : ''}`);
+  },
+
+  async getSalesSummary(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/sales-summary${query ? '?' + query : ''}`);
+  },
+
+  async getSalesRegister(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/sales-register${query ? '?' + query : ''}`);
+  },
+
+  async getSalesByCustomer(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/sales-by-customer${query ? '?' + query : ''}`);
+  },
+
+  async getSalesByProduct(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/sales-by-product${query ? '?' + query : ''}`);
+  },
+
+  async getGstSalesReport(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/gst-sales${query ? '?' + query : ''}`);
+  },
+
+  async getOutstandingSales(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/outstanding-sales${query ? '?' + query : ''}`);
+  },
+
+  async getPurchaseSummary(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/purchase-summary${query ? '?' + query : ''}`);
+  },
+
+  async getPurchaseRegister(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/purchase-register${query ? '?' + query : ''}`);
+  },
+
+  async getPurchaseByVendor(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/purchase-by-vendor${query ? '?' + query : ''}`);
+  },
+
+  async getGeneralLedger(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/general-ledger${query ? '?' + query : ''}`);
+  },
+
+  async getCustomerLedger(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/customer-ledger${query ? '?' + query : ''}`);
+  },
+
+  async getOutstandingPurchases(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/outstanding-purchases${query ? '?' + query : ''}`);
+  },
+
+  async getProfitLossReport(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/profit-loss${query ? '?' + query : ''}`);
+  },
+
+  async getProfitLossSummary(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/profit-loss/summary${query ? '?' + query : ''}`);
+  },
+
+  async getProfitLossProducts(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/profit-loss/products${query ? '?' + query : ''}`);
+  },
+
+  async getProfitLossCustomers(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/profit-loss/customers${query ? '?' + query : ''}`);
+  },
+
+  async getProfitLossBranches(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/profit-loss/branches${query ? '?' + query : ''}`);
+  },
+
+  async getProfitLossMonthly(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/profit-loss/monthly${query ? '?' + query : ''}`);
+  },
+
+  async getProfitLossYearly(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/profit-loss/yearly${query ? '?' + query : ''}`);
+  },
+
+  async getProfitLossComparison(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/profit-loss/comparison${query ? '?' + query : ''}`);
+  },
+
+  async getInvoiceProfitabilityReport(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/profit-loss/invoices${query ? '?' + query : ''}`);
+  },
+
+  async getInvoiceProfitabilityDetail(invoice: string | number, params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/profit-loss/invoices/${invoice}${query ? '?' + query : ''}`);
+  },
+
+  async getProductProfitabilityReport(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/product-profitability${query ? '?' + query : ''}`);
+  },
+
+  async getGstSummary(params: any = {}) {
+    const query = new URLSearchParams(params).toString();
+    return this.request('GET', `/reports/gst-summary${query ? '?' + query : ''}`);
+  },
+
+  // Gemini Voice AI
   async processGeminiVoice(text: string) {
     return this.request('POST', '/gemini/voice', { text });
   },

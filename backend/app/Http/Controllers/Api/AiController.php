@@ -55,6 +55,100 @@ class AiController extends Controller
         return response()->json(['success' => true, 'data' => $insights]);
     }
 
+    public function voice(Request $request)
+    {
+        $request->validate([
+            'text' => 'required|string|max:3000',
+            'provider' => 'nullable|string|in:browser,cloud,auto',
+            'language' => 'nullable|string|max:20',
+        ]);
+
+        $text = trim($request->input('text'));
+        $preferredProvider = strtolower((string) $request->input('provider', 'auto'));
+        $language = $request->input('language', 'en-US');
+
+        $settings = \App\Models\Setting::whereIn('key', [
+            'voice_tts_provider',
+            'voice_default_language',
+            'voice_browser_enabled',
+            'voice_paid_enabled',
+            'voice_auto_read_enabled',
+            'voice_speed',
+            'elevenlabs_api_key',
+            'elevenlabs_voice_id',
+            'elevenlabs_model_id',
+        ])->pluck('value', 'key')->toArray();
+
+        $provider = $preferredProvider === 'browser' || $preferredProvider === 'cloud'
+            ? $preferredProvider
+            : strtolower((string) ($settings['voice_tts_provider'] ?? env('TTS_PROVIDER', env('AI_TTS_PROVIDER', 'auto'))));
+
+        $browserEnabled = filter_var($settings['voice_browser_enabled'] ?? env('VOICE_BROWSER_ENABLED', true), FILTER_VALIDATE_BOOLEAN);
+        $paidEnabled = filter_var($settings['voice_paid_enabled'] ?? env('VOICE_PAID_ENABLED', true), FILTER_VALIDATE_BOOLEAN);
+        $configuredLanguage = trim((string) ($settings['voice_default_language'] ?? $language));
+        if ($configuredLanguage !== '') {
+            $language = $configuredLanguage;
+        }
+
+        if (($provider === 'cloud' || $provider === 'elevenlabs' || $provider === 'auto') && $paidEnabled) {
+            $apiKey = trim((string) ($settings['elevenlabs_api_key'] ?? env('ELEVENLABS_API_KEY', '')));
+            $voiceId = trim((string) ($settings['elevenlabs_voice_id'] ?? env('ELEVENLABS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL')));
+            $modelId = trim((string) ($settings['elevenlabs_model_id'] ?? env('ELEVENLABS_MODEL_ID', 'eleven_multilingual_v2')));
+
+            if ($apiKey && $voiceId) {
+                try {
+                    $response = \Illuminate\Support\Facades\Http::withHeaders([
+                        'Accept' => 'audio/mpeg',
+                        'Content-Type' => 'application/json',
+                        'xi-api-key' => $apiKey,
+                    ])->timeout(30)->post('https://api.elevenlabs.io/v1/text-to-speech/' . rawurlencode($voiceId), [
+                        'model_id' => $modelId ?: 'eleven_multilingual_v2',
+                        'text' => $text,
+                        'voice_settings' => [
+                            'stability' => 0.6,
+                            'similarity_boost' => 0.8,
+                        ],
+                    ]);
+
+                    if ($response->successful()) {
+                        return response()->json([
+                            'success' => true,
+                            'data' => [
+                                'source' => 'cloud',
+                                'provider' => 'elevenlabs',
+                                'language' => $language,
+                                'mime_type' => 'audio/mpeg',
+                                'audio_base64' => base64_encode($response->body()),
+                            ],
+                        ]);
+                    }
+
+                    Log::warning('ElevenLabs TTS failed: ' . $response->body());
+                } catch (\Throwable $e) {
+                    Log::warning('ElevenLabs TTS exception: ' . $e->getMessage());
+                }
+            }
+        }
+
+        if ($browserEnabled) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'source' => 'browser',
+                    'provider' => 'browser',
+                    'language' => $language,
+                    'fallback' => true,
+                    'message' => 'Using browser speech synthesis fallback.',
+                ],
+            ]);
+        }
+
+        return response()->json([
+            'success' => false,
+            'message' => 'No active voice provider available. Enable browser TTS or configure a paid provider.',
+        ], 503);
+    }
+
     public function chat(Request $request)
     {
         $this->validate($request, ['message' => 'required|string']);
