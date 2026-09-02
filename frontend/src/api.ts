@@ -30,12 +30,16 @@ const normalizeApiPayload = <T>(payload: unknown, fallback: T): T => {
 
   const record = payload as Record<string, unknown>;
 
+  // If this is an API envelope with success flag, preserve it as-is
+  // (it contains metadata like id, success, message)
+  const hasSuccess = 'success' in record && typeof record.success === 'boolean';
   const hasSummary = 'summary' in record && record.summary !== undefined;
 
-  if (hasSummary) {
+  if (hasSuccess || hasSummary) {
     return payload as T;
   }
 
+  // Only unwrap 'data' if there's no success flag
   if ('data' in record && record.data !== undefined) {
     const data = record.data;
 
@@ -115,7 +119,51 @@ export const apiClient = {
     const requestUrl = `${API_BASE}${normalizeEndpoint(endpoint)}`;
 
     try {
-      const response = await fetch(requestUrl, requestOptions);
+      // Add request timeout (30 seconds)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      
+      // Explicitly handle redirects manually to avoid issues with 302 redirects to login or error pages
+      const requestOptionsWithRedirect = {
+        ...requestOptions,
+        redirect: 'manual' as RequestRedirect,
+        signal: controller.signal,
+      };
+      
+      console.debug(`API Request: ${method.toUpperCase()} ${requestUrl}`, {
+        'Content-Length': requestOptions.body ? new Blob([requestOptions.body]).size : 0,
+        'Has Auth': !!requestOptions.headers?.Authorization,
+      });
+      
+      const response = await fetch(requestUrl, requestOptionsWithRedirect);
+      clearTimeout(timeoutId);
+
+      // Handle 3xx redirect responses
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location');
+        console.warn(
+          `API redirect (${response.status}): ${method} ${endpoint}\n` +
+          `Location: ${location}\n` +
+          `This may indicate an authentication or permission issue.`
+        );
+        
+        // If it's a redirect to a resource (like /api/purchases/123), extract the ID
+        if (location && /\/\d+$/.test(location)) {
+          const idMatch = location.match(/\/(\d+)$/);
+          if (idMatch) {
+            console.log(`Extracted ID from redirect Location header: ${idMatch[1]}`);
+            return { id: parseInt(idMatch[1], 10), status: response.status } as T;
+          }
+        }
+        
+        throw buildApiError({
+          status: response.status,
+          endpoint,
+          method,
+          fallbackMessage: `Redirect to ${location || 'unknown'} - check authentication and permissions`,
+          payload: { location },
+        });
+      }
 
       if (response.status === 401) {
         useAuthStore.getState().logout();
@@ -130,7 +178,19 @@ export const apiClient = {
 
       const contentType = response.headers.get('content-type') || '';
       const isJson = contentType.includes('application/json') || contentType.includes('text/json');
-      const body = isJson ? await response.json() : await response.text();
+      let body: any;
+      
+      try {
+        body = isJson ? await response.json() : await response.text();
+      } catch (parseError: any) {
+        console.error(
+          `Failed to parse response for ${method} ${endpoint}\n` +
+          `Status: ${response.status}\n` +
+          `Content-Type: ${contentType}\n` +
+          `Parse Error: ${parseError.message}`
+        );
+        throw parseError;
+      }
 
       if (!response.ok) {
         const fallbackEndpoints = method === 'GET' ? DASHBOARD_ENDPOINT_FALLBACKS[endpoint] || [] : [];
@@ -168,14 +228,49 @@ export const apiClient = {
         throw apiError;
       }
 
-      const networkMessage = error instanceof Error ? error.message : 'Network request failed';
-      console.error(`API request failed: ${method.toUpperCase()} ${endpoint}`, error);
+      // Enhanced network error diagnostics
+      let networkMessage = 'Network request failed';
+      let diagnostics: any = {
+        'Attempted URL': requestUrl,
+        'Method': method.toUpperCase(),
+        'Endpoint': endpoint,
+      };
+
+      if (error instanceof TypeError) {
+        if (error.message.includes('Failed to fetch')) {
+          networkMessage = 'Failed to connect to server. The backend may be offline, or there might be a CORS issue.';
+          diagnostics['Possible Causes'] = [
+            '1. Backend server is not running',
+            '2. API server is not accessible at ' + API_BASE,
+            '3. Network connectivity issue',
+            '4. CORS policy blocking the request',
+          ];
+        } else if (error.message.includes('aborted')) {
+          networkMessage = 'Request timeout (30s). The backend server is not responding in time.';
+          diagnostics['Possible Causes'] = [
+            '1. Backend server is slow or hanging',
+            '2. Large request payload',
+            '3. Database query is slow',
+          ];
+        } else {
+          networkMessage = `Network error: ${error.message}`;
+        }
+      } else if (error instanceof Error) {
+        networkMessage = error.message;
+      }
+
+      diagnostics['Error Message'] = networkMessage;
+      diagnostics['Has Authorization'] = !!useAuthStore.getState().token;
+
+      console.error(`API request failed: ${method.toUpperCase()} ${endpoint}`, diagnostics);
+      console.error('Full error object:', error);
+
       throw buildApiError({
         status: 0,
         endpoint,
         method,
         fallbackMessage: networkMessage || 'Network request failed',
-        payload: error,
+        payload: { diagnostics, error: error?.message },
       });
     }
   },
@@ -797,6 +892,19 @@ export const apiClient = {
 
   async addPurchaseInvoicePayment(id: number, data: any) {
     return this.request('POST', `/purchase-invoices/${id}/payments`, data);
+  },
+
+  // Aliases for backward compatibility
+  async getPurchase(id: number) {
+    const response = await this.getPurchaseInvoice(id);
+    // Handle both direct response and wrapped response
+    return response?.data ? response : { data: response };
+  },
+
+  async updatePurchase(id: number, data: any) {
+    const response = await this.updatePurchaseInvoice(id, data);
+    // Handle both direct response and wrapped response
+    return response?.data ? response : { data: response };
   },
 
   // ── Branches ──

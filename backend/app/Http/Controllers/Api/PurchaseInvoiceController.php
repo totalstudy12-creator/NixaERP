@@ -45,6 +45,17 @@ class PurchaseInvoiceController extends Controller
      */
     public function store(Request $request)
     {
+        // Log incoming request for debugging redirect issues
+        \Log::debug('Purchase invoice create request received', [
+            'user_id' => auth()->id(),
+            'ip' => $request->ip(),
+            'path' => $request->path(),
+            'method' => $request->method(),
+            'content_type' => $request->header('Content-Type'),
+            'has_auth' => $request->header('Authorization') ? 'yes' : 'no',
+            'purchase_number' => $request->get('purchase_number'),
+        ]);
+
         $validated = $request->validate([
             'company_id'              => 'required|exists:companies,id',
             'supplier_id'             => 'required|exists:suppliers,id',
@@ -264,10 +275,26 @@ class PurchaseInvoiceController extends Controller
                 'payment_status' => $totalPaid >= $purchase->grand_total ? 'Paid' : ($totalPaid > 0 ? 'Partial' : 'Unpaid'),
             ]);
 
+            // Log the purchase creation
+            \Log::info('Purchase invoice created via import', [
+                'purchase_id' => $purchase->id,
+                'purchase_number' => $purchase->purchase_number,
+                'supplier_id' => $purchase->supplier_id,
+                'grand_total' => $purchase->grand_total,
+            ]);
+
             return $purchase;
         });
 
-        return response()->json($purchase->load(['supplier', 'items', 'payments']), 201);
+        $response = [
+            'success' => true,
+            'id' => $purchase->id,
+            'purchase_id' => $purchase->id,
+            'data' => $purchase->load(['supplier', 'items', 'payments']),
+            'message' => 'Purchase invoice created successfully',
+        ];
+
+        return response()->json($response, 201);
     }
 
     /**
@@ -275,7 +302,12 @@ class PurchaseInvoiceController extends Controller
      */
     public function show($id)
     {
-        return PurchaseInvoice::with(['supplier', 'items.product', 'payments'])->findOrFail($id);
+        $purchase = PurchaseInvoice::with(['supplier', 'items.product', 'payments'])->findOrFail($id);
+        return response()->json([
+            'success' => true,
+            'data' => $purchase,
+            'message' => 'Purchase invoice retrieved successfully',
+        ]);
     }
 
     /**
@@ -298,8 +330,13 @@ class PurchaseInvoiceController extends Controller
         ]);
 
         $purchase->update($validated);
+        $updated = $purchase->fresh(['supplier', 'items', 'payments']);
 
-        return response()->json($purchase->fresh(['supplier', 'items', 'payments']));
+        return response()->json([
+            'success' => true,
+            'data' => $updated,
+            'message' => 'Purchase invoice updated successfully',
+        ]);
     }
 
     /**
@@ -340,12 +377,23 @@ class PurchaseInvoiceController extends Controller
             'status'           => 'completed',
             'payment_direction'=> 'outward',
         ]);
+        
+        // Recalculate payment status
         $totalPaid = $purchase->payments()->sum('amount');
+        $paymentStatus = $totalPaid >= $purchase->grand_total ? 'Paid' : ($totalPaid > 0 ? 'Partial' : 'Unpaid');
         $purchase->update([
             'paid_amount'    => $totalPaid,
-            'payment_status' => $totalPaid >= $purchase->grand_total ? 'Paid' : 'Partial',
+            'payment_status' => $paymentStatus,
         ]);
-        return response()->json($payment, 201);
+        
+        // Return the updated purchase with all relations
+        $updatedPurchase = $purchase->fresh(['supplier', 'items', 'payments']);
+        return response()->json([
+            'success' => true,
+            'data' => $updatedPurchase,
+            'payment' => $payment,
+            'message' => 'Payment added successfully',
+        ], 201);
     }
 
     /**

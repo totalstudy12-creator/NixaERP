@@ -586,7 +586,7 @@ const PurchaseImportModal = memo(
       return null;
     };
 
-    // Enhanced ID extraction
+    // Enhanced ID extraction with better diagnostics
     const extractId = (obj: any): number | null => {
       if (!obj) return null;
       if (typeof obj === 'number') return obj;
@@ -599,7 +599,20 @@ const PurchaseImportModal = memo(
         return null;
       }
       if (typeof obj === 'object') {
-        // Check direct properties
+        // First check: direct 'id' property (most common case for direct responses)
+        if ('id' in obj && obj.id) {
+          const idVal = obj.id;
+          if (typeof idVal === 'number') return idVal;
+          if (typeof idVal === 'string' && /^\d+$/.test(idVal)) return parseInt(idVal, 10);
+        }
+        
+        // Second check: 'data' wrapper that might contain the object
+        if ('data' in obj && obj.data && typeof obj.data === 'object' && !Array.isArray(obj.data)) {
+          const dataId = extractId(obj.data);
+          if (dataId) return dataId;
+        }
+        
+        // Third check: any property with 'id' in the name
         for (const key of Object.keys(obj)) {
           const val = obj[key];
           if (val == null) continue;
@@ -609,7 +622,8 @@ const PurchaseImportModal = memo(
             if (typeof val === 'string' && /^\d+$/.test(val)) return parseInt(val, 10);
           }
         }
-        // Recursively search nested objects and arrays
+        
+        // Fallback: recursively search nested objects and arrays
         for (const key of Object.keys(obj)) {
           const val = obj[key];
           if (val && typeof val === 'object') {
@@ -773,23 +787,78 @@ const PurchaseImportModal = memo(
 
           // Attempt to create purchase invoice
           let newPurchaseResponse: any;
-          if (typeof (apiClient as any).createPurchaseInvoice === 'function') {
-            newPurchaseResponse = await (apiClient as any).createPurchaseInvoice(payload);
-          } else {
-            newPurchaseResponse = await apiClient.request('POST', '/purchases', payload);
+          try {
+            if (typeof (apiClient as any).createPurchaseInvoice === 'function') {
+              newPurchaseResponse = await (apiClient as any).createPurchaseInvoice(payload);
+            } else {
+              newPurchaseResponse = await apiClient.request('POST', '/purchase-invoices', payload);
+            }
+          } catch (apiError: any) {
+            // Handle network errors (status 0)
+            if (apiError.status === 0) {
+              console.error(
+                `Network error while creating purchase invoice.\n` +
+                `Error: ${apiError.backendMessage}\n` +
+                `Purchase Number: ${normalizedRow.purchase_number}`
+              );
+              throw new Error(
+                `Network error creating purchase: ${apiError.backendMessage}. ` +
+                `Check that the backend API server is running and accessible. ` +
+                `See browser console for full diagnostics.`
+              );
+            }
+            
+            // If we get an API error with status 302 or 3xx, it indicates a redirect issue
+            if (apiError.status >= 300 && apiError.status < 400) {
+              console.error(
+                `Purchase creation returned redirect (${apiError.status}).\n` +
+                `This usually means: authentication failed, permission denied, or server misconfiguration.\n` +
+                `Check that your session is active and you have permission to create purchases.\n` +
+                `Error: ${apiError.message}`
+              );
+              throw new Error(
+                `Purchase creation failed with redirect (${apiError.status}). ` +
+                `Please verify you are logged in and have permission to create purchases. ` +
+                `Details: ${apiError.message}`
+              );
+            }
+            throw apiError;
           }
 
           let newPurchaseId = extractId(newPurchaseResponse);
+          
+          // Check if the response indicates a redirect happened but ID was extracted from Location header
+          if (newPurchaseResponse && newPurchaseResponse.status && newPurchaseResponse.status >= 300 && newPurchaseResponse.status < 400) {
+            console.warn(`Purchase created with redirect status ${newPurchaseResponse.status}, but ID was extracted from Location header.`);
+          }
 
           // If not found, try fallback with retries
           if (!newPurchaseId) {
+            console.warn(
+              `ID not found in response, attempting fallback search by purchase_number: ${normalizedRow.purchase_number}`
+            );
             newPurchaseId = await waitForPurchaseByNumber(normalizedRow.purchase_number);
           }
 
           if (!newPurchaseId) {
-            console.error('Purchase creation response:', newPurchaseResponse);
-            throw new Error(`Purchase created but could not retrieve ID. Please check the server response.`);
+            const responseStr = JSON.stringify(newPurchaseResponse, null, 2);
+            console.error(
+              `Purchase import failed: Cannot extract ID from response.\n` +
+              `Purchase Number: ${normalizedRow.purchase_number}\n` +
+              `Response Structure: ${responseStr}\n` +
+              `Response Type: ${typeof newPurchaseResponse}\n` +
+              `Is Array: ${Array.isArray(newPurchaseResponse)}\n` +
+              `Has 'id': ${'id' in (newPurchaseResponse || {})}\n` +
+              `Has 'data': ${'data' in (newPurchaseResponse || {})}`
+            );
+            throw new Error(
+              `Purchase created but ID extraction failed. ` +
+              `Response structure: ${JSON.stringify(Object.keys(newPurchaseResponse || {})).substring(0, 100)}. ` +
+              `Check browser console for full details.`
+            );
           }
+          
+          console.log(`Purchase invoice created successfully with ID: ${newPurchaseId}`);
 
           const paymentsToCreate: any[] = [];
           if (Array.isArray(normalizedRow.payments)) {

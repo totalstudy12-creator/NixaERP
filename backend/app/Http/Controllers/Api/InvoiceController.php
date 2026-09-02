@@ -198,8 +198,26 @@ class InvoiceController extends Controller
                 'total_amount'    => $grandTotal,
             ]);
 
+            // Log the invoice creation
+            \Log::info('Invoice created via API', [
+                'invoice_id' => $invoice->id,
+                'invoice_no' => $invoice->invoice_no,
+                'customer_id' => $invoice->customer_id,
+                'total_amount' => $invoice->total_amount,
+            ]);
+
             return $invoice->load(['company', 'branch', 'customer', 'items.product']);
         });
+
+        $response = [
+            'success' => true,
+            'id' => $invoice->id,
+            'invoice_id' => $invoice->id,
+            'data' => $invoice,
+            'message' => 'Invoice created successfully',
+        ];
+
+        return response()->json($response, 201);
     }
 
     /**
