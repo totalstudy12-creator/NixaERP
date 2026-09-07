@@ -1,10 +1,11 @@
 import { toIST } from '../utils/date';
+
 export type AppLogEntry = {
   id: string;
   timestamp: string;
   module: string;
   action: string;
-  status: 'success' | 'error' | 'info';
+  status: 'success' | 'error' | 'info' | 'warning';  // ✅ 'warning' added
   message: string;
 };
 
@@ -23,18 +24,27 @@ export function getAppLogs(): AppLogEntry[] {
   }
 }
 
-export function addAppLog(entry: Omit<AppLogEntry, 'id' | 'timestamp'>) {
-  const id = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+/**
+ * Adds an application log entry.
+ * Returns a Promise resolving to the updated log list (so callers can use .catch).
+ */
+export async function addAppLog(
+  entry: Omit<AppLogEntry, 'id' | 'timestamp'>
+): Promise<AppLogEntry[]> {
+  const id =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   const newEntry: AppLogEntry = {
     id,
     timestamp: toIST(new Date()).toISOString(),
     ...entry,
   };
+
   const logs = [newEntry, ...getAppLogs()].slice(0, 200);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(logs));
   window.dispatchEvent(new CustomEvent('app-log-updated'));
+
   return logs;
 }

@@ -23,44 +23,34 @@ export interface ApiError extends Error {
 
 const normalizeApiPayload = <T>(payload: unknown, fallback: T): T => {
   if (payload === null || payload === undefined) return fallback;
-
-  if (Array.isArray(payload)) return payload as T;
-
-  if (typeof payload !== 'object') return fallback;
-
-  const record = payload as Record<string, unknown>;
-
-  // If this is an API envelope with success flag, preserve it as-is
-  // (it contains metadata like id, success, message)
-  const hasSuccess = 'success' in record && typeof record.success === 'boolean';
-  const hasSummary = 'summary' in record && record.summary !== undefined;
-
-  if (hasSuccess || hasSummary) {
-    return payload as T;
-  }
-
-  // Only unwrap 'data' if there's no success flag
-  if ('data' in record && record.data !== undefined) {
-    const data = record.data;
-
-    if (Array.isArray(data)) {
-      return data as T;
-    }
-
-    if (data && typeof data === 'object') {
-      const nested = data as Record<string, unknown>;
-      const nestedHasOwnData = 'data' in nested;
-      const nestedHasSuccess = 'success' in nested;
-      const nestedHasMeta = 'meta' in nested;
-      const nestedHasSummary = 'summary' in nested;
-
-      if (!nestedHasOwnData && !nestedHasSuccess && !nestedHasMeta && !nestedHasSummary) {
-        return normalizeApiPayload(data, fallback);
-      }
-    }
-  }
-
   return payload as T;
+};
+
+const unwrapApiData = <T>(payload: unknown, fallback: T): T => {
+  let current: any = payload;
+  for (let depth = 0; depth < 3; depth += 1) {
+    if (current === null || current === undefined) return fallback;
+    if (Array.isArray(current)) return current as T;
+    if (typeof current !== 'object') return fallback;
+
+    const record = current as Record<string, unknown>;
+    if (!('data' in record) || record.data === undefined || record.data === null) {
+      return current as T;
+    }
+
+    current = record.data;
+  }
+  return current as T;
+};
+
+const buildQuery = (params: Record<string, unknown> = {}) => {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    search.set(key, String(value));
+  });
+  const query = search.toString();
+  return query ? `?${query}` : '';
 };
 
 const buildApiError = (options: {
@@ -118,10 +108,11 @@ export const apiClient = {
 
     const requestUrl = `${API_BASE}${normalizeEndpoint(endpoint)}`;
 
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
       // Add request timeout (30 seconds)
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      timeoutId = setTimeout(() => controller.abort(), 30000);
       
       // Explicitly handle redirects manually to avoid issues with 302 redirects to login or error pages
       const requestOptionsWithRedirect = {
@@ -136,7 +127,6 @@ export const apiClient = {
       });
       
       const response = await fetch(requestUrl, requestOptionsWithRedirect);
-      clearTimeout(timeoutId);
 
       // Handle 3xx redirect responses
       if (response.status >= 300 && response.status < 400) {
@@ -146,15 +136,6 @@ export const apiClient = {
           `Location: ${location}\n` +
           `This may indicate an authentication or permission issue.`
         );
-        
-        // If it's a redirect to a resource (like /api/purchases/123), extract the ID
-        if (location && /\/\d+$/.test(location)) {
-          const idMatch = location.match(/\/(\d+)$/);
-          if (idMatch) {
-            console.log(`Extracted ID from redirect Location header: ${idMatch[1]}`);
-            return { id: parseInt(idMatch[1], 10), status: response.status } as T;
-          }
-        }
         
         throw buildApiError({
           status: response.status,
@@ -177,11 +158,16 @@ export const apiClient = {
       }
 
       const contentType = response.headers.get('content-type') || '';
-      const isJson = contentType.includes('application/json') || contentType.includes('text/json');
-      let body: any;
+      const isJson = contentType.includes('application/json') || contentType.includes('text/json') || contentType.includes('+json');
+      let body: any = null;
       
       try {
-        body = isJson ? await response.json() : await response.text();
+        if (response.status === 204) {
+          body = null;
+        } else {
+          const raw = await response.text();
+          body = raw ? (isJson ? JSON.parse(raw) : raw) : null;
+        }
       } catch (parseError: any) {
         console.error(
           `Failed to parse response for ${method} ${endpoint}\n` +
@@ -272,6 +258,8 @@ export const apiClient = {
         fallbackMessage: networkMessage || 'Network request failed',
         payload: { diagnostics, error: error?.message },
       });
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
   },
 
@@ -571,6 +559,72 @@ export const apiClient = {
 
   async createSalesReturn(data: any) {
     return this.request('POST', '/sales/returns', data);
+  },
+
+  // ── Sales Invoice Returns ──
+  async getSalesInvoiceReturns(params: Record<string, unknown> = {}) {
+    return this.request('GET', `/sales-returns${buildQuery({ per_page: 1000, ...params })}`);
+  },
+
+  async createSalesInvoiceReturn(data: any) {
+    return this.request('POST', '/sales-returns', data);
+  },
+
+  async updateSalesInvoiceReturn(id: number, data: any) {
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid sales return ID.');
+    return this.request('PUT', `/sales-returns/${id}`, data);
+  },
+
+  async deleteSalesInvoiceReturn(id: number) {
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid sales return ID.');
+    return this.request('DELETE', `/sales-returns/${id}`);
+  },
+
+  async searchReturnCustomers(query: string) {
+    const trimmedQuery = String(query ?? '').trim();
+    if (!trimmedQuery) return { data: [] };
+    return this.request('GET', `/sales-returns/search/customers${buildQuery({ query: trimmedQuery })}`);
+  },
+
+  async searchReturnInvoices(query: string, customerId?: number) {
+    const trimmedQuery = String(query ?? '').trim();
+    if (!trimmedQuery) return { data: [] };
+    return this.request('GET', `/sales-returns/search/invoices${buildQuery({
+      query: trimmedQuery,
+      customer_id: customerId && customerId > 0 ? customerId : undefined,
+    })}`);
+  },
+
+  async searchReturnProducts(query: string) {
+    const trimmedQuery = String(query ?? '').trim();
+    if (!trimmedQuery) return { data: [] };
+    return this.request('GET', `/sales-returns/search/products${buildQuery({ query: trimmedQuery })}`);
+  },
+
+  async getCustomerInvoicesForReturn(customerId: number) {
+    if (!Number.isInteger(customerId) || customerId <= 0) throw new Error('Invalid customer ID.');
+    return this.request('GET', `/sales-returns/customer/${customerId}/invoices`);
+  },
+
+  async getInvoiceItemsForReturn(invoiceId: number) {
+    if (!Number.isInteger(invoiceId) || invoiceId <= 0) throw new Error('Invalid invoice ID.');
+    return this.request('GET', `/sales-returns/invoice/${invoiceId}/items`);
+  },
+
+  async getInvoiceDetailsForReturn(invoiceId: number) {
+    if (!Number.isInteger(invoiceId) || invoiceId <= 0) throw new Error('Invalid invoice ID.');
+
+    const response = await this.request<any>(
+      'GET',
+      `/sales-returns/invoice/${invoiceId}/details`
+    );
+
+    const invoice = unwrapApiData<any>(response, null);
+    if (!invoice || typeof invoice !== 'object' || !invoice.id) {
+      throw new Error('Invoice details were not returned by the server.');
+    }
+
+    return { data: invoice };
   },
 
   async getSalesReports() {
@@ -1354,6 +1408,7 @@ export const apiClient = {
   async geminiTest() {
     return this.request('GET', '/gemini/test');
   },
+
 };
 
 export default apiClient;

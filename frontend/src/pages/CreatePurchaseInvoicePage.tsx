@@ -1,187 +1,348 @@
-// src/pages/CreatePurchaseInvoicePage.tsx
-import { useEffect, useState, useCallback, useMemo, lazy, Suspense, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
+import type { KeyboardEvent } from 'react';
 import {
-  FiPlus, FiTrash2, FiSearch, FiFileText, FiCalendar, FiUser, FiBox,
-  FiX, FiSave, FiPrinter, FiRefreshCw, FiLoader, FiChevronDown, FiChevronUp,
-  FiCheckCircle, FiAlertCircle, FiChevronRight
+  FiPlus, FiTrash2, FiSearch, FiFileText, FiUser, FiBox, FiX, FiPrinter,
+  FiRefreshCw, FiLoader, FiChevronRight, FiSave, FiAlertCircle, FiCheckCircle
 } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
 
-const Offcanvas = lazy(() => import('../components/Offcanvas').then(m => ({ default: m.Offcanvas })));
+const Offcanvas = lazy(() =>
+  import('../components/Offcanvas').then((m) => ({ default: m.Offcanvas }))
+);
 
-// ── Types ──────────────────────────────────────────
-interface Company { id: number; name: string; }
+type Id = number | '';
+type DiscountType = 'percent' | 'amount';
+type ApplyType = 'before_tax' | 'after_tax';
+type PaymentDirection = 'inward' | 'outward';
+type PaymentMethod = 'UPI' | 'cash' | 'cheque' | 'bank_transfer' | 'other';
+
+interface Company { id: number; name: string; state?: string; billing_state?: string; }
 interface Supplier {
-  id: number; name: string; code?: string;
-  contact_person?: string; contact_no?: string; email?: string;
-  phone?: string; gst_number?: string; pan?: string;
-  billing_street?: string; billing_city?: string; billing_state?: string;
-  billing_country?: string; billing_pincode?: string;
-  company_id?: number;
+  id: number; name: string; code?: string; company_id?: number;
+  contact_person?: string; contact_no?: string; email?: string; phone?: string;
+  gst_number?: string; pan?: string; billing_street?: string; billing_city?: string;
+  billing_state?: string; billing_country?: string; billing_pincode?: string;
 }
 interface Product {
-  id: number; name: string; hsn_sac_code?: string; uom?: string;
-  purchase_price?: number | string; sale_price?: number | string;
-  tax_rate?: number | string; igst_rate?: number | string;
-  stock_quantity?: number | string; unit?: string; sku?: string; barcode?: string;
+  id: number; name: string; hsn_sac_code?: string; uom?: string; unit?: string;
+  purchase_price?: number | string; sale_price?: number | string; tax_rate?: number | string;
+  igst_rate?: number | string; stock_quantity?: number | string; sku?: string; barcode?: string;
 }
 interface BankAccount { id: number; bank_name: string; account_no: string; }
 
 interface PurchaseItem {
-  product_id: number; product_name: string; hsn_sac_code: string;
-  qty: number; uom: string; price: number;
-  discount_type: 'percent' | 'amount'; discount_percent: number; discount_amount: number;
-  gst_slab: number; is_inter_state: boolean;
-  cgst_percent: number; sgst_percent: number; igst_percent: number;
-  cgst_amount: number; sgst_amount: number; igst_amount: number; total: number;
+  product_id: number;
+  product_name: string;
+  hsn_sac_code: string;
+  qty: number;
+  uom: string;
+  price: number;
+  discount_type: DiscountType;
+  discount_percent: number;
+  discount_amount: number;
+  gst_slab: number;
+  custom_gst_rate: number;
+  is_inter_state: boolean;
+  cgst_percent: number;
+  sgst_percent: number;
+  igst_percent: number;
+  cgst_amount: number;
+  sgst_amount: number;
+  igst_amount: number;
+  total: number;
 }
 
 interface AdditionalCharge { id: string; label: string; amount: number; }
-
 interface PaymentEntry {
   id: string;
   amount: number;
-  payment_method: 'UPI' | 'cash' | 'cheque' | 'bank_transfer' | 'other';
+  payment_method: PaymentMethod;
   reference_no: string;
   transaction_date: string;
   bank_name: string;
   account_number: string;
   remarks: string;
-  payment_direction: 'inward' | 'outward';
+  payment_direction: PaymentDirection;
 }
 
 interface PurchaseFormData {
-  company_id: number | ''; supplier_id: number | '';
-  supplier_name: string; supplier_address: string;
-  contact_person: string; phone_no: string; gstin_pan: string;
-  reverse_charge: boolean; ship_to: string; place_of_supply: string;
+  company_id: Id;
+  supplier_id: Id;
+  supplier_name: string;
+  supplier_address: string;
+  contact_person: string;
+  phone_no: string;
+  gstin_pan: string;
+  reverse_charge: boolean;
+  ship_to: string;
+  place_of_supply: string;
   invoice_type: 'purchase_invoice' | 'purchase_bill';
-  invoice_no: string; invoice_date: string;
-  challan_no: string; challan_date: string;
-  po_no: string; po_date: string; lr_no: string; eway_no: string;
+  invoice_no: string;
+  invoice_date: string;
+  challan_no: string;
+  challan_date: string;
+  po_no: string;
+  po_date: string;
+  lr_no: string;
+  eway_no: string;
   delivery_mode: string;
   payment_type: 'credit' | 'cash' | 'cheque' | 'online' | 'bank_transfer';
-  payment_term: string; due_date: string;
-  bank_id: number | '';
-  packing_charges: number; general_discount_percent: number; general_discount_amount: number;
-  tcs_percent: number; round_off: number;
-  terms_title: string; terms_detail: string; document_note: string;
-  additional_charges: AdditionalCharge[]; internal_note: string;
-  billing_street: string; billing_city: string; billing_state: string; billing_country: string; billing_pincode: string;
-  shipping_street: string; shipping_city: string; shipping_state: string; shipping_country: string; shipping_pincode: string;
-  territory: string; zone: string; status: string; credit_limit: number; outstanding_amount: number;
-  wallet_balance: number; commission_rate: number; kyc_status: string; opening_balance: number;
-  due_days: number; fax: string; website: string; license_no: string;
-  custom_field_1: string; custom_field_2: string; notes: string; email: string;
+  payment_term: string;
+  due_date: string;
+  bank_id: Id;
+  packing_charges: number;
+  general_discount_percent: number;
+  general_discount_amount: number;
+  tcs_percent: number;
+  round_off: number;
+  terms_title: string;
+  terms_detail: string;
+  document_note: string;
+  additional_charges: AdditionalCharge[];
+  internal_note: string;
+  billing_street: string;
+  billing_city: string;
+  billing_state: string;
+  billing_country: string;
+  billing_pincode: string;
+  shipping_street: string;
+  shipping_city: string;
+  shipping_state: string;
+  shipping_country: string;
+  shipping_pincode: string;
+  territory: string;
+  zone: string;
+  status: string;
+  credit_limit: number;
+  outstanding_amount: number;
+  wallet_balance: number;
+  commission_rate: number;
+  kyc_status: string;
+  opening_balance: number;
+  due_days: number;
+  fax: string;
+  website: string;
+  license_no: string;
+  custom_field_1: string;
+  custom_field_2: string;
+  notes: string;
+  email: string;
   payments: PaymentEntry[];
 }
 
-// ── Number to words ───────────────────────────────
+const today = () => new Date().toISOString().slice(0, 10);
+const isDebugEnabled = () => import.meta.env.DEV || localStorage.getItem('nixaerp:debug') === '1';
+const debug = (event: string, data?: unknown) => {
+  if (!isDebugEnabled()) return;
+  console.debug(`[NIXA ERP][PurchaseInvoice] ${event}`, data ?? '');
+};
+
+const normalizeNumber = (value: unknown, fallback = 0) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+const nonNegative = (value: unknown) => Math.max(0, normalizeNumber(value));
+const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+const formatCurrency = (value: unknown) => nonNegative(value).toFixed(2);
+
+function unwrapApi<T = any>(response: any, fallback: T): T {
+  if (response == null) return fallback;
+  if (Array.isArray(response)) return response as T;
+  if (response?.data?.data !== undefined) return response.data.data as T;
+  if (response?.data !== undefined && !Array.isArray(response)) return response.data as T;
+  return response as T;
+}
+
+function normalizeList<T>(response: any): T[] {
+  const value = unwrapApi<any>(response, []);
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.data)) return value.data;
+  if (Array.isArray(value?.items)) return value.items;
+  if (Array.isArray(value?.results)) return value.results;
+  return [];
+}
+
+function getUserFriendlyError(error: any, fallback = 'Something went wrong. Please try again.') {
+  if (!error) return fallback;
+  if (typeof error === 'string') return error;
+  const responseData = error?.response?.data;
+  const validation = responseData?.errors ?? error?.validationErrors;
+  if (validation && typeof validation === 'object') {
+    const messages = Object.values(validation).flatMap((v: any) => Array.isArray(v) ? v : [v]);
+    if (messages.length) return messages.join(', ');
+  }
+  const message = responseData?.message ?? error?.message;
+  return typeof message === 'string' && message.trim() ? message : fallback;
+}
+
 function numberToWordsINR(amount: number): string {
   const units = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'];
   const teens = ['Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
   const tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-  const convert = (n: number): string => {
+  const under1000 = (n: number): string => {
     if (n === 0) return '';
-    const hundred = Math.floor(n / 100);
-    const remainder = n % 100;
-    let words = '';
-    if (hundred > 0) words += units[hundred] + ' Hundred ';
-    if (remainder === 0) return words.trim();
-    if (remainder < 10) words += units[remainder];
-    else if (remainder < 20) words += teens[remainder - 10];
-    else {
-      const ten = Math.floor(remainder / 10);
-      words += tens[ten];
-      if (remainder % 10) words += ' ' + units[remainder % 10];
-    }
-    return words.trim();
+    let out = '';
+    if (n >= 100) { out += `${units[Math.floor(n / 100)]} Hundred`; n %= 100; if (n) out += ' '; }
+    if (n >= 20) { out += tens[Math.floor(n / 10)]; if (n % 10) out += ` ${units[n % 10]}`; }
+    else if (n >= 10) out += teens[n - 10];
+    else if (n > 0) out += units[n];
+    return out;
   };
-  if (amount === 0) return 'Zero Rupees Only';
-  const rupees = Math.floor(amount);
-  const paise = Math.round((amount - rupees) * 100);
-  let words = '';
-  let n = rupees;
-  const parts: number[] = [];
-  while (n > 0) { parts.push(n % 1000); n = Math.floor(n / 1000); }
-  for (let i = 0; i < parts.length; i++) {
-    if (parts[i] > 0) {
-      let prefix = convert(parts[i]);
-      if (i === 1) prefix += ' Thousand';
-      else if (i === 2) prefix += ' Lakh';
-      else if (i === 3) prefix += ' Crore';
-      words = prefix + ' ' + words;
-    }
-  }
-  words = words.trim() + ' Rupees';
-  if (paise > 0) words += ' and ' + convert(paise) + ' Paise';
-  return words + ' Only';
+  let cents = Math.max(0, Math.round(normalizeNumber(amount) * 100));
+  const paise = cents % 100;
+  let rupees = Math.floor(cents / 100);
+  if (rupees === 0 && paise === 0) return 'Zero Rupees Only';
+  const parts: string[] = [];
+  const crore = Math.floor(rupees / 10_000_000); rupees %= 10_000_000;
+  const lakh = Math.floor(rupees / 100_000); rupees %= 100_000;
+  const thousand = Math.floor(rupees / 1_000); rupees %= 1_000;
+  if (crore) parts.push(`${under1000(crore)} Crore`);
+  if (lakh) parts.push(`${under1000(lakh)} Lakh`);
+  if (thousand) parts.push(`${under1000(thousand)} Thousand`);
+  if (rupees) parts.push(under1000(rupees));
+  let result = `${parts.join(' ')} Rupees`;
+  if (paise) result += ` and ${under1000(paise)} Paise`;
+  return `${result} Only`;
 }
 
-// ── Stable API Cache Hook ─────────────────────────
-const cache = new Map<string, { data: any; timestamp: number }>();
+const createInitialForm = (): PurchaseFormData => ({
+  company_id: '', supplier_id: '', supplier_name: '', supplier_address: '', contact_person: '', phone_no: '', gstin_pan: '',
+  reverse_charge: false, ship_to: '', place_of_supply: '', invoice_type: 'purchase_invoice', invoice_no: '', invoice_date: today(),
+  challan_no: '', challan_date: '', po_no: '', po_date: '', lr_no: '', eway_no: '', delivery_mode: '', payment_type: 'credit',
+  payment_term: '', due_date: '', bank_id: '', packing_charges: 0, general_discount_percent: 0, general_discount_amount: 0,
+  tcs_percent: 0, round_off: 0, terms_title: 'Terms and Conditions', terms_detail: '', document_note: '', additional_charges: [],
+  internal_note: '', billing_street: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
+  shipping_street: '', shipping_city: '', shipping_state: '', shipping_country: 'India', shipping_pincode: '', territory: '', zone: '',
+  status: 'active', credit_limit: 0, outstanding_amount: 0, wallet_balance: 0, commission_rate: 0, kyc_status: 'pending',
+  opening_balance: 0, due_days: 0, fax: '', website: '', license_no: '', custom_field_1: '', custom_field_2: '', notes: '', email: '', payments: []
+});
+
+const createInitialSupplier = () => ({
+  company_id: '', name: '', contact_person: '', contact_no: '', email: '', phone: '', gst_number: '', pan: '',
+  billing_street: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
+  shipping_street: '', shipping_city: '', shipping_state: '', shipping_country: 'India', shipping_pincode: '',
+  same_as_billing: true, opening_balance: 0, credit_limit: 0, due_days: 0, notes: ''
+});
+
+const createInitialProduct = () => ({
+  company_id: '', branch_id: '', name: '', sku: '', hsn_sac_code: '', unit: 'Piece', sale_price: '', purchase_price: '',
+  tax_rate: '0', stock_quantity: '0', reorder_level: '0', description: ''
+});
+
 function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = 300_000) {
+  const cacheRef = useRef<Map<string, { data: T; timestamp: number }>>(new Map());
+  const requestRef = useRef<Map<string, Promise<T>>>(new Map());
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
   const fetchData = useCallback(async (skipCache = false) => {
-    if (!skipCache) {
-      const entry = cache.get(key);
-      if (entry && Date.now() - entry.timestamp < ttlMs) {
-        setData(entry.data); setLoading(false); return;
-      }
+    const cached = cacheRef.current.get(key);
+    if (!skipCache && cached && Date.now() - cached.timestamp < ttlMs) {
+      setData(cached.data); setLoading(false); setError(null); return;
     }
+    const existing = requestRef.current.get(key);
+    const request = existing ?? fetcher();
+    if (!existing) requestRef.current.set(key, request);
     setLoading(true); setError(null);
     try {
-      const res = await fetcher();
-      const result = Array.isArray(res) ? res : (res as any).data ?? [];
-      cache.set(key, { data: result, timestamp: Date.now() });
+      const result = await request;
+      cacheRef.current.set(key, { data: result, timestamp: Date.now() });
       setData(result);
-    } catch (err: any) {
-      console.error('API error:', err);
-      setError('Unable to load data. Please try again.');
-    } finally { setLoading(false); }
-  }, [key, fetcher, ttlMs]);
-  useEffect(() => { fetchData(); }, [fetchData]);
+    } catch (e) {
+      console.error(`[NIXA ERP] API load failed: ${key}`, e);
+      setError(getUserFriendlyError(e, 'Unable to load data. Please try again.'));
+    } finally {
+      requestRef.current.delete(key);
+      setLoading(false);
+    }
+  }, [fetcher, key, ttlMs]);
+
+  useEffect(() => { void fetchData(); }, [fetchData]);
   return { data, loading, error, refresh: () => fetchData(true) };
 }
 
-// ── Helper: safe currency formatter ──
-function formatCurrency(value: number | string | undefined | null): string {
-  const num = Number(value);
-  return isNaN(num) ? '0.00' : num.toFixed(2);
+function getEffectiveGst(item: PurchaseItem) {
+  return item.gst_slab === -1 ? nonNegative(item.custom_gst_rate) : nonNegative(item.gst_slab);
 }
 
-// ── Helper: friendly error ──
-function getUserFriendlyError(error: any, fallback = 'Something went wrong. Please try again.'): string {
-  if (!error) return fallback;
-  if (typeof error === 'string') return error;
-  if (error.validationErrors) {
-    const messages = Object.values(error.validationErrors).flat();
-    return messages.join(', ') || fallback;
-  }
-  if (error.message && typeof error.message === 'string') {
-    if (error.message.includes('TypeError') || error.message.includes('Cannot read')) {
-      return fallback;
-    }
-    return error.message;
-  }
-  return fallback;
+function computeItem(item: PurchaseItem): PurchaseItem {
+  const qty = nonNegative(item.qty);
+  const price = nonNegative(item.price);
+  const base = round2(qty * price);
+  const discount = item.discount_type === 'percent'
+    ? round2(Math.min(base, base * Math.min(100, nonNegative(item.discount_percent)) / 100))
+    : round2(Math.min(base, nonNegative(item.discount_amount)));
+  const taxable = round2(Math.max(0, base - discount));
+  const slab = getEffectiveGst(item);
+  const cgstPercent = item.is_inter_state ? 0 : slab / 2;
+  const sgstPercent = item.is_inter_state ? 0 : slab / 2;
+  const igstPercent = item.is_inter_state ? slab : 0;
+  const cgst = round2(taxable * cgstPercent / 100);
+  const sgst = round2(taxable * sgstPercent / 100);
+  const igst = round2(taxable * igstPercent / 100);
+  return {
+    ...item, qty, price, discount_percent: nonNegative(item.discount_percent), discount_amount: discount,
+    cgst_percent: cgstPercent, sgst_percent: sgstPercent, igst_percent: igstPercent,
+    cgst_amount: cgst, sgst_amount: sgst, igst_amount: igst, total: round2(taxable + cgst + sgst + igst)
+  };
 }
 
-// ── Main Component ────────────────────────────────
+function makeItem(product: Product): PurchaseItem {
+  const tax = nonNegative(product.tax_rate ?? product.igst_rate);
+  return computeItem({
+    product_id: Number(product.id), product_name: product.name?.trim() || 'Unnamed product', hsn_sac_code: product.hsn_sac_code || '', qty: 1,
+    uom: product.uom || product.unit || 'NOS', price: nonNegative(product.purchase_price), discount_type: 'percent', discount_percent: 0,
+    discount_amount: 0, gst_slab: [0, 5, 12, 18, 28].includes(tax) ? tax : -1, custom_gst_rate: tax,
+    is_inter_state: false, cgst_percent: 0, sgst_percent: 0, igst_percent: 0, cgst_amount: 0, sgst_amount: 0, igst_amount: 0, total: 0
+  });
+}
+
+function htmlEscape(value: unknown) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+}
+
 export function CreatePurchaseInvoicePage() {
   const navigate = useNavigate();
   const { showSuccess, showError } = useNotification();
+  const [form, setForm] = useState<PurchaseFormData>(createInitialForm);
+  const [items, setItems] = useState<PurchaseItem[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const [autoRoundOff, setAutoRoundOff] = useState(true);
+  const [generalDiscountType, setGeneralDiscountType] = useState<DiscountType>('percent');
+  const [generalDiscountApplyType, setGeneralDiscountApplyType] = useState<ApplyType>('before_tax');
+  const [packingApplyType, setPackingApplyType] = useState<ApplyType>('after_tax');
+  const [productSearch, setProductSearch] = useState('');
+  const [supplierSearch, setSupplierSearch] = useState('');
+  const [showProductDropdown, setShowProductDropdown] = useState(false);
+  const [showSupplierDropdown, setShowSupplierDropdown] = useState(false);
+  const [supplierHighlight, setSupplierHighlight] = useState(-1);
+  const [productHighlight, setProductHighlight] = useState(-1);
+  const [showSupplierOffcanvas, setShowSupplierOffcanvas] = useState(false);
+  const [supplierSubmitting, setSupplierSubmitting] = useState(false);
+  const [newSupplier, setNewSupplier] = useState(createInitialSupplier);
+  const [showProductOffcanvas, setShowProductOffcanvas] = useState(false);
+  const [productSubmitting, setProductSubmitting] = useState(false);
+  const [newProduct, setNewProduct] = useState(createInitialProduct);
+  const [productFormErrors, setProductFormErrors] = useState<Record<string, boolean>>({});
 
-  const getCompanies = useCallback(() => apiClient.getCompanies(), []);
-  const getSuppliers = useCallback(() => apiClient.getSuppliers(), []);
-  const getProducts = useCallback(() => apiClient.getAllProducts(), []);
+  const supplierDropdownRef = useRef<HTMLDivElement>(null);
+  const productDropdownRef = useRef<HTMLDivElement>(null);
+  const submittedIdRef = useRef<number | string | null>(null);
+  const initialSnapshot = useRef('');
+
+  const getCompanies = useCallback(() => apiClient.getCompanies().then((r: any) => normalizeList<Company>(r)), []);
+  const getSuppliers = useCallback(() => apiClient.getSuppliers().then((r: any) => normalizeList<Supplier>(r)), []);
+  const getProducts = useCallback(() => apiClient.getAllProducts().then((r: any) => normalizeList<Product>(r)), []);
   const getBanks = useCallback(async () => {
-    try { return await apiClient.request('GET', '/banks'); } catch { return []; }
+    try { return normalizeList<BankAccount>(await apiClient.request('GET', '/banks')); }
+    catch (e) { debug('banks.load.failed', e); return []; }
   }, []);
 
   const { data: companies, loading: companiesLoading, error: companiesError } = useApiCache<Company[]>('companies', getCompanies);
@@ -189,1088 +350,401 @@ export function CreatePurchaseInvoicePage() {
   const { data: products, loading: productsLoading, error: productsError, refresh: refreshProducts } = useApiCache<Product[]>('products', getProducts);
   const { data: banks } = useApiCache<BankAccount[]>('banks', getBanks);
 
-  const generateInvoicePlaceholder = () => {
-    const y = new Date().getFullYear();
-    return `PUR-${y}-${Math.floor(1000 + Math.random() * 9000)}`;
-  };
-
-  const [items, setItems] = useState<PurchaseItem[]>([]);
-  const [submitting, setSubmitting] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
-  const [autoRoundOff, setAutoRoundOff] = useState(true);
-
-  const [form, setForm] = useState<PurchaseFormData>({
-    company_id: '',
-    supplier_id: '',
-    supplier_name: '',
-    supplier_address: '',
-    contact_person: '',
-    phone_no: '',
-    gstin_pan: '',
-    reverse_charge: false,
-    ship_to: '',
-    place_of_supply: '',
-    invoice_type: 'purchase_invoice',
-    invoice_no: '',
-    invoice_date: new Date().toISOString().split('T')[0],
-    challan_no: '',
-    challan_date: '',
-    po_no: '',
-    po_date: '',
-    lr_no: '',
-    eway_no: '',
-    delivery_mode: '',
-    payment_type: 'credit',
-    payment_term: '',
-    due_date: '',
-    bank_id: '',
-    packing_charges: 0,
-    general_discount_percent: 0,
-    general_discount_amount: 0,
-    tcs_percent: 0,
-    round_off: 0,
-    terms_title: 'Terms and Conditions',
-    terms_detail: '',
-    document_note: '',
-    additional_charges: [],
-    internal_note: '',
-    billing_street: '',
-    billing_city: '',
-    billing_state: '',
-    billing_country: 'India',
-    billing_pincode: '',
-    shipping_street: '',
-    shipping_city: '',
-    shipping_state: '',
-    shipping_country: 'India',
-    shipping_pincode: '',
-    territory: '',
-    zone: '',
-    status: 'active',
-    credit_limit: 0,
-    outstanding_amount: 0,
-    wallet_balance: 0,
-    commission_rate: 0,
-    kyc_status: 'pending',
-    opening_balance: 0,
-    due_days: 0,
-    fax: '',
-    website: '',
-    license_no: '',
-    custom_field_1: '',
-    custom_field_2: '',
-    notes: '',
-    email: '',
-    payments: [],
-  });
-
-  const [productSearch, setProductSearch] = useState('');
-  const [supplierSearch, setSupplierSearch] = useState('');
-  const [showProductDropdown, setShowProductDropdown] = useState(false);
-  const [showSupplierDropdown, setShowSupplierDropdown] = useState(false);
-  const [highlightIndex, setHighlightIndex] = useState(-1);
-
-  // Supplier creation offcanvas state
-  const [showSupplierOffcanvas, setShowSupplierOffcanvas] = useState(false);
-  const [supplierSubmitting, setSupplierSubmitting] = useState(false);
-  const [newSupplier, setNewSupplier] = useState({
-    company_id: '',
-    name: '',
-    contact_person: '',
-    contact_no: '',
-    email: '',
-    phone: '',
-    gst_number: '',
-    pan: '',
-    billing_street: '',
-    billing_city: '',
-    billing_state: '',
-    billing_country: 'India',
-    billing_pincode: '',
-    shipping_street: '',
-    shipping_city: '',
-    shipping_state: '',
-    shipping_country: 'India',
-    shipping_pincode: '',
-    same_as_billing: true,
-    opening_balance: 0,
-    credit_limit: 0,
-    due_days: 0,
-    notes: '',
-  });
-
-  // Product creation offcanvas state
-  const [showProductOffcanvas, setShowProductOffcanvas] = useState(false);
-  const [productSubmitting, setProductSubmitting] = useState(false);
-  const [newProduct, setNewProduct] = useState({
-    company_id: '',
-    branch_id: '',
-    name: '',
-    sku: '',
-    hsn_sac_code: '',
-    unit: 'Piece',
-    sale_price: '',
-    purchase_price: '',
-    tax_rate: '0',
-    stock_quantity: '0',
-    reorder_level: '0',
-    description: '',
-  });
-  const [productFormErrors, setProductFormErrors] = useState<Record<string, boolean>>({});
-
-  // Dirty state
-  const [isDirty, setIsDirty] = useState(false);
-  const initialForm = useRef(JSON.stringify(form));
-  const initialItems = useRef(JSON.stringify(items));
-
+  const initialReady = useRef(false);
   useEffect(() => {
-    const currentForm = JSON.stringify(form);
-    const currentItems = JSON.stringify(items);
-    setIsDirty(currentForm !== initialForm.current || currentItems !== initialItems.current);
-  }, [form, items]);
-
-  useEffect(() => {
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (isDirty) {
-        e.preventDefault();
-        e.returnValue = '';
-      }
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [isDirty]);
-
-  // ── Filtered lists ──
-  const filteredSuppliers = useMemo(() => {
-    if (!suppliers || !Array.isArray(suppliers)) return [];
-    let list = suppliers;
-    if (form.company_id) {
-      list = list.filter(s => !s.company_id || s.company_id === Number(form.company_id));
+    if (!initialReady.current) {
+      initialSnapshot.current = JSON.stringify({ form, items, generalDiscountType, generalDiscountApplyType, packingApplyType });
+      initialReady.current = true;
     }
-    const term = supplierSearch.toLowerCase().trim();
-    if (!term) return list;
-    return list.filter(s =>
-      s.name?.toLowerCase().includes(term) ||
-      (s.code && s.code.toLowerCase().includes(term)) ||
-      (s.gst_number && s.gst_number.toLowerCase().includes(term))
-    );
+  }, [form, items, generalDiscountType, generalDiscountApplyType, packingApplyType]);
+
+  const currentSnapshot = JSON.stringify({ form, items, generalDiscountType, generalDiscountApplyType, packingApplyType });
+  const isDirty = initialReady.current && currentSnapshot !== initialSnapshot.current;
+
+  useEffect(() => {
+    const beforeUnload = (e: BeforeUnloadEvent) => {
+      if (!isDirty || submitting || savingDraft) return;
+      e.preventDefault(); e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => window.removeEventListener('beforeunload', beforeUnload);
+  }, [isDirty, submitting, savingDraft]);
+
+  useEffect(() => {
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (supplierDropdownRef.current && !supplierDropdownRef.current.contains(target)) setShowSupplierDropdown(false);
+      if (productDropdownRef.current && !productDropdownRef.current.contains(target)) setShowProductDropdown(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, []);
+
+  const filteredSuppliers = useMemo(() => {
+    const list = Array.isArray(suppliers) ? suppliers.filter(Boolean) : [];
+    const companyId = Number(form.company_id || 0);
+    const byCompany = companyId ? list.filter((s) => !s.company_id || Number(s.company_id) === companyId) : list;
+    const q = supplierSearch.trim().toLowerCase();
+    return q ? byCompany.filter((s) => [s.name, s.code, s.gst_number, s.pan, s.phone, s.contact_no].some((v) => String(v || '').toLowerCase().includes(q))) : byCompany;
   }, [suppliers, supplierSearch, form.company_id]);
 
   const filteredProducts = useMemo(() => {
-    if (!products || !Array.isArray(products)) return [];
-    const term = productSearch.toLowerCase().trim();
-    if (!term) return products;
-    return products.filter(p =>
-      p.name?.toLowerCase().includes(term) ||
-      (p.sku && p.sku.toLowerCase().includes(term)) ||
-      (p.barcode && p.barcode.toLowerCase().includes(term)) ||
-      (p.hsn_sac_code && p.hsn_sac_code.toLowerCase().includes(term))
-    );
+    const list = Array.isArray(products) ? products.filter(Boolean) : [];
+    const q = productSearch.trim().toLowerCase();
+    return q ? list.filter((p) => [p.name, p.sku, p.barcode, p.hsn_sac_code].some((v) => String(v || '').toLowerCase().includes(q))) : list;
   }, [products, productSearch]);
 
-  // Auto-fill supplier details
+  const selectedSupplier = useMemo(() => suppliers?.find((s) => Number(s.id) === Number(form.supplier_id)), [suppliers, form.supplier_id]);
   useEffect(() => {
-    if (form.supplier_id && suppliers) {
-      const sup = suppliers.find(s => s.id === Number(form.supplier_id));
-      if (sup) {
-        setForm(prev => ({
-          ...prev,
-          supplier_name: sup.name || '',
-          supplier_address: sup.billing_street || '',
-          contact_person: sup.contact_person || '',
-          phone_no: sup.phone || sup.contact_no || '',
-          gstin_pan: sup.gst_number || sup.pan || '',
-          place_of_supply: sup.billing_state || '',
-          email: sup.email || '',
-        }));
-        setSupplierSearch(sup.name);
-      }
-    }
-  }, [form.supplier_id, suppliers]);
-
-  // ── Open product offcanvas ──
-  const openProductOffcanvas = () => {
-    setNewProduct(prev => ({
+    if (!selectedSupplier) return;
+    setForm((prev) => ({
       ...prev,
-      company_id: form.company_id ? String(form.company_id) : '',
+      supplier_name: selectedSupplier.name || prev.supplier_name,
+      supplier_address: [selectedSupplier.billing_street, selectedSupplier.billing_city, selectedSupplier.billing_state, selectedSupplier.billing_pincode].filter(Boolean).join(', '),
+      contact_person: selectedSupplier.contact_person || '',
+      phone_no: selectedSupplier.phone || selectedSupplier.contact_no || '',
+      gstin_pan: selectedSupplier.gst_number || selectedSupplier.pan || '',
+      place_of_supply: selectedSupplier.billing_state || prev.place_of_supply,
+      email: selectedSupplier.email || ''
     }));
-    setProductFormErrors({});
-    setShowProductOffcanvas(true);
+    setSupplierSearch(selectedSupplier.name || '');
+  }, [selectedSupplier]);
+
+  const itemSubtotal = useMemo(() => round2(items.reduce((sum, i) => sum + nonNegative(i.qty) * nonNegative(i.price), 0)), [items]);
+  const itemDiscountTotal = useMemo(() => round2(items.reduce((sum, i) => sum + nonNegative(i.discount_amount), 0)), [items]);
+  const taxableBeforeBillDiscount = useMemo(() => round2(Math.max(0, itemSubtotal - itemDiscountTotal)), [itemSubtotal, itemDiscountTotal]);
+  const itemCgstTotal = useMemo(() => round2(items.reduce((sum, i) => sum + nonNegative(i.cgst_amount), 0)), [items]);
+  const itemSgstTotal = useMemo(() => round2(items.reduce((sum, i) => sum + nonNegative(i.sgst_amount), 0)), [items]);
+  const itemIgstTotal = useMemo(() => round2(items.reduce((sum, i) => sum + nonNegative(i.igst_amount), 0)), [items]);
+  const itemTaxTotal = round2(itemCgstTotal + itemSgstTotal + itemIgstTotal);
+  const effectiveTaxRate = taxableBeforeBillDiscount > 0 ? itemTaxTotal / taxableBeforeBillDiscount : 0;
+  const generalDiscountAmount = useMemo(() => {
+    const raw = generalDiscountType === 'percent'
+      ? taxableBeforeBillDiscount * Math.min(100, nonNegative(form.general_discount_percent)) / 100
+      : nonNegative(form.general_discount_amount);
+    return round2(Math.min(taxableBeforeBillDiscount, raw));
+  }, [generalDiscountType, form.general_discount_percent, form.general_discount_amount, taxableBeforeBillDiscount]);
+  const discountedTaxable = generalDiscountApplyType === 'before_tax'
+    ? round2(Math.max(0, taxableBeforeBillDiscount - generalDiscountAmount))
+    : taxableBeforeBillDiscount;
+  const taxAfterBillDiscount = useMemo(() => {
+    if (generalDiscountApplyType === 'after_tax') return itemTaxTotal;
+    if (taxableBeforeBillDiscount <= 0) return 0;
+    let remainingDiscount = generalDiscountAmount;
+    let tax = 0;
+    items.forEach((item) => {
+      const base = round2(Math.max(0, nonNegative(item.qty) * nonNegative(item.price) - nonNegative(item.discount_amount)));
+      const allocated = round2(base > 0 ? generalDiscountAmount * base / taxableBeforeBillDiscount : 0);
+      const adjustedBase = Math.max(0, base - allocated);
+      const slab = getEffectiveGst(item);
+      tax += item.is_inter_state ? adjustedBase * slab / 100 : adjustedBase * slab / 100;
+      remainingDiscount -= allocated;
+    });
+    tax += remainingDiscount > 0 && discountedTaxable > 0 ? remainingDiscount * effectiveTaxRate : 0;
+    return round2(tax);
+  }, [generalDiscountApplyType, generalDiscountAmount, itemTaxTotal, taxableBeforeBillDiscount, items, discountedTaxable, effectiveTaxRate]);
+  const packingAmount = nonNegative(form.packing_charges);
+  const packingTax = packingApplyType === 'before_tax' ? round2(packingAmount * effectiveTaxRate) : 0;
+  const additionalChargesTotal = useMemo(() => round2(form.additional_charges.reduce((sum, c) => sum + nonNegative(c.amount), 0)), [form.additional_charges]);
+  const totalTaxWithPacking = round2(taxAfterBillDiscount + packingTax);
+  const afterTaxGeneralDiscount = generalDiscountApplyType === 'after_tax' ? generalDiscountAmount : 0;
+  const totalBeforeTcs = useMemo(() => round2(Math.max(0,
+    discountedTaxable + (packingApplyType === 'before_tax' ? packingAmount : 0) +
+    totalTaxWithPacking + additionalChargesTotal - afterTaxGeneralDiscount +
+    (packingApplyType === 'after_tax' ? packingAmount : 0)
+  )), [discountedTaxable, packingApplyType, packingAmount, totalTaxWithPacking, additionalChargesTotal, afterTaxGeneralDiscount]);
+  const tcsAmount = round2(totalBeforeTcs * Math.min(100, nonNegative(form.tcs_percent)) / 100);
+  const totalBeforeRoundOff = round2(totalBeforeTcs + tcsAmount);
+
+  useEffect(() => {
+    if (!autoRoundOff) return;
+    const next = round2(Math.round(totalBeforeRoundOff) - totalBeforeRoundOff);
+    setForm((prev) => Math.abs(prev.round_off - next) < 0.005 ? prev : { ...prev, round_off: next });
+  }, [autoRoundOff, totalBeforeRoundOff]);
+
+  const grandTotal = round2(Math.max(0, totalBeforeRoundOff + normalizeNumber(form.round_off)));
+  const totalInWords = useMemo(() => numberToWordsINR(grandTotal), [grandTotal]);
+  const totalOutward = useMemo(() => round2(form.payments.reduce((sum, p) => sum + (p.payment_direction === 'outward' ? nonNegative(p.amount) : 0), 0)), [form.payments]);
+  const totalInward = useMemo(() => round2(form.payments.reduce((sum, p) => sum + (p.payment_direction === 'inward' ? nonNegative(p.amount) : 0), 0)), [form.payments]);
+  const netPaid = round2(totalOutward - totalInward);
+  const balanceDue = round2(grandTotal - netPaid);
+
+  const updateItem = useCallback((index: number, patch: Partial<PurchaseItem>) => {
+    setItems((prev) => prev.map((item, i) => i === index ? computeItem({ ...item, ...patch }) : item));
+  }, []);
+  const addItem = useCallback((product: Product) => {
+    setItems((prev) => {
+      if (prev.some((item) => item.product_id === Number(product.id))) {
+        showError('Duplicate product', `${product.name} is already added.`);
+        return prev;
+      }
+      return [...prev, makeItem(product)];
+    });
+    setProductSearch(''); setShowProductDropdown(false); setProductHighlight(-1);
+  }, [showError]);
+  const removeItem = useCallback((index: number) => setItems((prev) => prev.filter((_, i) => i !== index)), []);
+
+  const clearFieldError = (field: string) => setFormErrors((prev) => { const next = { ...prev }; delete next[field]; return next; });
+  const updateForm = <K extends keyof PurchaseFormData>(field: K, value: PurchaseFormData[K]) => {
+    setForm((prev) => ({ ...prev, [field]: value })); clearFieldError(String(field));
   };
 
-  // ── Supplier creation handler ──
+  const validate = (isDraft: boolean) => {
+    const errors: Record<string, string> = {};
+    if (!form.company_id) errors.company_id = 'Select a company.';
+    if (!form.supplier_id) errors.supplier_id = 'Select a supplier.';
+    if (!form.invoice_no.trim() && !isDraft) errors.invoice_no = 'Invoice number is required.';
+    if (!form.invoice_date) errors.invoice_date = 'Invoice date is required.';
+    if (items.length === 0 && !isDraft) errors.items = 'Add at least one product.';
+    if (items.some((i) => i.qty <= 0 || i.price < 0)) errors.items = 'Item quantity must be greater than 0 and price cannot be negative.';
+    if (items.some((i) => getEffectiveGst(i) > 100)) errors.items = 'GST rate cannot exceed 100%.';
+    const paymentNegative = form.payments.some((p) => p.amount < 0);
+    if (paymentNegative) errors.payments = 'Payment amounts cannot be negative.';
+    if (totalOutward > grandTotal + 0.01) errors.payments = `Outward payments cannot exceed the invoice total of ₹${formatCurrency(grandTotal)}.`;
+    setFormErrors(errors);
+    debug('validation', errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  const selectSupplier = (supplier: Supplier) => {
+    updateForm('supplier_id', supplier.id);
+    setSupplierSearch(supplier.name || ''); setShowSupplierDropdown(false); setSupplierHighlight(-1);
+  };
+
   const createSupplier = async () => {
-    if (!newSupplier.name.trim()) { showError('Validation', 'Supplier name is required.'); return; }
-    if (!newSupplier.company_id) { showError('Validation', 'Company is required.'); return; }
-    try {
-      setSupplierSubmitting(true);
-      const payload = {
-        ...newSupplier,
-        company_id: Number(newSupplier.company_id),
-        type: 'supplier',
-        is_active: true,
-      };
-      const created = await apiClient.createSupplier(payload);
-      showSuccess('Supplier created', `${created.name} added.`);
-      refreshSuppliers();
-      setForm(prev => ({ ...prev, supplier_id: created.id }));
-      setShowSupplierOffcanvas(false);
-      setNewSupplier({
-        company_id: '',
-        name: '',
-        contact_person: '',
-        contact_no: '',
-        email: '',
-        phone: '',
-        gst_number: '',
-        pan: '',
-        billing_street: '',
-        billing_city: '',
-        billing_state: '',
-        billing_country: 'India',
-        billing_pincode: '',
-        shipping_street: '',
-        shipping_city: '',
-        shipping_state: '',
-        shipping_country: 'India',
-        shipping_pincode: '',
-        same_as_billing: true,
-        opening_balance: 0,
-        credit_limit: 0,
-        due_days: 0,
-        notes: '',
-      });
-    } catch (err: any) {
-      const errorMsg = getUserFriendlyError(err, 'Supplier creation failed.');
-      showError('Create failed', errorMsg);
-    } finally {
-      setSupplierSubmitting(false);
+    if (!newSupplier.company_id || !newSupplier.name.trim()) {
+      showError('Validation', 'Company and supplier name are required.'); return;
     }
+    setSupplierSubmitting(true);
+    try {
+      const createdRaw = await apiClient.createSupplier({
+        ...newSupplier, company_id: Number(newSupplier.company_id), type: 'supplier', is_active: true
+      });
+      const created = unwrapApi<Supplier>(createdRaw, {} as Supplier);
+      if (!created?.id) throw new Error('Supplier was created but the server did not return its ID.');
+      debug('supplier.created', created);
+      showSuccess('Supplier created', `${created.name} added.`);
+      updateForm('supplier_id', created.id);
+      await refreshSuppliers();
+      setShowSupplierOffcanvas(false); setNewSupplier(createInitialSupplier());
+    } catch (e) {
+      const message = getUserFriendlyError(e, 'Supplier creation failed.');
+      showError('Create failed', message); debug('supplier.create.failed', e);
+      await addAppLog({ module: 'Purchases', action: 'Create Supplier', status: 'error', message });
+    } finally { setSupplierSubmitting(false); }
   };
 
-  // ── Product creation handler ──
   const createProduct = async () => {
     const errors: Record<string, boolean> = {};
     if (!newProduct.company_id) errors.company_id = true;
     if (!newProduct.name.trim()) errors.name = true;
-    if (!newProduct.purchase_price || parseFloat(newProduct.purchase_price) < 0) errors.purchase_price = true;
     if (!newProduct.unit.trim()) errors.unit = true;
+    if (newProduct.purchase_price === '' || nonNegative(newProduct.purchase_price) !== normalizeNumber(newProduct.purchase_price) || normalizeNumber(newProduct.purchase_price) < 0) errors.purchase_price = true;
     setProductFormErrors(errors);
-    if (Object.keys(errors).length > 0) {
-      showError('Validation', 'Please fill in required fields (Company, Name, Purchase Price, Unit).');
-      return;
-    }
+    if (Object.keys(errors).length) { showError('Validation', 'Please fill the required product fields.'); return; }
 
     let sku = newProduct.sku.trim();
     if (!sku) {
-      const prefix = 'FU-';
-      let maxNum = 0;
-      products?.forEach(p => {
-        if (p.sku && p.sku.startsWith(prefix)) {
-          const num = parseInt(p.sku.slice(prefix.length), 10);
-          if (!isNaN(num) && num > maxNum) maxNum = num;
-        }
-      });
-      sku = `${prefix}${(maxNum + 1).toString().padStart(3, '0')}`;
+      const numbers = (products || []).map((p) => /^FU-(\d+)$/i.exec(p.sku || '')?.[1]).filter(Boolean).map(Number);
+      sku = `FU-${String((numbers.length ? Math.max(...numbers) : 0) + 1).padStart(3, '0')}`;
     }
-
-    const payload = {
-      company_id: Number(newProduct.company_id),
-      branch_id: newProduct.branch_id ? Number(newProduct.branch_id) : null,
-      name: newProduct.name.trim(),
-      sku,
-      hsn_sac_code: newProduct.hsn_sac_code.trim(),
-      unit: newProduct.unit.trim(),
-      sale_price: parseFloat(newProduct.sale_price || '0'),
-      purchase_price: parseFloat(newProduct.purchase_price || '0'),
-      tax_rate: parseFloat(newProduct.tax_rate || '0'),
-      stock_quantity: parseInt(newProduct.stock_quantity || '0'),
-      reorder_level: parseInt(newProduct.reorder_level || '0'),
-      description: newProduct.description.trim(),
-      active: true,
-    };
-
     setProductSubmitting(true);
     try {
-      const created = await apiClient.createProduct(payload);
+      const payload = {
+        company_id: Number(newProduct.company_id), branch_id: newProduct.branch_id ? Number(newProduct.branch_id) : null,
+        name: newProduct.name.trim(), sku, hsn_sac_code: newProduct.hsn_sac_code.trim(), unit: newProduct.unit.trim(),
+        sale_price: nonNegative(newProduct.sale_price), purchase_price: nonNegative(newProduct.purchase_price), tax_rate: Math.min(100, nonNegative(newProduct.tax_rate)),
+        stock_quantity: normalizeNumber(newProduct.stock_quantity), reorder_level: normalizeNumber(newProduct.reorder_level), description: newProduct.description.trim(), active: true
+      };
+      const createdRaw = await apiClient.createProduct(payload);
+      const created = unwrapApi<Product>(createdRaw, {} as Product);
+      if (!created?.id) throw new Error('Product was created but the server did not return its ID.');
       showSuccess('Product created', `${created.name} added to catalog.`);
-      refreshProducts();
-      setShowProductOffcanvas(false);
-      setNewProduct({
-        company_id: '',
-        branch_id: '',
-        name: '',
-        sku: '',
-        hsn_sac_code: '',
-        unit: 'Piece',
-        sale_price: '',
-        purchase_price: '',
-        tax_rate: '0',
-        stock_quantity: '0',
-        reorder_level: '0',
-        description: '',
-      });
-      if (created?.id && created?.name && created?.purchase_price !== undefined) {
-        const productToAdd: Product = {
-          id: created.id,
-          name: created.name,
-          hsn_sac_code: created.hsn_sac_code || '',
-          uom: created.unit || 'NOS',
-          purchase_price: created.purchase_price,
-          tax_rate: created.tax_rate,
-          igst_rate: created.tax_rate,
-          stock_quantity: created.stock_quantity,
-          unit: created.unit,
-          sku: created.sku,
-        };
-        addItem(productToAdd);
-      }
-    } catch (err: any) {
-      const errorMsg = getUserFriendlyError(err, 'Product creation failed.');
-      showError('Product creation failed', errorMsg);
-      addAppLog({ module: 'Inventory', action: 'Create', status: 'error', message: errorMsg });
-    } finally {
-      setProductSubmitting(false);
-    }
+      await refreshProducts(); setShowProductOffcanvas(false); setNewProduct(createInitialProduct()); setProductFormErrors({});
+      addItem(created);
+    } catch (e) {
+      const message = getUserFriendlyError(e, 'Product creation failed.');
+      showError('Product creation failed', message); debug('product.create.failed', e);
+      await addAppLog({ module: 'Inventory', action: 'Create Product', status: 'error', message });
+    } finally { setProductSubmitting(false); }
   };
 
-  // ── Item Management ──
-  const addItem = useCallback((product: Product) => {
-    if (items.some(item => item.product_id === product.id)) {
-      showError('Duplicate', 'Product already in list.');
+  const createPurchasePayload = (status: 'draft' | 'ordered') => ({
+    company_id: Number(form.company_id),
+    branch: localStorage.getItem('nixaerp_branch_name') || 'Main Branch',
+    supplier_id: Number(form.supplier_id), supplier_name: form.supplier_name.trim(), supplier_address: form.supplier_address.trim(),
+    contact_person: form.contact_person.trim(), phone_no: form.phone_no.trim(), gstin: form.gstin_pan.trim(), pan: form.gstin_pan.trim(),
+    reverse_charge: Boolean(form.reverse_charge), ship_to: form.ship_to.trim(), place_of_supply: form.place_of_supply.trim(),
+    invoice_type: form.invoice_type, purchase_number: form.invoice_no.trim(), purchase_date: form.invoice_date, due_date: form.due_date || null,
+    challan_no: form.challan_no.trim() || null, challan_date: form.challan_date || null, po_no: form.po_no.trim() || null, po_date: form.po_date || null,
+    lr_no: form.lr_no.trim() || null, eway_no: form.eway_no.trim() || null, delivery_mode: form.delivery_mode.trim() || null,
+    payment_type: form.payment_type, payment_term: form.payment_term.trim() || null, bank_id: form.bank_id ? Number(form.bank_id) : null,
+    packing_charges: packingAmount, packing_apply_type: packingApplyType,
+    general_discount_type: generalDiscountType,
+    general_discount_apply_type: generalDiscountApplyType,
+    general_discount_percent: generalDiscountType === 'percent' ? nonNegative(form.general_discount_percent) : 0,
+    general_discount_amount: generalDiscountType === 'amount' ? generalDiscountAmount : 0,
+    tcs_percent: nonNegative(form.tcs_percent), round_off: normalizeNumber(form.round_off),
+    terms_title: form.terms_title || null, terms_detail: form.terms_detail || null, document_note: form.document_note || null, internal_note: form.internal_note || null,
+    additional_charges: form.additional_charges.filter((c) => c.label.trim() || nonNegative(c.amount) > 0).map((c) => ({ label: c.label.trim(), amount: nonNegative(c.amount) })),
+    total_amount: grandTotal, tax_amount: totalTaxWithPacking, discount_amount: round2(itemDiscountTotal + generalDiscountAmount), status,
+    items: items.map((i) => ({
+      product_id: Number(i.product_id), product_name: i.product_name.trim(), hsn_sac_code: i.hsn_sac_code || '', unit: i.uom || 'NOS', quantity: nonNegative(i.qty),
+      purchase_price: nonNegative(i.price), discount_type: i.discount_type, discount_percent: i.discount_type === 'percent' ? nonNegative(i.discount_percent) : 0,
+      discount_amount: i.discount_type === 'amount' ? nonNegative(i.discount_amount) : 0, gst_slab: getEffectiveGst(i), is_inter_state: Boolean(i.is_inter_state),
+      cgst_percent: i.cgst_percent, sgst_percent: i.sgst_percent, igst_percent: i.igst_percent
+    }))
+  });
+
+  const printSavedPurchase = useCallback((purchaseId: string | number) => {
+    const win = window.open('', '_blank', 'noopener,noreferrer,width=900,height=800');
+    if (!win) throw new Error('Popup blocked. Allow popups to print the purchase invoice.');
+    const rows = items.map((i) => `<tr><td>${htmlEscape(i.product_name)}</td><td>${i.qty}</td><td>${htmlEscape(i.uom)}</td><td>₹${formatCurrency(i.price)}</td><td>₹${formatCurrency(i.discount_amount)}</td><td>${formatCurrency(getEffectiveGst(i))}%</td><td>₹${formatCurrency(i.total)}</td></tr>`).join('');
+    win.document.write(`<!doctype html><html><head><title>Purchase ${htmlEscape(form.invoice_no)}</title><style>body{font-family:Arial,sans-serif;padding:24px;color:#222}h1{font-size:20px;margin:0 0 8px}p{margin:4px 0;font-size:12px}table{width:100%;border-collapse:collapse;margin-top:20px;font-size:12px}th,td{border:1px solid #ddd;padding:7px;text-align:left}th{background:#f5f5f5}.right{text-align:right}.summary{margin-top:20px;margin-left:auto;width:320px}.row{display:flex;justify-content:space-between;padding:4px 0}.grand{font-weight:bold;font-size:16px;border-top:2px solid #222;margin-top:6px;padding-top:8px}</style></head><body><h1>Purchase Invoice</h1><p><b>Invoice:</b> ${htmlEscape(form.invoice_no)} &nbsp; <b>Date:</b> ${htmlEscape(form.invoice_date)}</p><p><b>Supplier:</b> ${htmlEscape(form.supplier_name)} &nbsp; <b>Place:</b> ${htmlEscape(form.place_of_supply)}</p><p><b>Purchase ID:</b> ${htmlEscape(purchaseId)}</p><table><thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Price</th><th>Discount</th><th>GST</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table><div class="summary"><div class="row"><span>Subtotal</span><span>₹${formatCurrency(itemSubtotal)}</span></div><div class="row"><span>Discount</span><span>-₹${formatCurrency(itemDiscountTotal + generalDiscountAmount)}</span></div><div class="row"><span>Tax</span><span>₹${formatCurrency(totalTaxWithPacking)}</span></div><div class="row"><span>Other Charges</span><span>₹${formatCurrency(additionalChargesTotal + packingAmount)}</span></div><div class="row"><span>TCS</span><span>₹${formatCurrency(tcsAmount)}</span></div><div class="row"><span>Round Off</span><span>₹${formatCurrency(form.round_off)}</span></div><div class="row grand"><span>Grand Total</span><span>₹${formatCurrency(grandTotal)}</span></div></div><p style="margin-top:24px"><b>Amount in words:</b> ${htmlEscape(totalInWords)}</p><script>window.onload=function(){window.print();setTimeout(function(){window.close()},300)}</script></body></html>`);
+    win.document.close();
+  }, [items, form.invoice_no, form.invoice_date, form.supplier_name, form.place_of_supply, itemSubtotal, itemDiscountTotal, generalDiscountAmount, totalTaxWithPacking, additionalChargesTotal, packingAmount, tcsAmount, form.round_off, grandTotal, totalInWords]);
+
+  const handleSubmit = useCallback(async (action: 'save' | 'save_print' | 'save_draft') => {
+    if (submitting || savingDraft || submittedIdRef.current) return;
+    const isDraft = action === 'save_draft';
+    if (!validate(isDraft)) {
+      showError('Validation', 'Please correct the highlighted fields.');
       return;
     }
-    const price = Number(product.purchase_price || 0);
-    const newItem: PurchaseItem = {
-      product_id: product.id,
-      product_name: product.name,
-      hsn_sac_code: product.hsn_sac_code || '',
-      qty: 1,
-      uom: product.uom || product.unit || 'NOS',
-      price: price,
-      discount_type: 'percent',
-      discount_percent: 0,
-      discount_amount: 0,
-      gst_slab: Number(product.tax_rate || product.igst_rate || 0),
-      is_inter_state: true,
-      cgst_percent: 0,
-      sgst_percent: 0,
-      igst_percent: Number(product.igst_rate || product.tax_rate || 0),
-      cgst_amount: 0,
-      sgst_amount: 0,
-      igst_amount: 0,
-      total: 0,
-    };
-    // calculate totals for initial state
-    const base = newItem.qty * newItem.price;
-    let cgst = 0, sgst = 0, igst = 0;
-    if (newItem.is_inter_state) {
-      igst = base * (newItem.gst_slab / 100);
-    } else {
-      const half = newItem.gst_slab / 2;
-      cgst = base * (half / 100);
-      sgst = base * (half / 100);
-    }
-    newItem.cgst_amount = cgst;
-    newItem.sgst_amount = sgst;
-    newItem.igst_amount = igst;
-    newItem.total = base + cgst + sgst + igst;
-    setItems(prev => [...prev, newItem]);
-    setProductSearch('');
-    setShowProductDropdown(false);
-  }, [items, showError]);
-
-  const removeItem = useCallback((index: number) => {
-    setItems(prev => prev.filter((_, i) => i !== index));
-  }, []);
-
-  const updateItem = useCallback((index: number, field: keyof PurchaseItem, value: any) => {
-    setItems(prev => {
-      const updated = [...prev];
-      updated[index] = { ...updated[index], [field]: value };
-      return updated;
-    });
-  }, []);
-
-  const recalcItem = useCallback((index: number) => {
-    setItems(prev => {
-      const updated = [...prev];
-      const item = { ...updated[index] };
-      const base = item.qty * item.price;
-      const discount = item.discount_type === 'percent'
-        ? base * (item.discount_percent / 100)
-        : item.discount_amount;
-      const afterDiscount = Math.max(0, base - discount);
-      const slab = item.gst_slab || 0;
-      if (item.is_inter_state) {
-        item.igst_percent = slab;
-        item.cgst_percent = 0; item.sgst_percent = 0;
-        item.igst_amount = afterDiscount * (slab / 100);
-        item.cgst_amount = 0; item.sgst_amount = 0;
-      } else {
-        const half = slab / 2;
-        item.cgst_percent = half; item.sgst_percent = half; item.igst_percent = 0;
-        item.cgst_amount = afterDiscount * (half / 100);
-        item.sgst_amount = afterDiscount * (half / 100);
-        item.igst_amount = 0;
-      }
-      item.discount_amount = discount;
-      item.total = afterDiscount + item.cgst_amount + item.sgst_amount + item.igst_amount;
-      updated[index] = item;
-      return updated;
-    });
-  }, []);
-
-  // ── Additional Charges ──
-  const addAdditionalCharge = () => setForm(prev => ({
-    ...prev,
-    additional_charges: [...prev.additional_charges, { id: Date.now().toString(), label: '', amount: 0 }]
-  }));
-  const updateAdditionalCharge = (id: string, field: 'label' | 'amount', value: any) => setForm(prev => ({
-    ...prev,
-    additional_charges: prev.additional_charges.map(c => c.id === id ? { ...c, [field]: value } : c)
-  }));
-  const removeAdditionalCharge = (id: string) => setForm(prev => ({
-    ...prev,
-    additional_charges: prev.additional_charges.filter(c => c.id !== id)
-  }));
-
-  // ── Payment Management ──
-  const addPayment = () => {
-    const newPayment: PaymentEntry = {
-      id: `new_${Date.now()}`,
-      amount: 0,
-      payment_method: 'bank_transfer',
-      reference_no: '',
-      transaction_date: new Date().toISOString().split('T')[0],
-      bank_name: '',
-      account_number: '',
-      remarks: '',
-      payment_direction: 'outward',
-    };
-    setForm(prev => ({ ...prev, payments: [...prev.payments, newPayment] }));
-  };
-
-  const updatePayment = (id: string, field: keyof PaymentEntry, value: any) => {
-    setForm(prev => ({
-      ...prev,
-      payments: prev.payments.map(p => p.id === id ? { ...p, [field]: value } : p)
-    }));
-  };
-
-  const removePayment = (id: string) => {
-    setForm(prev => ({
-      ...prev,
-      payments: prev.payments.filter(p => p.id !== id)
-    }));
-  };
-
-  // ── Totals ──
-  const itemSubtotal = useMemo(() => items.reduce((s, i) => s + (i.qty * i.price), 0), [items]);
-  const itemDiscountTotal = useMemo(() => items.reduce((s, i) => s + (i.discount_amount || 0), 0), [items]);
-  const itemCgstTotal = useMemo(() => items.reduce((s, i) => s + (i.cgst_amount || 0), 0), [items]);
-  const itemSgstTotal = useMemo(() => items.reduce((s, i) => s + (i.sgst_amount || 0), 0), [items]);
-  const itemIgstTotal = useMemo(() => items.reduce((s, i) => s + (i.igst_amount || 0), 0), [items]);
-  const totalTax = itemCgstTotal + itemSgstTotal + itemIgstTotal;
-  const itemTaxableTotal = useMemo(() => itemSubtotal - itemDiscountTotal, [itemSubtotal, itemDiscountTotal]);
-
-  const generalDiscountAmount = useMemo(() =>
-    form.general_discount_percent
-      ? (itemTaxableTotal * form.general_discount_percent) / 100
-      : form.general_discount_amount,
-  [itemTaxableTotal, form.general_discount_percent, form.general_discount_amount]);
-
-  const additionalChargesTotal = useMemo(() => form.additional_charges.reduce((s, c) => s + (c.amount || 0), 0), [form.additional_charges]);
-
-  const totalBeforeTcs = itemTaxableTotal - generalDiscountAmount + totalTax + additionalChargesTotal + form.packing_charges;
-  const tcsAmount = useMemo(() => totalBeforeTcs * (form.tcs_percent / 100), [totalBeforeTcs, form.tcs_percent]);
-  const totalBeforeRoundOff = totalBeforeTcs + tcsAmount;
-
-  useEffect(() => {
-    if (autoRoundOff) {
-      const rounded = Math.round(totalBeforeRoundOff);
-      const roundOffValue = +(rounded - totalBeforeRoundOff).toFixed(2);
-      setForm(prev => ({ ...prev, round_off: roundOffValue }));
-    }
-  }, [autoRoundOff, totalBeforeRoundOff]);
-
-  const grandTotal = totalBeforeRoundOff + form.round_off;
-  const totalInWords = useMemo(() => numberToWordsINR(grandTotal), [grandTotal]);
-
-  // Derived payment totals
-  const totalPaid = useMemo(() => form.payments.reduce((s, p) => s + (p.amount || 0), 0), [form.payments]);
-  const balanceDue = grandTotal - totalPaid;
-
-  const handleSupplierSelect = (supplier: Supplier) => {
-    setForm(prev => ({ ...prev, supplier_id: supplier.id }));
-    setSupplierSearch('');
-    setShowSupplierDropdown(false);
-  };
-
-  // Validation
-  const validateMainForm = () => {
-    const errors: Record<string, string> = {};
-    if (!form.company_id) errors.company_id = 'Select a company.';
-    if (!form.supplier_id) errors.supplier_id = 'Select a supplier.';
-    if (!form.invoice_no.trim()) errors.invoice_no = 'Invoice number is required.';
-    if (items.length === 0) errors.items = 'Add at least one product.';
-    if (form.payments.length > 0) {
-      const invalidPayments = form.payments.some(p => !['inward', 'outward'].includes(p.payment_direction));
-      if (invalidPayments) errors.payments = 'Each payment must have a valid direction.';
-    }
-    setFormErrors(errors);
-    return Object.keys(errors).length === 0;
-  };
-
-  const clearFieldError = (field: string) => {
-    setFormErrors(prev => {
-      if (!prev[field]) return prev;
-      const newErrors = { ...prev };
-      delete newErrors[field];
-      return newErrors;
-    });
-  };
-
-  // Submit
-  const handleSubmit = useCallback(async (action: 'save' | 'save_print' | 'save_draft' = 'save') => {
     setErrorMsg(null);
-    if (action !== 'save_draft' && !validateMainForm()) {
-      showError('Validation', 'Please fill all required fields.');
-      return;
-    }
-
-    const payload = {
-      company_id: Number(form.company_id),
-      branch: 'Main Branch', // kept as original behavior
-      supplier_id: Number(form.supplier_id),
-      supplier_name: form.supplier_name,
-      supplier_address: form.supplier_address,
-      contact_person: form.contact_person,
-      phone_no: form.phone_no,
-      gstin: form.gstin_pan,
-      pan: form.gstin_pan,
-      reverse_charge: Boolean(form.reverse_charge),
-      ship_to: form.ship_to,
-      place_of_supply: form.place_of_supply,
-      purchase_number: form.invoice_no,
-      purchase_date: form.invoice_date,
-      due_date: form.due_date || null,
-      challan_no: form.challan_no || null,
-      challan_date: form.challan_date || null,
-      po_no: form.po_no || null,
-      po_date: form.po_date || null,
-      lr_no: form.lr_no || null,
-      eway_no: form.eway_no || null,
-      delivery_mode: form.delivery_mode || null,
-      payment_type: form.payment_type,
-      payment_term: form.payment_term || null,
-      bank_id: form.bank_id ? Number(form.bank_id) : null,
-      packing_charges: Number(form.packing_charges || 0),
-      general_discount_percent: Number(form.general_discount_percent || 0),
-      general_discount_amount: Number(generalDiscountAmount || 0),
-      tcs_percent: Number(form.tcs_percent || 0),
-      round_off: Number(form.round_off || 0),
-      terms_title: form.terms_title || null,
-      terms_detail: form.terms_detail || null,
-      document_note: form.document_note || null,
-      internal_note: form.internal_note || null,
-      additional_charges: form.additional_charges.map(c => ({
-        label: c.label,
-        amount: Number(c.amount || 0),
-      })),
-      total_amount: Number(grandTotal || 0),
-      tax_amount: Number(totalTax || 0),
-      discount_amount: Number(itemDiscountTotal + generalDiscountAmount || 0),
-      status: action === 'save_draft' ? 'draft' : 'ordered',
-      items: items.map(i => ({
-        product_id: Number(i.product_id),
-        product_name: i.product_name,
-        hsn_sac_code: i.hsn_sac_code || '',
-        unit: i.uom,
-        quantity: Number(i.qty || 0),
-        purchase_price: Number(i.price || 0),
-        discount_type: i.discount_type,
-        discount_percent: i.discount_type === 'percent' ? Number(i.discount_percent) : 0,
-        discount_amount: i.discount_type === 'amount' ? Number(i.discount_amount) : 0,
-        gst_slab: Number(i.gst_slab || 0),
-        is_inter_state: Boolean(i.is_inter_state),
-        cgst_percent: Number(i.cgst_percent || 0),
-        sgst_percent: Number(i.sgst_percent || 0),
-        igst_percent: Number(i.igst_percent || 0),
-      })),
-    };
-
-    setSubmitting(true);
+    if (isDraft) setSavingDraft(true); else setSubmitting(true);
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    debug('submit.start', { requestId, action, invoiceNo: form.invoice_no, itemCount: items.length, grandTotal });
     try {
-      const res = await apiClient.createPurchaseInvoice(payload);
-      const newPurchase = res?.data ?? res;
-      if (!newPurchase?.id) {
-        showSuccess('Purchase created', `Invoice ${form.invoice_no} saved, but no ID returned.`);
-        navigate('/purchases');
-        return;
+      const payload = createPurchasePayload(isDraft ? 'draft' : 'ordered');
+      const response = await apiClient.createPurchaseInvoice(payload);
+      const purchase = unwrapApi<any>(response, null);
+      const purchaseId = purchase?.id ?? purchase?.purchase?.id ?? purchase?.data?.id;
+      if (!purchaseId) throw new Error('Purchase invoice was not returned with a valid ID. The server may not have saved it safely.');
+      submittedIdRef.current = purchaseId;
+      debug('submit.purchase.created', { requestId, purchaseId, response });
+
+      const validPayments = form.payments.filter((p) => nonNegative(p.amount) > 0);
+      const paymentFailures: string[] = [];
+      for (let index = 0; index < validPayments.length; index += 1) {
+        const payment = validPayments[index];
+        try {
+          await apiClient.request('POST', '/payments', {
+            company_id: Number(form.company_id), invoice_id: purchaseId, reference_no: payment.reference_no.trim() || `PAY-${purchaseId}-${index + 1}`,
+            amount: nonNegative(payment.amount), payment_method: payment.payment_method, status: 'completed', payment_direction: payment.payment_direction,
+            transaction_date: payment.transaction_date || form.invoice_date, bank_name: payment.bank_name.trim(), account_number: payment.account_number.trim(),
+            ledger_reference: payment.reference_no.trim() || `PAY-${purchaseId}-${index + 1}`, remarks: payment.remarks.trim()
+          });
+        } catch (paymentError) {
+          const message = getUserFriendlyError(paymentError, `Payment #${index + 1} failed.`);
+          paymentFailures.push(message); debug('submit.payment.failed', { index, error: paymentError });
+        }
       }
 
-      const validPayments = form.payments.filter(p => p.amount > 0);
-      if (validPayments.length > 0) {
-        const paymentPromises = validPayments.map((payment, idx) =>
-          apiClient.request('POST', '/payments', {
-            company_id: Number(form.company_id),
-            invoice_id: newPurchase.id,
-            reference_no: payment.reference_no || `PAY-${newPurchase.id}-${idx + 1}`,
-            amount: payment.amount,
-            payment_method: payment.payment_method,
-            status: 'completed',
-            payment_direction: payment.payment_direction || 'outward',
-            transaction_date: payment.transaction_date,
-            bank_name: payment.bank_name,
-            account_number: payment.account_number,
-            ledger_reference: payment.reference_no || `PAY-${newPurchase.id}-${idx + 1}`,
-            remarks: payment.remarks,
-          })
-        );
-        await Promise.all(paymentPromises);
+      await addAppLog({ module: 'Purchases', action: isDraft ? 'Create Draft' : 'Create', status: paymentFailures.length ? 'warning' : 'success', message: `${form.invoice_no || `Purchase #${purchaseId}`} | ID ${purchaseId}${paymentFailures.length ? ` | Payment failures: ${paymentFailures.join('; ')}` : ''}` });
+      if (paymentFailures.length) {
+        showError('Purchase saved with payment warning', `Invoice ${form.invoice_no || purchaseId} was saved, but ${paymentFailures.length} payment(s) failed. Review payments before treating the invoice as fully paid.`);
+      } else {
+        showSuccess(isDraft ? 'Draft saved' : 'Purchase created', isDraft ? `Draft ${form.invoice_no || purchaseId} saved.` : `Invoice ${form.invoice_no} created successfully.`);
       }
 
-      showSuccess('Purchase created', `Invoice ${form.invoice_no} created successfully.${validPayments.length ? ' Payments recorded.' : ''}`);
-      addAppLog({ module: 'Purchases', action: 'Create', status: 'success', message: form.invoice_no });
+      if (action === 'save_print') {
+        try { printSavedPurchase(purchaseId); } catch (printError) { showError('Print failed', getUserFriendlyError(printError, 'Invoice saved, but the print window could not be opened.')); }
+      }
       navigate('/purchases');
-    } catch (err: any) {
-      const errorMsg = getUserFriendlyError(err, 'Purchase invoice could not be saved.');
-      showError('Save Failed', errorMsg);
-      setErrorMsg(errorMsg);
+    } catch (e) {
+      submittedIdRef.current = null;
+      const message = getUserFriendlyError(e, 'Purchase invoice could not be saved.');
+      setErrorMsg(message); showError('Save failed', message); debug('submit.failed', { requestId, error: e });
+      await addAppLog({ module: 'Purchases', action: 'Create', status: 'error', message });
     } finally {
-      setSubmitting(false);
+      setSubmitting(false); setSavingDraft(false);
     }
-  }, [form, items, grandTotal, totalTax, itemDiscountTotal, generalDiscountAmount, navigate, showSuccess, showError]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form, items, grandTotal, submitting, savingDraft, generalDiscountType, generalDiscountApplyType, packingApplyType, createPurchasePayload, printSavedPurchase]);
 
-  // Keyboard navigation for dropdowns
-  const handleSupplierKeyDown = (e: React.KeyboardEvent) => {
+  const openSupplier = () => { setNewSupplier((p) => ({ ...p, company_id: form.company_id ? String(form.company_id) : '' })); setShowSupplierOffcanvas(true); };
+  const openProduct = () => { setNewProduct((p) => ({ ...p, company_id: form.company_id ? String(form.company_id) : '' })); setProductFormErrors({}); setShowProductOffcanvas(true); };
+  const generateInvoiceNo = () => updateForm('invoice_no', `PUR-${new Date().getFullYear()}-${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 10)}`);
+  const addCharge = () => setForm((p) => ({ ...p, additional_charges: [...p.additional_charges, { id: `${Date.now()}-${Math.random()}`, label: '', amount: 0 }] }));
+  const updateCharge = (id: string, patch: Partial<AdditionalCharge>) => setForm((p) => ({ ...p, additional_charges: p.additional_charges.map((c) => c.id === id ? { ...c, ...patch } : c) }));
+  const removeCharge = (id: string) => setForm((p) => ({ ...p, additional_charges: p.additional_charges.filter((c) => c.id !== id) }));
+  const addPayment = () => setForm((p) => ({ ...p, payments: [...p.payments, { id: `${Date.now()}-${Math.random()}`, amount: 0, payment_method: 'bank_transfer', reference_no: '', transaction_date: today(), bank_name: '', account_number: '', remarks: '', payment_direction: 'outward' }] }));
+  const updatePayment = (id: string, patch: Partial<PaymentEntry>) => setForm((p) => ({ ...p, payments: p.payments.map((x) => x.id === id ? { ...x, ...patch } : x) }));
+  const removePayment = (id: string) => setForm((p) => ({ ...p, payments: p.payments.filter((x) => x.id !== id) }));
+
+  const supplierKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (!filteredSuppliers.length) return;
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setHighlightIndex(prev => (prev + 1) % filteredSuppliers.length);
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setHighlightIndex(prev => (prev - 1 + filteredSuppliers.length) % filteredSuppliers.length);
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      if (highlightIndex >= 0 && highlightIndex < filteredSuppliers.length) {
-        handleSupplierSelect(filteredSuppliers[highlightIndex]);
-        setHighlightIndex(-1);
-      }
-    } else if (e.key === 'Escape') {
-      setShowSupplierDropdown(false);
-      setHighlightIndex(-1);
-    }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setSupplierHighlight((v) => (v + 1) % filteredSuppliers.length); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setSupplierHighlight((v) => (v - 1 + filteredSuppliers.length) % filteredSuppliers.length); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (supplierHighlight >= 0) selectSupplier(filteredSuppliers[supplierHighlight]); }
+    else if (e.key === 'Escape') setShowSupplierDropdown(false);
   };
-
-  const handleProductKeyDown = (e: React.KeyboardEvent) => {
+  const productKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (!filteredProducts.length) return;
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setHighlightIndex(prev => (prev + 1) % filteredProducts.length);
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setHighlightIndex(prev => (prev - 1 + filteredProducts.length) % filteredProducts.length);
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      if (highlightIndex >= 0 && highlightIndex < filteredProducts.length) {
-        addItem(filteredProducts[highlightIndex]);
-        setHighlightIndex(-1);
-      }
-    } else if (e.key === 'Escape') {
-      setShowProductDropdown(false);
-      setHighlightIndex(-1);
-    }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setProductHighlight((v) => (v + 1) % filteredProducts.length); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setProductHighlight((v) => (v - 1 + filteredProducts.length) % filteredProducts.length); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (productHighlight >= 0) addItem(filteredProducts[productHighlight]); }
+    else if (e.key === 'Escape') setShowProductDropdown(false);
   };
 
-  // Click outside handlers
-  const supplierDropdownRef = useRef<HTMLDivElement>(null);
-  const productDropdownRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (supplierDropdownRef.current && !supplierDropdownRef.current.contains(event.target as Node)) {
-        setShowSupplierDropdown(false);
-      }
-      if (productDropdownRef.current && !productDropdownRef.current.contains(event.target as Node)) {
-        setShowProductDropdown(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  const inputClass = "w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 focus:bg-white outline-none transition-all duration-200 placeholder-slate-400";
-  const labelClass = "block text-xs font-medium text-slate-600 mb-1.5";
-  const cardClass = "bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-slate-200/50 border border-slate-100 p-6 hover:shadow-xl transition-shadow";
-  const sectionTitleClass = "text-lg font-semibold mb-5 flex items-center gap-2 text-slate-800";
+  const inputClass = 'w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500/30 focus:border-blue-500 focus:bg-white outline-none transition';
+  const labelClass = 'block text-xs font-medium text-slate-600 mb-1.5';
+  const cardClass = 'bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-slate-200/50 border border-slate-100 p-6';
+  const sectionTitleClass = 'text-lg font-semibold mb-5 flex items-center gap-2 text-slate-800';
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 text-slate-800">
-      {errorMsg && (
-        <div className="mx-4 md:mx-8 mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-start gap-2 shadow-sm">
-          <FiX size={18} className="mt-0.5 shrink-0" />
-          <span className="whitespace-pre-wrap">{errorMsg}</span>
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 text-slate-800 pb-24">
+      {(companiesError || suppliersError || productsError) && (
+        <div className="mx-4 md:mx-8 mt-4 p-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl flex items-start gap-2 text-sm">
+          <FiAlertCircle className="mt-0.5 shrink-0" />
+          <div>Some master data could not be loaded. {companiesError || suppliersError || productsError}</div>
         </div>
       )}
+      {errorMsg && <div className="mx-4 md:mx-8 mt-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-start gap-2"><FiX className="mt-0.5 shrink-0" /><span>{errorMsg}</span></div>}
 
       <div className="max-w-full mx-auto p-4 md:p-8 space-y-6">
-        {/* Supplier & Invoice Details */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Left: Supplier Information */}
           <div className={cardClass}>
             <h2 className={`${sectionTitleClass} text-blue-700`}><FiUser /> Supplier Information</h2>
             <div className="space-y-5">
-              <div>
-                <label className={labelClass}>Company *</label>
-                <select 
-                  value={form.company_id} 
-                  onChange={e => { setForm(prev => ({ ...prev, company_id: e.target.value ? Number(e.target.value) : '', supplier_id: '' })); clearFieldError('company_id'); }} 
-                  className={`${inputClass} ${formErrors.company_id ? 'border-red-400 ring-2 ring-red-200' : ''}`}
-                >
-                  <option value="">Select Company</option>
-                  {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-                {formErrors.company_id && <p className="text-xs text-red-500 mt-1">{formErrors.company_id}</p>}
-              </div>
-              <div ref={supplierDropdownRef}>
-                <label className={labelClass}>Supplier *</label>
-                <div className="flex gap-2">
-                  <div className="relative flex-1">
-                    <input
-                      type="text"
-                      value={supplierSearch}
-                      onChange={e => { setSupplierSearch(e.target.value); setShowSupplierDropdown(true); setHighlightIndex(-1); }}
-                      onFocus={() => setShowSupplierDropdown(true)}
-                      onKeyDown={handleSupplierKeyDown}
-                      placeholder="Search supplier..."
-                      className={inputClass}
-                      aria-label="Search supplier"
-                    />
-                    {supplierSearch && (
-                      <button 
-                        onClick={() => { setSupplierSearch(''); setShowSupplierDropdown(false); }}
-                        className="absolute right-3 top-3 text-slate-400 hover:text-slate-600"
-                        aria-label="Clear search"
-                      >
-                        <FiX size={18} />
-                      </button>
-                    )}
-                    {showSupplierDropdown && supplierSearch && (
-                      <div className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-60 overflow-y-auto">
-                        {suppliersLoading ? (
-                          <div className="p-4 text-sm text-slate-500 flex items-center justify-center"><FiLoader className="animate-spin mr-2" /> Loading...</div>
-                        ) : suppliersError ? (
-                          <div className="p-4 text-sm text-red-500">Unable to load suppliers.</div>
-                        ) : filteredSuppliers.length === 0 ? (
-                          <div className="p-4 text-sm text-slate-500">No suppliers found.</div>
-                        ) : (
-                          filteredSuppliers.map((s, idx) => (
-                            <div
-                              key={s.id}
-                              className={`px-4 py-2.5 cursor-pointer text-sm flex items-center justify-between ${idx === highlightIndex ? 'bg-blue-50' : 'hover:bg-blue-50'}`}
-                              onMouseEnter={() => setHighlightIndex(idx)}
-                              onClick={() => handleSupplierSelect(s)}
-                            >
-                              <div className="min-w-0 flex-1">
-                                <div className="font-medium text-slate-800 truncate">{s.name}</div>
-                                <div className="text-xs text-slate-500 truncate">
-                                  {s.gst_number && <span className="mr-2">GST: {s.gst_number}</span>}
-                                  {s.phone && <span className="mr-2">📞 {s.phone}</span>}
-                                </div>
-                              </div>
-                              {idx === highlightIndex && <FiChevronRight className="text-blue-500" size={16} />}
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowSupplierOffcanvas(true)}
-                    className="px-4 py-2 rounded-xl border border-slate-200 text-sm text-blue-600 hover:bg-blue-50 hover:border-blue-300 transition-colors whitespace-nowrap"
-                  >
-                    Add Supplier
-                  </button>
-                </div>
-                {formErrors.supplier_id && <p className="text-xs text-red-500 mt-1">{formErrors.supplier_id}</p>}
-              </div>
-              <div><label className={labelClass}>M/S.</label><input type="text" value={form.supplier_name} onChange={e => setForm(prev => ({ ...prev, supplier_name: e.target.value }))} className={inputClass} /></div>
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className={labelClass}>Contact Person</label><input type="text" value={form.contact_person} onChange={e => setForm(prev => ({ ...prev, contact_person: e.target.value }))} className={inputClass} /></div>
-                <div><label className={labelClass}>Phone No</label><input type="text" value={form.phone_no} onChange={e => setForm(prev => ({ ...prev, phone_no: e.target.value }))} className={inputClass} /></div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className={labelClass}>Email</label><input type="text" value={form.email} onChange={e => setForm(prev => ({ ...prev, email: e.target.value }))} className={inputClass} /></div>
-                <div><label className={labelClass}>GSTIN / PAN</label><input type="text" value={form.gstin_pan} onChange={e => setForm(prev => ({ ...prev, gstin_pan: e.target.value }))} className={inputClass} /></div>
-              </div>
-              <div className="flex items-center gap-4">
-                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.reverse_charge} onChange={e => setForm(prev => ({ ...prev, reverse_charge: e.target.checked }))} className="rounded border-slate-300" /> Reverse Charge</label>
-              </div>
-              
-              <div><label className={labelClass}>Place of Supply *</label><input type="text" value={form.place_of_supply} onChange={e => setForm(prev => ({ ...prev, place_of_supply: e.target.value }))} className={inputClass} placeholder="State / UT" /></div>
+              <div><label className={labelClass}>Company *</label><select value={form.company_id} disabled={submitting || savingDraft} onChange={(e) => { updateForm('company_id', e.target.value ? Number(e.target.value) : ''); updateForm('supplier_id', ''); setSupplierSearch(''); }} className={`${inputClass} ${formErrors.company_id ? 'border-red-400' : ''}`}><option value="">{companiesLoading ? 'Loading companies...' : 'Select Company'}</option>{companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>{formErrors.company_id && <p className="text-xs text-red-500 mt-1">{formErrors.company_id}</p>}</div>
+              <div ref={supplierDropdownRef}><label className={labelClass}>Supplier *</label><div className="flex gap-2"><div className="relative flex-1"><input value={supplierSearch} onChange={(e) => { setSupplierSearch(e.target.value); setShowSupplierDropdown(true); setSupplierHighlight(-1); }} onFocus={() => setShowSupplierDropdown(true)} onKeyDown={supplierKeyDown} placeholder="Search supplier by name, code, GST, phone..." className={`${inputClass} ${formErrors.supplier_id ? 'border-red-400' : ''}`} />{supplierSearch && <button type="button" onClick={() => { setSupplierSearch(''); updateForm('supplier_id', ''); }} className="absolute right-3 top-3 text-slate-400"><FiX /></button>}{showSupplierDropdown && <div className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-64 overflow-y-auto">{suppliersLoading ? <div className="p-4 text-sm text-slate-500 flex justify-center"><FiLoader className="animate-spin mr-2" />Loading...</div> : filteredSuppliers.length === 0 ? <div className="p-4 text-sm text-slate-500">No suppliers found.</div> : filteredSuppliers.map((s, idx) => <button type="button" key={s.id} className={`w-full text-left px-4 py-3 flex items-center justify-between border-b border-slate-100 ${idx === supplierHighlight ? 'bg-blue-50' : 'hover:bg-blue-50'}`} onMouseEnter={() => setSupplierHighlight(idx)} onClick={() => selectSupplier(s)}><span className="min-w-0"><span className="block font-medium truncate">{s.name}</span><span className="block text-xs text-slate-500 truncate">{s.gst_number ? `GST: ${s.gst_number}` : ''}{s.phone || s.contact_no ? `  •  ${s.phone || s.contact_no}` : ''}</span></span>{idx === supplierHighlight && <FiChevronRight className="text-blue-500 shrink-0" />}</button>)}</div>}</div><button type="button" onClick={openSupplier} className="px-4 rounded-xl border border-blue-200 text-blue-600 hover:bg-blue-50">Add Supplier</button></div>{formErrors.supplier_id && <p className="text-xs text-red-500 mt-1">{formErrors.supplier_id}</p>}</div>
+              <div><label className={labelClass}>M/S.</label><input value={form.supplier_name} onChange={(e) => updateForm('supplier_name', e.target.value)} className={inputClass} /></div>
+              <div className="grid grid-cols-2 gap-3"><div><label className={labelClass}>Contact Person</label><input value={form.contact_person} onChange={(e) => updateForm('contact_person', e.target.value)} className={inputClass} /></div><div><label className={labelClass}>Phone No</label><input value={form.phone_no} onChange={(e) => updateForm('phone_no', e.target.value)} className={inputClass} /></div></div>
+              <div className="grid grid-cols-2 gap-3"><div><label className={labelClass}>Email</label><input type="email" value={form.email} onChange={(e) => updateForm('email', e.target.value)} className={inputClass} /></div><div><label className={labelClass}>GSTIN / PAN</label><input value={form.gstin_pan} onChange={(e) => updateForm('gstin_pan', e.target.value.toUpperCase())} className={inputClass} /></div></div>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.reverse_charge} onChange={(e) => updateForm('reverse_charge', e.target.checked)} className="rounded" />Reverse Charge</label>
+              <div><label className={labelClass}>Place of Supply *</label><input value={form.place_of_supply} onChange={(e) => updateForm('place_of_supply', e.target.value)} className={inputClass} placeholder="State / UT" /></div>
             </div>
           </div>
 
-          {/* Right: Invoice Details */}
           <div className={cardClass}>
             <h2 className={`${sectionTitleClass} text-indigo-700`}><FiFileText /> Purchase Invoice Details</h2>
             <div className="space-y-5">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div><label className={labelClass}>Invoice Type</label>
-                  <select value={form.invoice_type} onChange={e => setForm(prev => ({ ...prev, invoice_type: e.target.value as any }))} className={inputClass}>
-                    <option value="purchase_invoice">Purchase Invoice</option><option value="purchase_bill">Purchase Bill</option>
-                  </select>
-                </div>
-                <div>
-                  <label className={labelClass}>Invoice No. *</label>
-                  <div className="flex gap-1">
-                    <input
-                      type="text"
-                      value={form.invoice_no}
-                      onChange={e => { setForm(prev => ({ ...prev, invoice_no: e.target.value })); clearFieldError('invoice_no'); }}
-                      className={`${inputClass} flex-1 ${formErrors.invoice_no ? 'border-red-400 ring-2 ring-red-200' : ''}`}
-                      placeholder="Enter invoice number"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setForm(prev => ({ ...prev, invoice_no: generateInvoicePlaceholder() }))}
-                      className="px-3 py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-sm flex items-center gap-1 transition-colors"
-                      title="Generate unique number"
-                      aria-label="Generate invoice number"
-                    >
-                      <FiRefreshCw size={14} />
-                    </button>
-                  </div>
-                  {formErrors.invoice_no && <p className="text-xs text-red-500 mt-1">{formErrors.invoice_no}</p>}
-                </div>
-                <div><label className={labelClass}>Invoice Date *</label><input type="date" value={form.invoice_date} onChange={e => setForm(prev => ({ ...prev, invoice_date: e.target.value }))} className={inputClass} /></div>
-              </div>
-              <div><label className={labelClass}>Due Date</label><input type="date" value={form.due_date} onChange={e => setForm(prev => ({ ...prev, due_date: e.target.value }))} className={inputClass} /></div>
-              <div><label className={labelClass}>Challan No.</label><input type="text" value={form.challan_no} onChange={e => setForm(prev => ({ ...prev, challan_no: e.target.value }))} className={inputClass} /></div>
-              <div><label className={labelClass}>Challan Date</label><input type="date" value={form.challan_date} onChange={e => setForm(prev => ({ ...prev, challan_date: e.target.value }))} className={inputClass} /></div>
-              <div><label className={labelClass}>L.R. No.</label><input type="text" value={form.lr_no} onChange={e => setForm(prev => ({ ...prev, lr_no: e.target.value }))} className={inputClass} /></div>
-              <div><label className={labelClass}>E-Way Bill</label><input type="text" value={form.eway_no} onChange={e => setForm(prev => ({ ...prev, eway_no: e.target.value }))} className={inputClass} /></div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4"><div><label className={labelClass}>Invoice Type</label><select value={form.invoice_type} onChange={(e) => updateForm('invoice_type', e.target.value as PurchaseFormData['invoice_type'])} className={inputClass}><option value="purchase_invoice">Purchase Invoice</option><option value="purchase_bill">Purchase Bill</option></select></div><div><label className={labelClass}>Invoice No. *</label><div className="flex gap-1"><input value={form.invoice_no} onChange={(e) => updateForm('invoice_no', e.target.value.trimStart())} className={`${inputClass} flex-1 ${formErrors.invoice_no ? 'border-red-400' : ''}`} placeholder="Enter invoice number" /><button type="button" onClick={generateInvoiceNo} className="px-3 rounded-lg bg-slate-100 hover:bg-slate-200"><FiRefreshCw /></button></div>{formErrors.invoice_no && <p className="text-xs text-red-500 mt-1">{formErrors.invoice_no}</p>}</div><div><label className={labelClass}>Invoice Date *</label><input type="date" value={form.invoice_date} onChange={(e) => updateForm('invoice_date', e.target.value)} className={inputClass} /></div></div>
+              <div className="grid grid-cols-2 gap-4"><div><label className={labelClass}>Due Date</label><input type="date" value={form.due_date} onChange={(e) => updateForm('due_date', e.target.value)} className={inputClass} /></div><div><label className={labelClass}>Delivery Mode</label><input value={form.delivery_mode} onChange={(e) => updateForm('delivery_mode', e.target.value)} className={inputClass} /></div></div>
+              <div className="grid grid-cols-2 gap-4"><div><label className={labelClass}>Challan No.</label><input value={form.challan_no} onChange={(e) => updateForm('challan_no', e.target.value)} className={inputClass} /></div><div><label className={labelClass}>Challan Date</label><input type="date" value={form.challan_date} onChange={(e) => updateForm('challan_date', e.target.value)} className={inputClass} /></div></div>
+              <div className="grid grid-cols-2 gap-4"><div><label className={labelClass}>L.R. No.</label><input value={form.lr_no} onChange={(e) => updateForm('lr_no', e.target.value)} className={inputClass} /></div><div><label className={labelClass}>E-Way Bill</label><input value={form.eway_no} onChange={(e) => updateForm('eway_no', e.target.value)} className={inputClass} /></div></div>
             </div>
           </div>
         </div>
 
-        {/* Items Section */}
         <section className={`${cardClass} p-0 overflow-hidden`}>
-          <div className="p-4 md:p-6 border-b border-slate-100 bg-slate-50/50" ref={productDropdownRef}>
-            <div className="relative w-full flex gap-2">
-              <div className="relative flex-1">
-                <FiSearch className="absolute left-4 top-3.5 text-slate-400 z-10" size={18} />
-                <input
-                  type="text"
-                  placeholder="Search product by name, SKU, barcode or HSN..."
-                  value={productSearch}
-                  onChange={e => { setProductSearch(e.target.value); setShowProductDropdown(true); setHighlightIndex(-1); }}
-                  onFocus={() => setShowProductDropdown(true)}
-                  onKeyDown={handleProductKeyDown}
-                  className="w-full pl-12 pr-10 py-3 rounded-xl border-0 bg-white text-sm focus:ring-2 focus:ring-blue-500/30 outline-none transition shadow-sm"
-                  aria-label="Search product"
-                />
-                {productSearch && (
-                  <button 
-                    onClick={() => { setProductSearch(''); setShowProductDropdown(false); }}
-                    className="absolute right-3 top-3 text-slate-400 hover:text-slate-600"
-                    aria-label="Clear product search"
-                  >
-                    <FiX size={18} />
-                  </button>
-                )}
-                {showProductDropdown && productSearch && (
-                  <div className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-60 overflow-y-auto">
-                    {productsLoading ? (
-                      <div className="p-4 text-sm text-slate-500 flex items-center justify-center"><FiLoader className="animate-spin mr-2" /> Loading...</div>
-                    ) : productsError ? (
-                      <div className="p-4 text-sm text-red-500">Unable to load products.</div>
-                    ) : filteredProducts.length === 0 ? (
-                      <div className="p-4 text-sm text-slate-500">No products found.</div>
-                    ) : (
-                      filteredProducts.map((p, idx) => (
-                        <div
-                          key={p.id}
-                          className={`px-4 py-3 cursor-pointer text-sm flex justify-between items-center border-b border-slate-100 last:border-0 ${idx === highlightIndex ? 'bg-blue-50' : 'hover:bg-blue-50'}`}
-                          onMouseEnter={() => setHighlightIndex(idx)}
-                          onClick={() => { addItem(p); setHighlightIndex(-1); }}
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="font-medium text-slate-800 truncate">{p.name}</div>
-                            <div className="text-xs text-slate-500 truncate">
-                              {p.sku && <span className="mr-2">SKU: {p.sku}</span>}
-                              {p.stock_quantity != null && <span className="mr-2">Stock: {p.stock_quantity}</span>}
-                              {p.uom && <span className="mr-2">UOM: {p.uom}</span>}
-                              {p.barcode && <span>Barcode: {p.barcode}</span>}
-                            </div>
-                          </div>
-                          <span className="text-slate-600 font-medium ml-3">₹{formatCurrency(p.purchase_price)}</span>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={openProductOffcanvas}
-                className="px-4 py-2 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1 whitespace-nowrap transition-colors"
-              >
-                <FiPlus size={16} /> Add Product
-              </button>
-            </div>
-          </div>
+          <div ref={productDropdownRef} className="p-4 md:p-6 border-b border-slate-100 bg-slate-50/50"><div className="flex gap-2"><div className="relative flex-1"><FiSearch className="absolute left-4 top-3.5 text-slate-400" /><input value={productSearch} onChange={(e) => { setProductSearch(e.target.value); setShowProductDropdown(true); setProductHighlight(-1); }} onFocus={() => setShowProductDropdown(true)} onKeyDown={productKeyDown} placeholder="Search product by name, SKU, barcode or HSN..." className="w-full pl-12 pr-10 py-3 rounded-xl border-0 bg-white shadow-sm focus:ring-2 focus:ring-blue-500/30 outline-none" />{productSearch && <button type="button" onClick={() => { setProductSearch(''); setShowProductDropdown(false); }} className="absolute right-3 top-3 text-slate-400"><FiX /></button>}{showProductDropdown && <div className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-72 overflow-y-auto">{productsLoading ? <div className="p-4 flex justify-center text-sm text-slate-500"><FiLoader className="animate-spin mr-2" />Loading...</div> : filteredProducts.length === 0 ? <div className="p-4 text-sm text-slate-500">No products found.</div> : filteredProducts.map((p, idx) => <button type="button" key={p.id} onMouseEnter={() => setProductHighlight(idx)} onClick={() => addItem(p)} className={`w-full text-left px-4 py-3 flex justify-between items-center border-b border-slate-100 ${idx === productHighlight ? 'bg-blue-50' : 'hover:bg-blue-50'}`}><span className="min-w-0"><span className="block font-medium truncate">{p.name}</span><span className="block text-xs text-slate-500 truncate">{p.sku ? `SKU: ${p.sku}  ` : ''}{p.uom || p.unit || 'NOS'}{p.stock_quantity != null ? `  •  Stock: ${p.stock_quantity}` : ''}</span></span><span className="font-medium">₹{formatCurrency(p.purchase_price)}</span></button>)}</div>}</div><button type="button" onClick={openProduct} className="px-4 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 flex items-center gap-1"><FiPlus />Add Product</button></div></div>
 
-          {/* Desktop Table */}
-          <div className="hidden md:block overflow-x-auto scrollbar-hide">
-            <table className="w-full text-sm min-w-[1000px]">
-              <thead>
-                <tr className="text-left text-xs font-medium text-slate-500 uppercase tracking-wider bg-slate-50/80">
-                  <th className="py-3 px-3">Item</th>
-                  <th className="py-3 px-3 text-center">Qty</th>
-                  <th className="py-3 px-3 text-center">Unit</th>
-                  <th className="py-3 px-3 text-right">Price</th>
-                  <th className="py-3 px-3 text-center">Disc</th>
-                  <th className="py-3 px-3 text-center">GST</th>
-                  <th className="py-3 px-3 text-center">Inter</th>
-                  <th className="py-3 px-3 text-right">Total</th>
-                  <th className="w-10"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.length === 0 ? (
-                  <tr>
-                    <td colSpan={9} className="text-center py-16 text-slate-400">
-                      <FiBox size={40} className="mx-auto mb-3 opacity-30" />No products added yet.
-                    </td>
-                  </tr>
-                ) : items.map((item, idx) => (
-                  <tr key={idx} className="hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-0">
-                    <td className="py-2 px-3 max-w-[200px]">
-                      <input 
-                        type="text" 
-                        value={item.product_name} 
-                        onChange={e => updateItem(idx, 'product_name', e.target.value)} 
-                        className="w-full bg-transparent border-0 focus:ring-0 text-sm p-1 truncate"
-                        title={item.product_name}
-                      />
-                    </td>
-                    <td className="py-2 px-3">
-                      <input 
-                        type="number" 
-                        min="1" 
-                        step="1" 
-                        inputMode="numeric"
-                        value={item.qty} 
-                        onChange={e => { updateItem(idx, 'qty', Number(e.target.value)); recalcItem(idx); }} 
-                        className={`w-16 bg-transparent border-0 focus:ring-0 text-center p-1 ${item.qty <= 0 ? 'text-red-500' : ''}`}
-                      />
-                      {item.qty <= 0 && <div className="text-xs text-red-500 text-center">Min 1</div>}
-                    </td>
-                    <td className="py-2 px-3">
-                      <input type="text" value={item.uom} onChange={e => updateItem(idx, 'uom', e.target.value)} className="w-14 bg-transparent border-0 focus:ring-0 text-center p-1" />
-                    </td>
-                    <td className="py-2 px-3">
-                      <input 
-                        type="number" 
-                        min="0" 
-                        step="0.01" 
-                        inputMode="decimal"
-                        value={item.price} 
-                        onChange={e => { updateItem(idx, 'price', Number(e.target.value)); recalcItem(idx); }} 
-                        className={`w-20 bg-transparent border-0 focus:ring-0 text-right p-1 ${item.price < 0 ? 'text-red-500' : ''}`}
-                      />
-                      {item.price < 0 && <div className="text-xs text-red-500 text-right">Invalid</div>}
-                    </td>
-                    <td className="py-2 px-3">
-                      <div className="flex items-center gap-1">
-                        <select value={item.discount_type} onChange={e => { updateItem(idx, 'discount_type', e.target.value as 'percent'|'amount'); recalcItem(idx); }} className="bg-transparent border-0 focus:ring-0 text-center p-1 text-sm">
-                          <option value="percent">%</option><option value="amount">₹</option>
-                        </select>
-                        {item.discount_type === 'percent' ? (
-                          <input 
-                            type="number" 
-                            min="0" 
-                            step="0.01" 
-                            value={item.discount_percent} 
-                            onChange={e => { updateItem(idx, 'discount_percent', Number(e.target.value)); recalcItem(idx); }} 
-                            className={`w-14 bg-transparent border-0 focus:ring-0 text-center p-1 ${item.discount_percent < 0 ? 'text-red-500' : ''}`}
-                          />
-                        ) : (
-                          <input 
-                            type="number" 
-                            min="0" 
-                            step="0.01" 
-                            value={item.discount_amount} 
-                            onChange={e => { updateItem(idx, 'discount_amount', Number(e.target.value)); recalcItem(idx); }} 
-                            className={`w-16 bg-transparent border-0 focus:ring-0 text-center p-1 ${item.discount_amount < 0 || item.discount_amount > item.qty * item.price ? 'text-red-500' : ''}`}
-                          />
-                        )}
-                      </div>
-                    </td>
-                    <td className="py-2 px-3">
-                      <select value={item.gst_slab} onChange={e => { updateItem(idx, 'gst_slab', Number(e.target.value)); recalcItem(idx); }} className="bg-transparent border-0 focus:ring-0 text-center p-1 text-sm">
-                        <option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option>
-                      </select>
-                      {item.gst_slab === -1 && <input type="number" step="0.01" placeholder="%" onChange={e => { const val = Number(e.target.value); if (!isNaN(val)) { updateItem(idx, 'gst_slab', val); recalcItem(idx); } }} className="w-12 bg-transparent border-0 focus:ring-0 text-center p-1 ml-1" />}
-                    </td>
-                    <td className="py-2 px-3">
-                      <label className="inline-flex items-center gap-1 text-xs cursor-pointer"><input type="checkbox" checked={item.is_inter_state} onChange={e => { updateItem(idx, 'is_inter_state', e.target.checked); recalcItem(idx); }} className="rounded border-slate-300 text-blue-600 focus:ring-blue-500" />IGST</label>
-                    </td>
-                    <td className="py-2 px-3 text-right font-semibold text-slate-700">₹{formatCurrency(item.total)}</td>
-                    <td className="py-2 px-3"><button onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600 transition-colors" aria-label="Remove item"><FiTrash2 size={16} /></button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <div className="hidden md:block overflow-x-auto"><table className="w-full text-sm min-w-[1150px]"><thead><tr className="text-left text-xs font-medium text-slate-500 uppercase bg-slate-50/80"><th className="p-3">Item</th><th className="p-3 text-center">Qty</th><th className="p-3">Unit</th><th className="p-3 text-right">Price</th><th className="p-3">Discount</th><th className="p-3">GST</th><th className="p-3">Tax Mode</th><th className="p-3 text-right">Total</th><th></th></tr></thead><tbody>{items.length === 0 ? <tr><td colSpan={9} className="text-center py-16 text-slate-400"><FiBox size={40} className="mx-auto mb-3 opacity-30" />No products added yet.</td></tr> : items.map((item, idx) => <tr key={`${item.product_id}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50"><td className="p-2 max-w-[240px]"><input value={item.product_name} onChange={(e) => updateItem(idx, { product_name: e.target.value })} className="w-full bg-transparent border-0 focus:ring-0 p-1 truncate" /></td><td className="p-2"><input type="number" min="1" step="0.01" value={item.qty} onChange={(e) => updateItem(idx, { qty: normalizeNumber(e.target.value) })} className={`w-20 bg-transparent border-0 focus:ring-0 text-center ${item.qty <= 0 ? 'text-red-500' : ''}`} /></td><td className="p-2"><input value={item.uom} onChange={(e) => updateItem(idx, { uom: e.target.value })} className="w-16 bg-transparent border-0 focus:ring-0 text-center" /></td><td className="p-2"><input type="number" min="0" step="0.01" value={item.price} onChange={(e) => updateItem(idx, { price: normalizeNumber(e.target.value) })} className="w-24 bg-transparent border-0 focus:ring-0 text-right" /></td><td className="p-2"><div className="flex gap-1"><select value={item.discount_type} onChange={(e) => updateItem(idx, { discount_type: e.target.value as DiscountType, discount_percent: e.target.value === 'amount' ? 0 : item.discount_percent, discount_amount: e.target.value === 'percent' ? 0 : item.discount_amount })} className="bg-transparent border-0 focus:ring-0"><option value="percent">%</option><option value="amount">₹</option></select><input type="number" min="0" step="0.01" value={item.discount_type === 'percent' ? item.discount_percent : item.discount_amount} onChange={(e) => updateItem(idx, item.discount_type === 'percent' ? { discount_percent: normalizeNumber(e.target.value) } : { discount_amount: normalizeNumber(e.target.value) })} className="w-20 bg-transparent border-0 focus:ring-0 text-right" /></div></td><td className="p-2"><select value={item.gst_slab} onChange={(e) => updateItem(idx, { gst_slab: Number(e.target.value) })} className="bg-transparent border-0 focus:ring-0"><option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option></select>{item.gst_slab === -1 && <input type="number" min="0" max="100" step="0.01" value={item.custom_gst_rate} onChange={(e) => updateItem(idx, { custom_gst_rate: normalizeNumber(e.target.value) })} className="w-20 mt-1 bg-white border border-slate-200 rounded px-1 py-0.5 text-xs" />}</td><td className="p-2"><label className="inline-flex items-center gap-1 text-xs"><input type="checkbox" checked={item.is_inter_state} onChange={(e) => updateItem(idx, { is_inter_state: e.target.checked })} />IGST</label></td><td className="p-2 text-right font-semibold">₹{formatCurrency(item.total)}</td><td className="p-2"><button type="button" onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600"><FiTrash2 /></button></td></tr>)}</tbody></table></div>
 
-          {/* Mobile Cards */}
-          <div className="md:hidden p-4 space-y-4">
-            {items.length === 0 ? (
-              <div className="text-center py-16 text-slate-400"><FiBox size={40} className="mx-auto mb-3 opacity-30" />No products added yet.</div>
-            ) : items.map((item, idx) => (
-              <div key={idx} className="bg-slate-50 rounded-xl p-4 space-y-3 border border-slate-200 shadow-sm">
-                <div className="flex justify-between items-start">
-                  <span className="text-xs font-semibold text-slate-400">#{idx + 1}</span>
-                  <button onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600" aria-label="Remove item"><FiTrash2 size={16} /></button>
-                </div>
-                <input type="text" value={item.product_name} onChange={e => updateItem(idx, 'product_name', e.target.value)} className="w-full bg-transparent border-0 focus:ring-0 text-sm font-medium" />
-                <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-slate-500">Qty</label><input type="number" min="1" value={item.qty} onChange={e => { updateItem(idx, 'qty', Number(e.target.value)); recalcItem(idx); }} className={`w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs ${item.qty <= 0 ? 'border-red-400' : ''}`} />{products?.find(p => p.id === item.product_id)?.stock_quantity != null && <div className="text-xs text-slate-400 mt-1">Stock: {products.find(p => p.id === item.product_id)?.stock_quantity}</div>}</div>
-                  <div><label className="text-xs text-slate-500">Unit</label><input type="text" value={item.uom} onChange={e => updateItem(idx, 'uom', e.target.value)} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs" /></div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-slate-500">Price</label><input type="number" min="0" step="0.01" value={item.price} onChange={e => { updateItem(idx, 'price', Number(e.target.value)); recalcItem(idx); }} className={`w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs ${item.price < 0 ? 'border-red-400' : ''}`} /></div>
-                  <div><label className="text-xs text-slate-500">Disc Type</label><select value={item.discount_type} onChange={e => { updateItem(idx, 'discount_type', e.target.value as 'percent'|'amount'); recalcItem(idx); }} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value="percent">%</option><option value="amount">₹</option></select></div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-slate-500">Discount %</label><input type="number" min="0" value={item.discount_percent} onChange={e => { updateItem(idx, 'discount_percent', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs" /></div>
-                  <div><label className="text-xs text-slate-500">Disc Amount</label><input type="number" min="0" step="0.01" value={item.discount_amount} onChange={e => { updateItem(idx, 'discount_amount', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs" /></div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div><label className="text-xs text-slate-500">GST Slab</label><select value={item.gst_slab} onChange={e => { updateItem(idx, 'gst_slab', Number(e.target.value)); recalcItem(idx); }} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs"><option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option></select>{item.gst_slab === -1 && <input type="number" step="0.01" placeholder="%" onChange={e => { const val = Number(e.target.value); if (!isNaN(val)) { updateItem(idx, 'gst_slab', val); recalcItem(idx); } }} className="w-full bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-xs mt-1" />}</div>
-                  <div className="flex items-center gap-2"><label className="text-xs text-slate-500 flex items-center gap-1"><input type="checkbox" checked={item.is_inter_state} onChange={e => { updateItem(idx, 'is_inter_state', e.target.checked); recalcItem(idx); }} className="rounded border-slate-300" />IGST</label></div>
-                </div>
-                <div className="text-right font-semibold">₹{formatCurrency(item.total)}</div>
-              </div>
-            ))}
-          </div>
+          <div className="md:hidden p-4 space-y-4">{items.length === 0 ? <div className="text-center py-16 text-slate-400"><FiBox size={40} className="mx-auto mb-3 opacity-30" />No products added yet.</div> : items.map((item, idx) => <div key={`${item.product_id}-${idx}`} className="bg-slate-50 rounded-xl p-4 space-y-3 border border-slate-200"><div className="flex justify-between"><span className="text-xs text-slate-400">#{idx + 1}</span><button type="button" onClick={() => removeItem(idx)} className="text-red-400"><FiTrash2 /></button></div><input value={item.product_name} onChange={(e) => updateItem(idx, { product_name: e.target.value })} className="w-full bg-transparent border-0 font-medium" /><div className="grid grid-cols-2 gap-2"><div><label className={labelClass}>Qty</label><input type="number" min="1" step="0.01" value={item.qty} onChange={(e) => updateItem(idx, { qty: normalizeNumber(e.target.value) })} className={inputClass} /></div><div><label className={labelClass}>Unit</label><input value={item.uom} onChange={(e) => updateItem(idx, { uom: e.target.value })} className={inputClass} /></div><div><label className={labelClass}>Price</label><input type="number" min="0" step="0.01" value={item.price} onChange={(e) => updateItem(idx, { price: normalizeNumber(e.target.value) })} className={inputClass} /></div><div><label className={labelClass}>GST</label><select value={item.gst_slab} onChange={(e) => updateItem(idx, { gst_slab: Number(e.target.value) })} className={inputClass}><option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option></select></div></div>{item.gst_slab === -1 && <input type="number" min="0" max="100" step="0.01" value={item.custom_gst_rate} onChange={(e) => updateItem(idx, { custom_gst_rate: normalizeNumber(e.target.value) })} className={inputClass} placeholder="Custom GST %" />}<div className="grid grid-cols-2 gap-2"><div><label className={labelClass}>Discount Type</label><select value={item.discount_type} onChange={(e) => updateItem(idx, { discount_type: e.target.value as DiscountType })} className={inputClass}><option value="percent">Percent</option><option value="amount">Amount</option></select></div><div><label className={labelClass}>Discount</label><input type="number" min="0" step="0.01" value={item.discount_type === 'percent' ? item.discount_percent : item.discount_amount} onChange={(e) => updateItem(idx, item.discount_type === 'percent' ? { discount_percent: normalizeNumber(e.target.value) } : { discount_amount: normalizeNumber(e.target.value) })} className={inputClass} /></div></div><label className="text-xs flex items-center gap-2"><input type="checkbox" checked={item.is_inter_state} onChange={(e) => updateItem(idx, { is_inter_state: e.target.checked })} />Use IGST</label><div className="text-right font-bold">₹{formatCurrency(item.total)}</div></div>)}</div>
         </section>
 
-        {/* Invoice Info & Summary */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className={cardClass}>
             <h2 className={sectionTitleClass}>Invoice Information</h2>
             <div className="space-y-5">
-              <div><label className={labelClass}>Due Date</label><input type="date" value={form.due_date} onChange={e => setForm(prev => ({ ...prev, due_date: e.target.value }))} className={inputClass} /></div>
-              <div><label className={labelClass}>Bank</label><select value={form.bank_id} onChange={e => setForm(prev => ({ ...prev, bank_id: e.target.value ? Number(e.target.value) : '' }))} className={inputClass}><option value="">Select Bank</option>{banks?.map(b => <option key={b.id} value={b.id}>{b.bank_name} ({b.account_no})</option>)}</select></div>
-              <div><label className={labelClass}>Terms & Conditions</label><input type="text" value={form.terms_title} onChange={e => setForm(prev => ({ ...prev, terms_title: e.target.value }))} className={inputClass} /><textarea rows={4} value={form.terms_detail} onChange={e => setForm(prev => ({ ...prev, terms_detail: e.target.value }))} className={`${inputClass} mt-2`} /></div>
-              <div><label className={labelClass}>Document Note</label><textarea rows={2} value={form.document_note} onChange={e => setForm(prev => ({ ...prev, document_note: e.target.value }))} className={inputClass} /></div>
-              <div><label className={labelClass}>Internal Note</label><textarea rows={2} value={form.internal_note} onChange={e => setForm(prev => ({ ...prev, internal_note: e.target.value }))} className={inputClass} /></div>
+              <div className="grid grid-cols-2 gap-4"><div><label className={labelClass}>Payment Type</label><select value={form.payment_type} onChange={(e) => updateForm('payment_type', e.target.value as PurchaseFormData['payment_type'])} className={inputClass}><option value="credit">Credit</option><option value="cash">Cash</option><option value="cheque">Cheque</option><option value="online">Online</option><option value="bank_transfer">Bank Transfer</option></select></div><div><label className={labelClass}>Bank</label><select value={form.bank_id} onChange={(e) => updateForm('bank_id', e.target.value ? Number(e.target.value) : '')} className={inputClass}><option value="">Select Bank</option>{banks?.map((b) => <option key={b.id} value={b.id}>{b.bank_name} ({b.account_no})</option>)}</select></div></div>
+              <div><label className={labelClass}>Terms & Conditions</label><input value={form.terms_title} onChange={(e) => updateForm('terms_title', e.target.value)} className={inputClass} /><textarea rows={4} value={form.terms_detail} onChange={(e) => updateForm('terms_detail', e.target.value)} className={`${inputClass} mt-2`} /></div>
+              <div><label className={labelClass}>Document Note</label><textarea rows={2} value={form.document_note} onChange={(e) => updateForm('document_note', e.target.value)} className={inputClass} /></div>
+              <div><label className={labelClass}>Internal Note</label><textarea rows={2} value={form.internal_note} onChange={(e) => updateForm('internal_note', e.target.value)} className={inputClass} /></div>
             </div>
           </div>
 
@@ -1278,263 +752,32 @@ export function CreatePurchaseInvoicePage() {
             <h2 className={sectionTitleClass}>Invoice Summary</h2>
             <div className="space-y-3 text-sm">
               <div className="flex justify-between"><span className="text-slate-500">Subtotal</span><span>₹{formatCurrency(itemSubtotal)}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">Bill Discount</span><span className="text-red-500">-₹{formatCurrency(itemDiscountTotal)}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">Taxable Amount</span><span>₹{formatCurrency(itemTaxableTotal)}</span></div>
-              {!items.every(i => i.is_inter_state) && (
-                <>
-                  <div className="flex justify-between"><span className="text-slate-500">CGST</span><span>₹{formatCurrency(itemCgstTotal)}</span></div>
-                  <div className="flex justify-between"><span className="text-slate-500">SGST</span><span>₹{formatCurrency(itemSgstTotal)}</span></div>
-                </>
-              )}
-              {items.some(i => i.is_inter_state) && (
-                <div className="flex justify-between"><span className="text-slate-500">IGST</span><span>₹{formatCurrency(itemIgstTotal)}</span></div>
-              )}
+              <div className="flex justify-between"><span className="text-slate-500">Item Discount</span><span className="text-red-500">-₹{formatCurrency(itemDiscountTotal)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Taxable Amount</span><span>₹{formatCurrency(taxableBeforeBillDiscount)}</span></div>
+              <div className="flex items-center justify-between gap-2"><span className="text-slate-500">Bill Discount</span><div className="flex items-center gap-1"><select value={generalDiscountType} onChange={(e) => { const type = e.target.value as DiscountType; setGeneralDiscountType(type); setForm((p) => ({ ...p, general_discount_percent: type === 'percent' ? p.general_discount_percent : 0, general_discount_amount: type === 'amount' ? p.general_discount_amount : 0 })); }} className="border rounded-lg px-2 py-1 text-xs"><option value="percent">%</option><option value="amount">₹</option></select><input type="number" min="0" step="0.01" value={generalDiscountType === 'percent' ? form.general_discount_percent : form.general_discount_amount} onChange={(e) => updateForm(generalDiscountType === 'percent' ? 'general_discount_percent' : 'general_discount_amount', normalizeNumber(e.target.value))} className="w-24 text-right border rounded-lg px-2 py-1.5" /></div></div>
+              <div className="flex items-center gap-2 text-xs"><span>Apply:</span><select value={generalDiscountApplyType} onChange={(e) => setGeneralDiscountApplyType(e.target.value as ApplyType)} className="border rounded-lg px-2 py-1"><option value="before_tax">Before Tax</option><option value="after_tax">After Tax</option></select><span className="ml-auto text-red-500">-₹{formatCurrency(generalDiscountAmount)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">CGST</span><span>₹{formatCurrency(itemCgstTotal)}</span></div><div className="flex justify-between"><span className="text-slate-500">SGST</span><span>₹{formatCurrency(itemSgstTotal)}</span></div><div className="flex justify-between"><span className="text-slate-500">IGST</span><span>₹{formatCurrency(itemIgstTotal)}</span></div>
               <div className="flex justify-between"><span className="text-slate-500">Additional Charges</span><span>₹{formatCurrency(additionalChargesTotal)}</span></div>
-              <div className="flex justify-between"><span className="text-slate-500">Packing Charges</span><span>₹{formatCurrency(form.packing_charges)}</span></div>
+              <div className="flex items-center justify-between"><span className="text-slate-500">Packing Charges</span><input type="number" min="0" step="0.01" value={form.packing_charges} onChange={(e) => updateForm('packing_charges', nonNegative(e.target.value))} className="w-28 text-right border rounded-lg px-2 py-1.5" /></div>
+              <div className="flex items-center gap-2 text-xs"><span>Apply packing:</span><select value={packingApplyType} onChange={(e) => setPackingApplyType(e.target.value as ApplyType)} className="border rounded-lg px-2 py-1"><option value="before_tax">Before Tax</option><option value="after_tax">After Tax</option></select><span className="ml-auto">Tax ₹{formatCurrency(packingTax)}</span></div>
               <div className="flex justify-between"><span className="text-slate-500">TCS</span><span>₹{formatCurrency(tcsAmount)}</span></div>
-              <div className="flex items-center gap-2">
-                <label className="flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={autoRoundOff} onChange={e => setAutoRoundOff(e.target.checked)} className="rounded border-slate-300" />
-                  Auto round off
-                </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  value={form.round_off}
-                  onChange={e => setForm(prev => ({ ...prev, round_off: Number(e.target.value) }))}
-                  disabled={autoRoundOff}
-                  className="w-20 text-right border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none"
-                />
-              </div>
-              <hr className="border-slate-200" />
-              <div className="flex justify-between text-base font-bold text-slate-800"><span>Grand Total</span><span>₹{formatCurrency(grandTotal)}</span></div>
-              <div className="text-xs text-slate-500 mt-1">{totalInWords}</div>
+              <div className="flex items-center gap-2"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={autoRoundOff} onChange={(e) => setAutoRoundOff(e.target.checked)} />Auto round off</label><input type="number" step="0.01" value={form.round_off} disabled={autoRoundOff} onChange={(e) => updateForm('round_off', normalizeNumber(e.target.value))} className="w-24 text-right border rounded-lg px-2 py-1.5" /></div>
+              <hr />
+              <div className="flex justify-between text-base font-bold"><span>Grand Total</span><span>₹{formatCurrency(grandTotal)}</span></div><div className="text-xs text-slate-500">{totalInWords}</div>
 
-              {/* Payments Section */}
-              <div className="mt-6 border-t border-slate-100 pt-4">
-                <div className="flex justify-between items-center mb-3">
-                  <h3 className="text-sm font-semibold text-slate-700">Payments</h3>
-                  <button onClick={addPayment} className="text-blue-600 text-xs flex items-center gap-1 hover:underline" aria-label="Add payment"><FiPlus size={14} /> Add Payment</button>
-                </div>
-                {form.payments.length === 0 && <p className="text-xs text-slate-400">No payments recorded.</p>}
-                <div className="space-y-3">
-                  {form.payments.map((pay, idx) => (
-                    <div key={pay.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200">
-                      <div className="flex justify-between items-start mb-2">
-                        <span className="text-xs font-semibold text-slate-500">Payment #{idx + 1}</span>
-                        <button onClick={() => removePayment(pay.id)} className="text-red-400 hover:text-red-600" aria-label="Remove payment"><FiTrash2 size={14} /></button>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <div>
-                          <label className="block text-xs text-slate-500">Amount</label>
-                          <input type="number" min="0" step="0.01" inputMode="decimal" value={pay.amount} onChange={e => updatePayment(pay.id, 'amount', Number(e.target.value))} className={`w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none ${pay.amount < 0 ? 'border-red-400' : ''}`} />
-                        </div>
-                        <div>
-                          <label className="block text-xs text-slate-500">Method</label>
-                          <select value={pay.payment_method} onChange={e => updatePayment(pay.id, 'payment_method', e.target.value as any)} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none">
-                            <option value="UPI">UPI</option>
-                            <option value="cash">Cash</option>
-                            <option value="cheque">Cheque</option>
-                            <option value="bank_transfer">Bank Transfer</option>
-                            <option value="other">Other</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-xs text-slate-500">Reference No</label>
-                          <input type="text" value={pay.reference_no} onChange={e => updatePayment(pay.id, 'reference_no', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none" />
-                        </div>
-                        <div>
-                          <label className="block text-xs text-slate-500">Date</label>
-                          <input type="date" value={pay.transaction_date} onChange={e => updatePayment(pay.id, 'transaction_date', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none" />
-                        </div>
-                        <div>
-                          <label className="block text-xs text-slate-500">Direction *</label>
-                          <select value={pay.payment_direction} onChange={e => updatePayment(pay.id, 'payment_direction', e.target.value as 'inward' | 'outward')} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none">
-                            <option value="outward">Outward (Pay Supplier)</option>
-                            <option value="inward">Inward (Refund)</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className="block text-xs text-slate-500">Bank Name</label>
-                          <input type="text" value={pay.bank_name} onChange={e => updatePayment(pay.id, 'bank_name', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none" />
-                        </div>
-                        <div className="col-span-2">
-                          <label className="block text-xs text-slate-500">Remarks</label>
-                          <input type="text" value={pay.remarks} onChange={e => updatePayment(pay.id, 'remarks', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none" />
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <div className="flex justify-between mt-3 text-sm font-medium">
-                  <span className="text-slate-600">Total Paid</span>
-                  <span>₹{formatCurrency(totalPaid)}</span>
-                </div>
-                <div className="flex justify-between mt-1 text-sm font-medium">
-                  <span className="text-slate-600">Balance Due</span>
-                  <span className={balanceDue > 0 ? 'text-red-600' : 'text-emerald-600'}>₹{formatCurrency(balanceDue)}</span>
-                </div>
-              </div>
+              <div className="border-t pt-4 mt-5"><div className="flex justify-between items-center mb-3"><h3 className="font-semibold">Additional Charges Detail</h3><button type="button" onClick={addCharge} className="text-blue-600 text-xs flex gap-1 items-center"><FiPlus />Add</button></div>{form.additional_charges.map((charge) => <div key={charge.id} className="flex gap-2 mb-2"><input value={charge.label} onChange={(e) => updateCharge(charge.id, { label: e.target.value })} placeholder="Charge name" className="flex-1 border rounded-lg px-2 py-1.5 text-xs" /><input type="number" min="0" step="0.01" value={charge.amount} onChange={(e) => updateCharge(charge.id, { amount: nonNegative(e.target.value) })} className="w-28 border rounded-lg px-2 py-1.5 text-xs text-right" /><button type="button" onClick={() => removeCharge(charge.id)} className="text-red-400"><FiTrash2 /></button></div>)}</div>
+
+              <div className="border-t pt-4 mt-5"><div className="flex justify-between items-center mb-3"><h3 className="font-semibold">Payments</h3><button type="button" onClick={addPayment} className="text-blue-600 text-xs flex items-center gap-1"><FiPlus />Add Payment</button></div>{form.payments.length === 0 ? <p className="text-xs text-slate-400">No payments recorded.</p> : form.payments.map((pay, idx) => <div key={pay.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200 mb-3"><div className="flex justify-between mb-2"><span className="text-xs font-semibold text-slate-500">Payment #{idx + 1}</span><button type="button" onClick={() => removePayment(pay.id)} className="text-red-400"><FiTrash2 /></button></div><div className="grid grid-cols-2 gap-2"><div><label className="block text-xs text-slate-500">Amount</label><input type="number" min="0" step="0.01" value={pay.amount} onChange={(e) => updatePayment(pay.id, { amount: nonNegative(e.target.value) })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Method</label><select value={pay.payment_method} onChange={(e) => updatePayment(pay.id, { payment_method: e.target.value as PaymentMethod })} className="w-full border rounded-lg px-2 py-1.5 text-xs"><option value="UPI">UPI</option><option value="cash">Cash</option><option value="cheque">Cheque</option><option value="bank_transfer">Bank Transfer</option><option value="other">Other</option></select></div><div><label className="block text-xs text-slate-500">Reference No</label><input value={pay.reference_no} onChange={(e) => updatePayment(pay.id, { reference_no: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Date</label><input type="date" value={pay.transaction_date} onChange={(e) => updatePayment(pay.id, { transaction_date: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Direction</label><select value={pay.payment_direction} onChange={(e) => updatePayment(pay.id, { payment_direction: e.target.value as PaymentDirection })} className="w-full border rounded-lg px-2 py-1.5 text-xs"><option value="outward">Outward</option><option value="inward">Inward / Refund</option></select></div><div><label className="block text-xs text-slate-500">Bank Name</label><input value={pay.bank_name} onChange={(e) => updatePayment(pay.id, { bank_name: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div className="col-span-2"><label className="block text-xs text-slate-500">Remarks</label><input value={pay.remarks} onChange={(e) => updatePayment(pay.id, { remarks: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div></div></div>)}<div className="flex justify-between text-sm"><span>Total Outward</span><span>₹{formatCurrency(totalOutward)}</span></div><div className="flex justify-between text-sm"><span>Total Inward</span><span>₹{formatCurrency(totalInward)}</span></div><div className="flex justify-between mt-1 font-semibold"><span>Balance Due</span><span className={balanceDue > 0.01 ? 'text-red-600' : 'text-emerald-600'}>₹{formatCurrency(balanceDue)}</span></div></div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Sticky Bottom Bar */}
-      <div className="sticky bottom-0 bg-white/80 backdrop-blur-md border-t border-slate-200 shadow-2xl p-4 flex flex-wrap justify-end gap-3 z-30">
-        <button onClick={() => navigate('/purchases')} className="px-5 py-2.5 rounded-xl border border-slate-300 text-sm hover:bg-slate-50 transition-colors">Cancel</button>
-        
-        <button onClick={() => handleSubmit('save_print')} disabled={submitting} className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:from-cyan-600 hover:to-blue-700 text-sm flex items-center gap-2 shadow-lg shadow-cyan-400/30 transition-all disabled:opacity-50">
-          {submitting ? <FiLoader className="animate-spin" size={16} /> : <FiPrinter size={16} />} Print & Save
-        </button>
-      </div>
+      <div className="sticky bottom-0 bg-white/90 backdrop-blur-md border-t border-slate-200 shadow-2xl p-4 flex flex-wrap justify-end gap-3 z-40"><button type="button" onClick={() => navigate('/purchases')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl border border-slate-300 text-sm">Cancel</button><button type="button" onClick={() => handleSubmit('save_draft')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl border border-slate-300 text-sm flex items-center gap-2">{savingDraft ? <FiLoader className="animate-spin" /> : <FiSave />}Save Draft</button><button type="button" onClick={() => handleSubmit('save')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl bg-slate-800 text-white text-sm flex items-center gap-2">{submitting ? <FiLoader className="animate-spin" /> : <FiCheckCircle />}Save Purchase</button><button type="button" onClick={() => handleSubmit('save_print')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-white text-sm flex items-center gap-2">{submitting ? <FiLoader className="animate-spin" /> : <FiPrinter />}Print & Save</button></div>
 
-      {/* Supplier Offcanvas */}
-      {showSupplierOffcanvas && (
-        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
-          <Offcanvas
-            isOpen={showSupplierOffcanvas}
-            title="Add Supplier"
-            onClose={() => setShowSupplierOffcanvas(false)}
-            footer={
-              <div className="flex justify-between w-full">
-                <button onClick={() => setShowSupplierOffcanvas(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50 transition-colors" disabled={supplierSubmitting}>Close</button>
-                <button onClick={createSupplier} disabled={supplierSubmitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors">
-                  {supplierSubmitting ? 'Creating...' : 'Create Supplier'}
-                </button>
-              </div>
-            }
-          >
-            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
-              <fieldset className="border border-slate-200 rounded-xl p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2 px-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Basic Information</legend>
-                <div className="mt-3 space-y-4">
-                  <div>
-                    <label className={labelClass}>Company *</label>
-                    <select value={newSupplier.company_id} onChange={e => setNewSupplier(prev => ({ ...prev, company_id: e.target.value }))} className={inputClass}>
-                      <option value="">Select Company</option>
-                      {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className={labelClass}>Supplier Name *</label>
-                    <input type="text" value={newSupplier.name} onChange={e => setNewSupplier(prev => ({ ...prev, name: e.target.value }))} className={inputClass} placeholder="e.g., ABC Traders" />
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div><label className={labelClass}>Contact Person</label><input type="text" value={newSupplier.contact_person} onChange={e => setNewSupplier(prev => ({ ...prev, contact_person: e.target.value }))} className={inputClass} /></div>
-                    <div><label className={labelClass}>Contact No</label><input type="text" value={newSupplier.contact_no} onChange={e => setNewSupplier(prev => ({ ...prev, contact_no: e.target.value }))} className={inputClass} /></div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div><label className={labelClass}>Email</label><input type="email" value={newSupplier.email} onChange={e => setNewSupplier(prev => ({ ...prev, email: e.target.value }))} className={inputClass} /></div>
-                    <div><label className={labelClass}>Phone</label><input type="text" value={newSupplier.phone} onChange={e => setNewSupplier(prev => ({ ...prev, phone: e.target.value }))} className={inputClass} /></div>
-                  </div>
-                </div>
-              </fieldset>
+      {showSupplierOffcanvas && <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}><Offcanvas isOpen={showSupplierOffcanvas} title="Add Supplier" onClose={() => !supplierSubmitting && setShowSupplierOffcanvas(false)} footer={<div className="flex justify-between w-full"><button onClick={() => setShowSupplierOffcanvas(false)} disabled={supplierSubmitting} className="px-4 py-2 rounded-lg border">Close</button><button onClick={createSupplier} disabled={supplierSubmitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white">{supplierSubmitting ? 'Creating...' : 'Create Supplier'}</button></div>}><div className="space-y-5 overflow-y-auto pr-2" style={{ maxHeight: '70vh' }}><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Basic Information</legend><div className="space-y-4 mt-2"><div><label className={labelClass}>Company *</label><select value={newSupplier.company_id} onChange={(e) => setNewSupplier((p) => ({ ...p, company_id: e.target.value }))} className={inputClass}><option value="">Select Company</option>{companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div><div><label className={labelClass}>Supplier Name *</label><input value={newSupplier.name} onChange={(e) => setNewSupplier((p) => ({ ...p, name: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="Contact Person" value={newSupplier.contact_person} onChange={(e) => setNewSupplier((p) => ({ ...p, contact_person: e.target.value }))} className={inputClass} /><input placeholder="Contact No" value={newSupplier.contact_no} onChange={(e) => setNewSupplier((p) => ({ ...p, contact_no: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="Email" type="email" value={newSupplier.email} onChange={(e) => setNewSupplier((p) => ({ ...p, email: e.target.value }))} className={inputClass} /><input placeholder="Phone" value={newSupplier.phone} onChange={(e) => setNewSupplier((p) => ({ ...p, phone: e.target.value }))} className={inputClass} /></div></div></fieldset><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Tax Details</legend><div className="grid grid-cols-2 gap-4 mt-2"><input placeholder="GST Number" value={newSupplier.gst_number} onChange={(e) => setNewSupplier((p) => ({ ...p, gst_number: e.target.value.toUpperCase() }))} className={inputClass} /><input placeholder="PAN" value={newSupplier.pan} onChange={(e) => setNewSupplier((p) => ({ ...p, pan: e.target.value.toUpperCase() }))} className={inputClass} /></div></fieldset><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Billing Address</legend><div className="space-y-3 mt-2"><textarea rows={2} value={newSupplier.billing_street} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_street: e.target.value }))} className={inputClass} placeholder="Street Address" /><div className="grid grid-cols-2 gap-3"><input placeholder="City" value={newSupplier.billing_city} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_city: e.target.value }))} className={inputClass} /><input placeholder="State" value={newSupplier.billing_state} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_state: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-3"><input placeholder="Country" value={newSupplier.billing_country} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_country: e.target.value }))} className={inputClass} /><input placeholder="Pincode" value={newSupplier.billing_pincode} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_pincode: e.target.value }))} className={inputClass} /></div></div></fieldset></div></Offcanvas></Suspense>}
 
-              <fieldset className="border border-slate-200 rounded-xl p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2 px-2"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Tax Details</legend>
-                <div className="mt-3 grid grid-cols-2 gap-4">
-                  <div><label className={labelClass}>GST Number</label><input type="text" value={newSupplier.gst_number} onChange={e => setNewSupplier(prev => ({ ...prev, gst_number: e.target.value }))} className={inputClass} /></div>
-                  <div><label className={labelClass}>PAN</label><input type="text" value={newSupplier.pan} onChange={e => setNewSupplier(prev => ({ ...prev, pan: e.target.value }))} className={inputClass} /></div>
-                </div>
-              </fieldset>
-
-              <fieldset className="border border-slate-200 rounded-xl p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2 px-2"><span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Billing Address</legend>
-                <div className="mt-3 space-y-3">
-                  <textarea rows={2} value={newSupplier.billing_street} onChange={e => setNewSupplier(prev => ({ ...prev, billing_street: e.target.value }))} className={inputClass} placeholder="Street Address" />
-                  <div className="grid grid-cols-2 gap-3">
-                    <div><label className={labelClass}>City</label><input type="text" value={newSupplier.billing_city} onChange={e => setNewSupplier(prev => ({ ...prev, billing_city: e.target.value }))} className={inputClass} /></div>
-                    <div><label className={labelClass}>State</label><input type="text" value={newSupplier.billing_state} onChange={e => setNewSupplier(prev => ({ ...prev, billing_state: e.target.value }))} className={inputClass} /></div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div><label className={labelClass}>Country</label><input type="text" value={newSupplier.billing_country} onChange={e => setNewSupplier(prev => ({ ...prev, billing_country: e.target.value }))} className={inputClass} /></div>
-                    <div><label className={labelClass}>Pincode</label><input type="text" value={newSupplier.billing_pincode} onChange={e => setNewSupplier(prev => ({ ...prev, billing_pincode: e.target.value }))} className={inputClass} /></div>
-                  </div>
-                </div>
-              </fieldset>
-            </div>
-          </Offcanvas>
-        </Suspense>
-      )}
-
-      {/* Product Offcanvas */}
-      {showProductOffcanvas && (
-        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
-          <Offcanvas
-            isOpen={showProductOffcanvas}
-            title="Add Product"
-            onClose={() => setShowProductOffcanvas(false)}
-            footer={
-              <div className="flex justify-between w-full">
-                <button onClick={() => setShowProductOffcanvas(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50 transition-colors" disabled={productSubmitting}>Close</button>
-                <button onClick={createProduct} disabled={productSubmitting} className="px-5 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-50 transition-colors">
-                  {productSubmitting ? 'Creating...' : 'Create Product'}
-                </button>
-              </div>
-            }
-          >
-            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
-              <fieldset className="border border-slate-200 rounded-xl p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2 px-2"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Basic Information</legend>
-                <div className="mt-3 space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className={labelClass}>Company *</label>
-                      <select value={newProduct.company_id} onChange={e => setNewProduct(prev => ({ ...prev, company_id: e.target.value }))} className={`${inputClass} ${productFormErrors.company_id ? 'border-red-400 ring-2 ring-red-200' : ''}`}>
-                        <option value="">Select Company</option>
-                        {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label className={labelClass}>Branch</label>
-                      <select value={newProduct.branch_id} onChange={e => setNewProduct(prev => ({ ...prev, branch_id: e.target.value }))} className={inputClass}>
-                        <option value="">Select Branch</option>
-                        {/* Branches would be loaded here based on company */}
-                      </select>
-                    </div>
-                  </div>
-                  <div>
-                    <label className={labelClass}>Product Name *</label>
-                    <input type="text" value={newProduct.name} onChange={e => setNewProduct(prev => ({ ...prev, name: e.target.value }))} className={`${inputClass} ${productFormErrors.name ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="e.g., Steel Rod" />
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div><label className={labelClass}>SKU (optional)</label><input type="text" value={newProduct.sku} onChange={e => setNewProduct(prev => ({ ...prev, sku: e.target.value }))} className={inputClass} placeholder="Auto-generated if blank" /></div>
-                    <div><label className={labelClass}>HSN/SAC Code</label><input type="text" value={newProduct.hsn_sac_code} onChange={e => setNewProduct(prev => ({ ...prev, hsn_sac_code: e.target.value }))} className={inputClass} placeholder="e.g., 7308" /></div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div><label className={labelClass}>Unit *</label><input type="text" value={newProduct.unit} onChange={e => setNewProduct(prev => ({ ...prev, unit: e.target.value }))} className={`${inputClass} ${productFormErrors.unit ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="e.g., Piece, Kg" /></div>
-                    <div><label className={labelClass}>Purchase Price (₹) *</label><input type="number" step="0.01" value={newProduct.purchase_price} onChange={e => setNewProduct(prev => ({ ...prev, purchase_price: e.target.value }))} className={`${inputClass} ${productFormErrors.purchase_price ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="0.00" /></div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div><label className={labelClass}>Sale Price (₹)</label><input type="number" step="0.01" value={newProduct.sale_price} onChange={e => setNewProduct(prev => ({ ...prev, sale_price: e.target.value }))} className={inputClass} placeholder="0.00" /></div>
-                    <div><label className={labelClass}>Tax Rate (%)</label><input type="number" step="0.01" value={newProduct.tax_rate} onChange={e => setNewProduct(prev => ({ ...prev, tax_rate: e.target.value }))} className={inputClass} /></div>
-                  </div>
-                </div>
-              </fieldset>
-
-              <fieldset className="border border-slate-200 rounded-xl p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2 px-2"><span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Stock & Notes</legend>
-                <div className="mt-3 grid grid-cols-2 gap-4">
-                  <div><label className={labelClass}>Stock Quantity</label><input type="number" value={newProduct.stock_quantity} onChange={e => setNewProduct(prev => ({ ...prev, stock_quantity: e.target.value }))} className={inputClass} /></div>
-                  <div><label className={labelClass}>Reorder Level</label><input type="number" value={newProduct.reorder_level} onChange={e => setNewProduct(prev => ({ ...prev, reorder_level: e.target.value }))} className={inputClass} /></div>
-                </div>
-                <div className="mt-4">
-                  <label className={labelClass}>Description</label>
-                  <textarea rows={2} value={newProduct.description} onChange={e => setNewProduct(prev => ({ ...prev, description: e.target.value }))} className={inputClass} placeholder="Optional description" />
-                </div>
-              </fieldset>
-            </div>
-          </Offcanvas>
-        </Suspense>
-      )}
-
-      <style>{`
-        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        .hide-scrollbar::-webkit-scrollbar { display: none; }
-        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
-        .scrollbar-hide::-webkit-scrollbar { display: none; }
-      `}</style>
+      {showProductOffcanvas && <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}><Offcanvas isOpen={showProductOffcanvas} title="Add Product" onClose={() => !productSubmitting && setShowProductOffcanvas(false)} footer={<div className="flex justify-between w-full"><button onClick={() => setShowProductOffcanvas(false)} disabled={productSubmitting} className="px-4 py-2 rounded-lg border">Close</button><button onClick={createProduct} disabled={productSubmitting} className="px-5 py-2 rounded-lg bg-emerald-600 text-white">{productSubmitting ? 'Creating...' : 'Create Product'}</button></div>}><div className="space-y-5 overflow-y-auto pr-2" style={{ maxHeight: '70vh' }}><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Basic Information</legend><div className="space-y-4 mt-2"><div className="grid grid-cols-2 gap-4"><div><label className={labelClass}>Company *</label><select value={newProduct.company_id} onChange={(e) => setNewProduct((p) => ({ ...p, company_id: e.target.value }))} className={`${inputClass} ${productFormErrors.company_id ? 'border-red-400' : ''}`}><option value="">Select Company</option>{companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div><div><label className={labelClass}>Branch</label><input value={newProduct.branch_id} onChange={(e) => setNewProduct((p) => ({ ...p, branch_id: e.target.value }))} className={inputClass} placeholder="Branch ID (optional)" /></div></div><div><label className={labelClass}>Product Name *</label><input value={newProduct.name} onChange={(e) => setNewProduct((p) => ({ ...p, name: e.target.value }))} className={`${inputClass} ${productFormErrors.name ? 'border-red-400' : ''}`} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="SKU" value={newProduct.sku} onChange={(e) => setNewProduct((p) => ({ ...p, sku: e.target.value }))} className={inputClass} /><input placeholder="HSN/SAC Code" value={newProduct.hsn_sac_code} onChange={(e) => setNewProduct((p) => ({ ...p, hsn_sac_code: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="Unit" value={newProduct.unit} onChange={(e) => setNewProduct((p) => ({ ...p, unit: e.target.value }))} className={`${inputClass} ${productFormErrors.unit ? 'border-red-400' : ''}`} /><input type="number" min="0" step="0.01" placeholder="Purchase Price" value={newProduct.purchase_price} onChange={(e) => setNewProduct((p) => ({ ...p, purchase_price: e.target.value }))} className={`${inputClass} ${productFormErrors.purchase_price ? 'border-red-400' : ''}`} /></div><div className="grid grid-cols-2 gap-4"><input type="number" min="0" step="0.01" placeholder="Sale Price" value={newProduct.sale_price} onChange={(e) => setNewProduct((p) => ({ ...p, sale_price: e.target.value }))} className={inputClass} /><input type="number" min="0" max="100" step="0.01" placeholder="Tax Rate %" value={newProduct.tax_rate} onChange={(e) => setNewProduct((p) => ({ ...p, tax_rate: e.target.value }))} className={inputClass} /></div></div></fieldset><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Stock & Notes</legend><div className="grid grid-cols-2 gap-4 mt-2"><input type="number" placeholder="Stock Quantity" value={newProduct.stock_quantity} onChange={(e) => setNewProduct((p) => ({ ...p, stock_quantity: e.target.value }))} className={inputClass} /><input type="number" placeholder="Reorder Level" value={newProduct.reorder_level} onChange={(e) => setNewProduct((p) => ({ ...p, reorder_level: e.target.value }))} className={inputClass} /></div><textarea rows={3} placeholder="Description" value={newProduct.description} onChange={(e) => setNewProduct((p) => ({ ...p, description: e.target.value }))} className={`${inputClass} mt-4`} /></fieldset></div></Offcanvas></Suspense>}
     </div>
   );
 }

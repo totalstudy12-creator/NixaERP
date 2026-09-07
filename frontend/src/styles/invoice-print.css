@@ -1,0 +1,52 @@
+/* Print styles isolation */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .invoice-print-58mm,
+  .invoice-print-80mm,
+  .invoice-print-a4,
+  .print-only {
+    visibility: visible;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    background: white;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  /* Remove animations */
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  /* Ensure background colors print */
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+/* 58mm specific */
+@media print and (max-width: 58mm) {
+  .invoice-print-58mm {
+    width: 58mm;
+    max-width: 58mm;
+    padding: 0;
+  }
+}
+
+/* 80mm specific */
+@media print and (max-width: 80mm) {
+  .invoice-print-80mm {
+    width: 80mm;
+    max-width: 80mm;
+    padding: 0;
+  }
+}

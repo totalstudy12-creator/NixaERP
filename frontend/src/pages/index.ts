@@ -1,3 +1,4 @@
+// frontend/src/pages/index.ts
 export * from './LoginPage';
 export * from './DashboardPage';
 export * from './CompaniesPage';
@@ -6,6 +7,7 @@ export * from './ProductsPage';
 export * from './OrdersPage';
 export * from './InvoicesPage';
 export * from './InvoiceDetailPage';
+export * from './SalesInvoiceReturnPage'; 
 export * from './BranchesPage';
 export * from './WarehousesPage';
 export * from './UsersPage';
@@ -17,7 +19,6 @@ export * from './ManualOrdersPage';
 export * from './AuditLogsPage';
 export * from './SalesPOSPage';
 export * from './PurchasePage';
-
 export * from './EmployeesPage';
 export * from './AttendancePage';
 export * from './PayrollPage';
@@ -37,6 +38,7 @@ export * from './HealthMonitoringPage';
 export * from './BackupRestorePage';
 export * from './PageTemplate';
 
+// Re-export specific named exports if needed
 export { MarketingPage } from './MarketingPage';
 export { EmployeesPage } from './EmployeesPage';
 export { CreateInvoicePage } from './CreateInvoicePage';
@@ -47,4 +49,4 @@ export { NotFoundPage } from './NotFoundPage';
 export { InventoryPage } from './InventoryPage';
 export { EditInvoicePage } from './EditInvoicePage';
 export { CreatePurchaseInvoicePage } from './CreatePurchaseInvoicePage';
-export { EditPurchaseInvoicePage } from './EditPurchaseInvoicePage'; 
+export { EditPurchaseInvoicePage } from './EditPurchaseInvoicePage';

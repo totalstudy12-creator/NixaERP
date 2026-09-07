@@ -59,7 +59,7 @@ interface PaymentEntry {
   id: string;
   amount: number;
   payment_method: 'UPI' | 'cash' | 'cheque' | 'other';
-  reference_no: string;
+  reference_no: string; // now represents transaction ID
   transaction_date: string;
   bank_name: string;
   account_number: string;
@@ -206,7 +206,7 @@ function calculateSummary(items: InvoiceItem[], form: InvoiceFormData) {
     roundOff,
     grandTotal,
     totalPaid,
-    balanceDue: grandTotal - totalPaid,
+    balanceDue: Math.max(0, grandTotal - totalPaid), // <-- FIX: no negative due
   };
 }
 
@@ -339,7 +339,7 @@ export function CreateInvoicePage() {
   const { data: banks } = useApiCache<BankAccount>('banks', getBanks);
   const { data: customerGroups, refresh: refreshGroups } = useApiCache<any>('customerGroups', getCustomerGroups);
 
-  // ── State declarations (order matters) ──
+  // ── State declarations ──
   const [items, setItems] = useState<InvoiceItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -375,7 +375,7 @@ export function CreateInvoicePage() {
     payments: [],
   });
 
-  // Dirty state initial refs (now after form/items)
+  // Dirty state initial refs
   const [isDirty, setIsDirty] = useState(false);
   const initialForm = useRef(JSON.stringify(form));
   const initialItems = useRef(JSON.stringify(items));
@@ -864,11 +864,20 @@ export function CreateInvoicePage() {
 
   // Payments
   const addPayment = () => {
+    const generateTransactionId = () => {
+      const date = new Date();
+      const yyyy = date.getFullYear();
+      const mm = String(date.getMonth() + 1).padStart(2, '0');
+      const dd = String(date.getDate()).padStart(2, '0');
+      const random = Math.random().toString(36).substring(2, 6).toUpperCase();
+      return `TXN-${yyyy}${mm}${dd}-${random}`;
+    };
+
     const newPayment: PaymentEntry = {
       id: Date.now().toString(),
       amount: 0,
       payment_method: 'cash',
-      reference_no: '',
+      reference_no: generateTransactionId(),  // auto transaction id
       transaction_date: new Date().toISOString().split('T')[0],
       bank_name: '',
       account_number: '',
@@ -892,6 +901,9 @@ export function CreateInvoicePage() {
   // Summary
   const summary = useMemo(() => calculateSummary(items, form), [items, form]);
   const totalInWords = useMemo(() => numberToWordsINR(summary.grandTotal), [summary.grandTotal]);
+
+  // Compute change to return (if overpayment)
+  const changeToReturn = summary.totalPaid > summary.grandTotal ? summary.totalPaid - summary.grandTotal : 0;
 
   // Validation
   const validateMainForm = () => {
@@ -990,7 +1002,25 @@ export function CreateInvoicePage() {
       const res = await apiClient.createInvoice(invoicePayload);
       const newInvoice = res.data || res;
 
-      const validPayments = form.payments.filter(p => p.amount > 0);
+      // Cap payments to grand total
+      const grandTotal = summary.grandTotal;
+      let remainingToApply = grandTotal;
+      const validPayments = [];
+
+      for (const payment of form.payments) {
+        if (payment.amount <= 0) continue;
+        if (remainingToApply <= 0) break;
+
+        const amountToApply = Math.min(payment.amount, remainingToApply);
+        if (amountToApply > 0) {
+          validPayments.push({
+            ...payment,
+            amount: amountToApply,
+          });
+          remainingToApply -= amountToApply;
+        }
+      }
+
       if (validPayments.length > 0) {
         const paymentPromises = validPayments.map((payment, idx) =>
           apiClient.request('POST', '/payments', {
@@ -1011,7 +1041,11 @@ export function CreateInvoicePage() {
         await Promise.all(paymentPromises);
       }
 
-      showSuccess('Invoice saved', `Invoice ${form.invoice_no} created.${validPayments.length ? ' Payments recorded.' : ''}`);
+      const overpaid = changeToReturn > 0;
+      showSuccess(
+        'Invoice saved',
+        `Invoice ${form.invoice_no} created.${validPayments.length ? ' Payments recorded.' : ''}${overpaid ? ` Change to return: ₹${changeToReturn.toFixed(2)}` : ''}`
+      );
       addAppLog({ module: 'Invoices', action: 'Create', status: 'success', message: form.invoice_no });
       if (action === 'save_print') navigate(`/invoices/${newInvoice.id}?print=1`);
       else navigate(`/invoices/${newInvoice.id}`);
@@ -1022,7 +1056,7 @@ export function CreateInvoicePage() {
     } finally {
       setSubmitting(false);
     }
-  }, [form, items, navigate, showSuccess, showError]);
+  }, [form, items, navigate, showSuccess, showError, summary, changeToReturn]);
 
   // Keyboard navigation
   const handleProductKeyDown = (e: React.KeyboardEvent) => {
@@ -1664,7 +1698,7 @@ export function CreateInvoicePage() {
                         </select>
                       </div>
                       <div>
-                        <label className="block text-xs text-slate-500">Reference No</label>
+                        <label className="block text-xs text-slate-500">Transaction ID</label>
                         <input type="text" value={pay.reference_no} onChange={e => updatePayment(pay.id, 'reference_no', e.target.value)} className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500/30 outline-none" />
                       </div>
                       <div>
@@ -1687,6 +1721,12 @@ export function CreateInvoicePage() {
                 <span className="text-slate-600">Balance Due</span>
                 <span className={summary.balanceDue > 0 ? 'text-red-600' : 'text-emerald-600'}>₹{formatCurrency(summary.balanceDue)}</span>
               </div>
+              {changeToReturn > 0 && (
+                <div className="flex justify-between mt-1 text-sm font-medium">
+                  <span className="text-amber-600">Change to Return</span>
+                  <span className="text-amber-600">₹{formatCurrency(changeToReturn)}</span>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1695,8 +1735,9 @@ export function CreateInvoicePage() {
       {/* Sticky Bottom Bar */}
       <div className="sticky bottom-0 bg-white/80 backdrop-blur-md border-t border-slate-200 shadow-2xl p-4 flex flex-wrap justify-end gap-3 z-30">
         <button onClick={() => navigate('/invoices')} className="px-5 py-2.5 rounded-xl border border-slate-300 text-sm hover:bg-slate-50 transition-colors">Cancel</button>
-        
-        
+        <button onClick={() => handleSubmit('save')} disabled={submitting} className="px-5 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 transition-colors disabled:opacity-50">
+          {submitting ? <FiLoader className="animate-spin" size={16} /> : <FiSave size={16} />} Save
+        </button>
         <button onClick={() => handleSubmit('save_print')} disabled={submitting} className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-white hover:from-cyan-600 hover:to-blue-700 text-sm flex items-center gap-2 shadow-lg shadow-cyan-400/30 transition-all disabled:opacity-50">
           {submitting ? <FiLoader className="animate-spin" size={16} /> : <FiPrinter size={16} />} Print & Save
         </button>
@@ -1875,6 +1916,11 @@ export function CreateInvoicePage() {
                   <div className="grid grid-cols-2 gap-4">
                     <div><label className={labelClass}>Unit *</label><input type="text" value={newProduct.unit} onChange={e => setNewProduct(prev => ({ ...prev, unit: e.target.value }))} className={`${inputClass} ${productFormErrors.unit ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="e.g., Piece, Kg" /></div>
                     <div><label className={labelClass}>Sale Price (₹) *</label><input type="number" step="0.01" value={newProduct.sale_price} onChange={e => setNewProduct(prev => ({ ...prev, sale_price: e.target.value }))} className={`${inputClass} ${productFormErrors.sale_price ? 'border-red-400 ring-2 ring-red-200' : ''}`} placeholder="0.00" /></div>
+                  </div>
+                  {/* New Purchase Price input added here */}
+                  <div>
+                    <label className={labelClass}>Purchase Price / Cost (₹)</label>
+                    <input type="number" step="0.01" value={newProduct.purchase_price} onChange={e => setNewProduct(prev => ({ ...prev, purchase_price: e.target.value }))} className={inputClass} placeholder="0.00" />
                   </div>
                 </div>
               </fieldset>

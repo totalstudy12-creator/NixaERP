@@ -4,11 +4,13 @@ import {
   FiChevronDown, FiChevronUp, FiAlertCircle, FiPlus, FiTrash2,
   FiKey, FiX, FiCode, FiEye, FiEyeOff, FiLink, FiServer,
   FiGlobe, FiExternalLink, FiInfo, FiShield, FiDatabase,
+  FiPrinter, FiBluetooth, FiRadio, FiWifi, FiPower, FiLoader,
 } from 'react-icons/fi';
 import { apiClient, API_BASE } from '../api';
 import { useAuthStore } from '../store/auth';
 import { useNotification } from '../components/NotificationContext';
 
+// ---------- Types ----------
 interface SettingItem {
   id: number;
   key: string;
@@ -38,6 +40,8 @@ const DEFAULT_OPTIONS: Record<string, string[]> = {
   theme: ['light', 'dark', 'system'],
   date_format: ['DD/MM/YYYY', 'MM/DD/YYYY', 'YYYY-MM-DD'],
   time_format: ['12h', '24h'],
+  printer_format: ['58mm', '80mm', 'A4'],
+  printer_connection: ['browser', 'bluetooth', 'system'],
 };
 
 const GROUP_META: Record<string, { icon: string; color: string }> = {
@@ -47,6 +51,7 @@ const GROUP_META: Record<string, { icon: string; color: string }> = {
   notifications: { icon: '🔔', color: 'bg-amber-100 text-amber-700' },
   security: { icon: '🔒', color: 'bg-rose-100 text-rose-700' },
   appearance: { icon: '🎨', color: 'bg-pink-100 text-pink-700' },
+  printer: { icon: '🖨️', color: 'bg-cyan-100 text-cyan-700' },
 };
 
 // Skeleton components
@@ -86,6 +91,15 @@ const DEFAULT_VOICE_SETTINGS = {
   elevenlabs_model_id: 'eleven_multilingual_v2',
 };
 
+const DEFAULT_PRINTER_SETTINGS = {
+  printer_default_format: 'A4',
+  printer_connection_mode: 'browser',
+  printer_bluetooth_device_name: '',
+  printer_bluetooth_device_id: '',
+  printer_last_connected: '',
+  printer_is_connected: 'false',
+};
+
 export function SettingsPage() {
   const [settings, setSettings] = useState<SettingItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -96,7 +110,7 @@ export function SettingsPage() {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showAuthToken, setShowAuthToken] = useState(false);
-  const [activeTab, setActiveTab] = useState<'settings' | 'api'>('settings');
+  const [activeTab, setActiveTab] = useState<'settings' | 'api' | 'printer'>('settings');
   const [voiceConfig, setVoiceConfig] = useState(DEFAULT_VOICE_SETTINGS);
   const [newSetting, setNewSetting] = useState({
     key: '',
@@ -108,11 +122,14 @@ export function SettingsPage() {
   const { showSuccess, showError } = useNotification();
   const authToken = useAuthStore((state) => state.token);
 
-  // Build full API URL
+  const [bluetoothDevices, setBluetoothDevices] = useState<BluetoothDevice[]>([]);
+  const [scanningBluetooth, setScanningBluetooth] = useState(false);
+  const [connectingDevice, setConnectingDevice] = useState<string | null>(null);
+  const [connectedDevice, setConnectedDevice] = useState<BluetoothDevice | null>(null);
+  const [printerSettings, setPrinterSettings] = useState(DEFAULT_PRINTER_SETTINGS);
+
   const fullApiUrl = useMemo(() => {
-    if (API_BASE.startsWith('http')) {
-      return API_BASE;
-    }
+    if (API_BASE.startsWith('http')) return API_BASE;
     const baseUrl = window.location.origin;
     return `${baseUrl}${API_BASE}`;
   }, []);
@@ -123,9 +140,7 @@ export function SettingsPage() {
     try {
       const response = await apiClient.request('GET', '/settings');
       const rawData = Array.isArray(response) ? response : response?.data;
-      if (!rawData || !Array.isArray(rawData)) {
-        throw new Error('Invalid settings response');
-      }
+      if (!rawData || !Array.isArray(rawData)) throw new Error('Invalid settings response');
 
       const enriched = rawData.map((item: SettingItem) => ({
         ...item,
@@ -143,6 +158,23 @@ export function SettingsPage() {
         }
       });
       setVoiceConfig(mergedVoiceConfig);
+
+      const mergedPrinterSettings = { ...DEFAULT_PRINTER_SETTINGS };
+      rawData.forEach((item: any) => {
+        if (item && typeof item.key === 'string' && Object.prototype.hasOwnProperty.call(mergedPrinterSettings, item.key)) {
+          mergedPrinterSettings[item.key as keyof typeof mergedPrinterSettings] = String(item.value ?? mergedPrinterSettings[item.key as keyof typeof mergedPrinterSettings]);
+        }
+      });
+      setPrinterSettings(mergedPrinterSettings);
+
+      if (mergedPrinterSettings.printer_is_connected === 'true' && mergedPrinterSettings.printer_bluetooth_device_id) {
+        setConnectedDevice({
+          id: mergedPrinterSettings.printer_bluetooth_device_id,
+          name: mergedPrinterSettings.printer_bluetooth_device_name || 'Unknown Printer',
+        } as BluetoothDevice);
+      } else {
+        setConnectedDevice(null);
+      }
 
       setExpandedGroups(prev => {
         const firstGroup = enriched[0]?.group || 'general';
@@ -276,7 +308,7 @@ export function SettingsPage() {
     }
   }, [showSuccess, showError, loadSettings]);
 
-const saveVoiceSettings = useCallback(async () => {
+  const saveVoiceSettings = useCallback(async () => {
     const voiceEntries = Object.entries(voiceConfig).map(([key, value]) => ({
       key,
       value,
@@ -297,6 +329,107 @@ const saveVoiceSettings = useCallback(async () => {
       setSaving(prev => ({ ...prev, voice: false }));
     }
   }, [voiceConfig, showSuccess, showError, loadSettings]);
+
+  const savePrinterSettings = useCallback(async () => {
+    setSaving(prev => ({ ...prev, printer: true }));
+    try {
+      const entries = Object.entries(printerSettings);
+      for (const [key, value] of entries) {
+        await apiClient.request('PUT', `/settings/${key}`, {
+          value,
+          group: 'printer',
+          description: 'Printer configuration for thermal / A4 printing.',
+          is_public: false,
+        });
+
+        setSettings(current => {
+          const existing = current.find(s => s.key === key);
+          if (existing) {
+            return current.map(s => s.key === key ? { ...s, value } : s);
+          } else {
+            const newItem: SettingItem = {
+              id: Date.now(),
+              key,
+              value,
+              group: 'printer',
+              description: 'Printer configuration for thermal / A4 printing.',
+              is_public: false,
+              type: inferType(key),
+              options: DEFAULT_OPTIONS[key.toLowerCase()] || [],
+              defaultValue: value,
+            };
+            return [...current, newItem];
+          }
+        });
+      }
+      showSuccess('Printer settings saved', 'Default format and connection saved successfully.');
+    } catch (err: any) {
+      const msg = err?.backendMessage || err?.message || 'Unable to save printer settings.';
+      showError('Printer settings failed', msg);
+    } finally {
+      setSaving(prev => ({ ...prev, printer: false }));
+    }
+  }, [printerSettings, showSuccess, showError]);
+
+  const scanBluetoothPrinters = useCallback(async () => {
+    if (!('bluetooth' in navigator)) {
+      showError('Bluetooth not supported', 'This browser does not support Web Bluetooth. Use a Chromium‑based browser.');
+      return;
+    }
+    setScanningBluetooth(true);
+    setBluetoothDevices([]);
+    try {
+      const device = await navigator.bluetooth.requestDevice({
+        filters: [{ services: ['000018f0-0000-1000-8000-00805f9b34fb'] }],
+        optionalServices: ['000018f0-0000-1000-8000-00805f9b34fb', '000018f1-0000-1000-8000-00805f9b34fb']
+      });
+      setBluetoothDevices([device]);
+      showSuccess('Bluetooth device found', `Selected: ${device.name || 'Unnamed printer'}`);
+    } catch (err: any) {
+      if (err?.name === 'NotFoundError') {
+        showError('No device selected', 'Scan cancelled.');
+      } else {
+        showError('Bluetooth scan failed', err.message || 'Unable to find printers.');
+      }
+    } finally {
+      setScanningBluetooth(false);
+    }
+  }, [showSuccess, showError]);
+
+  const connectBluetoothDevice = useCallback(async (device: BluetoothDevice) => {
+    setConnectingDevice(device.id);
+    try {
+      const server = await device.gatt?.connect();
+      if (!server) throw new Error('GATT server unavailable');
+      setConnectedDevice(device);
+      setPrinterSettings(prev => ({
+        ...prev,
+        printer_is_connected: 'true',
+        printer_bluetooth_device_id: device.id,
+        printer_bluetooth_device_name: device.name || 'Unknown Printer',
+        printer_last_connected: new Date().toISOString(),
+      }));
+      showSuccess('Connected', `Connected to ${device.name || 'printer'}.`);
+    } catch (err: any) {
+      showError('Connection failed', err.message || 'Could not connect.');
+    } finally {
+      setConnectingDevice(null);
+    }
+  }, [showSuccess, showError]);
+
+  const disconnectBluetooth = useCallback(async () => {
+    if (connectedDevice?.gatt?.connected) {
+      connectedDevice.gatt.disconnect();
+    }
+    setConnectedDevice(null);
+    setPrinterSettings(prev => ({
+      ...prev,
+      printer_is_connected: 'false',
+      printer_bluetooth_device_id: '',
+      printer_bluetooth_device_name: '',
+    }));
+    showSuccess('Disconnected', 'Bluetooth printer disconnected.');
+  }, [connectedDevice, showSuccess]);
 
   const copyToClipboard = useCallback((key: string, value: string) => {
     navigator.clipboard.writeText(value).then(() => {
@@ -404,7 +537,7 @@ const saveVoiceSettings = useCallback(async () => {
             <FiSettings className="text-emerald-300" /> Settings
             <span className="text-sm font-normal text-emerald-100/70 ml-2">Control Center</span>
           </h1>
-          <p className="text-sm text-slate-300">Manage application settings and API access</p>
+          <p className="text-sm text-slate-300">Manage application settings, printer, and API access</p>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => void loadSettings()} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20 disabled:opacity-60">
@@ -428,6 +561,12 @@ const saveVoiceSettings = useCallback(async () => {
           <FiSettings className="inline mr-1" size={14} /> Settings
         </button>
         <button
+          onClick={() => setActiveTab('printer')}
+          className={`px-4 py-2 rounded-xl text-sm font-medium transition ${activeTab === 'printer' ? 'bg-slate-900 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
+        >
+          <FiPrinter className="inline mr-1" size={14} /> Printer
+        </button>
+        <button
           onClick={() => setActiveTab('api')}
           className={`px-4 py-2 rounded-xl text-sm font-medium transition ${activeTab === 'api' ? 'bg-slate-900 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
         >
@@ -435,7 +574,7 @@ const saveVoiceSettings = useCallback(async () => {
         </button>
       </div>
 
-      {/* Search - Only show for settings tab */}
+      {/* Search */}
       {activeTab === 'settings' && (
         <div className="flex flex-col sm:flex-row gap-4 mb-6">
           <div className="relative flex-1 max-w-md">
@@ -469,6 +608,7 @@ const saveVoiceSettings = useCallback(async () => {
           </div>
         ) : (
           <div className="space-y-6">
+            {/* Voice Connection Card */}
             <div className="rounded-2xl border border-violet-200 bg-gradient-to-r from-violet-50 via-white to-indigo-50 p-5 shadow-sm">
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                 <div>
@@ -484,7 +624,6 @@ const saveVoiceSettings = useCallback(async () => {
                   {saving.voice ? 'Saving...' : 'Save voice config'}
                 </button>
               </div>
-
               <div className="mt-5 grid gap-4 md:grid-cols-2">
                 <label className="text-sm text-slate-700">
                   <span className="mb-1 block font-medium">Provider</span>
@@ -499,7 +638,6 @@ const saveVoiceSettings = useCallback(async () => {
                     <option value="elevenlabs">ElevenLabs</option>
                   </select>
                 </label>
-
                 <label className="text-sm text-slate-700">
                   <span className="mb-1 block font-medium">Default language</span>
                   <select
@@ -512,7 +650,6 @@ const saveVoiceSettings = useCallback(async () => {
                     <option value="en-GB">English (UK)</option>
                   </select>
                 </label>
-
                 <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
                   <input
                     type="checkbox"
@@ -522,7 +659,6 @@ const saveVoiceSettings = useCallback(async () => {
                   />
                   Browser TTS enabled (free)
                 </label>
-
                 <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
                   <input
                     type="checkbox"
@@ -532,7 +668,6 @@ const saveVoiceSettings = useCallback(async () => {
                   />
                   Premium provider enabled
                 </label>
-
                 <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
                   <input
                     type="checkbox"
@@ -542,7 +677,6 @@ const saveVoiceSettings = useCallback(async () => {
                   />
                   Auto-read assistant replies
                 </label>
-
                 <label className="text-sm text-slate-700">
                   <span className="mb-1 block font-medium">Voice speed</span>
                   <input
@@ -555,7 +689,6 @@ const saveVoiceSettings = useCallback(async () => {
                     className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
                   />
                 </label>
-
                 <label className="md:col-span-2 text-sm text-slate-700">
                   <span className="mb-1 block font-medium">ElevenLabs API key</span>
                   <input
@@ -566,7 +699,6 @@ const saveVoiceSettings = useCallback(async () => {
                     className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
                   />
                 </label>
-
                 <label className="text-sm text-slate-700">
                   <span className="mb-1 block font-medium">ElevenLabs voice ID</span>
                   <input
@@ -576,7 +708,6 @@ const saveVoiceSettings = useCallback(async () => {
                     className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
                   />
                 </label>
-
                 <label className="text-sm text-slate-700">
                   <span className="mb-1 block font-medium">ElevenLabs model ID</span>
                   <input
@@ -589,6 +720,7 @@ const saveVoiceSettings = useCallback(async () => {
               </div>
             </div>
 
+            {/* Settings groups */}
             {settings.length === 0 ? (
               <div className="rounded-xl bg-white p-12 text-center shadow-sm">
                 <FiSettings className="mx-auto mb-4 text-slate-300" size={48} />
@@ -619,7 +751,6 @@ const saveVoiceSettings = useCallback(async () => {
                       </div>
                       {isExpanded ? <FiChevronUp size={20} /> : <FiChevronDown size={20} />}
                     </button>
-
                     {isExpanded && (
                       <div className="border-t border-slate-200 px-6 py-5">
                         <div className="space-y-4">
@@ -650,7 +781,6 @@ const saveVoiceSettings = useCallback(async () => {
                                   </button>
                                 </div>
                               </div>
-
                               <div className="flex items-center gap-3">
                                 <div className="flex-1">{renderInput(setting)}</div>
                                 <button
@@ -673,6 +803,113 @@ const saveVoiceSettings = useCallback(async () => {
             )}
           </div>
         )
+      )}
+
+      {/* Printer Settings Tab */}
+      {activeTab === 'printer' && (
+        <div className="space-y-6">
+          <div className="rounded-2xl border border-cyan-200 bg-gradient-to-r from-cyan-50 via-white to-blue-50 p-5 shadow-sm">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-600">Thermal / A4 Printer Setup</p>
+                <h2 className="mt-1 text-xl font-bold text-slate-800">Default Printer & Bluetooth Connection</h2>
+                <p className="text-sm text-slate-600">Select default format and connect Bluetooth thermal printers.</p>
+              </div>
+              <button
+                onClick={() => void savePrinterSettings()}
+                disabled={saving.printer}
+                className="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700 disabled:opacity-60"
+              >
+                {saving.printer ? 'Saving...' : 'Save printer settings'}
+              </button>
+            </div>
+
+            <div className="mt-6 grid gap-4 md:grid-cols-2">
+              <label className="text-sm text-slate-700">
+                <span className="mb-1 block font-medium">Default Print Format</span>
+                <select
+                  value={printerSettings.printer_default_format}
+                  onChange={(e) => setPrinterSettings(prev => ({ ...prev, printer_default_format: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-200"
+                >
+                  <option value="A4">A4 (Standard)</option>
+                  <option value="58mm">58mm Thermal</option>
+                  <option value="80mm">80mm Thermal</option>
+                </select>
+              </label>
+              <label className="text-sm text-slate-700">
+                <span className="mb-1 block font-medium">Connection Mode</span>
+                <select
+                  value={printerSettings.printer_connection_mode}
+                  onChange={(e) => setPrinterSettings(prev => ({ ...prev, printer_connection_mode: e.target.value }))}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-200"
+                >
+                  <option value="browser">Browser Print</option>
+                  <option value="bluetooth">Bluetooth Thermal</option>
+                  <option value="system">System Printer</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="mt-6 rounded-xl border border-slate-200 bg-white p-5">
+              <h3 className="mb-4 font-semibold text-slate-800 flex items-center gap-2">
+                <FiBluetooth className="text-cyan-600" size={18} /> Bluetooth Printer
+              </h3>
+              <div className="flex flex-wrap gap-3 mb-4">
+                <button
+                  onClick={() => void scanBluetoothPrinters()}
+                  disabled={scanningBluetooth}
+                  className="rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700 disabled:opacity-60 flex items-center gap-2"
+                >
+                  {scanningBluetooth ? <FiLoader className="animate-spin" size={16} /> : <FiRadio size={16} />}
+                  {scanningBluetooth ? 'Scanning...' : 'Scan for Bluetooth Printers'}
+                </button>
+                {connectedDevice && (
+                  <button
+                    onClick={() => void disconnectBluetooth()}
+                    className="rounded-lg border border-rose-300 px-4 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50 flex items-center gap-2"
+                  >
+                    <FiPower size={16} /> Disconnect
+                  </button>
+                )}
+              </div>
+              {bluetoothDevices.length > 0 ? (
+                <div className="space-y-2">
+                  {bluetoothDevices.map(device => (
+                    <div key={device.id} className="flex items-center justify-between rounded-lg border border-slate-200 p-3">
+                      <div className="flex items-center gap-2">
+                        <FiBluetooth className="text-slate-500" />
+                        <span className="text-sm font-medium">{device.name || 'Unnamed device'}</span>
+                      </div>
+                      <button
+                        onClick={() => connectBluetoothDevice(device)}
+                        disabled={connectingDevice === device.id}
+                        className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-60"
+                      >
+                        {connectingDevice === device.id ? 'Connecting...' : 'Connect'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-slate-500">No devices found. Click "Scan" to search.</p>
+              )}
+              {connectedDevice && (
+                <div className="mt-4 rounded-lg bg-emerald-50 border border-emerald-200 p-3 flex items-center gap-2">
+                  <FiCheck className="text-emerald-600" />
+                  <span className="text-sm">
+                    Connected to <strong>{connectedDevice.name || 'printer'}</strong>
+                  </span>
+                </div>
+              )}
+              {!('bluetooth' in navigator) && (
+                <p className="mt-3 text-xs text-amber-600">
+                  ⚠️ Web Bluetooth is not supported in this browser. Use a Chromium‑based browser for Bluetooth printing.
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* API Access Tab */}

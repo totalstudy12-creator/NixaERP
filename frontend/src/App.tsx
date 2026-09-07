@@ -45,6 +45,7 @@ import {
   NotFoundPage,
   CreatePurchaseInvoicePage,
   EditPurchaseInvoicePage,
+  SalesInvoiceReturnPage,
 } from './pages';
 import { AppLayout } from './components/AppLayout';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -59,6 +60,7 @@ const protectedRoutes = [
   { path: 'invoices/create', element: <CreateInvoicePage /> },
   { path: 'invoices/:id/edit', element: <EditInvoicePage /> },
   { path: 'invoices/:id', element: <InvoiceDetailPage /> },
+  { path: 'sales-invoice-returns', element: <SalesInvoiceReturnPage /> }, // <-- Added route
   { path: 'bank-cash', element: <BankCashPage /> },
   { path: 'automation', element: <AutomationPage /> },
   { path: 'health-monitoring', element: <HealthMonitoringPage /> },

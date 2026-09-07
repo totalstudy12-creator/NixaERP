@@ -1,10 +1,11 @@
- import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import {
   FiHome, FiBox, FiShoppingCart, FiDollarSign,
   FiUsers, FiMapPin, FiPackage, FiFileText,
   FiTrendingUp, FiClipboard, FiFolder,
   FiShoppingBag, FiBriefcase, FiUserPlus, FiCalendar, FiCreditCard,
   FiBookOpen, FiZap, FiShield, FiCpu, FiActivity, FiCreditCard as FiBank, FiBarChart2, FiDatabase,
+  FiCornerUpLeft, // <-- Added for Sales Invoice Return
 } from 'react-icons/fi';
 import { useCallback, useEffect } from 'react';
 import clsx from 'clsx';
@@ -41,6 +42,7 @@ const menuSections: MenuSection[] = [
     items: [
       { icon: FiShoppingCart, label: 'Orders', path: '/orders' },
       { icon: FiFileText, label: 'Sales', path: '/invoices' },
+      { icon: FiCornerUpLeft, label: 'Sales Invoice Return', path: '/sales-invoice-returns' }, // <-- New item
       { icon: FiBriefcase, label: 'Purchase', path: '/purchases' },
       { icon: FiDollarSign, label: 'Payments', path: '/payments' },
       { icon: FiBank, label: 'Bank & Cash', path: '/bank-cash' },
@@ -200,4 +202,4 @@ export function Sidebar({ isOpen = true, onClose }: SidebarProps) {
       </aside>
     </>
   );
-} 
+}
