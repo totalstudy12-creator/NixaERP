@@ -20,6 +20,7 @@ use App\Http\Controllers\Api\HealthController;
 use App\Http\Controllers\Api\InboxController;
 use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MarketingController;
+use App\Http\Controllers\Api\McpController;
 use App\Http\Controllers\Api\OfflineSyncController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\PayrollController;
@@ -36,7 +37,6 @@ use App\Http\Controllers\Api\UploadController;
 use App\Http\Controllers\Api\UserAccessController;
 use App\Http\Controllers\Api\WarehouseController;
 use App\Http\Controllers\Api\WhatsAppWebhookController;
-use App\Http\Middleware\ApiTokenMiddleware;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -45,21 +45,25 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 */
 
-// ==========================================================================
-// HEALTH CHECK
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Health Check
+|--------------------------------------------------------------------------
+*/
 
 Route::get(
     'status',
-    fn () => response()->json([
+    fn() => response()->json([
         'status' => 'ok',
         'service' => 'Business OS API',
     ])
 );
 
-// ==========================================================================
-// AUTH - PUBLIC
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Authentication
+|--------------------------------------------------------------------------
+*/
 
 Route::post(
     'login',
@@ -86,9 +90,11 @@ Route::put(
     [AuthController::class, 'updateProfile']
 )->middleware('auth:sanctum');
 
-// ==========================================================================
-// PUBLIC BIOMETRIC DEVICE ENDPOINTS
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Public Biometric Device Endpoints
+|--------------------------------------------------------------------------
+*/
 
 Route::post(
     'biometric/device/register',
@@ -110,18 +116,22 @@ Route::post(
     [OfflineSyncController::class, 'batchSync']
 );
 
-// ==========================================================================
-// PUBLIC SUPPLIERS
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Public Suppliers
+|--------------------------------------------------------------------------
+*/
 
 Route::apiResource(
     'suppliers',
     SupplierController::class
 );
 
-// ==========================================================================
-// PUBLIC BIOMETRIC ENROLLMENT
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Public Biometric Enrollment
+|--------------------------------------------------------------------------
+*/
 
 Route::get(
     'biometric/device/pending-enrollment',
@@ -138,17 +148,102 @@ Route::post(
     [BiometricDeviceController::class, 'updateEnrollmentStatus']
 );
 
-// ==========================================================================
-// PROTECTED ROUTES
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Protected Routes
+|--------------------------------------------------------------------------
+*/
 
-Route::middleware(['auth:sanctum'])->group(function () {
+Route::middleware('auth:sanctum')->group(function () {
 
-    // ======================================================================
-    // DASHBOARD & REPORT ENDPOINTS
-    // ======================================================================
+    /*
+|--------------------------------------------------------------------------
+| MCP
+|--------------------------------------------------------------------------
+|
+| MCP uses dedicated Laravel Sanctum Personal Access Tokens.
+|
+| IMPORTANT:
+| - No "abilities" middleware alias is required.
+| - MCP authorization is checked by McpController.
+| - MCP tokens are read-only in this phase.
+|
+*/
+
+    Route::prefix('mcp')->group(function () {
+
+        /*
+         * GET /api/mcp/status
+         *
+         * Any authenticated ERP user can verify MCP availability.
+         */
+        Route::get(
+            'status',
+            [McpController::class, 'status']
+        );
+
+        /*
+         * GET /api/mcp/context
+         *
+         * Requires a dedicated MCP token containing:
+         *
+         *     mcp:read
+         *
+         */
+        Route::get(
+            'context',
+            [McpController::class, 'context']
+        );
+
+        /*
+         * GET /api/mcp/tokens
+         *
+         * List only MCP tokens belonging to current user.
+         */
+        Route::get(
+            'tokens',
+            [SettingsController::class, 'listMcpTokens']
+        );
+
+        /*
+         * POST /api/mcp/tokens
+         *
+         * Create a dedicated read-only MCP token.
+         */
+        Route::post(
+            'tokens',
+            [SettingsController::class, 'generateMcpToken']
+        );
+
+        /*
+         * DELETE /api/mcp/tokens/{tokenId}
+         *
+         * Can only revoke a token belonging to current user.
+         */
+        Route::delete(
+            'tokens/{tokenId}',
+            [SettingsController::class, 'revokeMcpToken']
+        );
+
+        /*
+         * DELETE /api/mcp/tokens
+         *
+         * Revoke all MCP tokens belonging to current user.
+         */
+        Route::delete(
+            'tokens',
+            [SettingsController::class, 'revokeAllMcpTokens']
+        );
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Dashboard
+    |--------------------------------------------------------------------------
+    */
 
     Route::prefix('dashboard')->group(function () {
+
         Route::get(
             'analytics',
             [DashboardController::class, 'analytics']
@@ -255,9 +350,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         );
     });
 
-    // ======================================================================
-    // REPORTS
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Reports
+    |--------------------------------------------------------------------------
+    */
 
     Route::prefix('reports')->group(function () {
 
@@ -276,13 +373,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [DashboardController::class, 'leastSellingProducts']
         );
 
-        // Advanced reports
         Route::get(
             'summary',
             [ReportController::class, 'summary']
         );
 
-        // Sales reports
         Route::get(
             'sales-summary',
             [ReportController::class, 'salesSummary']
@@ -313,7 +408,6 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [ReportController::class, 'outstandingSales']
         );
 
-        // Purchase reports
         Route::get(
             'purchase-summary',
             [ReportController::class, 'purchaseSummary']
@@ -334,7 +428,6 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [ReportController::class, 'outstandingPurchases']
         );
 
-        // Accounting reports
         Route::get(
             'general-ledger',
             [ReportController::class, 'generalLedger']
@@ -400,16 +493,17 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [ReportController::class, 'productProfitability']
         );
 
-        // GST reports
         Route::get(
             'gst-summary',
             [ReportController::class, 'gstSummary']
         );
     });
 
-    // ======================================================================
-    // ALTERNATIVE DASHBOARD ENDPOINTS
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Alternative Dashboard Endpoints
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'products/low-stock',
@@ -436,9 +530,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [DashboardController::class, 'loginActivity']
     );
 
-    // ======================================================================
-    // CORE BUSINESS RESOURCES
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Core Business Resources
+    |--------------------------------------------------------------------------
+    */
 
     Route::apiResource(
         'companies',
@@ -480,12 +576,12 @@ Route::middleware(['auth:sanctum'])->group(function () {
         DealerController::class
     );
 
-    // ======================================================================
-    // INVOICES
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Invoices
+    |--------------------------------------------------------------------------
+    */
 
-    // IMPORTANT:
-    // next-number must be registered before apiResource.
     Route::get(
         'invoices/next-number',
         [InvoiceController::class, 'nextNumber']
@@ -501,9 +597,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         InvoiceController::class
     );
 
-    // ======================================================================
-    // PURCHASE INVOICES
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Purchase Invoices
+    |--------------------------------------------------------------------------
+    */
 
     Route::apiResource(
         'purchase-invoices',
@@ -515,18 +613,22 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [PurchaseInvoiceController::class, 'addPayment']
     );
 
-    // ======================================================================
-    // EMPLOYEES
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Employees
+    |--------------------------------------------------------------------------
+    */
 
     Route::apiResource(
         'employees',
         EmployeeController::class
     );
 
-    // ======================================================================
-    // ACCOUNTING
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Accounting
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'accounting/summary',
@@ -573,9 +675,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [AccountingController::class, 'statements']
     );
 
-    // ======================================================================
-    // SALES
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Sales
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'sales/summary',
@@ -637,9 +741,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [SalesController::class, 'reports']
     );
 
-    // ======================================================================
-    // PURCHASES
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Purchases
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'purchases/summary',
@@ -681,9 +787,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [SalesController::class, 'purchaseReports']
     );
 
-    // ======================================================================
-    // ATTENDANCE
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Attendance
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'attendance/today-summary',
@@ -731,9 +839,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [AttendanceController::class, 'bulkDelete']
     );
 
-    // ======================================================================
-    // PAYROLL & HR
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Payroll & HR
+    |--------------------------------------------------------------------------
+    */
 
     Route::prefix('payroll')->group(function () {
 
@@ -752,7 +862,6 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [PayrollController::class, 'runPayroll']
         );
 
-        // Advances
         Route::get(
             '/advances',
             [PayrollController::class, 'advances']
@@ -779,7 +888,6 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [PayrollController::class, 'destroyAdvance']
         );
 
-        // Leaves
         Route::get(
             '/leaves',
             [PayrollController::class, 'leaves']
@@ -806,7 +914,6 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [PayrollController::class, 'destroyLeave']
         );
 
-        // Shifts
         Route::get(
             '/shifts',
             [PayrollController::class, 'shifts']
@@ -833,7 +940,6 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [PayrollController::class, 'destroyShift']
         );
 
-        // Loans
         Route::get(
             '/loans',
             [PayrollController::class, 'loans']
@@ -860,7 +966,6 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [PayrollController::class, 'destroyLoan']
         );
 
-        // Payslips
         Route::get(
             '/payslips',
             [PayrollController::class, 'payslips']
@@ -887,7 +992,9 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [PayrollController::class, 'destroyPayslip']
         );
 
-        // Wildcard routes - MUST remain LAST
+        /*
+         * Wildcard routes must remain last.
+         */
         Route::get(
             '/{payroll}',
             [PayrollController::class, 'show']
@@ -910,9 +1017,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         );
     });
 
-    // ======================================================================
-    // BIOMETRIC MANAGEMENT
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Biometric Management
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'biometric/devices',
@@ -974,9 +1083,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [BiometricDeviceController::class, 'destroy']
     );
 
-    // ======================================================================
-    // FILE UPLOADS
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | File Uploads
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'uploads',
@@ -998,9 +1109,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [UploadController::class, 'destroy']
     );
 
-    // ======================================================================
-    // USER ACCESS MANAGEMENT
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | User Access Management
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'roles',
@@ -1047,9 +1160,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [UserAccessController::class, 'assignRolesToUser']
     );
 
-    // ======================================================================
-    // SETTINGS
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Settings
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'settings',
@@ -1101,9 +1216,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [SettingsController::class, 'destroy']
     );
 
-    // ======================================================================
-    // API TOKEN MANAGEMENT
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Existing API Token Management
+    |--------------------------------------------------------------------------
+    */
 
     Route::prefix('api-tokens')->group(function () {
 
@@ -1128,9 +1245,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         );
     });
 
-    // ======================================================================
-    // HEALTH & BACKUPS
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Health & Backups
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'health/cron',
@@ -1167,9 +1286,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [BackupController::class, 'download']
     );
 
-    // ======================================================================
-    // MARKETING
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Marketing
+    |--------------------------------------------------------------------------
+    */
 
     Route::prefix('marketing')->group(function () {
 
@@ -1219,9 +1340,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         );
     });
 
-    // ======================================================================
-    // SOCIAL OAUTH
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Social OAuth
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         '/auth/{provider}/redirect-url',
@@ -1238,9 +1361,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [SocialAuthController::class, 'disconnect']
     );
 
-    // ======================================================================
-    // UNIFIED INBOX
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Unified Inbox
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         '/inbox',
@@ -1262,9 +1387,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [InboxController::class, 'sendWhatsApp']
     );
 
-    // ======================================================================
-    // AI ASSISTANT
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | AI Assistant
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'ai/assistant/insights',
@@ -1316,10 +1443,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [\App\Http\Controllers\Api\AiProviderController::class, 'update']
     );
 
-    // ======================================================================
-    // GEMINI
-    // Protected by auth:sanctum because this is inside the protected group.
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Gemini
+    |--------------------------------------------------------------------------
+    */
 
     Route::prefix('gemini')->group(function () {
 
@@ -1344,9 +1472,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         );
     });
 
-    // ======================================================================
-    // INVENTORY IMPORT / EXPORT
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Inventory Import / Export
+    |--------------------------------------------------------------------------
+    */
 
     Route::post(
         '/inventory/import',
@@ -1368,9 +1498,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [ProductController::class, 'all']
     );
 
-    // ======================================================================
-    // CUSTOMER IMPORT / TEMPLATE
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Customer Import / Template
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         'customers/template',
@@ -1382,9 +1514,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [CustomerController::class, 'import']
     );
 
-    // ======================================================================
-    // PRODUCT DETAIL / STOCK ROUTES
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Product Details / Stock
+    |--------------------------------------------------------------------------
+    */
 
     Route::get(
         '/products/{product}/inventory-summary',
@@ -1436,10 +1570,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         [ProductController::class, 'transfer']
     );
 
-    // ======================================================================
-    // SALES RETURNS
-    // Protected by auth:sanctum because this is inside the protected group.
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Sales Returns
+    |--------------------------------------------------------------------------
+    */
 
     Route::prefix('sales-returns')->group(function () {
 
@@ -1494,13 +1629,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         );
     });
 
-    // ======================================================================
-    // EMAIL WEBHOOK
-    // NOTE:
-    // This remains protected here exactly as in your existing route file.
-    // If an external email provider calls it directly, it may need a separate
-    // webhook signature/token mechanism instead of auth:sanctum.
-    // ======================================================================
+    /*
+    |--------------------------------------------------------------------------
+    | Email Webhook
+    |--------------------------------------------------------------------------
+    */
 
     Route::post(
         '/webhooks/email',
@@ -1508,18 +1641,22 @@ Route::middleware(['auth:sanctum'])->group(function () {
     );
 });
 
-// ==========================================================================
-// PUBLIC OAUTH CALLBACK
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Public OAuth Callback
+|--------------------------------------------------------------------------
+*/
 
 Route::get(
     '/auth/{provider}/callback',
     [SocialAuthController::class, 'callback']
 );
 
-// ==========================================================================
-// PUBLIC WEBHOOKS
-// ==========================================================================
+/*
+|--------------------------------------------------------------------------
+| Public Webhooks
+|--------------------------------------------------------------------------
+*/
 
 Route::post(
     '/webhooks/whatsapp',

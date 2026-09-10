@@ -4,35 +4,83 @@ use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 
-// Ensure an application key exists in local/dev environments to avoid
-// MissingAppKeyException during development when .env may be incomplete.
-if (empty(getenv('APP_KEY')) && empty($_ENV['APP_KEY'] ?? '') && empty($_SERVER['APP_KEY'] ?? '')) {
-    try {
-        $key = 'base64:' . base64_encode(random_bytes(32));
-        putenv("APP_KEY={$key}");
-        $_ENV['APP_KEY'] = $key;
-        $_SERVER['APP_KEY'] = $key;
-    } catch (Throwable $e) {
-        // If random_bytes fails, fall back to a simple random string (not ideal for production)
-        $key = 'base64:' . base64_encode(substr(bin2hex(random_bytes(16)), 0, 32));
-        putenv("APP_KEY={$key}");
-        $_ENV['APP_KEY'] = $key;
-        $_SERVER['APP_KEY'] = $key;
-    }
-}
+/*
+|--------------------------------------------------------------------------
+| Application Bootstrap
+|--------------------------------------------------------------------------
+|
+| Laravel 12 application configuration.
+|
+| Important:
+| APP_KEY must be defined in .env for production.
+| We do NOT generate a runtime APP_KEY because doing so can invalidate
+| encrypted sessions/cookies when the application restarts.
+|
+*/
 
-return Application::configure(basePath: dirname(__DIR__))
+return Application::configure(
+    basePath: dirname(__DIR__)
+)
     ->withRouting(
-        web: __DIR__.'/../routes/web.php',
-        api: __DIR__.'/../routes/api.php',
-        commands: __DIR__.'/../routes/console.php',
+        web: __DIR__ . '/../routes/web.php',
+        api: __DIR__ . '/../routes/api.php',
+        commands: __DIR__ . '/../routes/console.php',
         health: '/up',
     )
-    ->withMiddleware(function (Middleware $middleware): void {
-        $middleware->api(prepend: [
-            \App\Http\Middleware\AllowCors::class,
-        ]);
+
+    /*
+    |--------------------------------------------------------------------------
+    | Middleware
+    |--------------------------------------------------------------------------
+    */
+
+    ->withMiddleware(function (
+        Middleware $middleware
+    ): void {
+
+        /*
+         * Existing API CORS middleware.
+         *
+         * MCP uses the same API pipeline and therefore inherits
+         * the existing CORS configuration.
+         */
+        $middleware->api(
+            prepend: [
+                \App\Http\Middleware\AllowCors::class,
+            ]
+        );
+
+        /*
+         * NOTE:
+         *
+         * Do NOT add:
+         *
+         *     abilities
+         *
+         * here.
+         *
+         * We are intentionally handling MCP ability authorization
+         * inside McpController until a dedicated MCP middleware is
+         * introduced and tested.
+         */
     })
-    ->withExceptions(function (Exceptions $exceptions): void {
-        //
-    })->create();
+
+    /*
+    |--------------------------------------------------------------------------
+    | Exceptions
+    |--------------------------------------------------------------------------
+    */
+
+    ->withExceptions(function (
+        Exceptions $exceptions
+    ): void {
+
+        /*
+         * Keep the application's existing exception handling.
+         *
+         * MCP controllers return controlled JSON errors and should
+         * never expose raw exception messages to external clients.
+         */
+    })
+
+    ->create();
