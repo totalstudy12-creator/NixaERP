@@ -1,52 +1,53 @@
-# ------------------------------------------------------------
-# Laravel
-# ------------------------------------------------------------
+# ============================================================
+
+# Nexa ERP / RaptorERP
+
+# Root Git Ignore
+
+# Laravel + React/Vite + Tailwind CSS + MCP
+
+# ============================================================
+
+# ============================================================
+
+# LARAVEL / PHP
+
+# ============================================================
 
 *.log
 
 .env
-.env.backup
-.env.production
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 .phpactor.json
 .phpunit.result.cache
 .phpunit.cache/
 
-# ------------------------------------------------------------
-# IDE / Editor
-# ------------------------------------------------------------
+# Laravel logs
 
-/.fleet
-/.idea
-/.nova
-/.vscode
-/.zed
+/storage/logs/*
+!/storage/logs/.gitignore
 
-# ------------------------------------------------------------
-# OS
-# ------------------------------------------------------------
+# Laravel cache/runtime
 
-.DS_Store
-Thumbs.db
+/storage/framework/cache/*
+!/storage/framework/cache/.gitignore
 
-# ------------------------------------------------------------
-# Authentication / Composer
-# ------------------------------------------------------------
+/storage/framework/sessions/*
+!/storage/framework/sessions/.gitignore
 
-/auth.json
+/storage/framework/testing/*
+!/storage/framework/testing/.gitignore
 
-# ------------------------------------------------------------
-# Dependencies
-# ------------------------------------------------------------
+/storage/framework/views/*
+!/storage/framework/views/.gitignore
 
-/node_modules
-/vendor
+# ============================================================
 
-# ------------------------------------------------------------
-# Laravel Build / Runtime
-# ------------------------------------------------------------
+# LARAVEL GENERATED / RUNTIME FILES
+
+# ============================================================
 
 /public/build
 /public/hot
@@ -55,30 +56,274 @@ Thumbs.db
 /storage/*.key
 /storage/pail
 
-# ------------------------------------------------------------
-# Laravel / Homestead
-# ------------------------------------------------------------
+# ============================================================
+
+# COMPOSER
+
+# ============================================================
+
+/vendor/
+
+# Composer authentication
+
+/auth.json
+
+# Composer local binaries/cache
+
+/composer.phar
+
+# ============================================================
+
+# NODE.JS / FRONTEND DEPENDENCIES
+
+# ============================================================
+
+node_modules/
+
+# Explicit frontend dependency ignore
+
+/frontend/node_modules/
+
+# MCP dependencies
+
+/mcp-server/node_modules/
+
+# ============================================================
+
+# FRONTEND / REACT / VITE
+
+# ============================================================
+
+/frontend/dist/
+/frontend/.vite/
+/frontend/.cache/
+/frontend/coverage/
+
+# Frontend local environment files
+
+/frontend/.env
+/frontend/.env.*
+!/frontend/.env.example
+
+# Vite local files
+
+/frontend/*.local
+
+# Build output
+
+/frontend/build/
+
+# ============================================================
+
+# NPM / YARN / PNPM LOGS
+
+# ============================================================
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Keep package-lock.json tracked.
+
+# ============================================================
+
+# MCP SERVER
+
+# ============================================================
+
+/mcp-server/dist/
+/mcp-server/build/
+
+/mcp-server/.env
+/mcp-server/.env.*
+!/mcp-server/.env.example
+
+/mcp-server/*.log
+
+# ============================================================
+
+# MCP LOCAL / RUNTIME DATA
+
+# ============================================================
+
+/mcp-server/.tmp/
+/mcp-server/.cache/
+/mcp-server/.data/
+/mcp-server/tmp/
+/mcp-server/logs/
+
+# ============================================================
+
+# IDE / EDITORS
+
+# ============================================================
+
+/.fleet
+/.idea
+/.nova
+/.vscode
+/.zed
+
+*.code-workspace
+
+# ============================================================
+
+# OPERATING SYSTEM
+
+# ============================================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================================
+
+# LARAVEL / HOMESTEAD
+
+# ============================================================
 
 Homestead.json
 Homestead.yaml
 
-# ------------------------------------------------------------
-# MCP Server
-# ------------------------------------------------------------
+# ============================================================
 
-/mcp-server/node_modules
-/mcp-server/dist
+# TEST / COVERAGE
 
-/mcp-server/.env
-/mcp-server/.env.local
-/mcp-server/.env.production
-/mcp-server/.env.*.local
+# ============================================================
 
-/mcp-server/*.log
+/coverage/
+/.nyc_output/
+/.phpunit.cache/
 
-# ------------------------------------------------------------
-# MCP local/runtime files
-# ------------------------------------------------------------
+# ============================================================
 
-/mcp-server/.tmp
-/mcp-server/.cache
+# TEMPORARY FILES
+
+# ============================================================
+
+*.tmp
+*.temp
+*.swp
+*.swo
+*.bak
+*.old
+*.orig
+*.rej
+
+# ============================================================
+
+# LOCAL DATABASE FILES
+
+# ============================================================
+
+*.sqlite
+*.sqlite3
+
+# ============================================================
+
+# DOCKER LOCAL FILES
+
+# ============================================================
+
+.DockerDesktop/
+.DockerDesktop/*
+
+# ============================================================
+
+# TERRAFORM / INFRASTRUCTURE LOCAL STATE
+
+# ============================================================
+
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+
+# ============================================================
+
+# LOCAL CACHE / TOOL OUTPUT
+
+# ============================================================
+
+.cache/
+.tmp/
+temp/
+tmp/
+
+# ============================================================
+
+# SECURITY / SECRET BACKUPS
+
+# ============================================================
+
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+.env.backup
+.env.production
+.env.local
+.env.*.local
+
+# ============================================================
+
+# BACKUP / EXPORT FILES
+
+# ============================================================
+
+*.dump
+*.sql~
+*.zip
+*.tar
+*.tar.gz
+
+# ============================================================
+
+# IMPORTANT FILES THAT SHOULD REMAIN TRACKED
+
+# ============================================================
+
+# Do NOT ignore:
+
+# package.json
+
+# package-lock.json
+
+# tsconfig.json
+
+# tsconfig.node.json
+
+# vite.config.ts
+
+# tailwind.config.*           (if present)
+
+# postcss.config.*            (if present)
+
+# composer.json
+
+# composer.lock
+
+# artisan
+
+# routes/
+
+# app/
+
+# resources/
+
+# database/
+
+# frontend/src/
+
+# mcp-server/src/
+
+# .env.example
+
+# /frontend/.env.example
+
+# /mcp-server/.env.example
+
+# ============================================================
