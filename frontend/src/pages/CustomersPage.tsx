@@ -1,91 +1,107 @@
-import { useEffect, useState, useCallback, useMemo, lazy, Suspense, memo, useRef, DragEvent } from 'react';
+// src/pages/CustomersPage.tsx
+import React, {
+  useEffect,
+  useState,
+  useCallback,
+  useMemo,
+  useRef,
+  lazy,
+  Suspense,
+  memo,
+  startTransition,
+  type DragEvent,
+} from 'react';
 import { createPortal } from 'react-dom';
+import { useNavigate } from 'react-router-dom';
 import {
-  FiPlus, FiRefreshCw, FiTrash2, FiEdit, FiDownload, FiUpload,
-  FiUsers, FiShoppingBag, FiTruck, FiPackage, FiAlertCircle,
-  FiFilter, FiSearch, FiX, FiBriefcase, FiMapPin,
-  FiFile, FiCheck, FiAlertTriangle, FiChevronDown, FiEye, FiEyeOff,
-  FiMoreVertical
+  FiPlus,
+  FiTrash2,
+  FiEdit,
+  FiDownload,
+  FiUpload,
+  FiUsers,
+  FiShoppingBag,
+  FiTruck,
+  FiPackage,
+  FiAlertCircle,
+  FiFilter,
+  FiX,
+  FiFile,
+  FiCheck,
+  FiAlertTriangle,
+  FiChevronDown,
+  FiEye,
+  FiEyeOff,
+  FiMoreVertical,
+  FiBookOpen,
+  FiFileText,
+  FiCreditCard,
+  FiActivity,
+  FiExternalLink,
+  FiMail,
+  FiPhone,
+  FiMapPin,
+  FiCalendar,
 } from 'react-icons/fi';
-
-// ---------- Lazy loaded heavy components ----------
-const ModernDataTable = lazy(() =>
-  import('../components/ModernDataTable').then(m => ({ default: m.ModernDataTable }))
-);
-const Offcanvas = lazy(() =>
-  import('../components/Offcanvas').then(m => ({ default: m.Offcanvas }))
-);
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
 
-// ---------- Simple API Cache Hook ----------
-const cache = new Map<string, { data: any; timestamp: number }>();
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 
-function useApiCache<T>(
-  key: string,
-  fetcher: () => Promise<T>,
-  ttlMs = 300_000
-): {
-  data: T | null;
-  loading: boolean;
-  error: string | null;
-  refresh: () => Promise<void>;
-} {
-  const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+const Offcanvas = lazy(() =>
+  import('../components/Offcanvas').then((m) => ({ default: m.Offcanvas }))
+);
 
-  const fetchData = useCallback(async (skipCache = false) => {
-    if (!skipCache) {
-      const entry = cache.get(key);
-      if (entry && Date.now() - entry.timestamp < ttlMs) {
-        setData(entry.data);
-        setLoading(false);
-        return;
-      }
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetcher();
-      const result = Array.isArray(res) ? res : (res as any).data ?? [];
-      cache.set(key, { data: result, timestamp: Date.now() });
-      setData(result);
-    } catch (err: any) {
-      const msg = err.message || 'Failed to load';
-      setError(msg);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, [key, fetcher, ttlMs]);
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
-
-  return { data, loading, error, refresh: () => fetchData(true) };
-}
-
-// ---------- Types ----------
 type CustomerType = 'customer' | 'dealer' | 'distributor';
 type DuplicateAction = 'skip' | 'update' | 'stop';
+type DetailTab = 'overview' | 'invoices' | 'payments' | 'orders' | 'activity';
 
-interface Company { id: number; name: string; }
-interface Branch { id: number; name: string; company_id?: number; }
-interface CustomerGroup { id: number; name: string; }
+interface Company {
+  id: number;
+  name: string;
+}
+interface Branch {
+  id: number;
+  name: string;
+  company_id?: number;
+}
+interface CustomerGroup {
+  id: number;
+  name: string;
+}
 
 interface Customer {
   id: number;
   name: string;
   type: CustomerType;
   company_type?: string;
-  email: string;
-  contact_no: string;
+  email?: string;
+  contact_no?: string;
   contact_person?: string;
-  gst_number: string;
+  gst_number?: string;
   registration_type?: string;
   pan?: string;
   billing_street?: string;
@@ -100,7 +116,7 @@ interface Customer {
   shipping_state?: string;
   shipping_country?: string;
   shipping_pincode?: string;
-  eway_bill_distance?: number;
+  eway_bill_distance?: number | string;
   group_id?: number | null;
   group?: CustomerGroup;
   opening_balance?: number;
@@ -160,9 +176,53 @@ interface CustomerFormData {
   same_as_billing: boolean;
 }
 
+interface InvoiceSummaryRow {
+  id: number;
+  invoice_no?: string;
+  total_amount?: number | string;
+  status?: string;
+  invoice_date?: string;
+  due_date?: string | null;
+  payment_status?: string;
+  [key: string]: unknown;
+}
+
+interface PaymentRow {
+  id: number;
+  reference_no?: string;
+  amount?: number | string;
+  payment_method?: string;
+  payment_direction?: string;
+  status?: string;
+  transaction_date?: string;
+  remarks?: string;
+  [key: string]: unknown;
+}
+
+interface OrderSummaryRow {
+  id: number;
+  order_no?: string;
+  total_amount?: number | string;
+  status?: string;
+  source?: string;
+  delivery_date?: string | null;
+  created_at?: string;
+  [key: string]: unknown;
+}
+
+interface ActivityEntry {
+  id: string;
+  type: 'invoice' | 'payment' | 'order';
+  title: string;
+  subtitle: string;
+  amount: number;
+  date: string;
+  status?: string;
+}
+
 interface ImportPreviewRow {
   row: number;
-  data: Record<string, any>;
+  data: Record<string, unknown>;
   valid: boolean;
   errors: Record<string, string>;
   name: string;
@@ -179,175 +239,487 @@ interface ImportSummary {
   failed?: number;
 }
 
-// ---------- Skeleton Components ----------
+interface ImportError {
+  row: number;
+  field: string;
+  message: string;
+}
+
+interface GstLookupResult {
+  company_name?: string;
+  billing_street?: string;
+  billing_city?: string;
+  billing_state?: string;
+  billing_pincode?: string;
+  billing_country?: string;
+  registration_type?: string;
+  pan?: string;
+}
+
+interface AppLogEntry {
+  module: string;
+  action: string;
+  status: 'success' | 'error' | 'info';
+  message: string;
+}
+
+interface ApiErrorLike {
+  message?: string;
+  status?: number;
+  response?: { status?: number };
+}
+
+/* ------------------------------------------------------------------ */
+/* Constants                                                           */
+/* ------------------------------------------------------------------ */
+
+const CACHE_TTL_MS = 300_000;
+const TABLE_COLUMN_COUNT = 9;
+const RELATED_LIMIT = 10;
+
+const TYPE_OPTIONS = [
+  { value: 'all', label: 'All types' },
+  { value: 'customer', label: 'Customer' },
+  { value: 'dealer', label: 'Dealer' },
+  { value: 'distributor', label: 'Distributor' },
+] as const;
+
+const TABLE_HEAD_CLASS = 'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
+
+/* ------------------------------------------------------------------ */
+/* Safe helpers                                                        */
+/* ------------------------------------------------------------------ */
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (typeof error === 'object' && error !== null) {
+    const candidate = (error as ApiErrorLike).message;
+    if (typeof candidate === 'string' && candidate.trim()) return candidate;
+  }
+  if (error instanceof Error && error.message) return error.message;
+  return fallback;
+}
+
+function safeLog(entry: AppLogEntry): void {
+  try {
+    addAppLog(entry);
+  } catch {
+    /* no-op */
+  }
+}
+
+function safeNum(value: unknown): number {
+  const n = typeof value === 'number' ? value : parseFloat(String(value ?? ''));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function unwrapList<T>(response: unknown): T[] {
+  if (Array.isArray(response)) return response as T[];
+  if (response && typeof response === 'object' && Array.isArray((response as { data?: unknown }).data)) {
+    return (response as { data: T[] }).data;
+  }
+  return [];
+}
+
+function escapeCsvField(value: unknown): string {
+  const raw = String(value ?? '');
+  const dangerous = /^[=+\-@\t\r]/.test(raw);
+  const safe = dangerous ? `\t${raw}` : raw;
+  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
+
+function formatCurrency(value: unknown): string {
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 2,
+  }).format(safeNum(value));
+}
+
+function formatDate(value?: string | null): string {
+  if (!value) return '—';
+  const dateValue = value.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) return '—';
+  const [year, month, day] = dateValue.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  if (Number.isNaN(date.getTime())) return '—';
+  return new Intl.DateTimeFormat('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  }).format(date);
+}
+
+/* ------------------------------------------------------------------ */
+/* Cache hook (race-safe)                                              */
+/* ------------------------------------------------------------------ */
+
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+}
+
+const cache = new Map<string, CacheEntry<unknown>>();
+
+function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TTL_MS) {
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
+  const mountedRef = useRef(true);
+  const fetcherRef = useRef(fetcher);
+
+  useEffect(() => {
+    fetcherRef.current = fetcher;
+  }, [fetcher]);
+
+  const fetchData = useCallback(
+    async (skipCache = false) => {
+      const requestId = ++requestIdRef.current;
+
+      if (!skipCache) {
+        const entry = cache.get(key);
+        if (entry && Date.now() - entry.timestamp < ttlMs) {
+          if (!mountedRef.current || requestId !== requestIdRef.current) return;
+          setData(entry.data as T);
+          setLoading(false);
+          setError(null);
+          return;
+        }
+      }
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const res = await fetcherRef.current();
+        if (!mountedRef.current || requestId !== requestIdRef.current) return;
+        const result = Array.isArray(res)
+          ? (res as T)
+          : ((res as { data?: T })?.data ?? ([] as unknown as T));
+        cache.set(key, { data: result, timestamp: Date.now() });
+        setData(result);
+      } catch (err: unknown) {
+        if (!mountedRef.current || requestId !== requestIdRef.current) return;
+        setError(getErrorMessage(err, 'Failed to load'));
+      } finally {
+        if (mountedRef.current && requestId === requestIdRef.current) setLoading(false);
+      }
+    },
+    [key, ttlMs]
+  );
+
+  useEffect(() => {
+    mountedRef.current = true;
+    void fetchData();
+    return () => {
+      mountedRef.current = false;
+      requestIdRef.current += 1;
+    };
+  }, [fetchData]);
+
+  const refresh = useCallback(() => {
+    cache.delete(key);
+    return fetchData(true);
+  }, [fetchData, key]);
+
+  return { data, loading, error, refresh };
+}
+
+/* ------------------------------------------------------------------ */
+/* Uniform table header                                                */
+/* ------------------------------------------------------------------ */
+
+function TableHeadLabel({
+  children,
+  align = 'left',
+}: {
+  children: React.ReactNode;
+  align?: 'left' | 'right';
+}) {
+  const alignClass = align === 'right' ? 'justify-end' : '';
+  return (
+    <span className={`inline-flex items-center gap-1 ${alignClass} ${TABLE_HEAD_CLASS}`}>
+      {children}
+    </span>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Status badges                                                       */
+/* ------------------------------------------------------------------ */
+
+function statusPill(status?: string | null): { label: string; className: string } {
+  const value = String(status ?? '').toLowerCase();
+  const map: Record<string, { label: string; className: string }> = {
+    paid: { label: 'Paid', className: 'border-emerald-200/70 bg-emerald-50 text-emerald-700' },
+    partial: { label: 'Partial', className: 'border-sky-200/70 bg-sky-50 text-sky-700' },
+    unpaid: { label: 'Unpaid', className: 'border-amber-200/70 bg-amber-50 text-amber-700' },
+    overdue: { label: 'Overdue', className: 'border-red-200/70 bg-red-50 text-red-700' },
+    pending: { label: 'Pending', className: 'border-amber-200/70 bg-amber-50 text-amber-700' },
+    confirmed: { label: 'Confirmed', className: 'border-sky-200/70 bg-sky-50 text-sky-700' },
+    shipped: { label: 'Shipped', className: 'border-violet-200/70 bg-violet-50 text-violet-700' },
+    delivered: { label: 'Delivered', className: 'border-emerald-200/70 bg-emerald-50 text-emerald-700' },
+    completed: { label: 'Completed', className: 'border-emerald-200/70 bg-emerald-50 text-emerald-700' },
+    draft: { label: 'Draft', className: 'border-slate-200 bg-slate-50 text-slate-600' },
+    issued: { label: 'Issued', className: 'border-indigo-200/70 bg-indigo-50 text-indigo-700' },
+    failed: { label: 'Failed', className: 'border-red-200/70 bg-red-50 text-red-700' },
+  };
+  return map[value] ?? { label: status || '—', className: 'border-slate-200 bg-slate-50 text-slate-600' };
+}
+
+function StatusPill({ status }: { status?: string | null }) {
+  const { label, className } = statusPill(status);
+  return (
+    <Badge
+      variant="outline"
+      className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${className}`}
+    >
+      {label}
+    </Badge>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Skeletons                                                           */
+/* ------------------------------------------------------------------ */
+
 const StatCardSkeleton = memo(() => (
-  <div className="flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-4 animate-pulse">
-    <div className="h-10 w-10 rounded-xl bg-slate-200" />
-    <div className="space-y-2 flex-1">
-      <div className="h-3 w-16 bg-slate-200 rounded" />
-      <div className="h-6 w-8 bg-slate-200 rounded" />
+  <div className="flex items-start gap-3 rounded-2xl border border-slate-200/80 bg-white p-4">
+    <div className="h-10 w-10 shrink-0 animate-pulse rounded-xl bg-slate-200" />
+    <div className="flex-1 space-y-2">
+      <div className="h-3 w-20 animate-pulse rounded bg-slate-200" />
+      <div className="h-6 w-16 animate-pulse rounded bg-slate-200" />
     </div>
   </div>
 ));
+StatCardSkeleton.displayName = 'StatCardSkeleton';
 
 const TableSkeleton = memo(() => (
-  <div className="bg-white rounded-xl shadow-sm border p-6 space-y-4 animate-pulse">
-    <div className="h-6 w-48 bg-slate-200 rounded" />
-    {[...Array(10)].map((_, i) => (
+  <div className="space-y-3 bg-white p-6">
+    <div className="h-6 w-48 animate-pulse rounded bg-slate-200" />
+    {Array.from({ length: 8 }).map((_, i) => (
       <div key={i} className="flex gap-4">
-        <div className="h-4 w-1/4 bg-slate-200 rounded" />
-        <div className="h-4 w-1/5 bg-slate-200 rounded" />
-        <div className="h-4 w-1/6 bg-slate-200 rounded" />
-        <div className="h-4 w-1/6 bg-slate-200 rounded" />
-        <div className="h-4 w-1/4 bg-slate-200 rounded" />
+        <div className="h-4 w-1/4 animate-pulse rounded bg-slate-200" />
+        <div className="h-4 w-1/5 animate-pulse rounded bg-slate-200" />
+        <div className="h-4 w-1/6 animate-pulse rounded bg-slate-200" />
+        <div className="h-4 w-1/6 animate-pulse rounded bg-slate-200" />
+        <div className="h-4 w-1/4 animate-pulse rounded bg-slate-200" />
       </div>
     ))}
   </div>
 ));
+TableSkeleton.displayName = 'TableSkeleton';
 
-const StatCard = memo(({ icon: Icon, label, value, tone }: {
-  icon: any; label: string; value: number;
-  tone: 'blue' | 'emerald' | 'amber' | 'rose' | 'purple' | 'teal';
-}) => {
-  const bg = tone === 'blue' ? 'bg-blue-100 text-blue-600' :
-             tone === 'emerald' ? 'bg-emerald-100 text-emerald-600' :
-             tone === 'amber' ? 'bg-amber-100 text-amber-600' :
-             tone === 'rose' ? 'bg-rose-100 text-rose-600' :
-             tone === 'purple' ? 'bg-purple-100 text-purple-600' :
-             'bg-teal-100 text-teal-600';
-  return (
-    <div className="flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
-      <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${bg}`}>
-        <Icon size={20} />
-      </div>
-      <div>
-        <p className="text-xs font-medium text-slate-500">{label}</p>
-        <p className="text-2xl font-bold text-slate-900">{value}</p>
-      </div>
-    </div>
-  );
-});
+/* ------------------------------------------------------------------ */
+/* Stat card                                                           */
+/* ------------------------------------------------------------------ */
 
-// ---------- Action Dropdown Component (Portal-based) ----------
-const ActionDropdown = memo(({ customer, onEdit, onDelete }: {
-  customer: Customer;
-  onEdit: (customer: Customer) => void;
-  onDelete: (customer: Customer) => void;
-}) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const [position, setPosition] = useState({ top: 0, right: 0 });
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const dropdownRef = useRef<HTMLDivElement>(null);
+type Accent = 'indigo' | 'emerald' | 'rose' | 'amber' | 'violet' | 'teal' | 'sky';
 
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (
-        dropdownRef.current && 
-        !dropdownRef.current.contains(event.target as Node) &&
-        buttonRef.current &&
-        !buttonRef.current.contains(event.target as Node)
-      ) {
-        setIsOpen(false);
-      }
+const StatCard = memo(
+  ({
+    icon: Icon,
+    label,
+    value,
+    accent = 'indigo',
+    prefix,
+  }: {
+    icon: React.ElementType;
+    label: string;
+    value: string | number;
+    accent?: Accent;
+    prefix?: string;
+  }) => {
+    const accents: Record<Accent, { bg: string; icon: string; ring: string }> = {
+      indigo: { bg: 'bg-indigo-50', icon: 'text-indigo-600', ring: 'ring-indigo-500/10' },
+      emerald: { bg: 'bg-emerald-50', icon: 'text-emerald-600', ring: 'ring-emerald-500/10' },
+      rose: { bg: 'bg-rose-50', icon: 'text-rose-600', ring: 'ring-rose-500/10' },
+      amber: { bg: 'bg-amber-50', icon: 'text-amber-600', ring: 'ring-amber-500/10' },
+      violet: { bg: 'bg-violet-50', icon: 'text-violet-600', ring: 'ring-violet-500/10' },
+      teal: { bg: 'bg-teal-50', icon: 'text-teal-600', ring: 'ring-teal-500/10' },
+      sky: { bg: 'bg-sky-50', icon: 'text-sky-600', ring: 'ring-sky-500/10' },
     };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+    const style = accents[accent];
 
-  const handleToggle = () => {
-    if (buttonRef.current) {
-      const rect = buttonRef.current.getBoundingClientRect();
-      setPosition({
-        top: rect.bottom + 4,
-        right: window.innerWidth - rect.right,
-      });
-    }
-    setIsOpen(!isOpen);
-  };
+    return (
+      <div className="group relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:-translate-y-0.5 hover:border-slate-300/80 hover:shadow-[0_8px_24px_-12px_rgba(15,23,42,0.15)]">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+              {label}
+            </p>
+            <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
+              {prefix}
+              {value}
+            </p>
+          </div>
+          <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${style.bg} ring-1 ${style.ring}`}>
+            <Icon size={18} className={style.icon} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+);
+StatCard.displayName = 'StatCard';
 
-  return (
-    <>
-      <button
-        ref={buttonRef}
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          handleToggle();
-        }}
-        className="p-2 rounded-lg text-slate-500 hover:bg-slate-100 transition"
-        title="Actions"
-      >
-        <FiMoreVertical size={16} />
-      </button>
-      
-      {isOpen && createPortal(
-        <div
-          ref={dropdownRef}
-          style={{
-            position: 'fixed',
-            top: position.top,
-            right: position.right,
-            zIndex: 9999,
+/* ------------------------------------------------------------------ */
+/* Portal-based Action Dropdown (Edit / Ledger / Delete)               */
+/* ------------------------------------------------------------------ */
+
+const MENU_WIDTH = 200;
+const MENU_HEIGHT = 150;
+const MENU_MARGIN = 8;
+
+const ActionDropdown = memo(
+  ({
+    customer,
+    onEdit,
+    onLedger,
+    onDelete,
+  }: {
+    customer: Customer;
+    onEdit: (customer: Customer) => void;
+    onLedger: (customer: Customer) => void;
+    onDelete: (customer: Customer) => void;
+  }) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
+    const buttonRef = useRef<HTMLButtonElement>(null);
+    const menuRef = useRef<HTMLDivElement>(null);
+
+    const toggle = useCallback(() => {
+      if (isOpen) {
+        setIsOpen(false);
+        return;
+      }
+      const rect = buttonRef.current?.getBoundingClientRect();
+      if (rect) {
+        const left = Math.min(
+          Math.max(MENU_MARGIN, rect.right - MENU_WIDTH),
+          window.innerWidth - MENU_WIDTH - MENU_MARGIN
+        );
+        const top =
+          rect.bottom + MENU_HEIGHT <= window.innerHeight - MENU_MARGIN
+            ? rect.bottom + 4
+            : Math.max(MENU_MARGIN, rect.top - MENU_HEIGHT - 4);
+        setMenuStyle({ position: 'fixed', left, top, width: MENU_WIDTH, zIndex: 9999 });
+      }
+      setIsOpen(true);
+    }, [isOpen]);
+
+    useEffect(() => {
+      if (!isOpen) return;
+      const handler = (event: MouseEvent) => {
+        const target = event.target as Node;
+        if (
+          buttonRef.current &&
+          !buttonRef.current.contains(target) &&
+          menuRef.current &&
+          !menuRef.current.contains(target)
+        ) {
+          setIsOpen(false);
+        }
+      };
+      const onScrollOrResize = () => setIsOpen(false);
+      document.addEventListener('mousedown', handler);
+      window.addEventListener('resize', onScrollOrResize);
+      window.addEventListener('scroll', onScrollOrResize, true);
+      return () => {
+        document.removeEventListener('mousedown', handler);
+        window.removeEventListener('resize', onScrollOrResize);
+        window.removeEventListener('scroll', onScrollOrResize, true);
+      };
+    }, [isOpen]);
+
+    return (
+      <>
+        <button
+          ref={buttonRef}
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            toggle();
           }}
-          className="w-40 bg-white rounded-xl shadow-2xl border border-slate-200 py-1"
-          onClick={(e) => e.stopPropagation()}
+          className={`grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 ${
+            isOpen ? 'bg-slate-100 text-slate-700' : ''
+          }`}
+          title="Actions"
+          aria-haspopup="menu"
+          aria-expanded={isOpen}
         >
-          <button
-            type="button"
-            onClick={() => {
-              setIsOpen(false);
-              onEdit(customer);
-            }}
-            className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition"
-          >
-            <FiEdit size={14} className="text-blue-500" /> Edit
-          </button>
-          <div className="border-t border-slate-100 my-1"></div>
-          <button
-            type="button"
-            onClick={() => {
-              setIsOpen(false);
-              onDelete(customer);
-            }}
-            className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-rose-600 hover:bg-rose-50 transition"
-          >
-            <FiTrash2 size={14} /> Delete
-          </button>
-        </div>,
-        document.body
-      )}
-    </>
-  );
-});
+          <FiMoreVertical size={16} />
+        </button>
 
-// ---------- GST Lookup Hook ----------
-function useGstLookup() {
-  const [lookingUp, setLookingUp] = useState(false);
+        {isOpen &&
+          createPortal(
+            <div
+              ref={menuRef}
+              role="menu"
+              style={menuStyle}
+              onClick={(e) => e.stopPropagation()}
+              className="animate-fadeIn overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10"
+            >
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setIsOpen(false);
+                  onEdit(customer);
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
+              >
+                <FiEdit size={14} className="text-indigo-500" /> Edit
+              </button>
 
-  const lookupGst = useCallback(async (gstin: string) => {
-    if (!gstin || gstin.length < 10) return null;
-    setLookingUp(true);
-    try {
-      const result = await apiClient.lookupGst(gstin);
-      return result;
-    } catch {
-      return null;
-    } finally {
-      setLookingUp(false);
-    }
-  }, []);
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setIsOpen(false);
+                  onLedger(customer);
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
+              >
+                <FiBookOpen size={14} className="text-emerald-500" /> Ledger
+              </button>
 
-  return { lookupGst, lookingUp };
-}
+              <div className="my-1 border-t border-slate-100" />
 
-// ---------- Main Component ----------
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setIsOpen(false);
+                  onDelete(customer);
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-red-600 transition hover:bg-red-50"
+              >
+                <FiTrash2 size={14} /> Delete
+              </button>
+            </div>,
+            document.body
+          )}
+      </>
+    );
+  }
+);
+ActionDropdown.displayName = 'ActionDropdown';
+
+/* ------------------------------------------------------------------ */
+/* Main component                                                      */
+/* ------------------------------------------------------------------ */
+
 export function CustomersPage() {
-  const [searchTerm, setSearchTerm] = useState('');
+  const navigate = useNavigate();
+  const { showSuccess, showError } = useNotification();
+
+  /* -------------------- Filter state -------------------- */
   const [filterType, setFilterType] = useState('all');
   const [filterCompany, setFilterCompany] = useState('all');
   const [filterBranch, setFilterBranch] = useState('all');
 
-  // Form state
+  /* -------------------- Form state -------------------- */
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [formData, setFormData] = useState<CustomerFormData>({
@@ -397,7 +769,7 @@ export function CustomersPage() {
   const [newGroupName, setNewGroupName] = useState('');
   const [addingGroup, setAddingGroup] = useState(false);
 
-  // ── Import state ──
+  /* -------------------- Import state -------------------- */
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importStep, setImportStep] = useState<'select' | 'preview' | 'result'>('select');
@@ -405,195 +777,350 @@ export function CustomersPage() {
   const [duplicateAction, setDuplicateAction] = useState<DuplicateAction>('skip');
   const [importPreview, setImportPreview] = useState<ImportPreviewRow[]>([]);
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(null);
-  const [importErrors, setImportErrors] = useState<Array<{ row: number; field: string; message: string }>>([]);
+  const [importErrors, setImportErrors] = useState<ImportError[]>([]);
   const [importResultMessage, setImportResultMessage] = useState('');
   const [importSuccess, setImportSuccess] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  // ── Outstanding amount visibility state ──
+  /* -------------------- Detail view state -------------------- */
+  const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
+  const [detailTab, setDetailTab] = useState<DetailTab>('overview');
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [customerInvoices, setCustomerInvoices] = useState<InvoiceSummaryRow[]>([]);
+  const [customerPayments, setCustomerPayments] = useState<PaymentRow[]>([]);
+  const [customerOrders, setCustomerOrders] = useState<OrderSummaryRow[]>([]);
+
+  /* -------------------- Outstanding visibility -------------------- */
   const [outstandingVisibleIds, setOutstandingVisibleIds] = useState<Set<number>>(new Set());
 
-  const { showSuccess, showError } = useNotification();
-
-  // ---------- API Caching ----------
+  /* -------------------- Data fetching -------------------- */
   const {
-    data: customers, loading: custLoading, error: custError,
+    data: customers,
+    loading: custLoading,
+    error: custError,
     refresh: refreshCustomers,
   } = useApiCache<Customer[]>('customers', () => apiClient.getCustomers());
 
   const { data: companies } = useApiCache<Company[]>('companies', () => apiClient.getCompanies());
   const { data: branches } = useApiCache<Branch[]>('branches', () => apiClient.getBranches());
-  const {
-    data: customerGroups, refresh: refreshGroups,
-  } = useApiCache<CustomerGroup[]>('customerGroups', () => apiClient.getCustomerGroups());
+  const { data: customerGroups, refresh: refreshGroups } = useApiCache<CustomerGroup[]>(
+    'customerGroups',
+    () => apiClient.getCustomerGroups()
+  );
 
-  // ---------- Filter & Search ----------
+  /* -------------------- Filtering -------------------- */
   const filteredCustomers = useMemo(() => {
     if (!customers) return [];
     let filtered = [...customers];
-    if (searchTerm.trim()) {
-      const term = searchTerm.toLowerCase();
-      filtered = filtered.filter(c =>
-        c.name?.toLowerCase().includes(term) ||
-        c.email?.toLowerCase().includes(term) ||
-        c.contact_no?.toLowerCase().includes(term) ||
-        c.gst_number?.toLowerCase().includes(term)
-      );
-    }
-    if (filterType !== 'all') filtered = filtered.filter(c => c.type === filterType);
-    if (filterCompany !== 'all') filtered = filtered.filter(c => c.company_id === parseInt(filterCompany));
-    if (filterBranch !== 'all') filtered = filtered.filter(c => c.branch_id === parseInt(filterBranch));
+    if (filterType !== 'all') filtered = filtered.filter((c) => c.type === filterType);
+    if (filterCompany !== 'all') filtered = filtered.filter((c) => c.company_id === parseInt(filterCompany));
+    if (filterBranch !== 'all') filtered = filtered.filter((c) => c.branch_id === parseInt(filterBranch));
     return filtered;
-  }, [customers, searchTerm, filterType, filterCompany, filterBranch]);
+  }, [customers, filterType, filterCompany, filterBranch]);
 
-  const summary = useMemo(() => ({
-    total: customers?.length || 0,
-    customersCount: customers?.filter(c => c.type === 'customer').length || 0,
-    dealers: customers?.filter(c => c.type === 'dealer').length || 0,
-    distributors: customers?.filter(c => c.type === 'distributor').length || 0,
-  }), [customers]);
+  const summary = useMemo(
+    () => ({
+      total: customers?.length || 0,
+      customersCount: customers?.filter((c) => c.type === 'customer').length || 0,
+      dealers: customers?.filter((c) => c.type === 'dealer').length || 0,
+      distributors: customers?.filter((c) => c.type === 'distributor').length || 0,
+    }),
+    [customers]
+  );
 
-  // ---------- Pagination ----------
-  const [currentPage, setCurrentPage] = useState(1);
-  const rowsPerPage = 15;
-  const totalPages = Math.ceil(filteredCustomers.length / rowsPerPage);
-  const paginatedCustomers = useMemo(() => {
-    const start = (currentPage - 1) * rowsPerPage;
-    return filteredCustomers.slice(start, start + rowsPerPage);
-  }, [filteredCustomers, currentPage]);
+  const activeFilterCount = [
+    filterType !== 'all' ? filterType : undefined,
+    filterCompany !== 'all' ? filterCompany : undefined,
+    filterBranch !== 'all' ? filterBranch : undefined,
+  ].filter(Boolean).length;
 
-  useEffect(() => setCurrentPage(1), [searchTerm, filterType, filterCompany, filterBranch]);
+  const clearFilters = useCallback(() => {
+    setFilterType('all');
+    setFilterCompany('all');
+    setFilterBranch('all');
+  }, []);
 
-  // ---------- Branch filters ----------
+  /* -------------------- Selection -------------------- */
+  const allSelected = Boolean(
+    filteredCustomers.length > 0 && filteredCustomers.every((c) => selectedIds.includes(c.id))
+  );
+
+  const toggleSelectAll = useCallback(() => {
+    const ids = filteredCustomers.map((c) => c.id);
+    if (!ids.length) return;
+    if (allSelected) {
+      setSelectedIds((current) => current.filter((id) => !ids.includes(id)));
+    } else {
+      setSelectedIds((current) => Array.from(new Set([...current, ...ids])));
+    }
+  }, [allSelected, filteredCustomers]);
+
+  const toggleSelected = useCallback((id: number) => {
+    setSelectedIds((current) =>
+      current.includes(id) ? current.filter((v) => v !== id) : [...current, id]
+    );
+  }, []);
+
+  /* -------------------- Branch filters -------------------- */
   const filteredBranchesForm = useMemo(() => {
     if (formData.company_id && branches) {
       const companyId = parseInt(String(formData.company_id));
-      return branches.filter(b => b.company_id === companyId);
+      return branches.filter((b) => b.company_id === companyId);
     }
     return [];
   }, [formData.company_id, branches]);
 
   const filteredBranchesFilter = useMemo(() => {
     if (filterCompany !== 'all' && branches) {
-      return branches.filter(b => b.company_id === parseInt(filterCompany));
+      return branches.filter((b) => b.company_id === parseInt(filterCompany));
     }
     return branches || [];
   }, [filterCompany, branches]);
 
-  // ---------- GST Auto-fill ----------
-  const { lookupGst, lookingUp } = useGstLookup();
+  /* -------------------- Detail view handler -------------------- */
+  const handleViewCustomer = useCallback(async (customer: Customer) => {
+    setViewingCustomer(customer);
+    setDetailTab('overview');
+    setCustomerInvoices([]);
+    setCustomerPayments([]);
+    setCustomerOrders([]);
+    setDetailLoading(true);
+
+    try {
+      const [invRes, payRes, ordRes] = await Promise.allSettled([
+        apiClient.request('GET', `/invoices?customer_id=${customer.id}&per_page=${RELATED_LIMIT}`),
+        apiClient.request('GET', `/payments?customer_id=${customer.id}&per_page=${RELATED_LIMIT}`),
+        apiClient.request('GET', `/orders?customer_id=${customer.id}&per_page=${RELATED_LIMIT}`),
+      ]);
+
+      if (invRes.status === 'fulfilled') {
+        setCustomerInvoices(unwrapList<InvoiceSummaryRow>(invRes.value).slice(0, RELATED_LIMIT));
+      }
+      if (payRes.status === 'fulfilled') {
+        setCustomerPayments(unwrapList<PaymentRow>(payRes.value).slice(0, RELATED_LIMIT));
+      }
+      if (ordRes.status === 'fulfilled') {
+        setCustomerOrders(unwrapList<OrderSummaryRow>(ordRes.value).slice(0, RELATED_LIMIT));
+      }
+    } finally {
+      setDetailLoading(false);
+    }
+  }, []);
+
+  /* -------------------- Combined activity timeline -------------------- */
+  const activityEntries = useMemo<ActivityEntry[]>(() => {
+    const entries: ActivityEntry[] = [];
+
+    customerInvoices.forEach((inv) => {
+      entries.push({
+        id: `inv-${inv.id}`,
+        type: 'invoice',
+        title: `Invoice ${inv.invoice_no ?? `#${inv.id}`}`,
+        subtitle: inv.payment_status || inv.status || 'Invoice',
+        amount: safeNum(inv.total_amount),
+        date: (inv.invoice_date as string) || '',
+        status: (inv.status as string) || undefined,
+      });
+    });
+
+    customerPayments.forEach((pay) => {
+      entries.push({
+        id: `pay-${pay.id}`,
+        type: 'payment',
+        title: `Payment ${pay.reference_no ?? `#${pay.id}`}`,
+        subtitle: `${pay.payment_direction ?? 'inward'} · ${pay.payment_method ?? '—'}`,
+        amount: safeNum(pay.amount),
+        date: (pay.transaction_date as string) || '',
+        status: (pay.status as string) || undefined,
+      });
+    });
+
+    customerOrders.forEach((ord) => {
+      entries.push({
+        id: `ord-${ord.id}`,
+        type: 'order',
+        title: `Order ${ord.order_no ?? `#${ord.id}`}`,
+        subtitle: `${ord.source ?? 'order'} · ${ord.status ?? '—'}`,
+        amount: safeNum(ord.total_amount),
+        date: (ord.created_at as string) || (ord.delivery_date as string) || '',
+        status: (ord.status as string) || undefined,
+      });
+    });
+
+    return entries
+      .sort((a, b) => (b.date > a.date ? 1 : -1))
+      .slice(0, 20);
+  }, [customerInvoices, customerPayments, customerOrders]);
+
+  /* -------------------- GST auto-fill -------------------- */
+  const [lookingUp, setLookingUp] = useState(false);
 
   const handleGstChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData(prev => ({ ...prev, gst_number: e.target.value }));
+    setFormData((prev) => ({ ...prev, gst_number: e.target.value }));
   };
 
   const handleAutoFill = async () => {
-    if (!formData.gst_number) return;
-    const data = await lookupGst(formData.gst_number);
-    if (data) {
-      setFormData(prev => ({
-        ...prev,
-        name: data.company_name || prev.name,
-        billing_street: data.billing_street || prev.billing_street,
-        billing_city: data.billing_city || prev.billing_city,
-        billing_state: data.billing_state || prev.billing_state,
-        billing_pincode: data.billing_pincode || prev.billing_pincode,
-        billing_country: data.billing_country || prev.billing_country,
-        registration_type: data.registration_type || prev.registration_type,
-        pan: data.pan || prev.pan,
-      }));
-      showSuccess('GSTIN details auto-filled');
-    } else {
-      showError('Unable to fetch GSTIN details. Check the number and try again.');
+    if (!formData.gst_number || formData.gst_number.length < 10) {
+      showError('Invalid GSTIN', 'Please enter a valid GSTIN (min 10 characters).');
+      return;
+    }
+    setLookingUp(true);
+    try {
+      const data = (await apiClient.lookupGst(formData.gst_number)) as GstLookupResult;
+      if (data) {
+        setFormData((prev) => ({
+          ...prev,
+          name: data.company_name || prev.name,
+          billing_street: data.billing_street || prev.billing_street,
+          billing_city: data.billing_city || prev.billing_city,
+          billing_state: data.billing_state || prev.billing_state,
+          billing_pincode: data.billing_pincode || prev.billing_pincode,
+          billing_country: data.billing_country || prev.billing_country,
+          registration_type: data.registration_type || prev.registration_type,
+          pan: data.pan || prev.pan,
+        }));
+        showSuccess('GSTIN details auto-filled');
+      } else {
+        showError('Not found', 'Unable to fetch GSTIN details. Check the number and try again.');
+      }
+    } catch (err: unknown) {
+      showError('Lookup failed', getErrorMessage(err, 'Unable to fetch GSTIN details.'));
+    } finally {
+      setLookingUp(false);
     }
   };
 
-  // ---------- Same as Billing ----------
+  /* -------------------- Same as billing -------------------- */
   const handleSameAsBillingToggle = (checked: boolean) => {
-    setFormData(prev => ({
+    setFormData((prev) => ({
       ...prev,
       same_as_billing: checked,
-      ...(checked ? {
-        shipping_street: prev.billing_street,
-        shipping_landmark: prev.billing_landmark,
-        shipping_city: prev.billing_city,
-        shipping_state: prev.billing_state,
-        shipping_country: prev.billing_country,
-        shipping_pincode: prev.billing_pincode,
-      } : {}),
+      ...(checked
+        ? {
+            shipping_street: prev.billing_street,
+            shipping_landmark: prev.billing_landmark,
+            shipping_city: prev.billing_city,
+            shipping_state: prev.billing_state,
+            shipping_country: prev.billing_country,
+            shipping_pincode: prev.billing_pincode,
+          }
+        : {}),
     }));
   };
 
-  // ---------- Group management ----------
+  /* -------------------- Group management -------------------- */
   const handleAddGroup = async () => {
     if (!newGroupName.trim()) return;
     setAddingGroup(true);
     try {
       await apiClient.createCustomerGroup({ name: newGroupName.trim() });
       refreshGroups();
+      showSuccess('Group added', `${newGroupName.trim()} created.`);
       setNewGroupName('');
       setShowGroupModal(false);
-      showSuccess('Group added');
-    } catch (err: any) {
-      showError('Failed to add group', err.message);
+    } catch (err: unknown) {
+      showError('Failed to add group', getErrorMessage(err, 'Failed to add group.'));
     } finally {
       setAddingGroup(false);
     }
   };
 
-  // ---------- Bulk actions ----------
+  /* -------------------- Bulk actions -------------------- */
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0) return;
-    if (!confirm(`Delete ${selectedIds.length} customer(s)?`)) return;
+    if (!window.confirm(`Delete ${selectedIds.length} customer(s)?`)) return;
     try {
       await Promise.all(selectedIds.map((id) => apiClient.deleteCustomer(id)));
       showSuccess('Bulk delete', `${selectedIds.length} deleted.`);
-      addAppLog({ module: 'Customers', action: 'Bulk delete', status: 'success', message: `Deleted ${selectedIds.length}` });
+      safeLog({
+        module: 'Customers',
+        action: 'Bulk delete',
+        status: 'success',
+        message: `Deleted ${selectedIds.length}`,
+      });
       setSelectedIds([]);
       refreshCustomers();
-    } catch (err: any) {
-      showError('Bulk delete failed', err.message);
+    } catch (err: unknown) {
+      showError('Bulk delete failed', getErrorMessage(err, 'Bulk delete failed.'));
     }
   };
 
   const handleBulkTypeChange = async (type: CustomerType) => {
     if (selectedIds.length === 0) return;
-    if (!confirm(`Change type to ${type} for ${selectedIds.length}?`)) return;
+    if (!window.confirm(`Change type to "${type}" for ${selectedIds.length} record(s)?`)) return;
     try {
-      await Promise.all(selectedIds.map(id => apiClient.updateCustomer(id, { type })));
-      showSuccess('Bulk update', `Type changed for ${selectedIds.length} customer(s).`);
-      addAppLog({ module: 'Customers', action: 'Bulk type change', status: 'success', message: `Changed to ${type}` });
+      await Promise.all(selectedIds.map((id) => apiClient.updateCustomer(id, { type })));
+      showSuccess('Bulk update', `Type changed for ${selectedIds.length} record(s).`);
+      safeLog({
+        module: 'Customers',
+        action: 'Bulk type change',
+        status: 'success',
+        message: `Changed to ${type}`,
+      });
       setSelectedIds([]);
       refreshCustomers();
-    } catch (err: any) {
-      showError('Bulk update failed', err.message);
+    } catch (err: unknown) {
+      showError('Bulk update failed', getErrorMessage(err, 'Bulk update failed.'));
     }
   };
 
-  // ---------- CRUD Handlers ----------
-  const handleCreate = useCallback(() => {
-    setEditingId(null);
+  /* -------------------- CRUD -------------------- */
+  const resetForm = () => {
     setFormData({
-      name: '', type: 'customer', company_type: '', email: '',
-      contact_person: '', contact_no: '', gst_number: '', registration_type: '', pan: '',
-      billing_street: '', billing_landmark: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
-      shipping_street: '', shipping_landmark: '', shipping_city: '', shipping_state: '', shipping_country: 'India', shipping_pincode: '',
-      eway_bill_distance: '', group_id: '', opening_balance: '', credit_limit: '', due_days: '',
+      name: '',
+      type: 'customer',
+      company_type: '',
+      email: '',
+      contact_no: '',
+      contact_person: '',
+      gst_number: '',
+      registration_type: '',
+      pan: '',
+      billing_street: '',
+      billing_landmark: '',
+      billing_city: '',
+      billing_state: '',
+      billing_country: 'India',
+      billing_pincode: '',
+      shipping_street: '',
+      shipping_landmark: '',
+      shipping_city: '',
+      shipping_state: '',
+      shipping_country: 'India',
+      shipping_pincode: '',
+      eway_bill_distance: '',
+      group_id: '',
+      opening_balance: '',
+      credit_limit: '',
+      due_days: '',
       outstanding_amount: '',
-      fax: '', website: '', note: '', license_no: '', custom_field_1: '', custom_field_2: '',
-      is_active: true, company_id: '', branch_id: '',
+      fax: '',
+      website: '',
+      note: '',
+      license_no: '',
+      custom_field_1: '',
+      custom_field_2: '',
+      is_active: true,
+      company_id: '',
+      branch_id: '',
       same_as_billing: true,
     });
     setFormErrors({});
+  };
+
+  const handleCreate = useCallback(() => {
+    setEditingId(null);
+    resetForm();
     setIsPanelOpen(true);
   }, []);
 
   const handleEdit = useCallback((customer: Customer) => {
     setEditingId(customer.id);
-    const same = !customer.shipping_street ||
+    const same =
+      !customer.shipping_street ||
       (customer.shipping_street === customer.billing_street &&
-       customer.shipping_city === customer.billing_city);
+        customer.shipping_city === customer.billing_city);
     setFormData({
       name: customer.name || '',
       type: customer.type || 'customer',
@@ -637,29 +1164,52 @@ export function CustomersPage() {
     setIsPanelOpen(true);
   }, []);
 
-  const handleDelete = useCallback(async (customer: Customer) => {
-    if (!confirm(`Delete "${customer.name}"?`)) return;
-    try {
-      await apiClient.deleteCustomer(customer.id);
-      showSuccess('Deleted', `${customer.name} removed.`);
-      addAppLog({ module: 'Customers', action: 'Delete', status: 'success', message: `Deleted ${customer.name}` });
-      refreshCustomers();
-    } catch (err: any) {
-      showError('Delete failed', err.message);
-    }
-  }, [refreshCustomers, showSuccess, showError]);
+  const handleLedger = useCallback(
+    (customer: Customer) => {
+      navigate(`/customers/${customer.id}/ledger`);
+    },
+    [navigate]
+  );
 
-  // ---------- Validation ----------
+  const handleDelete = useCallback(
+    async (customer: Customer) => {
+      if (!window.confirm(`Delete "${customer.name}"?`)) return;
+      try {
+        await apiClient.deleteCustomer(customer.id);
+        showSuccess('Deleted', `${customer.name} removed.`);
+        safeLog({
+          module: 'Customers',
+          action: 'Delete',
+          status: 'success',
+          message: `Deleted ${customer.name}`,
+        });
+        refreshCustomers();
+      } catch (err: unknown) {
+        showError('Delete failed', getErrorMessage(err, 'Delete failed.'));
+      }
+    },
+    [refreshCustomers, showSuccess, showError]
+  );
+
+  /* -------------------- Validation -------------------- */
   const validateForm = (): boolean => {
     const errors: Record<string, boolean> = {};
     let valid = true;
-    if (!formData.name.trim()) { errors.name = true; valid = false; }
-    if (!formData.billing_city.trim()) { errors.billing_city = true; valid = false; }
+    if (!formData.name.trim()) {
+      errors.name = true;
+      valid = false;
+    }
+    if (!formData.billing_city.trim()) {
+      errors.billing_city = true;
+      valid = false;
+    }
     if (formData.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
-      errors.email = true; valid = false;
+      errors.email = true;
+      valid = false;
     }
     if (formData.contact_no.trim() && !/^\d+$/.test(formData.contact_no.trim())) {
-      errors.contact_no = true; valid = false;
+      errors.contact_no = true;
+      valid = false;
     }
     setFormErrors(errors);
     if (!valid) showError('Validation', 'Please fix the highlighted required fields.');
@@ -669,8 +1219,9 @@ export function CustomersPage() {
   const handleSubmit = useCallback(async () => {
     if (!validateForm()) return;
 
-    const { same_as_billing, ...payload } = {
-      ...formData,
+    const { same_as_billing: _same, ...rest } = formData;
+    const payload = {
+      ...rest,
       company_id: formData.company_id ? parseInt(String(formData.company_id)) : null,
       branch_id: formData.branch_id ? parseInt(String(formData.branch_id)) : null,
       group_id: formData.group_id ? parseInt(String(formData.group_id)) : null,
@@ -686,47 +1237,83 @@ export function CustomersPage() {
       if (editingId) {
         await apiClient.updateCustomer(editingId, payload);
         showSuccess('Updated', `${formData.name} updated.`);
-        addAppLog({ module: 'Customers', action: 'Update', status: 'success', message: `Updated ${formData.name}` });
+        safeLog({
+          module: 'Customers',
+          action: 'Update',
+          status: 'success',
+          message: `Updated ${formData.name}`,
+        });
       } else {
         await apiClient.createCustomer(payload);
         showSuccess('Created', `${formData.name} created.`);
-        addAppLog({ module: 'Customers', action: 'Create', status: 'success', message: `Created ${formData.name}` });
+        safeLog({
+          module: 'Customers',
+          action: 'Create',
+          status: 'success',
+          message: `Created ${formData.name}`,
+        });
       }
       setIsPanelOpen(false);
       refreshCustomers();
-    } catch (err: any) {
-      showError('Save failed', err.message);
-      addAppLog({ module: 'Customers', action: 'Save', status: 'error', message: err.message });
+    } catch (err: unknown) {
+      showError('Save failed', getErrorMessage(err, 'Save failed.'));
+      safeLog({
+        module: 'Customers',
+        action: 'Save',
+        status: 'error',
+        message: getErrorMessage(err, 'Save failed.'),
+      });
     } finally {
       setSubmitting(false);
     }
   }, [formData, editingId, refreshCustomers, showSuccess, showError]);
 
-  // ---------- Export CSV ----------
+  /* -------------------- Export -------------------- */
   const handleExport = useCallback(() => {
     if (filteredCustomers.length === 0) {
       showError('Export failed', 'No customers to export.');
       return;
     }
-    const headers = ['ID', 'Name', 'Type', 'Email', 'Contact No', 'Company', 'Branch', 'GST', 'City', 'State', 'Outstanding'];
-    const rows = filteredCustomers.map(c => [
-      c.id, c.name, c.type, c.email, c.contact_no,
-      c.company?.name || '', c.branch?.name || '',
-      c.gst_number || '', c.billing_city || '', c.billing_state || '',
-      c.outstanding_amount ?? 0
-    ]);
-    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
+    const headers = [
+      'ID',
+      'Name',
+      'Type',
+      'Email',
+      'Contact No',
+      'Company',
+      'Branch',
+      'GST',
+      'City',
+      'State',
+      'Outstanding',
+    ];
+    const rows = filteredCustomers.map((c) =>
+      [
+        c.id,
+        escapeCsvField(c.name),
+        escapeCsvField(c.type),
+        escapeCsvField(c.email || ''),
+        escapeCsvField(c.contact_no || ''),
+        escapeCsvField(c.company?.name || ''),
+        escapeCsvField(c.branch?.name || ''),
+        escapeCsvField(c.gst_number || ''),
+        escapeCsvField(c.billing_city || ''),
+        escapeCsvField(c.billing_state || ''),
+        safeNum(c.outstanding_amount).toFixed(2),
+      ].join(',')
+    );
+    const csv = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `customers-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
-    window.URL.revokeObjectURL(url);
+    URL.revokeObjectURL(url);
     showSuccess('Export', 'Data exported.');
   }, [filteredCustomers, showSuccess, showError]);
 
-  // ---------- IMPORT Handlers ----------
+  /* -------------------- Import handlers -------------------- */
   const handleImportOpen = () => {
     setIsImportOpen(true);
     setImportStep('select');
@@ -753,16 +1340,14 @@ export function CustomersPage() {
       return;
     }
     setImportFile(file);
-    handlePreview(file);
+    void handlePreview(file);
   };
 
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragOver(false);
     const files = e.dataTransfer.files;
-    if (files.length) {
-      handleFileChange(files[0]);
-    }
+    if (files.length) handleFileChange(files[0]);
   };
 
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
@@ -775,17 +1360,21 @@ export function CustomersPage() {
     setDragOver(false);
   };
 
-  const handlePreview = async (file: File = importFile!) => {
+  const handlePreview = async (file: File = importFile as File) => {
     if (!file) return;
     setImportLoading(true);
     try {
       const response = await apiClient.importCustomers(file, duplicateAction, true);
       setImportPreview(response.preview || []);
-      setImportSummary({ total: response.total, valid: response.valid, invalid: response.invalid });
+      setImportSummary({
+        total: response.total,
+        valid: response.valid,
+        invalid: response.invalid,
+      });
       setImportErrors(response.errors || []);
       setImportStep('preview');
-    } catch (err: any) {
-      showError('Preview failed', err.message);
+    } catch (err: unknown) {
+      showError('Preview failed', getErrorMessage(err, 'Preview failed.'));
       setImportStep('select');
     } finally {
       setImportLoading(false);
@@ -805,15 +1394,30 @@ export function CustomersPage() {
       if (response.success) {
         showSuccess('Import completed', response.message);
         refreshCustomers();
-        addAppLog({ module: 'Customers', action: 'Import', status: 'success', message: `Imported ${response.summary.created} customers` });
+        safeLog({
+          module: 'Customers',
+          action: 'Import',
+          status: 'success',
+          message: `Imported ${response.summary.created} customers`,
+        });
       } else {
         showError('Import failed', response.message || 'Please check errors.');
-        addAppLog({ module: 'Customers', action: 'Import', status: 'error', message: response.message });
+        safeLog({
+          module: 'Customers',
+          action: 'Import',
+          status: 'error',
+          message: response.message,
+        });
       }
-    } catch (err: any) {
-      showError('Import failed', err.message);
+    } catch (err: unknown) {
+      showError('Import failed', getErrorMessage(err, 'Import failed.'));
       setImportStep('preview');
-      addAppLog({ module: 'Customers', action: 'Import', status: 'error', message: err.message });
+      safeLog({
+        module: 'Customers',
+        action: 'Import',
+        status: 'error',
+        message: getErrorMessage(err, 'Import failed.'),
+      });
     } finally {
       setImportLoading(false);
     }
@@ -822,50 +1426,49 @@ export function CustomersPage() {
   const handleDownloadTemplate = async () => {
     try {
       const blob = await apiClient.downloadCustomerTemplate();
-      const url = window.URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
       link.download = 'customers_template.csv';
       document.body.appendChild(link);
       link.click();
       link.remove();
-      window.URL.revokeObjectURL(url);
+      URL.revokeObjectURL(url);
       showSuccess('Template downloaded', 'Ready for import.');
-    } catch (err: any) {
-      showError('Template download failed', err.message);
+    } catch (err: unknown) {
+      showError('Template download failed', getErrorMessage(err, 'Download failed.'));
     }
   };
 
   const handleDownloadErrorReport = () => {
     if (importErrors.length === 0) return;
     const headers = ['Row', 'Field', 'Error'];
-    const rows = importErrors.map(e => [e.row, e.field, e.message]);
-    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
+    const rows = importErrors.map((e) =>
+      [e.row, escapeCsvField(e.field), escapeCsvField(e.message)].join(',')
+    );
+    const csv = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
     link.download = 'customer_import_errors.csv';
     document.body.appendChild(link);
     link.click();
     link.remove();
-    window.URL.revokeObjectURL(url);
+    URL.revokeObjectURL(url);
   };
 
-  // ---------- Outstanding visibility toggle ----------
+  /* -------------------- Outstanding visibility -------------------- */
   const toggleOutstandingVisibility = useCallback((id: number) => {
-    setOutstandingVisibleIds(prev => {
+    setOutstandingVisibleIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   }, []);
 
-  // ---------- Helper: render a field with red glow on error ----------
+  /* -------------------- Render field helper -------------------- */
   const renderField = (
     label: string,
     field: keyof CustomerFormData,
@@ -875,504 +1478,1420 @@ export function CustomersPage() {
     const value = formData[field] ?? '';
     const id = `field-${field}`;
     const hasError = formErrors[field];
+    const base = 'h-10 w-full min-w-0 rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition';
+    const stateClass = hasError
+      ? 'border-rose-300 ring-2 ring-rose-200'
+      : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10';
+
     return (
-      <div>
-        <label htmlFor={id} className="block text-sm font-medium text-gray-700 mb-1">
-          {label} {required && <span className="text-red-500">*</span>}
+      <div className="min-w-0">
+        <label
+          htmlFor={id}
+          className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500"
+        >
+          {label} {required && <span className="text-rose-500">*</span>}
         </label>
         <input
           id={id}
           type={type}
           value={value as string | number}
-          onChange={(e) => setFormData(prev => ({ ...prev, [field]: e.target.value }))}
-          className={`w-full rounded-lg border bg-white px-3 py-2 text-sm shadow-sm transition ${
-            hasError
-              ? 'border-red-400 ring-2 ring-red-200 focus:border-red-500 focus:ring-red-300'
-              : 'border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200'
-          }`}
+          onChange={(e) => setFormData((prev) => ({ ...prev, [field]: e.target.value }))}
+          className={`${base} ${stateClass}`}
           placeholder={`Enter ${label}`}
+          step={type === 'number' ? '0.01' : undefined}
         />
       </div>
     );
   };
 
-  // ---------- Table Columns ----------
-  const columns = useMemo(() => [
-    {
-      name: 'ID',
-      selector: (row: Customer) => row.id,
-      sortable: true,
-      cell: (row: Customer) => (
-        <span className="text-sm text-slate-500 font-mono">#{row.id}</span>
-      ),
-      width: '70px',
-      center: true,
-    },
-    {
-      name: 'Name',
-      selector: (row: Customer) => row.name,
-      sortable: true,
-      cell: (row: Customer) => (
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold shadow-sm">
-            {row.name?.[0]?.toUpperCase() || 'C'}
+  /* -------------------- Error state -------------------- */
+  if (custError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiAlertCircle size={24} />
           </div>
-          <div>
-            <div className="font-medium text-slate-800">{row.name}</div>
-            <div className="text-xs text-slate-400 capitalize">{row.type}</div>
-          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Failed to load customers</h2>
+          <p className="mt-1.5 text-sm text-slate-500">{custError}</p>
+          <Button
+            onClick={refreshCustomers}
+            className="mt-5 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800"
+          >
+            Try again
+          </Button>
         </div>
-      ),
-      width: '220px',
-    },
-    {
-      name: 'Type',
-      selector: (row: Customer) => row.type,
-      cell: (row: Customer) => {
-        const map: Record<string, { label: string; color: string }> = {
-          customer: { label: 'Customer', color: 'bg-blue-100 text-blue-700' },
-          dealer: { label: 'Dealer', color: 'bg-purple-100 text-purple-700' },
-          distributor: { label: 'Distributor', color: 'bg-teal-100 text-teal-700' },
-        };
-        const t = map[row.type] || map.customer;
-        return <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${t.color}`}>{t.label}</span>;
-      },
-      sortable: true,
-      width: '130px',
-    },
-    {
-      name: 'Email',
-      selector: (row: Customer) => row.email,
-      cell: (row: Customer) => <span className="text-sm text-slate-600">{row.email}</span>,
-      width: '200px',
-    },
-    {
-      name: 'Contact No',
-      selector: (row: Customer) => row.contact_no,
-      cell: (row: Customer) => <span className="text-sm text-slate-600">{row.contact_no}</span>,
-      width: '150px',
-    },
-    {
-      name: 'Outstanding',
-      selector: (row: Customer) => row.outstanding_amount ?? 0,
-      sortable: true,
-      cell: (row: Customer) => {
-        const isVisible = outstandingVisibleIds.has(row.id);
-        const amount = Number(row.outstanding_amount ?? 0);
-        return (
-          <div className="flex items-center gap-2">
-            <span className="font-medium">
-              {isVisible ? `₹${amount.toFixed(2)}` : '•••••'}
-            </span>
-            <button
-              onClick={() => toggleOutstandingVisibility(row.id)}
-              className="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition"
-              title={isVisible ? 'Hide amount' : 'Show amount'}
-            >
-              {isVisible ? <FiEyeOff size={16} /> : <FiEye size={16} />}
-            </button>
-          </div>
-        );
-      },
-      width: '140px',
-    },
-    {
-      name: 'Company',
-      selector: (row: Customer) => row.company?.name || '-',
-      cell: (row: Customer) => <span className="text-sm">{row.company?.name || '-'}</span>,
-      width: '140px',
-    },
-    {
-      name: 'Actions',
-      cell: (row: Customer) => (
-        <ActionDropdown
-          customer={row}
-          onEdit={handleEdit}
-          onDelete={handleDelete}
-        />
-      ),
-      width: '70px',
-      center: true,
-    },
-  ], [handleEdit, handleDelete, outstandingVisibleIds, toggleOutstandingVisibility]);
+      </div>
+    );
+  }
 
-  // ---------- Render ----------
+  /* -------------------- Render -------------------- */
   return (
-    <div className="min-h-screen bg-[#f5f7fb] p-4 md:p-7 text-slate-800">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 mb-6 rounded-3xl bg-slate-950 px-5 py-6 md:px-8 md:py-7 shadow-xl shadow-slate-300/50">
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" /> Customer Management
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white md:text-3xl flex items-center gap-3">
-            <FiUsers className="text-cyan-300" /> Customers
-            <span className="text-sm font-normal text-cyan-100/70 ml-2">Directory</span>
-          </h1>
-          <p className="text-sm text-slate-300">Manage customers, dealers & distributors</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={refreshCustomers} disabled={custLoading} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20 disabled:opacity-60">
-            <FiRefreshCw className={custLoading ? 'animate-spin inline mr-1' : 'inline mr-1'} size={14} /> Refresh
-          </button>
-          <button onClick={handleImportOpen} className="rounded-xl bg-emerald-400 text-slate-950 px-3 py-2 text-sm font-medium hover:bg-emerald-300 shadow-md shadow-emerald-500/20">
-            <FiUpload className="inline mr-1" size={14} /> Import
-          </button>
-          <button onClick={handleExport} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20">
-            <FiDownload className="inline mr-1" size={14} /> Export
-          </button>
-          <button onClick={handleCreate} className="rounded-xl bg-cyan-400 text-slate-950 px-3 py-2 text-sm font-medium hover:bg-cyan-300 shadow-md shadow-cyan-500/20">
-            <FiPlus className="inline mr-1" size={14} /> Add Customer
-          </button>
-        </div>
-      </div>
+    <>
+      <style>{`
+        .animate-fadeIn { animation: fadeIn 0.2s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
 
-      {/* Search & Filters */}
-      <div className="flex flex-col sm:flex-row gap-4 mb-6">
-        <div className="relative flex-1 max-w-md">
-          <FiSearch className="absolute left-3 top-2.5 text-slate-400" size={18} />
-          <input
-            type="text"
-            placeholder="Search..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm outline-none placeholder:text-slate-400 focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 transition"
-          />
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <FiFilter size={16} className="text-slate-500" />
-          <select value={filterType} onChange={(e) => setFilterType(e.target.value)} className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm">
-            <option value="all">All Types</option>
-            <option value="customer">Customer</option>
-            <option value="dealer">Dealer</option>
-            <option value="distributor">Distributor</option>
-          </select>
-          <select value={filterCompany} onChange={(e) => { setFilterCompany(e.target.value); setFilterBranch('all'); }} className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm">
-            <option value="all">All Companies</option>
-            {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-          <select value={filterBranch} onChange={(e) => setFilterBranch(e.target.value)} className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm">
-            <option value="all">All Branches</option>
-            {filteredBranchesFilter.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-          </select>
-        </div>
-      </div>
+        .customers-offcanvas-wide {
+          width: min(1080px, 96vw) !important;
+          max-width: min(1080px, 96vw) !important;
+        }
+        .customers-detail-offcanvas {
+          width: min(760px, 96vw) !important;
+          max-width: min(760px, 96vw) !important;
+        }
+        @media (max-width: 640px) {
+          .customers-offcanvas-wide,
+          .customers-detail-offcanvas { width: 100vw !important; max-width: 100vw !important; }
+        }
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        {customers ? (
-          <>
-            <StatCard icon={FiUsers} label="Total" value={summary.total} tone="blue" />
-            <StatCard icon={FiShoppingBag} label="Customers" value={summary.customersCount} tone="emerald" />
-            <StatCard icon={FiTruck} label="Dealers" value={summary.dealers} tone="purple" />
-            <StatCard icon={FiPackage} label="Distributors" value={summary.distributors} tone="teal" />
-          </>
-        ) : (
-          [...Array(4)].map((_, i) => <StatCardSkeleton key={i} />)
-        )}
-      </div>
+        .customers-offcanvas-wide .customers-form-scroll,
+        .customers-detail-offcanvas .customers-form-scroll {
+          overflow-y: auto;
+          overflow-x: hidden;
+          min-height: 0;
+          flex: 1 1 auto;
+          max-height: calc(100vh - 180px);
+          scrollbar-width: thin;
+          scrollbar-color: #cbd5e1 transparent;
+        }
+        .customers-offcanvas-wide .customers-form-scroll::-webkit-scrollbar,
+        .customers-detail-offcanvas .customers-form-scroll::-webkit-scrollbar { width: 8px; }
+        .customers-offcanvas-wide .customers-form-scroll::-webkit-scrollbar-track,
+        .customers-detail-offcanvas .customers-form-scroll::-webkit-scrollbar-track { background: transparent; }
+        .customers-offcanvas-wide .customers-form-scroll::-webkit-scrollbar-thumb,
+        .customers-detail-offcanvas .customers-form-scroll::-webkit-scrollbar-thumb {
+          background-color: #cbd5e1; border-radius: 8px;
+        }
+        .customers-offcanvas-wide .customers-form-scroll::-webkit-scrollbar-thumb:hover,
+        .customers-detail-offcanvas .customers-form-scroll::-webkit-scrollbar-thumb:hover {
+          background-color: #94a3b8;
+        }
+      `}</style>
 
-      {/* Error banner */}
-      {custError && (
-        <div className="mb-4 p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl flex items-center gap-2 animate-shake">
-          <FiAlertCircle size={20} /> {custError}
-        </div>
-      )}
+      <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
+        <div className="mx-auto w-full max-w-[1900px] space-y-5 p-3 sm:p-4 lg:space-y-6 lg:p-6">
+          {/* Hero */}
+          <section className="relative overflow-hidden rounded-2xl border border-slate-800/10 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 px-5 py-6 shadow-[0_20px_40px_-20px_rgba(15,23,42,0.45)] sm:px-7 lg:px-8">
+            <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-indigo-500/20 blur-3xl" />
+            <div className="pointer-events-none absolute -bottom-24 right-24 h-56 w-56 rounded-full bg-cyan-500/10 blur-3xl" />
 
-      {/* Bulk Actions */}
-      {selectedIds.length > 0 && (
-        <div className="bg-white p-3 rounded-xl shadow-sm border border-slate-200 mb-4 flex flex-wrap items-center gap-3">
-          <span className="text-sm font-medium text-slate-700">{selectedIds.length} selected</span>
-          <button onClick={() => handleBulkTypeChange('customer')} className="inline-flex items-center gap-2 rounded-lg bg-blue-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-600">
-            <FiEdit size={16} /> Set Customer
-          </button>
-          <button onClick={() => handleBulkTypeChange('dealer')} className="inline-flex items-center gap-2 rounded-lg bg-purple-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-purple-600">
-            <FiEdit size={16} /> Set Dealer
-          </button>
-          <button onClick={() => handleBulkTypeChange('distributor')} className="inline-flex items-center gap-2 rounded-lg bg-teal-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-600">
-            <FiEdit size={16} /> Set Distributor
-          </button>
-          <button onClick={handleBulkDelete} className="inline-flex items-center gap-2 rounded-lg bg-rose-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-600">
-            <FiTrash2 size={16} /> Delete
-          </button>
-          <button onClick={() => setSelectedIds([])} className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50">
-            Clear
-          </button>
-        </div>
-      )}
+            <div className="relative flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+              <div className="min-w-0">
+                <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200 backdrop-blur">
+                  <FiUsers size={12} />
+                  CRM · Customers
+                </div>
+                <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl lg:text-[32px]">
+                  Customer directory
+                </h1>
+                <p className="mt-1.5 max-w-2xl text-sm text-slate-300">
+                  Manage customers, dealers, and distributors — with GST, addresses, and credit limits.
+                </p>
+              </div>
 
-      {/* Table */}
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <Suspense fallback={<TableSkeleton />}>
-          {custLoading ? (
-            <TableSkeleton />
-          ) : (
-            <>
-              <ModernDataTable
-                title="Customers List"
-                columns={columns}
-                data={paginatedCustomers}
-                loading={false}
-                selectable
-                selectedIds={selectedIds}
-                onSelectionChange={setSelectedIds}
-                striped
-                highlightOnHover
-                pointerOnHover
-              />
-              {totalPages > 1 && (
-                <div className="flex items-center justify-between px-6 py-3 border-t">
-                  <span className="text-sm text-slate-600">
-                    Showing {((currentPage - 1) * rowsPerPage) + 1} to {Math.min(currentPage * rowsPerPage, filteredCustomers.length)} of {filteredCustomers.length}
-                  </span>
-                  <div className="flex gap-1">
-                    <button onClick={() => setCurrentPage(1)} disabled={currentPage === 1} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">««</button>
-                    <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">‹</button>
-                    <span className="px-3 py-1 text-sm font-medium">{currentPage} / {totalPages}</span>
-                    <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">›</button>
-                    <button onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">»»</button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="outline"
+                  onClick={handleImportOpen}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                >
+                  <FiUpload className="mr-2" size={14} />
+                  Import
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handleExport}
+                  disabled={custLoading || filteredCustomers.length === 0}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                >
+                  <FiDownload className="mr-2" size={14} />
+                  Export
+                </Button>
+                <Button
+                  onClick={handleCreate}
+                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                >
+                  <FiPlus className="mr-2" size={14} />
+                  Add customer
+                </Button>
+              </div>
+            </div>
+          </section>
+
+          {/* KPI */}
+          <section className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
+            {customers ? (
+              <>
+                <StatCard icon={FiUsers} label="Total" value={summary.total} accent="indigo" />
+                <StatCard icon={FiShoppingBag} label="Customers" value={summary.customersCount} accent="emerald" />
+                <StatCard icon={FiTruck} label="Dealers" value={summary.dealers} accent="violet" />
+                <StatCard icon={FiPackage} label="Distributors" value={summary.distributors} accent="teal" />
+              </>
+            ) : (
+              Array.from({ length: 4 }).map((_, i) => <StatCardSkeleton key={i} />)
+            )}
+          </section>
+
+          {/* Filters */}
+          <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <CardHeader className="flex flex-row items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-5">
+              <div className="flex items-center gap-2.5">
+                <div className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600 ring-1 ring-indigo-500/10">
+                  <FiFilter size={14} />
+                </div>
+                <div>
+                  <CardTitle className="text-sm font-semibold text-slate-800">Filters</CardTitle>
+                  <CardDescription className="text-[11px] text-slate-500">
+                    {activeFilterCount > 0
+                      ? `${activeFilterCount} active filter${activeFilterCount > 1 ? 's' : ''}`
+                      : 'Refine by type, company, or branch'}
+                  </CardDescription>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {activeFilterCount > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-9 rounded-lg text-slate-500 hover:text-slate-800"
+                    onClick={clearFilters}
+                  >
+                    <FiX className="mr-1.5" size={14} />
+                    Reset
+                  </Button>
+                )}
+              </div>
+            </CardHeader>
+
+            <CardContent className="bg-white p-4 sm:p-5">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="min-w-0">
+                  <div className="relative">
+                    <select
+                      aria-label="Type"
+                      value={filterType}
+                      onChange={(e) => setFilterType(e.target.value)}
+                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                    >
+                      {TYPE_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    <FiChevronDown
+                      className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                      size={14}
+                    />
                   </div>
                 </div>
-              )}
-            </>
+
+                <div className="min-w-0">
+                  <div className="relative">
+                    <select
+                      aria-label="Company"
+                      value={filterCompany}
+                      onChange={(e) => {
+                        setFilterCompany(e.target.value);
+                        setFilterBranch('all');
+                      }}
+                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                    >
+                      <option value="all">All companies</option>
+                      {companies?.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                    <FiChevronDown
+                      className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                      size={14}
+                    />
+                  </div>
+                </div>
+
+                <div className="min-w-0">
+                  <div className="relative">
+                    <select
+                      aria-label="Branch"
+                      value={filterBranch}
+                      onChange={(e) => setFilterBranch(e.target.value)}
+                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                    >
+                      <option value="all">All branches</option>
+                      {filteredBranchesFilter.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </select>
+                    <FiChevronDown
+                      className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                      size={14}
+                    />
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Bulk toolbar */}
+          {selectedIds.length > 0 && (
+            <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
+              <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
+                <div className="mr-1 flex items-center gap-2 rounded-lg bg-indigo-50 px-2.5 py-1 text-indigo-700 ring-1 ring-indigo-500/10">
+                  <span className="text-sm font-bold">{selectedIds.length}</span>
+                  <span className="text-xs font-medium">selected</span>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9 rounded-lg"
+                  onClick={() => handleBulkTypeChange('customer')}
+                >
+                  <FiShoppingBag className="mr-1.5 text-emerald-600" size={14} /> Set customer
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9 rounded-lg"
+                  onClick={() => handleBulkTypeChange('dealer')}
+                >
+                  <FiTruck className="mr-1.5 text-violet-600" size={14} /> Set dealer
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9 rounded-lg"
+                  onClick={() => handleBulkTypeChange('distributor')}
+                >
+                  <FiPackage className="mr-1.5 text-teal-600" size={14} /> Set distributor
+                </Button>
+                <Button
+                  size="sm"
+                  className="h-9 rounded-lg border border-red-600 bg-red-600 font-semibold text-white shadow-none hover:border-red-700 hover:bg-red-700"
+                  onClick={handleBulkDelete}
+                >
+                  <FiTrash2 className="mr-1.5" size={14} /> Delete
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="ml-auto h-9 rounded-lg text-slate-500 hover:text-slate-800"
+                  onClick={() => setSelectedIds([])}
+                >
+                  Clear
+                </Button>
+              </div>
+            </div>
           )}
-        </Suspense>
+
+          {/* Table card */}
+          <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <CardHeader className="flex flex-col gap-3 border-b border-slate-100 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+              <div className="flex items-center gap-2.5">
+                <div className="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-slate-600">
+                  <FiUsers size={14} />
+                </div>
+                <div>
+                  <CardTitle className="text-sm font-semibold text-slate-800">
+                    Customer list
+                  </CardTitle>
+                  <CardDescription className="text-[11px] text-slate-500">
+                    {custLoading
+                      ? 'Loading customers…'
+                      : `${filteredCustomers.length.toLocaleString('en-IN')} record${
+                          filteredCustomers.length === 1 ? '' : 's'
+                        } · Click a row to view details`}
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+
+            <div className="overflow-x-auto">
+              <Table className="min-w-[1180px]">
+                <TableHeader>
+                  <TableRow className="border-slate-100 bg-slate-50/70 hover:bg-slate-50/70">
+                    <TableHead className="w-11 px-3">
+                      <input
+                        aria-label="Select all"
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={(event) => {
+                          event.stopPropagation();
+                          toggleSelectAll();
+                        }}
+                        onClick={(event) => event.stopPropagation()}
+                        className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                      />
+                    </TableHead>
+                    <TableHead className="w-16">
+                      <TableHeadLabel>ID</TableHeadLabel>
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>Name</TableHeadLabel>
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>Type</TableHeadLabel>
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>Contact</TableHeadLabel>
+                    </TableHead>
+                    <TableHead className="text-right">
+                      <TableHeadLabel align="right">Outstanding</TableHeadLabel>
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>Company</TableHeadLabel>
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>City</TableHeadLabel>
+                    </TableHead>
+                    <TableHead className="w-12" />
+                  </TableRow>
+                </TableHeader>
+
+                <TableBody>
+                  {custLoading &&
+                    Array.from({ length: 8 }).map((_, index) => (
+                      <TableRow key={`skeleton-${index}`} className="border-slate-100">
+                        {Array.from({ length: TABLE_COLUMN_COUNT }).map((__, cellIndex) => (
+                          <TableCell key={cellIndex}>
+                            <div className="h-4 animate-pulse rounded bg-slate-100" />
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    ))}
+
+                  {!custLoading &&
+                    filteredCustomers.map((customer) => {
+                      const selected = selectedIds.includes(customer.id);
+                      const typeColors: Record<CustomerType, string> = {
+                        customer: 'border-emerald-200/70 bg-emerald-50 text-emerald-700',
+                        dealer: 'border-violet-200/70 bg-violet-50 text-violet-700',
+                        distributor: 'border-teal-200/70 bg-teal-50 text-teal-700',
+                      };
+                      const isVisible = outstandingVisibleIds.has(customer.id);
+                      const amount = safeNum(customer.outstanding_amount);
+
+                      return (
+                        <TableRow
+                          key={customer.id}
+                          data-state={selected ? 'selected' : undefined}
+                          className={`cursor-pointer border-slate-100 transition-colors hover:bg-slate-50/70 ${
+                            selected ? 'bg-indigo-50/40 hover:bg-indigo-50/60' : ''
+                          }`}
+                          onClick={() => handleViewCustomer(customer)}
+                        >
+                          <TableCell className="px-3" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              aria-label={`Select ${customer.name}`}
+                              type="checkbox"
+                              checked={selected}
+                              onChange={(event) => {
+                                event.stopPropagation();
+                                toggleSelected(customer.id);
+                              }}
+                              onClick={(event) => event.stopPropagation()}
+                              className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                            />
+                          </TableCell>
+
+                          <TableCell>
+                            <span className="font-mono text-[12px] text-slate-500">
+                              #{customer.id}
+                            </span>
+                          </TableCell>
+
+                          <TableCell>
+                            <div className="flex min-w-[200px] items-center gap-2.5">
+                              <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-[11px] font-bold text-white">
+                                {(customer.name || 'C')[0]?.toUpperCase()}
+                              </div>
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-semibold text-slate-900">
+                                  {customer.name}
+                                </p>
+                                {customer.gst_number && (
+                                  <p className="truncate text-[11px] text-slate-500">
+                                    {customer.gst_number}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          </TableCell>
+
+                          <TableCell>
+                            <Badge
+                              variant="outline"
+                              className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold capitalize ${
+                                typeColors[customer.type] ||
+                                'border-slate-200 bg-slate-50 text-slate-600'
+                              }`}
+                            >
+                              {customer.type}
+                            </Badge>
+                          </TableCell>
+
+                          <TableCell>
+                            <div className="min-w-[190px]">
+                              {customer.email && (
+                                <p className="truncate text-sm text-slate-700">{customer.email}</p>
+                              )}
+                              {customer.contact_no && (
+                                <p className="truncate text-[11px] text-slate-500">
+                                  {customer.contact_no}
+                                </p>
+                              )}
+                              {!customer.email && !customer.contact_no && (
+                                <span className="text-sm text-slate-400">—</span>
+                              )}
+                            </div>
+                          </TableCell>
+
+                          <TableCell className="whitespace-nowrap text-right">
+                            <div className="inline-flex items-center gap-2">
+                              <span
+                                className={`inline-flex items-center rounded-lg px-2 py-1 text-sm font-semibold tabular-nums ${
+                                  amount > 0
+                                    ? 'bg-rose-50 text-rose-600'
+                                    : 'bg-emerald-50 text-emerald-600'
+                                }`}
+                              >
+                                {isVisible ? formatCurrency(amount) : '•••••'}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleOutstandingVisibility(customer.id);
+                                }}
+                                className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                                title={isVisible ? 'Hide amount' : 'Show amount'}
+                                aria-label={isVisible ? 'Hide amount' : 'Show amount'}
+                              >
+                                {isVisible ? <FiEyeOff size={14} /> : <FiEye size={14} />}
+                              </button>
+                            </div>
+                          </TableCell>
+
+                          <TableCell>
+                            <span className="text-sm text-slate-700">
+                              {customer.company?.name || '—'}
+                            </span>
+                          </TableCell>
+
+                          <TableCell>
+                            <span className="text-sm text-slate-700">
+                              {customer.billing_city || '—'}
+                            </span>
+                          </TableCell>
+
+                          <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                            <ActionDropdown
+                              customer={customer}
+                              onEdit={handleEdit}
+                              onLedger={handleLedger}
+                              onDelete={handleDelete}
+                            />
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+
+                  {!custLoading && !filteredCustomers.length && (
+                    <TableRow>
+                      <TableCell colSpan={TABLE_COLUMN_COUNT} className="py-20 text-center">
+                        <div className="mx-auto max-w-md px-4">
+                          <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 ring-1 ring-slate-200/70">
+                            <FiFilter className="h-6 w-6 text-slate-400" />
+                          </div>
+                          <p className="mt-4 text-base font-semibold text-slate-800">
+                            No customers found
+                          </p>
+                          <p className="mt-1 text-sm text-slate-500">
+                            Try adjusting the type, company, or branch filter.
+                          </p>
+                          <Button
+                            className="mt-5 rounded-lg"
+                            variant="outline"
+                            onClick={clearFilters}
+                          >
+                            <FiFilter className="mr-2" size={14} />
+                            Reset filters
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </Card>
+        </div>
       </div>
 
-      {/* Offcanvas – Full Form */}
-      {isPanelOpen && (
-        <Suspense fallback={
-          <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
-            <div className="bg-white p-8 rounded-2xl">Loading form...</div>
-          </div>
-        }>
+      {/* ══════════════════════════════════════════════════════════ */}
+      {/* Customer detail view (opens on row click)                 */}
+      {/* ══════════════════════════════════════════════════════════ */}
+      {viewingCustomer && (
+        <Suspense
+          fallback={
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
+              <div className="rounded-2xl bg-white p-8 text-sm text-slate-600 shadow-xl">
+                Loading…
+              </div>
+            </div>
+          }
+        >
           <Offcanvas
-            isOpen={isPanelOpen}
-            title={editingId ? 'Edit Customer' : 'Add Customer'}
-            onClose={() => setIsPanelOpen(false)}
+            isOpen={!!viewingCustomer}
+            title={viewingCustomer.name}
+            onClose={() => setViewingCustomer(null)}
+            className="customers-detail-offcanvas"
             footer={
-              <div className="flex justify-between w-full">
-                <button onClick={() => setIsPanelOpen(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={submitting}>
-                  <FiX className="inline mr-1" /> Close
-                </button>
-                <button onClick={handleSubmit} disabled={submitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50">
-                  {submitting ? 'Saving...' : 'Save'}
-                </button>
+              <div className="flex w-full justify-between gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setViewingCustomer(null)}
+                  className="rounded-xl"
+                >
+                  <FiX className="mr-2" size={14} /> Close
+                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => handleLedger(viewingCustomer)}
+                    className="rounded-xl text-emerald-600"
+                  >
+                    <FiBookOpen className="mr-2" size={14} /> Ledger
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      setViewingCustomer(null);
+                      handleEdit(viewingCustomer);
+                    }}
+                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                  >
+                    <FiEdit className="mr-2" size={14} /> Edit
+                  </Button>
+                </div>
               </div>
             }
           >
-            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
-              {/* Customer / Vendor Detail */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Customer / Vendor Detail
+            <div className="customers-form-scroll space-y-5 pr-2">
+              {/* Customer header summary */}
+              <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-base font-bold text-white shadow-sm">
+                      {(viewingCustomer.name || 'C')[0]?.toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate text-base font-bold text-slate-900">
+                        {viewingCustomer.name}
+                      </p>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <Badge
+                          variant="outline"
+                          className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold capitalize ${
+                            viewingCustomer.type === 'dealer'
+                              ? 'border-violet-200/70 bg-violet-50 text-violet-700'
+                              : viewingCustomer.type === 'distributor'
+                                ? 'border-teal-200/70 bg-teal-50 text-teal-700'
+                                : 'border-emerald-200/70 bg-emerald-50 text-emerald-700'
+                          }`}
+                        >
+                          {viewingCustomer.type}
+                        </Badge>
+                        {viewingCustomer.is_active ? (
+                          <Badge
+                            variant="outline"
+                            className="rounded-full border-emerald-200/70 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700"
+                          >
+                            Active
+                          </Badge>
+                        ) : (
+                          <Badge
+                            variant="outline"
+                            className="rounded-full border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600"
+                          >
+                            Inactive
+                          </Badge>
+                        )}
+                        <span className="font-mono text-[11px] text-slate-400">
+                          #{viewingCustomer.id}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Money summary tiles */}
+              <div className="grid grid-cols-3 gap-2">
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                    Outstanding
+                  </p>
+                  <p
+                    className={`mt-1 text-sm font-bold tabular-nums ${
+                      safeNum(viewingCustomer.outstanding_amount) > 0
+                        ? 'text-rose-600'
+                        : 'text-emerald-600'
+                    }`}
+                  >
+                    {formatCurrency(viewingCustomer.outstanding_amount)}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                    Credit limit
+                  </p>
+                  <p className="mt-1 text-sm font-bold tabular-nums text-slate-900">
+                    {formatCurrency(viewingCustomer.credit_limit)}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                    Opening
+                  </p>
+                  <p className="mt-1 text-sm font-bold tabular-nums text-slate-900">
+                    {formatCurrency(viewingCustomer.opening_balance)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Tabs */}
+              <div className="flex flex-wrap items-center gap-1 rounded-xl border border-slate-200 bg-white p-1">
+                {(
+                  [
+                    { key: 'overview', label: 'Overview', icon: FiUsers },
+                    { key: 'invoices', label: 'Invoices', icon: FiFileText },
+                    { key: 'payments', label: 'Payments', icon: FiCreditCard },
+                    { key: 'orders', label: 'Orders', icon: FiShoppingBag },
+                    { key: 'activity', label: 'Activity', icon: FiActivity },
+                  ] as const
+                ).map((tab) => {
+                  const Icon = tab.icon;
+                  const active = detailTab === tab.key;
+                  return (
+                    <button
+                      key={tab.key}
+                      type="button"
+                      onClick={() => setDetailTab(tab.key)}
+                      className={`inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-semibold transition ${
+                        active
+                          ? 'bg-slate-900 text-white shadow-sm'
+                          : 'text-slate-600 hover:bg-slate-100'
+                      }`}
+                    >
+                      <Icon size={13} />
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* ── Overview tab ── */}
+              {detailTab === 'overview' && (
+                <div className="space-y-4">
+                  <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                    <div className="border-b border-slate-100 px-3.5 py-2.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                        Contact
+                      </p>
+                    </div>
+                    <div className="divide-y divide-slate-100">
+                      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                        <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                          <FiMail size={12} /> Email
+                        </span>
+                        <span className="min-w-0 truncate text-xs font-semibold text-slate-800">
+                          {viewingCustomer.email || '—'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                        <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                          <FiPhone size={12} /> Phone
+                        </span>
+                        <span className="text-xs font-semibold text-slate-800">
+                          {viewingCustomer.contact_no || '—'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                        <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                          <FiUsers size={12} /> Contact person
+                        </span>
+                        <span className="min-w-0 truncate text-xs font-semibold text-slate-800">
+                          {viewingCustomer.contact_person || '—'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                        <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                          GSTIN
+                        </span>
+                        <span className="font-mono text-xs font-semibold text-slate-800">
+                          {viewingCustomer.gst_number || '—'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                        <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                          PAN
+                        </span>
+                        <span className="font-mono text-xs font-semibold text-slate-800">
+                          {viewingCustomer.pan || '—'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {(viewingCustomer.billing_city || viewingCustomer.billing_street) && (
+                    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                      <div className="border-b border-slate-100 px-3.5 py-2.5">
+                        <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          <FiMapPin size={12} /> Billing address
+                        </p>
+                      </div>
+                      <div className="px-3.5 py-3 text-xs text-slate-700">
+                        {viewingCustomer.billing_street && (
+                          <p className="whitespace-pre-line">{viewingCustomer.billing_street}</p>
+                        )}
+                        <p className="mt-1 text-slate-600">
+                          {[viewingCustomer.billing_city, viewingCustomer.billing_state, viewingCustomer.billing_pincode]
+                            .filter(Boolean)
+                            .join(', ') || '—'}
+                        </p>
+                        <p className="text-slate-500">{viewingCustomer.billing_country || ''}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Quick stat snapshot for this customer */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="rounded-xl border border-indigo-200/70 bg-indigo-50/60 p-3">
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-indigo-700/80">
+                        Invoices
+                      </p>
+                      <p className="mt-1 text-lg font-bold text-indigo-700">
+                        {detailLoading ? '…' : customerInvoices.length}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-emerald-200/70 bg-emerald-50/60 p-3">
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700/80">
+                        Payments
+                      </p>
+                      <p className="mt-1 text-lg font-bold text-emerald-700">
+                        {detailLoading ? '…' : customerPayments.length}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-violet-200/70 bg-violet-50/60 p-3">
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-violet-700/80">
+                        Orders
+                      </p>
+                      <p className="mt-1 text-lg font-bold text-violet-700">
+                        {detailLoading ? '…' : customerOrders.length}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Invoices tab ── */}
+              {detailTab === 'invoices' && (
+                <div className="space-y-2">
+                  {detailLoading ? (
+                    <div className="space-y-2">
+                      {Array.from({ length: 4 }).map((_, i) => (
+                        <div
+                          key={i}
+                          className="h-14 animate-pulse rounded-xl border border-slate-100 bg-slate-50"
+                        />
+                      ))}
+                    </div>
+                  ) : customerInvoices.length === 0 ? (
+                    <EmptyTab
+                      icon={FiFileText}
+                      title="No invoices yet"
+                      subtitle="This customer hasn't been invoiced."
+                    />
+                  ) : (
+                    customerInvoices.map((inv) => (
+                      <button
+                        key={inv.id}
+                        type="button"
+                        onClick={() => navigate(`/invoices/${inv.id}`)}
+                        className="flex w-full items-center gap-3 rounded-xl border border-slate-200 bg-white p-3 text-left transition hover:border-indigo-300 hover:bg-indigo-50/40"
+                      >
+                        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                          <FiFileText size={16} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-semibold text-slate-900">
+                            {inv.invoice_no ?? `#${inv.id}`}
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            {formatDate(inv.invoice_date)} · {inv.payment_status || '—'}
+                          </p>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <p className="text-sm font-semibold tabular-nums text-slate-900">
+                            {formatCurrency(inv.total_amount)}
+                          </p>
+                          <div className="mt-0.5 flex justify-end">
+                            <StatusPill status={inv.status} />
+                          </div>
+                        </div>
+                        <FiExternalLink className="shrink-0 text-slate-300" size={14} />
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {/* ── Payments tab ── */}
+              {detailTab === 'payments' && (
+                <div className="space-y-2">
+                  {detailLoading ? (
+                    <div className="space-y-2">
+                      {Array.from({ length: 4 }).map((_, i) => (
+                        <div
+                          key={i}
+                          className="h-14 animate-pulse rounded-xl border border-slate-100 bg-slate-50"
+                        />
+                      ))}
+                    </div>
+                  ) : customerPayments.length === 0 ? (
+                    <EmptyTab
+                      icon={FiCreditCard}
+                      title="No payments yet"
+                      subtitle="No payment records for this customer."
+                    />
+                  ) : (
+                    customerPayments.map((pay) => {
+                      const inward =
+                        String(pay.payment_direction ?? 'inward').toLowerCase() === 'inward';
+                      return (
+                        <div
+                          key={pay.id}
+                          className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3"
+                        >
+                          <div
+                            className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${
+                              inward
+                                ? 'bg-emerald-50 text-emerald-600'
+                                : 'bg-amber-50 text-amber-600'
+                            }`}
+                          >
+                            <FiCreditCard size={16} />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-semibold text-slate-900">
+                              {pay.reference_no ?? `#${pay.id}`}
+                            </p>
+                            <p className="text-[11px] text-slate-500">
+                              {formatDate(pay.transaction_date)} · {pay.payment_method ?? '—'} ·{' '}
+                              {inward ? 'Inward' : 'Outward'}
+                            </p>
+                          </div>
+                          <div className="shrink-0 text-right">
+                            <p
+                              className={`text-sm font-semibold tabular-nums ${
+                                inward ? 'text-emerald-600' : 'text-amber-600'
+                              }`}
+                            >
+                              {inward ? '+' : '−'}
+                              {formatCurrency(pay.amount)}
+                            </p>
+                            <div className="mt-0.5 flex justify-end">
+                              <StatusPill status={pay.status} />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+
+              {/* ── Orders tab ── */}
+              {detailTab === 'orders' && (
+                <div className="space-y-2">
+                  {detailLoading ? (
+                    <div className="space-y-2">
+                      {Array.from({ length: 4 }).map((_, i) => (
+                        <div
+                          key={i}
+                          className="h-14 animate-pulse rounded-xl border border-slate-100 bg-slate-50"
+                        />
+                      ))}
+                    </div>
+                  ) : customerOrders.length === 0 ? (
+                    <EmptyTab
+                      icon={FiShoppingBag}
+                      title="No orders yet"
+                      subtitle="This customer hasn't placed any orders."
+                    />
+                  ) : (
+                    customerOrders.map((ord) => (
+                      <button
+                        key={ord.id}
+                        type="button"
+                        onClick={() => navigate(`/orders/${ord.id}`)}
+                        className="flex w-full items-center gap-3 rounded-xl border border-slate-200 bg-white p-3 text-left transition hover:border-violet-300 hover:bg-violet-50/40"
+                      >
+                        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-violet-50 text-violet-600">
+                          <FiShoppingBag size={16} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-semibold text-slate-900">
+                            {ord.order_no ?? `#${ord.id}`}
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            {formatDate(ord.created_at || ord.delivery_date)} · {ord.source ?? '—'}
+                          </p>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          <p className="text-sm font-semibold tabular-nums text-slate-900">
+                            {formatCurrency(ord.total_amount)}
+                          </p>
+                          <div className="mt-0.5 flex justify-end">
+                            <StatusPill status={ord.status} />
+                          </div>
+                        </div>
+                        <FiExternalLink className="shrink-0 text-slate-300" size={14} />
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {/* ── Activity tab ── */}
+              {detailTab === 'activity' && (
+                <div className="space-y-2">
+                  {detailLoading ? (
+                    <div className="space-y-2">
+                      {Array.from({ length: 5 }).map((_, i) => (
+                        <div
+                          key={i}
+                          className="h-14 animate-pulse rounded-xl border border-slate-100 bg-slate-50"
+                        />
+                      ))}
+                    </div>
+                  ) : activityEntries.length === 0 ? (
+                    <EmptyTab
+                      icon={FiActivity}
+                      title="No recent activity"
+                      subtitle="Nothing has happened with this customer yet."
+                    />
+                  ) : (
+                    <div className="relative pl-6">
+                      {/* Timeline spine */}
+                      <div className="absolute bottom-2 left-2.5 top-2 w-px bg-slate-200" />
+
+                      {activityEntries.map((entry) => {
+                        const iconMap = {
+                          invoice: { icon: FiFileText, className: 'bg-indigo-50 text-indigo-600' },
+                          payment: {
+                            icon: FiCreditCard,
+                            className: 'bg-emerald-50 text-emerald-600',
+                          },
+                          order: {
+                            icon: FiShoppingBag,
+                            className: 'bg-violet-50 text-violet-600',
+                          },
+                        };
+                        const style = iconMap[entry.type];
+                        const Icon = style.icon;
+
+                        return (
+                          <div key={entry.id} className="relative mb-2 pl-3">
+                            <div
+                              className={`absolute -left-[17px] top-2 grid h-6 w-6 place-items-center rounded-full ring-4 ring-white ${style.className}`}
+                            >
+                              <Icon size={11} />
+                            </div>
+                            <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-semibold text-slate-900">
+                                  {entry.title}
+                                </p>
+                                <p className="flex items-center gap-1 text-[11px] text-slate-500">
+                                  <FiCalendar size={10} />
+                                  {formatDate(entry.date)} · {entry.subtitle}
+                                </p>
+                              </div>
+                              <div className="shrink-0 text-right">
+                                <p className="text-sm font-semibold tabular-nums text-slate-900">
+                                  {formatCurrency(entry.amount)}
+                                </p>
+                                {entry.status && (
+                                  <div className="mt-0.5 flex justify-end">
+                                    <StatusPill status={entry.status} />
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </Offcanvas>
+        </Suspense>
+      )}
+
+      {/* Offcanvas – Customer form */}
+      {isPanelOpen && (
+        <Suspense
+          fallback={
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
+              <div className="rounded-2xl bg-white p-8 text-sm text-slate-600 shadow-xl">
+                Loading form…
+              </div>
+            </div>
+          }
+        >
+          <Offcanvas
+            isOpen={isPanelOpen}
+            title={editingId ? 'Edit customer' : 'Add customer'}
+            onClose={() => setIsPanelOpen(false)}
+            className="customers-offcanvas-wide"
+            footer={
+              <div className="flex w-full justify-between">
+                <Button
+                  variant="outline"
+                  onClick={() => setIsPanelOpen(false)}
+                  disabled={submitting}
+                  className="rounded-xl"
+                >
+                  <FiX className="mr-2" size={14} /> Cancel
+                </Button>
+                <Button
+                  onClick={handleSubmit}
+                  disabled={submitting}
+                  className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                >
+                  {submitting ? 'Saving…' : editingId ? 'Update customer' : 'Save customer'}
+                </Button>
+              </div>
+            }
+          >
+            <div className="customers-form-scroll space-y-5 pr-2">
+              <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
+                <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
+                  <span className="h-2 w-2 rounded-full bg-indigo-500" /> Customer / vendor detail
                 </legend>
                 <div className="mt-3 space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
-                    <select
-                      value={formData.type}
-                      onChange={(e) => setFormData(prev => ({ ...prev, type: e.target.value as CustomerType }))}
-                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                    >
-                      <option value="customer">Customer</option>
-                      <option value="dealer">Dealer</option>
-                      <option value="distributor">Distributor</option>
-                    </select>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="min-w-0">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Type
+                      </label>
+                      <div className="relative">
+                        <select
+                          value={formData.type}
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              type: e.target.value as CustomerType,
+                            }))
+                          }
+                          className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                        >
+                          <option value="customer">Customer</option>
+                          <option value="dealer">Dealer</option>
+                          <option value="distributor">Distributor</option>
+                        </select>
+                        <FiChevronDown
+                          className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                          size={14}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="min-w-0">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Company <span className="text-rose-500">*</span>
+                      </label>
+                      <div className="relative">
+                        <select
+                          value={formData.company_id as string}
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              company_id: e.target.value,
+                              branch_id: '',
+                            }))
+                          }
+                          className={`h-10 w-full appearance-none rounded-xl border bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition ${
+                            formErrors.company_id
+                              ? 'border-rose-300 ring-2 ring-rose-200'
+                              : 'border-slate-200 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
+                          }`}
+                        >
+                          <option value="">Select company</option>
+                          {companies?.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
+                        <FiChevronDown
+                          className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                          size={14}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="min-w-0">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Branch
+                      </label>
+                      <div className="relative">
+                        <select
+                          value={formData.branch_id as string}
+                          onChange={(e) =>
+                            setFormData((prev) => ({ ...prev, branch_id: e.target.value }))
+                          }
+                          className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                        >
+                          <option value="">Select branch</option>
+                          {filteredBranchesForm.map((b) => (
+                            <option key={b.id} value={b.id}>
+                              {b.name}
+                            </option>
+                          ))}
+                        </select>
+                        <FiChevronDown
+                          className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                          size={14}
+                        />
+                      </div>
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Company *</label>
-                      <select
-                        value={formData.company_id as string}
-                        onChange={(e) => setFormData(prev => ({ ...prev, company_id: e.target.value }))}
-                        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                      >
-                        <option value="">Select Company</option>
-                        {companies?.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
-                      <select
-                        value={formData.branch_id as string}
-                        onChange={(e) => setFormData(prev => ({ ...prev, branch_id: e.target.value }))}
-                        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                      >
-                        <option value="">Select Branch</option>
-                        {filteredBranchesForm.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">GSTIN</label>
+                  <div className="min-w-0">
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      GSTIN
+                    </label>
                     <div className="flex gap-2">
-                      <input
+                      <Input
                         id="gst_number"
                         type="text"
                         value={formData.gst_number}
                         onChange={handleGstChange}
-                        className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                        className="h-10 flex-1 rounded-xl border-slate-200 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
                         placeholder="Enter GSTIN"
                       />
-                      <button
+                      <Button
                         type="button"
                         onClick={handleAutoFill}
                         disabled={lookingUp || !formData.gst_number}
-                        className="rounded-lg bg-blue-500 px-4 py-2 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50 whitespace-nowrap"
+                        className="h-10 shrink-0 rounded-xl bg-slate-900 px-4 text-xs font-semibold text-white hover:bg-slate-800"
                       >
-                        {lookingUp ? 'Fetching...' : 'Auto Fill'}
-                      </button>
+                        {lookingUp ? 'Fetching…' : 'Auto fill'}
+                      </Button>
                     </div>
                   </div>
 
-                  {renderField('Company Name', 'name', 'text', true)}
-                  <div className="grid grid-cols-2 gap-4">
-                    {renderField('Contact Person', 'contact_person')}
-                    <div>
-                      <label htmlFor="contact_no" className="block text-sm font-medium text-gray-700 mb-1">Contact No</label>
+                  {renderField('Company name', 'name', 'text', true)}
+
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {renderField('Contact person', 'contact_person')}
+
+                    <div className="min-w-0">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Contact no
+                      </label>
                       <input
                         id="contact_no"
                         type="tel"
                         value={formData.contact_no}
                         onChange={(e) => {
                           const val = e.target.value.replace(/\D/g, '');
-                          setFormData(prev => ({ ...prev, contact_no: val }));
+                          setFormData((prev) => ({ ...prev, contact_no: val }));
                         }}
-                        className={`w-full rounded-lg border bg-white px-3 py-2 text-sm shadow-sm transition ${
+                        className={`h-10 w-full min-w-0 rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition ${
                           formErrors.contact_no
-                            ? 'border-red-400 ring-2 ring-red-200 focus:border-red-500 focus:ring-red-300'
-                            : 'border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200'
+                            ? 'border-rose-300 ring-2 ring-rose-200'
+                            : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
                         }`}
-                        placeholder="Enter Contact No"
+                        placeholder="Enter contact no"
+                        maxLength={15}
                       />
                     </div>
+
+                    {renderField('Email', 'email', 'email')}
                   </div>
-                  {renderField('Email', 'email', 'email')}
                 </div>
               </fieldset>
 
-              {/* Registration Details */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-indigo-500"></span> Registration Details
+              <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
+                <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
+                  <span className="h-2 w-2 rounded-full bg-violet-500" /> Registration details
                 </legend>
-                <div className="mt-3 grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Registration Type</label>
-                    <select
-                      value={formData.registration_type}
-                      onChange={(e) => setFormData(prev => ({ ...prev, registration_type: e.target.value }))}
-                      className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                    >
-                      <option value="">Select</option>
-                      <option value="Registered">Registered</option>
-                      <option value="Unregistered">Unregistered</option>
-                    </select>
+                <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  <div className="min-w-0">
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Registration type
+                    </label>
+                    <div className="relative">
+                      <select
+                        value={formData.registration_type}
+                        onChange={(e) =>
+                          setFormData((prev) => ({
+                            ...prev,
+                            registration_type: e.target.value,
+                          }))
+                        }
+                        className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                      >
+                        <option value="">Select</option>
+                        <option value="Registered">Registered</option>
+                        <option value="Unregistered">Unregistered</option>
+                      </select>
+                      <FiChevronDown
+                        className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                        size={14}
+                      />
+                    </div>
                   </div>
                   {renderField('PAN', 'pan')}
                 </div>
               </fieldset>
 
-              {/* Billing Address */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Billing Address
+              <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
+                <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500" /> Billing address
                 </legend>
                 <div className="mt-3 space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                  <div className="min-w-0">
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Address
+                    </label>
                     <textarea
                       value={formData.billing_street}
-                      onChange={(e) => setFormData(prev => ({ ...prev, billing_street: e.target.value }))}
+                      onChange={(e) =>
+                        setFormData((prev) => ({ ...prev, billing_street: e.target.value }))
+                      }
                       rows={2}
-                      className={`w-full rounded-lg border bg-white px-3 py-2 text-sm shadow-sm transition ${
-                        formErrors.billing_city ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200'
+                      className={`min-h-[80px] w-full resize-y rounded-xl border bg-white px-3.5 py-2.5 text-sm outline-none transition ${
+                        formErrors.billing_city
+                          ? 'border-rose-300 ring-2 ring-rose-200'
+                          : 'border-slate-200 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
                       }`}
-                      placeholder="Enter Address"
+                      placeholder="Enter address"
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                     {renderField('City', 'billing_city', 'text', true)}
                     {renderField('State', 'billing_state')}
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
                     {renderField('Country', 'billing_country')}
                     {renderField('Pincode', 'billing_pincode')}
                   </div>
                 </div>
               </fieldset>
 
-              {/* Shipping Address */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-teal-500"></span> Shipping Address
+              <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
+                <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
+                  <span className="h-2 w-2 rounded-full bg-teal-500" /> Shipping address
                 </legend>
                 <div className="mt-3">
-                  <label className="flex items-center gap-2 cursor-pointer mb-3">
+                  <label className="mb-3 flex cursor-pointer items-center gap-2">
                     <input
                       type="checkbox"
                       checked={formData.same_as_billing}
                       onChange={(e) => handleSameAsBillingToggle(e.target.checked)}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                     />
-                    <span className="text-sm text-gray-600">Same as Billing Address</span>
+                    <span className="text-sm text-slate-600">Same as billing address</span>
                   </label>
                   {!formData.same_as_billing && (
                     <div className="space-y-4">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
+                      <div className="min-w-0">
+                        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Address
+                        </label>
                         <textarea
                           value={formData.shipping_street}
-                          onChange={(e) => setFormData(prev => ({ ...prev, shipping_street: e.target.value }))}
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              shipping_street: e.target.value,
+                            }))
+                          }
                           rows={2}
-                          className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                          placeholder="Enter Shipping Address"
+                          className="min-h-[80px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                          placeholder="Enter shipping address"
                         />
                       </div>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">City</label>
-                          <input
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                        <div className="min-w-0">
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            City
+                          </label>
+                          <Input
                             type="text"
                             value={formData.shipping_city}
-                            onChange={(e) => setFormData(prev => ({ ...prev, shipping_city: e.target.value }))}
-                            className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                            onChange={(e) =>
+                              setFormData((prev) => ({ ...prev, shipping_city: e.target.value }))
+                            }
+                            className="h-10 rounded-xl border-slate-200"
                             placeholder="City"
                           />
                         </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">State</label>
-                          <input
+                        <div className="min-w-0">
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            State
+                          </label>
+                          <Input
                             type="text"
                             value={formData.shipping_state}
-                            onChange={(e) => setFormData(prev => ({ ...prev, shipping_state: e.target.value }))}
-                            className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                            onChange={(e) =>
+                              setFormData((prev) => ({ ...prev, shipping_state: e.target.value }))
+                            }
+                            className="h-10 rounded-xl border-slate-200"
                             placeholder="State"
                           />
                         </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Country</label>
-                          <input
+                        <div className="min-w-0">
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Country
+                          </label>
+                          <Input
                             type="text"
                             value={formData.shipping_country}
-                            onChange={(e) => setFormData(prev => ({ ...prev, shipping_country: e.target.value }))}
-                            className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                            onChange={(e) =>
+                              setFormData((prev) => ({
+                                ...prev,
+                                shipping_country: e.target.value,
+                              }))
+                            }
+                            className="h-10 rounded-xl border-slate-200"
                             placeholder="Country"
                           />
                         </div>
-                        <div>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">Pincode</label>
-                          <input
+                        <div className="min-w-0">
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Pincode
+                          </label>
+                          <Input
                             type="text"
                             value={formData.shipping_pincode}
-                            onChange={(e) => setFormData(prev => ({ ...prev, shipping_pincode: e.target.value }))}
-                            className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                            onChange={(e) =>
+                              setFormData((prev) => ({
+                                ...prev,
+                                shipping_pincode: e.target.value,
+                              }))
+                            }
+                            className="h-10 rounded-xl border-slate-200"
                             placeholder="Pincode"
+                            maxLength={6}
                           />
                         </div>
                       </div>
@@ -1381,106 +2900,146 @@ export function CustomersPage() {
                 </div>
               </fieldset>
 
-              {/* Group & Financials */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-purple-500"></span> Group & Balance
+              <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
+                <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
+                  <span className="h-2 w-2 rounded-full bg-violet-500" /> Group & balance
                 </legend>
                 <div className="mt-3 space-y-4">
-                  <div className="flex items-end gap-2">
-                    <div className="flex-1">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Group</label>
-                      <select
-                        value={formData.group_id as string}
-                        onChange={(e) => setFormData(prev => ({ ...prev, group_id: e.target.value }))}
-                        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                      >
-                        <option value="">Select Group</option>
-                        {customerGroups?.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
-                      </select>
+                  <div className="flex min-w-0 items-end gap-2">
+                    <div className="min-w-0 flex-1">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Group
+                      </label>
+                      <div className="relative">
+                        <select
+                          value={formData.group_id as string}
+                          onChange={(e) =>
+                            setFormData((prev) => ({ ...prev, group_id: e.target.value }))
+                          }
+                          className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                        >
+                          <option value="">Select group</option>
+                          {customerGroups?.map((g) => (
+                            <option key={g.id} value={g.id}>
+                              {g.name}
+                            </option>
+                          ))}
+                        </select>
+                        <FiChevronDown
+                          className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                          size={14}
+                        />
+                      </div>
                     </div>
-                    <button type="button" onClick={() => setShowGroupModal(true)} className="mb-0.5 text-blue-600 text-sm hover:underline whitespace-nowrap">+ Add Group</button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setShowGroupModal(true)}
+                      className="h-10 shrink-0 rounded-xl"
+                    >
+                      <FiPlus className="mr-1.5" size={14} /> Add
+                    </Button>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    {renderField('Opening Balance', 'opening_balance', 'number')}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Outstanding Amount</label>
-                      <div className="flex items-center gap-2">
-                        <span className="text-gray-500">₹</span>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    {renderField('Opening balance', 'opening_balance', 'number')}
+
+                    <div className="min-w-0">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Outstanding amount
+                      </label>
+                      <div className="relative">
+                        <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-sm text-slate-500">
+                          ₹
+                        </span>
                         <input
                           type="number"
                           value={formData.outstanding_amount ?? ''}
-                          onChange={(e) => setFormData(prev => ({ ...prev, outstanding_amount: e.target.value }))}
-                          className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                          onChange={(e) =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              outstanding_amount: e.target.value,
+                            }))
+                          }
+                          className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-8 pr-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                           placeholder="0"
+                          step="0.01"
                         />
                       </div>
                     </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Credit</label>
-                      <div className="flex items-center gap-2">
-                        <span className="text-gray-500">₹</span>
+
+                    <div className="min-w-0">
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Credit limit
+                      </label>
+                      <div className="relative">
+                        <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-sm text-slate-500">
+                          ₹
+                        </span>
                         <input
                           type="number"
                           value={formData.credit_limit ?? ''}
-                          onChange={(e) => setFormData(prev => ({ ...prev, credit_limit: e.target.value }))}
-                          className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                          onChange={(e) =>
+                            setFormData((prev) => ({ ...prev, credit_limit: e.target.value }))
+                          }
+                          className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-8 pr-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                           placeholder="0"
+                          step="0.01"
                         />
                       </div>
-                      <span className="text-xs text-slate-500">(You pay the customer)</span>
                     </div>
-                    {renderField('Due Days', 'due_days', 'number')}
+
+                    {renderField('Due days', 'due_days', 'number')}
                   </div>
                 </div>
               </fieldset>
 
-              {/* Custom Fields */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span> Custom Fields
+              <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
+                <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
+                  <span className="h-2 w-2 rounded-full bg-rose-500" /> Custom fields
                 </legend>
-                <div className="mt-3 grid grid-cols-3 gap-4">
-                  {renderField('License No.', 'license_no')}
-                  {renderField('Custom Field 1', 'custom_field_1')}
-                  {renderField('Custom Field 2', 'custom_field_2')}
+                <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {renderField('License no.', 'license_no')}
+                  {renderField('Custom field 1', 'custom_field_1')}
+                  {renderField('Custom field 2', 'custom_field_2')}
                 </div>
               </fieldset>
 
-              {/* Additional Details */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Additional Details
+              <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
+                <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
+                  <span className="h-2 w-2 rounded-full bg-amber-500" /> Additional details
                 </legend>
                 <div className="mt-3 space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    {renderField('Fax No', 'fax')}
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {renderField('Fax no', 'fax')}
                     {renderField('Website', 'website')}
+                    {renderField('E-way distance (km)', 'eway_bill_distance', 'number')}
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Note</label>
-                      <textarea
-                        value={formData.note}
-                        onChange={(e) => setFormData(prev => ({ ...prev, note: e.target.value }))}
-                        rows={2}
-                        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                        placeholder="Enter Note"
-                      />
-                    </div>
+                  <div className="min-w-0">
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                      Note
+                    </label>
+                    <textarea
+                      value={formData.note}
+                      onChange={(e) =>
+                        setFormData((prev) => ({ ...prev, note: e.target.value }))
+                      }
+                      rows={2}
+                      className="min-h-[80px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                      placeholder="Enter note"
+                    />
                   </div>
-                  <div className="flex items-center gap-2 mt-2">
+                  <div className="flex items-center gap-2">
                     <input
                       type="checkbox"
                       id="is_active"
                       checked={formData.is_active}
-                      onChange={(e) => setFormData(prev => ({ ...prev, is_active: e.target.checked }))}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      onChange={(e) =>
+                        setFormData((prev) => ({ ...prev, is_active: e.target.checked }))
+                      }
+                      className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                     />
-                    <label htmlFor="is_active" className="text-sm text-gray-700">
-                      Enable – Company will be visible on all documents
+                    <label htmlFor="is_active" className="text-sm text-slate-600">
+                      Enable — visible on all documents
                     </label>
                   </div>
                 </div>
@@ -1490,97 +3049,184 @@ export function CustomersPage() {
         </Suspense>
       )}
 
-      {/* Add Group Modal */}
+      {/* Add group modal */}
       {showGroupModal && (
-        <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center">
-          <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-md">
-            <h3 className="text-lg font-semibold mb-4">Add Customer Group</h3>
-            <input
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm"
+            onClick={() => !addingGroup && setShowGroupModal(false)}
+          />
+          <div className="animate-fadeIn relative w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <div className="mb-5 flex items-center gap-3">
+              <div className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600 ring-1 ring-indigo-500/10">
+                <FiUsers size={18} />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Add customer group</h3>
+                <p className="text-xs text-slate-500">Group customers for easier filtering.</p>
+              </div>
+            </div>
+            <Input
               type="text"
               value={newGroupName}
               onChange={(e) => setNewGroupName(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm mb-4"
+              className="h-10 rounded-xl border-slate-200"
               placeholder="Group name"
             />
-            <div className="flex justify-end gap-3">
-              <button onClick={() => { setShowGroupModal(false); setNewGroupName(''); }} className="px-4 py-2 rounded-lg border text-sm" disabled={addingGroup}>Cancel</button>
-              <button onClick={handleAddGroup} disabled={addingGroup || !newGroupName.trim()} className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
-                {addingGroup ? 'Adding...' : 'Add Group'}
-              </button>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setShowGroupModal(false);
+                  setNewGroupName('');
+                }}
+                disabled={addingGroup}
+                className="rounded-xl"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleAddGroup}
+                disabled={addingGroup || !newGroupName.trim()}
+                className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+              >
+                {addingGroup ? 'Adding…' : 'Add group'}
+              </Button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Import Offcanvas */}
+      {/* Import offcanvas */}
       {isImportOpen && (
-        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
+        <Suspense
+          fallback={
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
+              <div className="rounded-2xl bg-white p-8 text-sm text-slate-600 shadow-xl">
+                Loading…
+              </div>
+            </div>
+          }
+        >
           <Offcanvas
             isOpen={isImportOpen}
-            title="Import Customers"
+            title="Import customers"
             onClose={() => setIsImportOpen(false)}
             footer={
-              <div className="flex justify-between w-full">
-                <button onClick={() => setIsImportOpen(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={importLoading}>
+              <div className="flex w-full justify-between">
+                <Button
+                  variant="outline"
+                  onClick={() => setIsImportOpen(false)}
+                  disabled={importLoading}
+                  className="rounded-xl"
+                >
                   Close
-                </button>
+                </Button>
                 {importStep === 'select' && (
-                  <button onClick={() => fileInputRef.current?.click()} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700">
-                    Browse File
-                  </button>
+                  <Button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                  >
+                    Browse file
+                  </Button>
                 )}
                 {importStep === 'preview' && !importLoading && (
-                  <button onClick={handleImport} className="px-5 py-2 rounded-lg bg-emerald-600 text-white font-medium hover:bg-emerald-700 disabled:opacity-50" disabled={!importSummary || importSummary.valid === 0}>
-                    Import {importSummary && `(${importSummary.valid} valid)`}
-                  </button>
+                  <Button
+                    onClick={handleImport}
+                    disabled={!importSummary || importSummary.valid === 0}
+                    className="rounded-xl bg-emerald-600 font-semibold hover:bg-emerald-700"
+                  >
+                    Import{importSummary ? ` (${importSummary.valid} valid)` : ''}
+                  </Button>
                 )}
                 {importStep === 'result' && (
-                  <button onClick={() => { setIsImportOpen(false); refreshCustomers(); }} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700">
-                    Close & Refresh
-                  </button>
+                  <Button
+                    onClick={() => {
+                      setIsImportOpen(false);
+                      refreshCustomers();
+                    }}
+                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                  >
+                    Close & refresh
+                  </Button>
                 )}
               </div>
             }
           >
-            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
+            <div className="customers-form-scroll space-y-5 pr-2">
               {importStep === 'select' && (
                 <>
-                  <div className="text-sm text-slate-600 mb-4">
-                    Upload a CSV file to import customers. The file must match the required format. You can download a template below.
-                  </div>
+                  <p className="text-sm text-slate-600">
+                    Upload a CSV file to import customers. The file must match the required format.
+                    You can download a template below.
+                  </p>
                   <div
-                    className={`border-2 border-dashed rounded-xl p-8 text-center transition ${dragOver ? 'border-blue-500 bg-blue-50' : 'border-slate-300'}`}
+                    className={`rounded-2xl border-2 border-dashed p-8 text-center transition ${
+                      dragOver ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300'
+                    }`}
                     onDrop={handleDrop}
                     onDragOver={handleDragOver}
                     onDragLeave={handleDragLeave}
                   >
-                    <FiUpload size={40} className="mx-auto text-slate-400 mb-3" />
-                    <p className="text-sm text-slate-600">Drag and drop your CSV file here, or click to browse</p>
-                    <input type="file" ref={fileInputRef} onChange={(e) => { const file = e.target.files?.[0]; if (file) handleFileChange(file); }} accept=".csv" className="hidden" />
-                    <button onClick={() => fileInputRef.current?.click()} className="mt-3 px-4 py-2 text-sm bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100">
-                      Browse Files
-                    </button>
+                    <FiUpload size={40} className="mx-auto mb-3 text-slate-400" />
+                    <p className="text-sm text-slate-600">
+                      Drag and drop your CSV file here, or click to browse
+                    </p>
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) handleFileChange(file);
+                      }}
+                      accept=".csv"
+                      className="hidden"
+                    />
+                    <Button
+                      onClick={() => fileInputRef.current?.click()}
+                      variant="outline"
+                      className="mt-3 rounded-xl"
+                    >
+                      Browse files
+                    </Button>
                   </div>
                   {importFile && (
-                    <div className="flex items-center justify-between bg-slate-50 p-3 rounded-lg border">
-                      <div className="flex items-center gap-2">
-                        <FiFile className="text-blue-600" />
-                        <span className="text-sm font-medium">{importFile.name}</span>
-                        <span className="text-xs text-slate-500">({(importFile.size / 1024).toFixed(1)} KB)</span>
+                    <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <FiFile className="shrink-0 text-indigo-600" size={16} />
+                        <span className="truncate text-sm font-medium">{importFile.name}</span>
+                        <span className="shrink-0 text-xs text-slate-500">
+                          ({(importFile.size / 1024).toFixed(1)} KB)
+                        </span>
                       </div>
-                      <button onClick={() => { setImportFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; setImportStep('select'); }} className="text-rose-600 hover:text-rose-800">
-                        <FiX size={18} />
+                      <button
+                        onClick={() => {
+                          setImportFile(null);
+                          if (fileInputRef.current) fileInputRef.current.value = '';
+                          setImportStep('select');
+                        }}
+                        className="grid h-7 w-7 place-items-center rounded-lg text-red-500 transition hover:bg-red-50"
+                        aria-label="Remove file"
+                      >
+                        <FiX size={16} />
                       </button>
                     </div>
                   )}
-                  <div className="flex justify-between items-center mt-4">
-                    <button onClick={handleDownloadTemplate} className="text-sm text-blue-600 hover:underline flex items-center gap-1">
-                      <FiDownload size={14} /> Download Template
+                  <div className="mt-2 flex items-center justify-between">
+                    <button
+                      onClick={handleDownloadTemplate}
+                      className="flex items-center gap-1 text-sm font-medium text-indigo-600 underline-offset-2 hover:underline"
+                    >
+                      <FiDownload size={14} /> Download template
                     </button>
                     {importFile && (
-                      <button onClick={() => handlePreview(importFile)} disabled={importLoading} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
-                        {importLoading ? 'Processing...' : 'Preview'}
-                      </button>
+                      <Button
+                        onClick={() => handlePreview(importFile)}
+                        disabled={importLoading}
+                        className="rounded-xl bg-slate-900 font-semibold hover:bg-slate-800"
+                      >
+                        {importLoading ? 'Processing…' : 'Preview'}
+                      </Button>
                     )}
                   </div>
                 </>
@@ -1588,60 +3234,130 @@ export function CustomersPage() {
 
               {importStep === 'preview' && (
                 <>
-                  <div className="flex flex-wrap items-center gap-4 mb-4">
+                  <div className="flex flex-wrap items-center gap-4">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">Duplicate Action:</span>
-                      <select value={duplicateAction} onChange={(e) => setDuplicateAction(e.target.value as DuplicateAction)} className="rounded border px-2 py-1 text-sm" disabled={importLoading}>
-                        <option value="skip">Skip</option>
-                        <option value="update">Update</option>
-                        <option value="stop">Stop</option>
-                      </select>
+                      <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Duplicate action
+                      </span>
+                      <div className="relative">
+                        <select
+                          value={duplicateAction}
+                          onChange={(e) =>
+                            setDuplicateAction(e.target.value as DuplicateAction)
+                          }
+                          disabled={importLoading}
+                          className="h-9 appearance-none rounded-lg border border-slate-200 bg-white px-3 pr-8 text-sm font-medium text-slate-700 outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                        >
+                          <option value="skip">Skip</option>
+                          <option value="update">Update</option>
+                          <option value="stop">Stop</option>
+                        </select>
+                        <FiChevronDown
+                          className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+                          size={12}
+                        />
+                      </div>
                     </div>
-                    <div className="flex items-center gap-4 text-sm">
-                      <span>Total: <strong>{importSummary?.total || 0}</strong></span>
-                      <span className="text-emerald-600">Valid: <strong>{importSummary?.valid || 0}</strong></span>
-                      <span className="text-rose-600">Invalid: <strong>{importSummary?.invalid || 0}</strong></span>
+                    <div className="flex items-center gap-3 text-xs">
+                      <span className="text-slate-600">
+                        Total: <strong className="text-slate-900">{importSummary?.total || 0}</strong>
+                      </span>
+                      <span className="text-emerald-600">
+                        Valid: <strong>{importSummary?.valid || 0}</strong>
+                      </span>
+                      <span className="text-red-600">
+                        Invalid: <strong>{importSummary?.invalid || 0}</strong>
+                      </span>
                     </div>
                   </div>
                   {importLoading ? (
-                    <div className="flex justify-center py-8"><div className="animate-spin rounded-full h-8 w-8 border-4 border-blue-500 border-t-transparent" /></div>
+                    <div className="flex justify-center py-8">
+                      <div className="h-8 w-8 animate-spin rounded-full border-4 border-indigo-500 border-t-transparent" />
+                    </div>
                   ) : (
                     <>
-                      <div className="overflow-x-auto border rounded-lg">
+                      <div className="overflow-x-auto rounded-xl border border-slate-200">
                         <table className="w-full text-sm">
-                          <thead className="bg-slate-50 border-b">
+                          <thead className="bg-slate-50">
                             <tr>
-                              <th className="px-3 py-2 text-left">#</th>
-                              <th className="px-3 py-2 text-left">Name</th>
-                              <th className="px-3 py-2 text-left">Email</th>
-                              <th className="px-3 py-2 text-left">Contact</th>
-                              <th className="px-3 py-2 text-left">Company</th>
-                              <th className="px-3 py-2 text-left">City</th>
-                              <th className="px-3 py-2 text-left">Valid</th>
+                              <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                #
+                              </th>
+                              <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                Name
+                              </th>
+                              <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                Email
+                              </th>
+                              <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                Contact
+                              </th>
+                              <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                City
+                              </th>
+                              <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                Valid
+                              </th>
                             </tr>
                           </thead>
                           <tbody>
                             {importPreview.slice(0, 50).map((row) => (
-                              <tr key={row.row} className={`border-b ${row.valid ? '' : 'bg-rose-50'}`}>
-                                <td className="px-3 py-2">{row.row}</td>
-                                <td className="px-3 py-2">{row.data.name || '-'}</td>
-                                <td className="px-3 py-2">{row.data.email || '-'}</td>
-                                <td className="px-3 py-2">{row.data.contact_no || '-'}</td>
-                                <td className="px-3 py-2">{row.data.company_id || '-'}</td>
-                                <td className="px-3 py-2">{row.data.billing_city || '-'}</td>
-                                <td className="px-3 py-2">{row.valid ? <FiCheck className="text-emerald-600" /> : <FiAlertTriangle className="text-rose-600" title={Object.values(row.errors).join(', ')} />}</td>
+                              <tr
+                                key={row.row}
+                                className={`border-t border-slate-100 ${
+                                  row.valid ? '' : 'bg-red-50/60'
+                                }`}
+                              >
+                                <td className="px-3 py-2 text-xs text-slate-600">{row.row}</td>
+                                <td className="px-3 py-2 text-xs text-slate-700">
+                                  {(row.data.name as string) || '-'}
+                                </td>
+                                <td className="px-3 py-2 text-xs text-slate-700">
+                                  {(row.data.email as string) || '-'}
+                                </td>
+                                <td className="px-3 py-2 text-xs text-slate-700">
+                                  {(row.data.contact_no as string) || '-'}
+                                </td>
+                                <td className="px-3 py-2 text-xs text-slate-700">
+                                  {(row.data.billing_city as string) || '-'}
+                                </td>
+                                <td className="px-3 py-2 text-xs">
+                                  {row.valid ? (
+                                    <FiCheck className="text-emerald-600" size={14} />
+                                  ) : (
+                                    <FiAlertTriangle
+                                      className="text-red-600"
+                                      size={14}
+                                      aria-label={Object.values(row.errors).join(', ')}
+                                    />
+                                  )}
+                                </td>
                               </tr>
                             ))}
-                            {importPreview.length > 50 && <tr><td colSpan={7} className="px-3 py-2 text-center text-slate-500">... and {importPreview.length - 50} more rows</td></tr>}
+                            {importPreview.length > 50 && (
+                              <tr className="border-t border-slate-100">
+                                <td colSpan={6} className="px-3 py-2 text-center text-xs text-slate-500">
+                                  … and {importPreview.length - 50} more rows
+                                </td>
+                              </tr>
+                            )}
                           </tbody>
                         </table>
                       </div>
                       {importErrors.length > 0 && (
-                        <div className="mt-4 p-3 bg-rose-50 rounded-lg border border-rose-200">
-                          <p className="text-sm font-medium text-rose-700 mb-2">Validation errors:</p>
-                          <ul className="text-xs text-rose-600 space-y-1 max-h-40 overflow-y-auto">
-                            {importErrors.slice(0, 20).map((err, idx) => <li key={idx}>Row {err.row}: {err.field} – {err.message}</li>)}
-                            {importErrors.length > 20 && <li>... and {importErrors.length - 20} more</li>}
+                        <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3">
+                          <p className="mb-2 text-xs font-semibold text-red-700">
+                            Validation errors:
+                          </p>
+                          <ul className="max-h-40 space-y-1 overflow-y-auto text-xs text-red-600">
+                            {importErrors.slice(0, 20).map((err, idx) => (
+                              <li key={idx}>
+                                Row {err.row}: {err.field} – {err.message}
+                              </li>
+                            ))}
+                            {importErrors.length > 20 && (
+                              <li>… and {importErrors.length - 20} more</li>
+                            )}
                           </ul>
                         </div>
                       )}
@@ -1652,33 +3368,108 @@ export function CustomersPage() {
 
               {importStep === 'result' && (
                 <div className="space-y-4">
-                  <div className={`p-4 rounded-lg ${importSuccess ? 'bg-emerald-50 border border-emerald-200' : 'bg-rose-50 border border-rose-200'}`}>
-                    <h3 className="font-bold text-lg">{importSuccess ? '✅ Import Completed' : '❌ Import Failed'}</h3>
-                    <p className="text-sm mt-1">{importResultMessage}</p>
+                  <div
+                    className={`rounded-xl p-4 ${
+                      importSuccess
+                        ? 'border border-emerald-200 bg-emerald-50'
+                        : 'border border-red-200 bg-red-50'
+                    }`}
+                  >
+                    <h3 className="text-base font-bold text-slate-900">
+                      {importSuccess ? 'Import completed' : 'Import failed'}
+                    </h3>
+                    <p className="mt-1 text-sm text-slate-700">{importResultMessage}</p>
                   </div>
                   {importSummary && (
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
-                      <div className="bg-slate-50 p-3 rounded-lg text-center"><div className="font-bold">{importSummary.total}</div><div className="text-slate-500">Total</div></div>
-                      <div className="bg-emerald-50 p-3 rounded-lg text-center"><div className="font-bold text-emerald-700">{importSummary.created ?? 0}</div><div className="text-slate-500">Created</div></div>
-                      <div className="bg-blue-50 p-3 rounded-lg text-center"><div className="font-bold text-blue-700">{importSummary.updated ?? 0}</div><div className="text-slate-500">Updated</div></div>
-                      <div className="bg-amber-50 p-3 rounded-lg text-center"><div className="font-bold text-amber-700">{importSummary.skipped ?? 0}</div><div className="text-slate-500">Skipped</div></div>
-                      <div className="bg-rose-50 p-3 rounded-lg text-center"><div className="font-bold text-rose-700">{importSummary.failed ?? 0}</div><div className="text-slate-500">Failed</div></div>
+                    <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-5">
+                      <div className="rounded-xl bg-slate-50 p-3 text-center">
+                        <div className="text-lg font-bold text-slate-900">
+                          {importSummary.total}
+                        </div>
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                          Total
+                        </div>
+                      </div>
+                      <div className="rounded-xl bg-emerald-50 p-3 text-center">
+                        <div className="text-lg font-bold text-emerald-700">
+                          {importSummary.created ?? 0}
+                        </div>
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                          Created
+                        </div>
+                      </div>
+                      <div className="rounded-xl bg-indigo-50 p-3 text-center">
+                        <div className="text-lg font-bold text-indigo-700">
+                          {importSummary.updated ?? 0}
+                        </div>
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                          Updated
+                        </div>
+                      </div>
+                      <div className="rounded-xl bg-amber-50 p-3 text-center">
+                        <div className="text-lg font-bold text-amber-700">
+                          {importSummary.skipped ?? 0}
+                        </div>
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                          Skipped
+                        </div>
+                      </div>
+                      <div className="rounded-xl bg-red-50 p-3 text-center">
+                        <div className="text-lg font-bold text-red-700">
+                          {importSummary.failed ?? 0}
+                        </div>
+                        <div className="text-[11px] uppercase tracking-wide text-slate-500">
+                          Failed
+                        </div>
+                      </div>
                     </div>
                   )}
                   {importErrors.length > 0 && (
                     <div>
-                      <div className="flex justify-between items-center">
-                        <p className="text-sm font-medium text-rose-700">Errors ({importErrors.length})</p>
-                        <button onClick={handleDownloadErrorReport} className="text-xs text-blue-600 hover:underline flex items-center gap-1">
-                          <FiDownload size={12} /> Download Error Report
+                      <div className="mb-2 flex items-center justify-between">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-red-700">
+                          Errors ({importErrors.length})
+                        </p>
+                        <button
+                          onClick={handleDownloadErrorReport}
+                          className="flex items-center gap-1 text-xs font-medium text-indigo-600 underline-offset-2 hover:underline"
+                        >
+                          <FiDownload size={12} /> Download report
                         </button>
                       </div>
-                      <div className="mt-2 max-h-48 overflow-y-auto border rounded-lg">
+                      <div className="max-h-48 overflow-y-auto rounded-xl border border-slate-200">
                         <table className="w-full text-xs">
-                          <thead className="bg-slate-50"><tr><th className="px-3 py-1 text-left">Row</th><th className="px-3 py-1 text-left">Field</th><th className="px-3 py-1 text-left">Message</th></tr></thead>
+                          <thead className="bg-slate-50">
+                            <tr>
+                              <th className="px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                Row
+                              </th>
+                              <th className="px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                Field
+                              </th>
+                              <th className="px-3 py-1.5 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                Message
+                              </th>
+                            </tr>
+                          </thead>
                           <tbody>
-                            {importErrors.slice(0, 50).map((err, idx) => <tr key={idx} className="border-t"><td className="px-3 py-1">{err.row}</td><td className="px-3 py-1">{err.field}</td><td className="px-3 py-1">{err.message}</td></tr>)}
-                            {importErrors.length > 50 && <tr><td colSpan={3} className="px-3 py-1 text-center text-slate-500">... and {importErrors.length - 50} more</td></tr>}
+                            {importErrors.slice(0, 50).map((err, idx) => (
+                              <tr key={idx} className="border-t border-slate-100">
+                                <td className="px-3 py-1.5 text-slate-600">{err.row}</td>
+                                <td className="px-3 py-1.5 text-slate-600">{err.field}</td>
+                                <td className="px-3 py-1.5 text-slate-700">{err.message}</td>
+                              </tr>
+                            ))}
+                            {importErrors.length > 50 && (
+                              <tr className="border-t border-slate-100">
+                                <td
+                                  colSpan={3}
+                                  className="px-3 py-1.5 text-center text-slate-500"
+                                >
+                                  … and {importErrors.length - 50} more
+                                </td>
+                              </tr>
+                            )}
                           </tbody>
                         </table>
                       </div>
@@ -1690,20 +3481,32 @@ export function CustomersPage() {
           </Offcanvas>
         </Suspense>
       )}
+    </>
+  );
+}
 
-      <style>{`
-        .hide-scrollbar {
-          -ms-overflow-style: none;
-          scrollbar-width: none;
-        }
-        .hide-scrollbar::-webkit-scrollbar { display: none; }
-        @keyframes shake {
-          0%,100% { transform: translateX(0); }
-          25% { transform: translateX(-5px); }
-          75% { transform: translateX(5px); }
-        }
-        .animate-shake { animation: shake 0.4s ease-in-out; }
-      `}</style>
+/* ------------------------------------------------------------------ */
+/* Empty tab helper                                                    */
+/* ------------------------------------------------------------------ */
+
+function EmptyTab({
+  icon: Icon,
+  title,
+  subtitle,
+}: {
+  icon: React.ElementType;
+  title: string;
+  subtitle: string;
+}) {
+  return (
+    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 py-10 text-center">
+      <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-white ring-1 ring-slate-200/70">
+        <Icon className="h-5 w-5 text-slate-400" />
+      </div>
+      <p className="mt-3 text-sm font-semibold text-slate-800">{title}</p>
+      <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>
     </div>
   );
 }
+
+export default CustomersPage;

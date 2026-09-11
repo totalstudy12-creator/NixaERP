@@ -23,7 +23,6 @@ import {
   FiBarChart2,
   FiFilter,
   FiGrid,
-  FiBox,
   FiChevronDown,
   FiCalendar,
   FiArrowUpRight,
@@ -35,29 +34,43 @@ import {
   FiSearch,
   FiLayers,
   FiDatabase,
-  FiExternalLink,
-  FiFile,
-  FiInfo,
 } from 'react-icons/fi';
-
-import clsx from 'clsx';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
+
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Separator } from '@/components/ui/separator';
+
 import type {
   SalesSummaryReport,
   ProfitLossReport,
   ProfitLossSummaryReport,
   ProductProfitabilityReport,
   InvoiceProfitabilityReport,
-  GstSummaryReport,
   OutstandingSalesReport,
-  DashboardSummary,
 } from '../types/reports';
 
-// ============================================================
-// TYPES
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Minimal className combiner (replaces the clsx dependency)           */
+/* ------------------------------------------------------------------ */
+
+function cn(...classes: Array<string | false | null | undefined>): string {
+  return classes.filter(Boolean).join(' ');
+}
+
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
 
 interface Customer {
   id?: number;
@@ -76,7 +89,6 @@ interface Invoice {
   total_amount: number | string;
   status: string;
   created_at?: string;
-  // Optional fields for branch/company filtering
   branch_name?: string;
   company_name?: string;
 }
@@ -123,7 +135,7 @@ interface GstReportEntry {
   cess?: number | string;
   total_tax?: number | string;
   total_value?: number | string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 interface ApiErrorState {
@@ -134,9 +146,9 @@ interface ApiErrorState {
   gstr1: string | null;
 }
 
-// ============================================================
-// REPORT CATEGORIES
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Report categories                                                   */
+/* ------------------------------------------------------------------ */
 
 const REPORT_CATEGORIES = [
   {
@@ -177,10 +189,7 @@ const REPORT_CATEGORIES = [
   },
 ];
 
-const SUB_REPORTS: Record<
-  string,
-  { label: string; icon: JSX.Element }[]
-> = {
+const SUB_REPORTS: Record<string, { label: string; icon: JSX.Element }[]> = {
   sales: [
     { label: 'Sales Summary', icon: <FiFileText size={14} /> },
     { label: 'Sales Register', icon: <FiFileText size={14} /> },
@@ -209,9 +218,7 @@ const SUB_REPORTS: Record<
     { label: 'Cash Flow', icon: <FiDollarSign size={14} /> },
     { label: 'Outstanding Receivable', icon: <FiAlertTriangle size={14} /> },
   ],
-  gst: [
-    { label: 'GSTR-1', icon: <FiFileText size={14} /> },
-  ],
+  gst: [{ label: 'GSTR-1', icon: <FiFileText size={14} /> }],
   expenses: [
     { label: 'Expense Summary', icon: <FiCreditCard size={14} /> },
     { label: 'Category-wise Expense', icon: <FiFileText size={14} /> },
@@ -220,18 +227,12 @@ const SUB_REPORTS: Record<
   ],
 };
 
-// ============================================================
-// API CACHE HOOK
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* API cache hook                                                      */
+/* ------------------------------------------------------------------ */
 
-function useApiCache<T>(
-  key: string,
-  fetcher: () => Promise<T>,
-  ttlMs = 300000
-) {
-  const cache = useRef(
-    new Map<string, { data: T; timestamp: number }>()
-  ).current;
+function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = 300000) {
+  const cache = useRef(new Map<string, { data: T; timestamp: number }>()).current;
 
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
@@ -247,11 +248,7 @@ function useApiCache<T>(
     async (skipCache = false) => {
       if (!skipCache) {
         const cached = cache.get(key);
-
-        if (
-          cached &&
-          Date.now() - cached.timestamp < ttlMs
-        ) {
+        if (cached && Date.now() - cached.timestamp < ttlMs) {
           setData(cached.data);
           setLoading(false);
           setError(null);
@@ -265,21 +262,13 @@ function useApiCache<T>(
       try {
         const response = await fetcherRef.current();
 
-        // Preserve full API response objects for wrapped report payloads such as:
-        // { success: true, data: [...], meta: {...} }
-        // Some pages still use plain object wrappers without success/meta; those are unwrapped
-        // only when their `data` value is a plain object rather than a report array.
         let result: T = response as T;
 
         if (response && typeof response === 'object') {
-          const payload = response as Record<string, any>;
+          const payload = response as Record<string, unknown>;
           const hasData = 'data' in payload && payload.data !== undefined;
           const hasSummary = 'summary' in payload && payload.summary !== undefined;
 
-          // Preserve real accounting report envelopes like:
-          // { success: true, data: [...], meta: {...}, summary: {...} }
-          // But unwrap generic list wrappers such as:
-          // { data: [...], meta: {...} }
           if (hasData && !hasSummary && Array.isArray(payload.data)) {
             result = payload.data as T;
           } else if (
@@ -297,17 +286,13 @@ function useApiCache<T>(
           }
         }
 
-        cache.set(key, {
-          data: result as T,
-          timestamp: Date.now(),
-        });
-
+        cache.set(key, { data: result as T, timestamp: Date.now() });
         setData(result as T);
-      } catch (error: any) {
+      } catch (error: unknown) {
         const message =
-          error?.backendMessage ||
-          error?.response?.data?.message ||
-          error?.message ||
+          (error as { backendMessage?: string })?.backendMessage ||
+          (error as { response?: { data?: { message?: string } } })?.response?.data?.message ||
+          (error as Error)?.message ||
           'Unable to load report data.';
 
         setError(message);
@@ -316,7 +301,7 @@ function useApiCache<T>(
         setLoading(false);
       }
     },
-    [cache, key, ttlMs]
+    [cache, key, ttlMs],
   );
 
   useEffect(() => {
@@ -331,16 +316,12 @@ function useApiCache<T>(
   };
 }
 
-// ============================================================
-// HELPERS
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
 
 const safeNum = (value: unknown): number => {
-  const number =
-    typeof value === 'number'
-      ? value
-      : Number.parseFloat(String(value ?? ''));
-
+  const number = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
   return Number.isFinite(number) ? number : 0;
 };
 
@@ -351,18 +332,12 @@ const formatCurrency = (value: number) =>
     maximumFractionDigits: 2,
   }).format(value);
 
-const formatNumber = (value: number) =>
-  new Intl.NumberFormat('en-IN').format(value);
+const formatNumber = (value: number) => new Intl.NumberFormat('en-IN').format(value);
 
 const formatDate = (value?: string) => {
   if (!value) return '-';
-
   const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return value.slice(0, 10);
-  }
-
+  if (Number.isNaN(date.getTime())) return value.slice(0, 10);
   return new Intl.DateTimeFormat('en-IN', {
     day: '2-digit',
     month: 'short',
@@ -370,17 +345,13 @@ const formatDate = (value?: string) => {
   }).format(date);
 };
 
-const getToday = () =>
-  new Date().toISOString().split('T')[0];
+const getToday = () => new Date().toISOString().split('T')[0];
 
 const getFinancialYearStart = () => {
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth();
-
-  const startYear =
-    month >= 3 ? year : year - 1;
-
+  const startYear = month >= 3 ? year : year - 1;
   return `${startYear}-04-01`;
 };
 
@@ -388,126 +359,83 @@ const getFinancialYear = () => {
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth();
-
-  const startYear =
-    month >= 3 ? year : year - 1;
-
+  const startYear = month >= 3 ? year : year - 1;
   return `${startYear}-${startYear + 1}`;
 };
 
-const getCSVValue = (
-  row: any,
-  key: string
-) => {
+const getCSVValue = (row: Record<string, unknown>, key: string) => {
   const value = key
     .split('.')
-    .reduce(
+    .reduce<unknown>(
       (current, property) =>
-        current?.[property],
-      row
+        current && typeof current === 'object'
+          ? (current as Record<string, unknown>)[property]
+          : undefined,
+      row,
     );
 
-  if (
-    value === null ||
-    value === undefined
-  ) {
-    return '';
-  }
+  if (value === null || value === undefined) return '';
 
-  const text = String(value).replace(
-    /"/g,
-    '""'
-  );
-
+  const text = String(value).replace(/"/g, '""');
   return `"${text}"`;
 };
 
-// ============================================================
-// MAIN COMPONENT
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Main component                                                      */
+/* ------------------------------------------------------------------ */
 
 export function ReportsPage() {
-  const {
-    showSuccess,
-    showError,
-  } = useNotification();
+  const { showSuccess, showError } = useNotification();
 
-  const [activeCategory, setActiveCategory] =
-    useState('dashboard');
+  const [activeCategory, setActiveCategory] = useState('dashboard');
+  const [activeSubReport, setActiveSubReport] = useState('');
 
-  const [activeSubReport, setActiveSubReport] =
-    useState('');
+  const [dateFrom, setDateFrom] = useState(getFinancialYearStart());
+  const [dateTo, setDateTo] = useState(getToday());
+  const [financialYear, setFinancialYear] = useState(getFinancialYear());
 
-  const [dateFrom, setDateFrom] =
-    useState(getFinancialYearStart());
+  const [filterCustomer, setFilterCustomer] = useState('all');
+  const [filterVendor, setFilterVendor] = useState('all');
+  const [filterProduct, setFilterProduct] = useState('all');
+  const [filterBranch, setFilterBranch] = useState('all');
+  const [filterCompany, setFilterCompany] = useState('all');
+  const [filterCategory, setFilterCategory] = useState('all');
+  const [filterPaymentMode, setFilterPaymentMode] = useState('all');
+  const [filterStatus, setFilterStatus] = useState('all');
 
-  const [dateTo, setDateTo] =
-    useState(getToday());
+  const [showFilters, setShowFilters] = useState(false);
+  const [search, setSearch] = useState('');
 
-  const [financialYear, setFinancialYear] =
-    useState(getFinancialYear());
+  const [branches, setBranches] = useState<{ id: number; name: string }[]>([]);
+  const [companies, setCompanies] = useState<{ id: number; name: string }[]>([]);
 
-  const [filterCustomer, setFilterCustomer] =
-    useState('all');
+  const printRef = useRef<HTMLDivElement>(null);
 
-  const [filterVendor, setFilterVendor] =
-    useState('all');
+  /* -------------------- Filters data -------------------- */
 
-  const [filterProduct, setFilterProduct] =
-    useState('all');
-
-  const [filterBranch, setFilterBranch] =
-    useState('all');
-
-  const [filterCompany, setFilterCompany] =
-    useState('all');
-
-  const [filterCategory, setFilterCategory] =
-    useState('all');
-
-  const [filterPaymentMode, setFilterPaymentMode] =
-    useState('all');
-
-  const [filterStatus, setFilterStatus] =
-    useState('all');
-
-  const [showFilters, setShowFilters] =
-    useState(false);
-
-  const [search, setSearch] =
-    useState('');
-
-  // Data for filter dropdowns (branches, companies)
-  const [branches, setBranches] = useState<
-    { id: number; name: string }[]
-  >([]);
-  const [companies, setCompanies] = useState<
-    { id: number; name: string }[]
-  >([]);
-
-  const printRef =
-    useRef<HTMLDivElement>(null);
-
-  // ============================================================
-  // API
-  // ============================================================
-
-  // Fetch branches and companies for filter dropdowns
   const fetchBranches = useCallback(async () => {
     try {
       const response = await apiClient.request('GET', '/branches');
-      setBranches(Array.isArray(response) ? response : response.data || []);
-    } catch (error) {
-      console.error('Failed to fetch branches', error);
+      setBranches(
+        Array.isArray(response)
+          ? response
+          : ((response as { data?: { id: number; name: string }[] }).data ?? []),
+      );
+    } catch {
+      /* silent */
     }
   }, []);
 
   const fetchCompanies = useCallback(async () => {
     try {
       const response = await apiClient.request('GET', '/companies');
-      setCompanies(Array.isArray(response) ? response : response.data || []);
-    } catch (error) {
-      console.error('Failed to fetch companies', error);
+      setCompanies(
+        Array.isArray(response)
+          ? response
+          : ((response as { data?: { id: number; name: string }[] }).data ?? []),
+      );
+    } catch {
+      /* silent */
     }
   }, []);
 
@@ -516,61 +444,51 @@ export function ReportsPage() {
     fetchCompanies();
   }, [fetchBranches, fetchCompanies]);
 
+  /* -------------------- Base fetchers -------------------- */
+
   const invoicesFetcher = useCallback(
     () =>
       apiClient.request(
         'GET',
-        `/invoices?from=${encodeURIComponent(
-          dateFrom
-        )}&to=${encodeURIComponent(dateTo)}`
+        `/invoices?from=${encodeURIComponent(dateFrom)}&to=${encodeURIComponent(dateTo)}`,
       ),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const purchasesFetcher = useCallback(
     () =>
       apiClient.request(
         'GET',
-        `/purchase-invoices?from=${encodeURIComponent(
-          dateFrom
-        )}&to=${encodeURIComponent(dateTo)}`
+        `/purchase-invoices?from=${encodeURIComponent(dateFrom)}&to=${encodeURIComponent(dateTo)}`,
       ),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const paymentsFetcher = useCallback(
     () =>
       apiClient.request(
         'GET',
-        `/payments?from=${encodeURIComponent(
-          dateFrom
-        )}&to=${encodeURIComponent(dateTo)}`
+        `/payments?from=${encodeURIComponent(dateFrom)}&to=${encodeURIComponent(dateTo)}`,
       ),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
-  // Replace ledger with accounting/statements
   const ledgerFetcher = useCallback(
     () =>
       apiClient.request(
         'GET',
-        `/accounting/statements?from=${encodeURIComponent(
-          dateFrom
-        )}&to=${encodeURIComponent(dateTo)}`
+        `/accounting/statements?from=${encodeURIComponent(dateFrom)}&to=${encodeURIComponent(dateTo)}`,
       ),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
-  // GST fetcher: only gst-sales (GSTR-1)
   const gstr1Fetcher = useCallback(
     () =>
       apiClient.request(
         'GET',
-        `/reports/gst-sales?from=${encodeURIComponent(
-          dateFrom
-        )}&to=${encodeURIComponent(dateTo)}`
+        `/reports/gst-sales?from=${encodeURIComponent(dateFrom)}&to=${encodeURIComponent(dateTo)}`,
       ),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const {
@@ -578,82 +496,52 @@ export function ReportsPage() {
     loading: invLoading,
     error: invError,
     refresh: refreshInvoices,
-  } = useApiCache<Invoice[]>(
-    `reports-invoices-${dateFrom}-${dateTo}`,
-    invoicesFetcher
-  );
+  } = useApiCache<Invoice[]>(`reports-invoices-${dateFrom}-${dateTo}`, invoicesFetcher);
 
   const {
     data: purchaseInvoices,
     loading: purchaseLoading,
     error: purchaseError,
     refresh: refreshPurchases,
-  } = useApiCache<PurchaseInvoice[]>(
-    `reports-purchases-${dateFrom}-${dateTo}`,
-    purchasesFetcher
-  );
+  } = useApiCache<PurchaseInvoice[]>(`reports-purchases-${dateFrom}-${dateTo}`, purchasesFetcher);
 
   const {
     data: payments,
     loading: paymentLoading,
     error: paymentError,
     refresh: refreshPayments,
-  } = useApiCache<Payment[]>(
-    `reports-payments-${dateFrom}-${dateTo}`,
-    paymentsFetcher
-  );
+  } = useApiCache<Payment[]>(`reports-payments-${dateFrom}-${dateTo}`, paymentsFetcher);
 
   const {
     data: ledger,
     loading: ledgerLoading,
     error: ledgerError,
     refresh: refreshLedger,
-  } = useApiCache<LedgerEntry[]>(
-    `reports-ledger-${dateFrom}-${dateTo}`,
-    ledgerFetcher
-  );
+  } = useApiCache<LedgerEntry[]>(`reports-ledger-${dateFrom}-${dateTo}`, ledgerFetcher);
 
   const {
     data: gstr1Data,
     loading: gstr1Loading,
     error: gstr1Error,
     refresh: refreshGstr1,
-  } = useApiCache<GstReportEntry[]>(
-    `reports-gstr1-${dateFrom}-${dateTo}`,
-    gstr1Fetcher
-  );
+  } = useApiCache<GstReportEntry[]>(`reports-gstr1-${dateFrom}-${dateTo}`, gstr1Fetcher);
 
-  // ============================================================
-  // ADVANCED REPORT FETCHERS (NEW REPORTS API)
-  // ============================================================
+  /* -------------------- Advanced fetchers -------------------- */
 
   const advancedSalesSummaryFetcher = useCallback(
     () =>
-      apiClient.getSalesSummary({
-        from: dateFrom,
-        to: dateTo,
-        page: 1,
-        per_page: 100,
-      }),
-    [dateFrom, dateTo]
+      apiClient.getSalesSummary({ from: dateFrom, to: dateTo, page: 1, per_page: 100 }),
+    [dateFrom, dateTo],
   );
 
   const advancedProfitLossFetcher = useCallback(
-    () =>
-      apiClient.getProfitLossReport({
-        from: dateFrom,
-        to: dateTo,
-      }),
-    [dateFrom, dateTo]
+    () => apiClient.getProfitLossReport({ from: dateFrom, to: dateTo }),
+    [dateFrom, dateTo],
   );
 
   const advancedProfitLossSummaryFetcher = useCallback(
-    () =>
-      apiClient.getProfitLossSummary({
-        from: dateFrom,
-        to: dateTo,
-      }),
-    [dateFrom, dateTo]
+    () => apiClient.getProfitLossSummary({ from: dateFrom, to: dateTo }),
+    [dateFrom, dateTo],
   );
 
   const advancedInvoiceProfitabilityFetcher = useCallback(
@@ -664,7 +552,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 25,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedProductProfitabilityFetcher = useCallback(
@@ -675,7 +563,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 10,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedCustomerProfitabilityFetcher = useCallback(
@@ -686,7 +574,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 10,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedBranchProfitabilityFetcher = useCallback(
@@ -697,16 +585,12 @@ export function ReportsPage() {
         page: 1,
         per_page: 10,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedGstSummaryFetcher = useCallback(
-    () =>
-      apiClient.getGstSummary({
-        from: dateFrom,
-        to: dateTo,
-      }),
-    [dateFrom, dateTo]
+    () => apiClient.getGstSummary({ from: dateFrom, to: dateTo }),
+    [dateFrom, dateTo],
   );
 
   const advancedOutstandingSalesFetcher = useCallback(
@@ -717,7 +601,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 100,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedSalesRegisterFetcher = useCallback(
@@ -728,7 +612,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 100,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedSalesByCustomerFetcher = useCallback(
@@ -739,7 +623,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 100,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedSalesByProductFetcher = useCallback(
@@ -750,7 +634,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 100,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedPurchaseSummaryFetcher = useCallback(
@@ -761,7 +645,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 100,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedOutstandingPurchasesFetcher = useCallback(
@@ -772,7 +656,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 100,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedPurchaseRegisterFetcher = useCallback(
@@ -783,7 +667,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 100,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedPurchaseByVendorFetcher = useCallback(
@@ -794,7 +678,7 @@ export function ReportsPage() {
         page: 1,
         per_page: 100,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
   const advancedGeneralLedgerFetcher = useCallback(
@@ -805,165 +689,66 @@ export function ReportsPage() {
         page: 1,
         per_page: 100,
       }),
-    [dateFrom, dateTo]
+    [dateFrom, dateTo],
   );
 
-  const {
-    data: advancedSalesSummary,
-    loading: advancedSalesSummaryLoading,
-    error: advancedSalesSummaryError,
-  } = useApiCache<SalesSummaryReport>(
-    `reports-advanced-sales-${dateFrom}-${dateTo}`,
-    advancedSalesSummaryFetcher
-  );
+  const { data: advancedSalesSummary, loading: advancedSalesSummaryLoading, error: advancedSalesSummaryError } =
+    useApiCache<SalesSummaryReport>(`reports-advanced-sales-${dateFrom}-${dateTo}`, advancedSalesSummaryFetcher);
 
-  const {
-    data: advancedProfitLoss,
-    loading: advancedProfitLossLoading,
-    error: advancedProfitLossError,
-  } = useApiCache<ProfitLossReport>(
-    `reports-advanced-pl-${dateFrom}-${dateTo}`,
-    advancedProfitLossFetcher
-  );
+  const { data: advancedProfitLoss, loading: advancedProfitLossLoading, error: advancedProfitLossError } =
+    useApiCache<ProfitLossReport>(`reports-advanced-pl-${dateFrom}-${dateTo}`, advancedProfitLossFetcher);
 
-  const {
-    data: advancedProfitLossSummary,
-    loading: advancedProfitLossSummaryLoading,
-    error: advancedProfitLossSummaryError,
-  } = useApiCache<ProfitLossSummaryReport>(
-    `reports-advanced-pl-summary-${dateFrom}-${dateTo}`,
-    advancedProfitLossSummaryFetcher
-  );
+  const { data: advancedProfitLossSummary, loading: advancedProfitLossSummaryLoading, error: advancedProfitLossSummaryError } =
+    useApiCache<ProfitLossSummaryReport>(`reports-advanced-pl-summary-${dateFrom}-${dateTo}`, advancedProfitLossSummaryFetcher);
 
-  const {
-    data: advancedInvoiceProfitability,
-    loading: advancedInvoiceProfitabilityLoading,
-    error: advancedInvoiceProfitabilityError,
-  } = useApiCache<InvoiceProfitabilityReport>(
-    `reports-advanced-invoice-profitability-${dateFrom}-${dateTo}`,
-    advancedInvoiceProfitabilityFetcher
-  );
+  const { data: advancedInvoiceProfitability, loading: advancedInvoiceProfitabilityLoading, error: advancedInvoiceProfitabilityError } =
+    useApiCache<InvoiceProfitabilityReport>(`reports-advanced-invoice-profitability-${dateFrom}-${dateTo}`, advancedInvoiceProfitabilityFetcher);
 
-  const {
-    data: advancedProductProfitability,
-    loading: advancedProductProfitabilityLoading,
-    error: advancedProductProfitabilityError,
-  } = useApiCache<ProductProfitabilityReport>(
-    `reports-advanced-product-profitability-${dateFrom}-${dateTo}`,
-    advancedProductProfitabilityFetcher
-  );
+  const { data: advancedProductProfitability, loading: advancedProductProfitabilityLoading, error: advancedProductProfitabilityError } =
+    useApiCache<ProductProfitabilityReport>(`reports-advanced-product-profitability-${dateFrom}-${dateTo}`, advancedProductProfitabilityFetcher);
 
-  const {
-    data: advancedCustomerProfitability,
-    loading: advancedCustomerProfitabilityLoading,
-    error: advancedCustomerProfitabilityError,
-  } = useApiCache<any>(
-    `reports-advanced-customer-profitability-${dateFrom}-${dateTo}`,
-    advancedCustomerProfitabilityFetcher
-  );
+  const { data: advancedCustomerProfitability, loading: advancedCustomerProfitabilityLoading, error: advancedCustomerProfitabilityError } =
+    useApiCache<{ data?: Record<string, unknown>[] }>(`reports-advanced-customer-profitability-${dateFrom}-${dateTo}`, advancedCustomerProfitabilityFetcher);
 
-  const {
-    data: advancedBranchProfitability,
-    loading: advancedBranchProfitabilityLoading,
-    error: advancedBranchProfitabilityError,
-  } = useApiCache<any>(
-    `reports-advanced-branch-profitability-${dateFrom}-${dateTo}`,
-    advancedBranchProfitabilityFetcher
-  );
+  const { data: advancedBranchProfitability, loading: advancedBranchProfitabilityLoading, error: advancedBranchProfitabilityError } =
+    useApiCache<{ data?: Record<string, unknown>[] }>(`reports-advanced-branch-profitability-${dateFrom}-${dateTo}`, advancedBranchProfitabilityFetcher);
 
-  const {
-    data: advancedGstSummary,
-    loading: advancedGstSummaryLoading,
-    error: advancedGstSummaryError,
-  } = useApiCache<GstSummaryReport>(
-    `reports-advanced-gst-${dateFrom}-${dateTo}`,
-    advancedGstSummaryFetcher
-  );
+  const { data: advancedGstSummary, loading: advancedGstSummaryLoading, error: advancedGstSummaryError } =
+    useApiCache<Record<string, unknown>>(`reports-advanced-gst-${dateFrom}-${dateTo}`, advancedGstSummaryFetcher);
 
-  const {
-    data: advancedOutstandingSales,
-    loading: advancedOutstandingSalesLoading,
-    error: advancedOutstandingSalesError,
-  } = useApiCache<OutstandingSalesReport>(
-    `reports-advanced-outstanding-${dateFrom}-${dateTo}`,
-    advancedOutstandingSalesFetcher
-  );
+  const { data: advancedOutstandingSales, loading: advancedOutstandingSalesLoading, error: advancedOutstandingSalesError } =
+    useApiCache<OutstandingSalesReport>(`reports-advanced-outstanding-${dateFrom}-${dateTo}`, advancedOutstandingSalesFetcher);
 
-  const {
-    data: advancedSalesRegister,
-    loading: advancedSalesRegisterLoading,
-    error: advancedSalesRegisterError,
-  } = useApiCache<any>(
-    `reports-sales-register-${dateFrom}-${dateTo}`,
-    advancedSalesRegisterFetcher
-  );
+  const { data: advancedSalesRegister, loading: advancedSalesRegisterLoading, error: advancedSalesRegisterError } =
+    useApiCache<{ data?: Record<string, unknown>[] }>(`reports-sales-register-${dateFrom}-${dateTo}`, advancedSalesRegisterFetcher);
 
-  const {
-    data: advancedSalesByCustomer,
-    loading: advancedSalesByCustomerLoading,
-    error: advancedSalesByCustomerError,
-  } = useApiCache<any>(
-    `reports-sales-by-customer-${dateFrom}-${dateTo}`,
-    advancedSalesByCustomerFetcher
-  );
+  const { data: advancedSalesByCustomer, loading: advancedSalesByCustomerLoading, error: advancedSalesByCustomerError } =
+    useApiCache<{ data?: Record<string, unknown>[] }>(`reports-sales-by-customer-${dateFrom}-${dateTo}`, advancedSalesByCustomerFetcher);
 
-  const {
-    data: advancedSalesByProduct,
-    loading: advancedSalesByProductLoading,
-    error: advancedSalesByProductError,
-  } = useApiCache<any>(
-    `reports-sales-by-product-${dateFrom}-${dateTo}`,
-    advancedSalesByProductFetcher
-  );
+  const { data: advancedSalesByProduct, loading: advancedSalesByProductLoading, error: advancedSalesByProductError } =
+    useApiCache<{ data?: Record<string, unknown>[] }>(`reports-sales-by-product-${dateFrom}-${dateTo}`, advancedSalesByProductFetcher);
 
-  const {
-    data: advancedPurchaseSummary,
-    loading: advancedPurchaseSummaryLoading,
-    error: advancedPurchaseSummaryError,
-  } = useApiCache<any>(
-    `reports-purchase-summary-${dateFrom}-${dateTo}`,
-    advancedPurchaseSummaryFetcher
-  );
+  const { data: advancedPurchaseSummary, loading: advancedPurchaseSummaryLoading, error: advancedPurchaseSummaryError } =
+    useApiCache<{ data?: Record<string, unknown>[] }>(`reports-purchase-summary-${dateFrom}-${dateTo}`, advancedPurchaseSummaryFetcher);
 
-  const {
-    data: advancedOutstandingPurchases,
-    loading: advancedOutstandingPurchasesLoading,
-    error: advancedOutstandingPurchasesError,
-  } = useApiCache<any>(
-    `reports-outstanding-purchases-${dateFrom}-${dateTo}`,
-    advancedOutstandingPurchasesFetcher
-  );
+  const { data: advancedOutstandingPurchases, loading: advancedOutstandingPurchasesLoading, error: advancedOutstandingPurchasesError } =
+    useApiCache<{ data?: Record<string, unknown>[] }>(`reports-outstanding-purchases-${dateFrom}-${dateTo}`, advancedOutstandingPurchasesFetcher);
 
-  const {
-    data: advancedPurchaseRegister,
-    loading: advancedPurchaseRegisterLoading,
-    error: advancedPurchaseRegisterError,
-  } = useApiCache<any>(
-    `reports-purchase-register-${dateFrom}-${dateTo}`,
-    advancedPurchaseRegisterFetcher
-  );
+  const { data: advancedPurchaseRegister, loading: advancedPurchaseRegisterLoading, error: advancedPurchaseRegisterError } =
+    useApiCache<{ data?: Record<string, unknown>[] }>(`reports-purchase-register-${dateFrom}-${dateTo}`, advancedPurchaseRegisterFetcher);
 
-  const {
-    data: advancedPurchaseByVendor,
-    loading: advancedPurchaseByVendorLoading,
-    error: advancedPurchaseByVendorError,
-  } = useApiCache<any>(
-    `reports-purchase-by-vendor-${dateFrom}-${dateTo}`,
-    advancedPurchaseByVendorFetcher
-  );
+  const { data: advancedPurchaseByVendor, loading: advancedPurchaseByVendorLoading, error: advancedPurchaseByVendorError } =
+    useApiCache<{ data?: Record<string, unknown>[] }>(`reports-purchase-by-vendor-${dateFrom}-${dateTo}`, advancedPurchaseByVendorFetcher);
 
-  const {
-    data: advancedGeneralLedger,
-    loading: advancedGeneralLedgerLoading,
-    error: advancedGeneralLedgerError,
-  } = useApiCache<any>(
-    `reports-general-ledger-${dateFrom}-${dateTo}`,
-    advancedGeneralLedgerFetcher
-  );
+  const { data: advancedGeneralLedger, loading: advancedGeneralLedgerLoading, error: advancedGeneralLedgerError } =
+    useApiCache<{ data?: Record<string, unknown>[] }>(`reports-general-ledger-${dateFrom}-${dateTo}`, advancedGeneralLedgerFetcher);
 
-  // ============================================================
-  // REFRESH
-  // ============================================================
+  // Suppress unused var lint for reported ones we still want around
+  void advancedGstSummary;
+  void advancedGstSummaryLoading;
+  void advancedGstSummaryError;
+
+  /* -------------------- Refresh -------------------- */
 
   const isRefreshing =
     invLoading ||
@@ -978,7 +763,6 @@ export function ReportsPage() {
     advancedProductProfitabilityLoading ||
     advancedCustomerProfitabilityLoading ||
     advancedBranchProfitabilityLoading ||
-    advancedGstSummaryLoading ||
     advancedOutstandingSalesLoading;
 
   const refreshAll = () => {
@@ -989,67 +773,32 @@ export function ReportsPage() {
     refreshGstr1();
   };
 
-  // ============================================================
-  // SUMMARY
-  // ============================================================
+  /* -------------------- Summary -------------------- */
 
   const dashboardSummary = useMemo(() => {
-    const sales =
-      invoices?.reduce(
-        (sum, item) =>
-          sum + safeNum(item.total_amount),
-        0
-      ) ?? 0;
+    const sales = invoices?.reduce((sum, item) => sum + safeNum(item.total_amount), 0) ?? 0;
 
     const purchases =
-      purchaseInvoices?.reduce(
-        (sum, item) =>
-          sum + safeNum(item.grand_total),
-        0
-      ) ?? 0;
+      purchaseInvoices?.reduce((sum, item) => sum + safeNum(item.grand_total), 0) ?? 0;
 
     const receivables =
       invoices
         ?.filter((item) => {
-          const status =
-            item.status?.toLowerCase();
-
-          return (
-            status !== 'paid' &&
-            status !== 'cancelled' &&
-            status !== 'canceled'
-          );
+          const status = item.status?.toLowerCase();
+          return status !== 'paid' && status !== 'cancelled' && status !== 'canceled';
         })
-        .reduce(
-          (sum, item) =>
-            sum + safeNum(item.total_amount),
-          0
-        ) ?? 0;
+        .reduce((sum, item) => sum + safeNum(item.total_amount), 0) ?? 0;
 
     const payables =
       purchaseInvoices
         ?.filter((item) => {
-          const status =
-            item.status?.toLowerCase();
-
-          return (
-            status !== 'paid' &&
-            status !== 'cancelled' &&
-            status !== 'canceled'
-          );
+          const status = item.status?.toLowerCase();
+          return status !== 'paid' && status !== 'cancelled' && status !== 'canceled';
         })
-        .reduce(
-          (sum, item) =>
-            sum + safeNum(item.grand_total),
-          0
-        ) ?? 0;
+        .reduce((sum, item) => sum + safeNum(item.grand_total), 0) ?? 0;
 
     const totalPayments =
-      payments?.reduce(
-        (sum, item) =>
-          sum + safeNum(item.amount),
-        0
-      ) ?? 0;
+      payments?.reduce((sum, item) => sum + safeNum(item.amount), 0) ?? 0;
 
     return {
       sales,
@@ -1058,56 +807,37 @@ export function ReportsPage() {
       payables,
       totalPayments,
       profit: sales - purchases,
-      invoiceCount:
-        invoices?.length ?? 0,
-      purchaseCount:
-        purchaseInvoices?.length ?? 0,
-      paymentCount:
-        payments?.length ?? 0,
+      invoiceCount: invoices?.length ?? 0,
+      purchaseCount: purchaseInvoices?.length ?? 0,
+      paymentCount: payments?.length ?? 0,
     };
-  }, [
-    invoices,
-    purchaseInvoices,
-    payments,
-  ]);
+  }, [invoices, purchaseInvoices, payments]);
 
-  // ============================================================
-  // FILTERED DATA
-  // ============================================================
+  /* -------------------- Filtered data -------------------- */
 
   const filteredInvoices = useMemo(() => {
     if (!invoices || !Array.isArray(invoices)) return [];
 
-    const query =
-      search.trim().toLowerCase();
+    const query = search.trim().toLowerCase();
 
     return invoices.filter((invoice) => {
       const matchesSearch =
         !query ||
-        invoice.invoice_no
-          ?.toLowerCase()
-          .includes(query) ||
-        invoice.customer?.name
-          ?.toLowerCase()
-          .includes(query);
+        invoice.invoice_no?.toLowerCase().includes(query) ||
+        invoice.customer?.name?.toLowerCase().includes(query);
 
       const matchesStatus =
         filterStatus === 'all' ||
-        invoice.status?.toLowerCase() ===
-          filterStatus.toLowerCase();
+        invoice.status?.toLowerCase() === filterStatus.toLowerCase();
 
       const matchesCustomer =
-        filterCustomer === 'all' ||
-        invoice.customer?.name ===
-          filterCustomer;
+        filterCustomer === 'all' || invoice.customer?.name === filterCustomer;
 
       const matchesBranch =
-        filterBranch === 'all' ||
-        (invoice as any).branch_name === filterBranch;
+        filterBranch === 'all' || invoice.branch_name === filterBranch;
 
       const matchesCompany =
-        filterCompany === 'all' ||
-        (invoice as any).company_name === filterCompany;
+        filterCompany === 'all' || invoice.company_name === filterCompany;
 
       return (
         matchesSearch &&
@@ -1117,85 +847,50 @@ export function ReportsPage() {
         matchesCompany
       );
     });
-  }, [
-    invoices,
-    search,
-    filterStatus,
-    filterCustomer,
-    filterBranch,
-    filterCompany,
-  ]);
+  }, [invoices, search, filterStatus, filterCustomer, filterBranch, filterCompany]);
 
   const filteredPurchases = useMemo(() => {
     if (!purchaseInvoices || !Array.isArray(purchaseInvoices)) return [];
 
-    const query =
-      search.trim().toLowerCase();
+    const query = search.trim().toLowerCase();
 
-    return purchaseInvoices.filter(
-      (purchase) => {
-        const matchesSearch =
-          !query ||
-          purchase.purchase_number
-            ?.toLowerCase()
-            .includes(query) ||
-          purchase.supplier?.name
-            ?.toLowerCase()
-            .includes(query);
+    return purchaseInvoices.filter((purchase) => {
+      const matchesSearch =
+        !query ||
+        purchase.purchase_number?.toLowerCase().includes(query) ||
+        purchase.supplier?.name?.toLowerCase().includes(query);
 
-        const matchesStatus =
-          filterStatus === 'all' ||
-          purchase.status
-            ?.toLowerCase() ===
-            filterStatus.toLowerCase();
+      const matchesStatus =
+        filterStatus === 'all' ||
+        purchase.status?.toLowerCase() === filterStatus.toLowerCase();
 
-        const matchesVendor =
-          filterVendor === 'all' ||
-          purchase.supplier?.name ===
-            filterVendor;
+      const matchesVendor =
+        filterVendor === 'all' || purchase.supplier?.name === filterVendor;
 
-        const matchesBranch =
-          filterBranch === 'all' ||
-          (purchase as any).branch_name === filterBranch;
+      const matchesBranch =
+        filterBranch === 'all' || purchase.branch_name === filterBranch;
 
-        const matchesCompany =
-          filterCompany === 'all' ||
-          (purchase as any).company_name === filterCompany;
+      const matchesCompany =
+        filterCompany === 'all' || purchase.company_name === filterCompany;
 
-        return (
-          matchesSearch &&
-          matchesStatus &&
-          matchesVendor &&
-          matchesBranch &&
-          matchesCompany
-        );
-      }
-    );
-  }, [
-    purchaseInvoices,
-    search,
-    filterStatus,
-    filterVendor,
-    filterBranch,
-    filterCompany,
-  ]);
+      return (
+        matchesSearch &&
+        matchesStatus &&
+        matchesVendor &&
+        matchesBranch &&
+        matchesCompany
+      );
+    });
+  }, [purchaseInvoices, search, filterStatus, filterVendor, filterBranch, filterCompany]);
 
   const filteredLedger = useMemo(() => {
     if (!ledger || !Array.isArray(ledger)) return [];
-
-    const query =
-      search.trim().toLowerCase();
-
+    const query = search.trim().toLowerCase();
     return ledger.filter((entry) => {
       if (!query) return true;
-
       return (
-        entry.description
-          ?.toLowerCase()
-          .includes(query) ||
-        entry.date
-          ?.toLowerCase()
-          .includes(query)
+        entry.description?.toLowerCase().includes(query) ||
+        entry.date?.toLowerCase().includes(query)
       );
     });
   }, [ledger, search]);
@@ -1212,142 +907,65 @@ export function ReportsPage() {
     });
   }, [gstr1Data, search]);
 
-  // ============================================================
-  // UNIQUE FILTER VALUES FROM REAL API DATA
-  // ============================================================
+  /* -------------------- Filter options -------------------- */
 
   const customerOptions = useMemo(() => {
-    const values =
-      invoices
-        ?.map(
-          (invoice) =>
-            invoice.customer?.name
-        )
-        .filter(Boolean) ?? [];
-
-    return Array.from(
-      new Set(values)
-    ) as string[];
+    const values = invoices?.map((invoice) => invoice.customer?.name).filter(Boolean) ?? [];
+    return Array.from(new Set(values)) as string[];
   }, [invoices]);
 
   const vendorOptions = useMemo(() => {
-    const values =
-      purchaseInvoices
-        ?.map(
-          (purchase) =>
-            purchase.supplier?.name
-        )
-        .filter(Boolean) ?? [];
-
-    return Array.from(
-      new Set(values)
-    ) as string[];
+    const values = purchaseInvoices?.map((purchase) => purchase.supplier?.name).filter(Boolean) ?? [];
+    return Array.from(new Set(values)) as string[];
   }, [purchaseInvoices]);
 
   const statusOptions = useMemo(() => {
     const values = [
-      ...(invoices ?? []).map(
-        (item) => item.status
-      ),
-      ...(purchaseInvoices ?? []).map(
-        (item) => item.status
-      ),
+      ...(invoices ?? []).map((item) => item.status),
+      ...(purchaseInvoices ?? []).map((item) => item.status),
     ].filter(Boolean);
+    return Array.from(new Set(values));
+  }, [invoices, purchaseInvoices]);
 
-    return Array.from(
-      new Set(values)
-    );
-  }, [
-    invoices,
-    purchaseInvoices,
-  ]);
+  const branchOptions = useMemo(() => branches.map((branch) => branch.name), [branches]);
 
-  const branchOptions = useMemo(() => {
-    return branches.map((branch) => branch.name);
-  }, [branches]);
+  const companyOptions = useMemo(() => companies.map((company) => company.name), [companies]);
 
-  const companyOptions = useMemo(() => {
-    return companies.map((company) => company.name);
-  }, [companies]);
+  /* -------------------- Export / Print -------------------- */
 
-  // ============================================================
-  // CSV
-  // ============================================================
-
-  const exportCSV = (
-    data: any[],
-    headers: string[],
-    filename: string
-  ) => {
+  const exportCSV = (data: Record<string, unknown>[], headers: string[], filename: string) => {
     if (!data.length) {
-      showError(
-        'Export',
-        'There is no real API data available to export.'
-      );
+      showError('Export', 'There is no real API data available to export.');
       return;
     }
 
     const csv = [
       headers.join(','),
-      ...data.map((row) =>
-        headers
-          .map((header) =>
-            getCSVValue(row, header)
-          )
-          .join(',')
-      ),
+      ...data.map((row) => headers.map((header) => getCSVValue(row, header)).join(',')),
     ].join('\n');
 
-    const blob = new Blob([csv], {
-      type: 'text/csv;charset=utf-8;',
-    });
-
-    const url =
-      URL.createObjectURL(blob);
-
-    const anchor =
-      document.createElement('a');
-
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
     anchor.href = url;
     anchor.download = filename;
-
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
-
     URL.revokeObjectURL(url);
 
-    showSuccess(
-      'Export complete',
-      `${filename} downloaded successfully.`
-    );
+    showSuccess('Export complete', `${filename} downloaded successfully.`);
   };
-
-  // ============================================================
-  // PRINT
-  // ============================================================
 
   const handlePrint = () => {
     if (!printRef.current) {
-      showError(
-        'Print',
-        'No report content is available.'
-      );
+      showError('Print', 'No report content is available.');
       return;
     }
 
-    const newWindow =
-      window.open(
-        '',
-        '_blank',
-        'width=1200,height=800'
-      );
-
+    const newWindow = window.open('', '_blank', 'width=1200,height=800');
     if (!newWindow) {
-      showError(
-        'Print',
-        'Popup blocked. Please allow popups.'
-      );
+      showError('Print', 'Popup blocked. Please allow popups.');
       return;
     }
 
@@ -1357,74 +975,32 @@ export function ReportsPage() {
         <head>
           <title>Business Report</title>
           <meta charset="UTF-8" />
-
           <style>
-            * {
-              box-sizing: border-box;
-            }
-
-            body {
-              margin: 0;
-              padding: 12mm;
-              background: #ffffff;
-              color: #111827;
-              font-family:
-                Arial,
-                Helvetica,
-                sans-serif;
-            }
-
-            table {
-              width: 100%;
-              border-collapse: collapse;
-            }
-
-            th,
-            td {
-              border: 1px solid #d1d5db;
-              padding: 7px 8px;
-              font-size: 11px;
-            }
-
-            th {
-              background: #f3f4f6;
-              font-weight: 700;
-            }
-
-            .hidden-print {
-              display: none !important;
-            }
-
-            @page {
-              size: A4;
-              margin: 10mm;
-            }
+            * { box-sizing: border-box; }
+            body { margin: 0; padding: 12mm; background: #fff; color: #111827; font-family: Arial, Helvetica, sans-serif; }
+            table { width: 100%; border-collapse: collapse; }
+            th, td { border: 1px solid #d1d5db; padding: 7px 8px; font-size: 11px; }
+            th { background: #f3f4f6; font-weight: 700; }
+            .hidden-print { display: none !important; }
+            @page { size: A4; margin: 10mm; }
           </style>
         </head>
-
-        <body>
-          ${printRef.current.innerHTML}
-        </body>
+        <body>${printRef.current.innerHTML}</body>
       </html>
     `);
-
     newWindow.document.close();
-
     setTimeout(() => {
       newWindow.print();
       newWindow.close();
     }, 300);
   };
 
-  // ============================================================
-  // RESET FILTERS
-  // ============================================================
+  /* -------------------- Reset -------------------- */
 
   const resetFilters = () => {
     setDateFrom(getFinancialYearStart());
     setDateTo(getToday());
     setFinancialYear(getFinancialYear());
-
     setFilterCustomer('all');
     setFilterVendor('all');
     setFilterProduct('all');
@@ -1433,13 +1009,10 @@ export function ReportsPage() {
     setFilterCategory('all');
     setFilterPaymentMode('all');
     setFilterStatus('all');
-
     setSearch('');
   };
 
-  // ============================================================
-  // API ERROR
-  // ============================================================
+  /* -------------------- Derived error / count -------------------- */
 
   const apiErrors: ApiErrorState = {
     invoices: invError,
@@ -1449,611 +1022,668 @@ export function ReportsPage() {
     gstr1: gstr1Error,
   };
 
-  const hasApiError =
-    Object.values(apiErrors).some(Boolean);
+  const hasApiError = Object.values(apiErrors).some(Boolean);
 
-  // ============================================================
-  // CATEGORY CHANGE
-  // ============================================================
+  const activeFilterCount =
+    (search ? 1 : 0) +
+    (filterCustomer !== 'all' ? 1 : 0) +
+    (filterVendor !== 'all' ? 1 : 0) +
+    (filterStatus !== 'all' ? 1 : 0) +
+    (filterBranch !== 'all' ? 1 : 0) +
+    (filterCompany !== 'all' ? 1 : 0);
 
-  const changeCategory = (
-    category: string
-  ) => {
+  /* -------------------- Category change -------------------- */
+
+  const changeCategory = (category: string) => {
     setActiveCategory(category);
     setActiveSubReport('');
     setSearch('');
   };
 
-  // ============================================================
-  // RENDER
-  // ============================================================
+  /* -------------------- Render -------------------- */
 
   return (
-    <div className="min-h-screen bg-[#f5f7fb] p-4 md:p-7 text-slate-800">
-      {/* ======================================================
-          PAGE HEADER (dark banner style)
-      ====================================================== */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 mb-6 rounded-3xl bg-slate-950 px-5 py-6 md:px-8 md:py-7 shadow-xl shadow-slate-300/50">
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" /> Reporting & Analytics
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white md:text-3xl flex items-center gap-3">
-            <FiBarChart2 className="text-cyan-300" /> Reports
-            <span className="text-sm font-normal text-cyan-100/70 ml-2">Live API Data</span>
-          </h1>
-          <p className="text-sm text-slate-300">Comprehensive business reports including GST</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="hidden rounded-xl bg-white/10 px-3 py-2 text-xs font-medium text-white ring-1 ring-white/15 sm:block">
-            <FiDatabase className="mr-1 inline" size={13} /> API Connected
-          </div>
-          <button
-            onClick={refreshAll}
-            disabled={isRefreshing}
-            className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 transition hover:bg-white/20 disabled:opacity-60"
-          >
-            <FiRefreshCw className={isRefreshing ? 'animate-spin inline mr-1' : 'inline mr-1'} size={14} /> Refresh
-          </button>
-          <button
-            onClick={handlePrint}
-            className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 transition hover:bg-white/20"
-          >
-            <FiPrinter className="inline mr-1" size={14} /> Print
-          </button>
-        </div>
-      </div>
+    <>
+      <style>{`
+        .reports-fadeIn { animation: fadeIn 0.2s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+      `}</style>
 
-      {/* ======================================================
-          CATEGORY NAVIGATION
-      ====================================================== */}
-      <section className="mb-6">
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-          {REPORT_CATEGORIES.map((category) => {
-            const active = activeCategory === category.key;
-            return (
-              <button
-                key={category.key}
-                type="button"
-                onClick={() => changeCategory(category.key)}
-                className={clsx(
-                  'group relative overflow-hidden rounded-2xl border p-4 text-left transition-all',
-                  active
-                    ? 'border-cyan-500 bg-cyan-50 shadow-md shadow-cyan-100'
-                    : 'border-slate-200 bg-white hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'
-                )}
-              >
-                {active && <span className="absolute left-0 top-0 h-full w-1 bg-cyan-500" />}
-                <div className="flex items-center gap-3">
-                  <div
-                    className={clsx(
-                      'grid h-10 w-10 shrink-0 place-items-center rounded-xl transition',
-                      active
-                        ? 'bg-cyan-600 text-white'
-                        : 'bg-slate-100 text-slate-600 group-hover:bg-slate-900 group-hover:text-white'
-                    )}
-                  >
-                    {category.icon}
-                  </div>
-                  <div className="min-w-0">
-                    <p className={clsx('text-sm font-bold', active ? 'text-cyan-800' : 'text-slate-800')}>
-                      {category.label}
-                    </p>
-                    <p className="mt-0.5 truncate text-[11px] text-slate-500">{category.description}</p>
-                  </div>
+      <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
+        <div className="mx-auto w-full max-w-[1900px] space-y-5 p-3 sm:p-4 lg:space-y-6 lg:p-6">
+          {/* Hero */}
+          <section className="relative overflow-hidden rounded-2xl border border-slate-800/10 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 px-5 py-6 shadow-[0_20px_40px_-20px_rgba(15,23,42,0.45)] sm:px-7 lg:px-8">
+            <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-indigo-500/20 blur-3xl" />
+            <div className="pointer-events-none absolute -bottom-24 right-24 h-56 w-56 rounded-full bg-cyan-500/10 blur-3xl" />
+
+            <div className="relative flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+              <div className="min-w-0">
+                <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200 backdrop-blur">
+                  <FiBarChart2 size={12} />
+                  Reporting · Analytics
                 </div>
-              </button>
-            );
-          })}
-        </div>
-      </section>
+                <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl lg:text-[32px]">
+                  Reports workspace
+                </h1>
+                <p className="mt-1.5 max-w-2xl text-sm text-slate-300">
+                  Sales, purchases, accounts, GST and profitability — powered by live API data.
+                </p>
+              </div>
 
-      {/* ======================================================
-          FILTER TOOLBAR
-      ====================================================== */}
-      <section className="mb-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-col gap-3 border-b border-slate-100 p-4 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <div className="grid h-9 w-9 place-items-center rounded-xl bg-cyan-50 text-cyan-600">
-              <FiFilter size={16} />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-slate-900">Report Filters</h2>
-              <p className="text-[11px] text-slate-500">Select the reporting period and filters</p>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setShowFilters((value) => !value)}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-            >
-              Advanced Filters
-              <FiChevronDown size={14} className={clsx('transition-transform', showFilters && 'rotate-180')} />
-            </button>
-            <button
-              type="button"
-              onClick={resetFilters}
-              className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-            >
-              Reset
-            </button>
-            <button
-              type="button"
-              onClick={refreshAll}
-              className="rounded-lg bg-cyan-600 px-3 py-2 text-xs font-bold text-white hover:bg-cyan-700"
-            >
-              Apply
-            </button>
-          </div>
-        </div>
-
-        <div className="grid gap-4 p-4 md:grid-cols-2 lg:grid-cols-4">
-          <FilterField label="Date From">
-            <div className="relative">
-              <FiCalendar size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="date"
-                value={dateFrom}
-                onChange={(event) => setDateFrom(event.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
-              />
-            </div>
-          </FilterField>
-          <FilterField label="Date To">
-            <div className="relative">
-              <FiCalendar size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(event) => setDateTo(event.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
-              />
-            </div>
-          </FilterField>
-          <FilterField label="Financial Year">
-            <select
-              value={financialYear}
-              onChange={(event) => {
-                const value = event.target.value;
-                setFinancialYear(value);
-                const [start] = value.split('-');
-                setDateFrom(`${start}-04-01`);
-                setDateTo(`${Number(start) + 1}-03-31`);
-              }}
-              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
-            >
-              <option value="2026-2027">2026-2027</option>
-              <option value="2025-2026">2025-2026</option>
-              <option value="2024-2025">2024-2025</option>
-              <option value="2023-2024">2023-2024</option>
-            </select>
-          </FilterField>
-          <FilterField label="Search">
-            <div className="relative">
-              <FiSearch size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="search"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search report data..."
-                className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm text-slate-800 outline-none placeholder:text-slate-400 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-100"
-              />
-            </div>
-          </FilterField>
-        </div>
-
-        {showFilters && (
-          <div className="border-t border-slate-100 bg-slate-50/60 p-4">
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <FilterField label="Customer">
-                <select
-                  value={filterCustomer}
-                  onChange={(event) => setFilterCustomer(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-500"
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="hidden items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-white backdrop-blur sm:inline-flex">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  <FiDatabase size={12} />
+                  API connected
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={refreshAll}
+                  disabled={isRefreshing}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
                 >
-                  <option value="all">All Customers</option>
-                  {customerOptions.map((customer) => (
-                    <option key={customer} value={customer}>{customer}</option>
-                  ))}
-                </select>
-              </FilterField>
-              <FilterField label="Vendor">
-                <select
-                  value={filterVendor}
-                  onChange={(event) => setFilterVendor(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-500"
+                  <FiRefreshCw className={cn('mr-2', isRefreshing && 'animate-spin')} size={14} />
+                  Refresh
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={handlePrint}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
                 >
-                  <option value="all">All Vendors</option>
-                  {vendorOptions.map((vendor) => (
-                    <option key={vendor} value={vendor}>{vendor}</option>
-                  ))}
-                </select>
-              </FilterField>
-              <FilterField label="Status">
-                <select
-                  value={filterStatus}
-                  onChange={(event) => setFilterStatus(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-500"
-                >
-                  <option value="all">All Status</option>
-                  {statusOptions.map((status) => (
-                    <option key={status} value={status}>{status}</option>
-                  ))}
-                </select>
-              </FilterField>
-              <FilterField label="Branch">
-                <select
-                  value={filterBranch}
-                  onChange={(event) => setFilterBranch(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-500"
-                >
-                  <option value="all">All Branches</option>
-                  {branchOptions.map((branch) => (
-                    <option key={branch} value={branch}>{branch}</option>
-                  ))}
-                </select>
-              </FilterField>
-              <FilterField label="Company">
-                <select
-                  value={filterCompany}
-                  onChange={(event) => setFilterCompany(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-500"
-                >
-                  <option value="all">All Companies</option>
-                  {companyOptions.map((company) => (
-                    <option key={company} value={company}>{company}</option>
-                  ))}
-                </select>
-              </FilterField>
-              <FilterField label="Product">
-                <select
-                  value={filterProduct}
-                  onChange={(event) => setFilterProduct(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-500"
-                >
-                  <option value="all">All Products</option>
-                </select>
-              </FilterField>
-              <FilterField label="Category">
-                <select
-                  value={filterCategory}
-                  onChange={(event) => setFilterCategory(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-500"
-                >
-                  <option value="all">All Categories</option>
-                </select>
-              </FilterField>
-              <FilterField label="Payment Mode">
-                <select
-                  value={filterPaymentMode}
-                  onChange={(event) => setFilterPaymentMode(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-500"
-                >
-                  <option value="all">All Payment Modes</option>
-                </select>
-              </FilterField>
-            </div>
-            <div className="mt-4 flex items-center gap-2 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-              <FiAlertTriangle size={14} />
-              Customer, vendor, branch, and company filters use values returned by the current APIs.
-            </div>
-          </div>
-        )}
-      </section>
-
-      {/* API Error Banner */}
-      {hasApiError && (
-        <div className="mb-6 rounded-2xl border border-rose-200 bg-rose-50 p-4">
-          <div className="flex gap-3">
-            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-rose-100 text-rose-600">
-              <FiAlertTriangle size={17} />
-            </div>
-            <div>
-              <p className="text-sm font-bold text-rose-800">Some report APIs could not be loaded</p>
-              <div className="mt-1 space-y-0.5 text-xs text-rose-700">
-                {invError && <p>Sales: {invError}</p>}
-                {purchaseError && <p>Purchases: {purchaseError}</p>}
-                {paymentError && <p>Payments: {paymentError}</p>}
-                {ledgerError && <p>Ledger: {ledgerError}</p>}
-                {gstr1Error && <p>GST Sales: {gstr1Error}</p>}
+                  <FiPrinter className="mr-2" size={14} />
+                  Print
+                </Button>
               </div>
             </div>
-          </div>
-        </div>
-      )}
+          </section>
 
-      {/* ======================================================
-          REPORT AREA (white card)
-      ====================================================== */}
-      <div ref={printRef} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        {/* Sub Navigation */}
-        {SUB_REPORTS[activeCategory] && (
-          <div className="border-b border-slate-200 bg-slate-50/80 px-4 py-3">
-            <div className="flex gap-2 overflow-x-auto pb-1">
-              {SUB_REPORTS[activeCategory].map((report) => {
-                const active = activeSubReport === report.label;
-                return (
-                  <button
-                    key={report.label}
-                    type="button"
-                    onClick={() => setActiveSubReport(report.label)}
-                    className={clsx(
-                      'inline-flex shrink-0 items-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold transition',
-                      active
-                        ? 'border-slate-950 bg-slate-950 text-white shadow-sm'
-                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
-                    )}
+          {/* Category grid */}
+          <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+            {REPORT_CATEGORIES.map((category) => {
+              const active = activeCategory === category.key;
+              return (
+                <button
+                  key={category.key}
+                  type="button"
+                  onClick={() => changeCategory(category.key)}
+                  className={cn(
+                    'group relative overflow-hidden rounded-2xl border p-4 text-left transition-all duration-200',
+                    active
+                      ? 'border-indigo-300 bg-indigo-50/60 ring-1 ring-indigo-500/10'
+                      : 'border-slate-200/80 bg-white hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-[0_8px_24px_-12px_rgba(15,23,42,0.15)]',
+                  )}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p
+                        className={cn(
+                          'text-[11px] font-semibold uppercase tracking-[0.14em]',
+                          active ? 'text-indigo-500' : 'text-slate-400',
+                        )}
+                      >
+                        {category.label}
+                      </p>
+                      <p className="mt-1.5 truncate text-xs text-slate-500">
+                        {category.description}
+                      </p>
+                    </div>
+                    <div
+                      className={cn(
+                        'grid h-9 w-9 shrink-0 place-items-center rounded-xl transition',
+                        active
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-slate-100 text-slate-600 group-hover:bg-slate-900 group-hover:text-white',
+                      )}
+                    >
+                      {category.icon}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </section>
+
+          {/* Filters */}
+          <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <CardHeader className="flex flex-row items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-5">
+              <div className="flex items-center gap-2.5">
+                <div className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600 ring-1 ring-indigo-500/10">
+                  <FiFilter size={14} />
+                </div>
+                <div>
+                  <CardTitle className="text-sm font-semibold text-slate-800">
+                    Report filters
+                  </CardTitle>
+                  <CardDescription className="text-[11px] text-slate-500">
+                    {activeFilterCount > 0
+                      ? `${activeFilterCount} active filter${activeFilterCount > 1 ? 's' : ''}`
+                      : 'Select the reporting period and scope'}
+                  </CardDescription>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowFilters((v) => !v)}
+                  className="h-9 rounded-lg"
+                >
+                  Advanced
+                  <FiChevronDown
+                    size={14}
+                    className={cn('ml-1.5 transition-transform', showFilters && 'rotate-180')}
+                  />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={resetFilters}
+                  className="h-9 rounded-lg text-slate-500 hover:text-slate-800"
+                >
+                  <FiXCircle className="mr-1.5" size={14} />
+                  Reset
+                </Button>
+              </div>
+            </CardHeader>
+
+            <CardContent className="bg-white p-4 sm:p-5">
+              <div className="grid gap-3 lg:grid-cols-12">
+                <div className="relative lg:col-span-4">
+                  <FiSearch
+                    className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                    size={16}
+                  />
+                  <Input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search report data…"
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="h-10 rounded-xl border-slate-200 pl-10 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
+                  />
+                </div>
+
+                <div className="relative lg:col-span-2">
+                  <FiCalendar
+                    className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                    size={14}
+                  />
+                  <Input
+                    type="date"
+                    aria-label="Date from"
+                    value={dateFrom}
+                    onChange={(e) => setDateFrom(e.target.value)}
+                    className="h-10 rounded-xl border-slate-200 pl-9 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
+                  />
+                </div>
+
+                <div className="relative lg:col-span-2">
+                  <FiCalendar
+                    className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                    size={14}
+                  />
+                  <Input
+                    type="date"
+                    aria-label="Date to"
+                    value={dateTo}
+                    onChange={(e) => setDateTo(e.target.value)}
+                    className="h-10 rounded-xl border-slate-200 pl-9 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
+                  />
+                </div>
+
+                <div className="relative lg:col-span-2">
+                  <select
+                    aria-label="Financial year"
+                    value={financialYear}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setFinancialYear(value);
+                      const [start] = value.split('-');
+                      setDateFrom(`${start}-04-01`);
+                      setDateTo(`${Number(start) + 1}-03-31`);
+                    }}
+                    className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                   >
-                    {report.icon}
-                    {report.label}
-                  </button>
-                );
-              })}
+                    <option value="2026-2027">FY 2026-2027</option>
+                    <option value="2025-2026">FY 2025-2026</option>
+                    <option value="2024-2025">FY 2024-2025</option>
+                    <option value="2023-2024">FY 2023-2024</option>
+                  </select>
+                  <FiChevronDown
+                    className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                    size={14}
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 lg:col-span-2 lg:justify-end">
+                  <div className="flex items-center rounded-xl border border-slate-200 bg-white p-0.5 shadow-sm">
+                    {[
+                      { key: '30d', label: '30d' },
+                      { key: '90d', label: '90d' },
+                      { key: 'fy', label: 'FY' },
+                    ].map((preset) => (
+                      <button
+                        key={preset.key}
+                        type="button"
+                        onClick={() => {
+                          const today = new Date();
+                          const to = today.toISOString().slice(0, 10);
+                          if (preset.key === '30d') {
+                            const d = new Date();
+                            d.setDate(d.getDate() - 29);
+                            setDateFrom(d.toISOString().slice(0, 10));
+                            setDateTo(to);
+                          } else if (preset.key === '90d') {
+                            const d = new Date();
+                            d.setDate(d.getDate() - 89);
+                            setDateFrom(d.toISOString().slice(0, 10));
+                            setDateTo(to);
+                          } else {
+                            setDateFrom(getFinancialYearStart());
+                            setDateTo(getToday());
+                          }
+                        }}
+                        className="rounded-lg px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:bg-slate-100"
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {showFilters && (
+                <div className="mt-4 border-t border-slate-100 pt-4">
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    {[
+                      {
+                        label: 'Customer',
+                        value: filterCustomer,
+                        setter: setFilterCustomer,
+                        options: customerOptions,
+                        allLabel: 'All customers',
+                      },
+                      {
+                        label: 'Vendor',
+                        value: filterVendor,
+                        setter: setFilterVendor,
+                        options: vendorOptions,
+                        allLabel: 'All vendors',
+                      },
+                      {
+                        label: 'Status',
+                        value: filterStatus,
+                        setter: setFilterStatus,
+                        options: statusOptions,
+                        allLabel: 'All statuses',
+                      },
+                      {
+                        label: 'Branch',
+                        value: filterBranch,
+                        setter: setFilterBranch,
+                        options: branchOptions,
+                        allLabel: 'All branches',
+                      },
+                      {
+                        label: 'Company',
+                        value: filterCompany,
+                        setter: setFilterCompany,
+                        options: companyOptions,
+                        allLabel: 'All companies',
+                      },
+                    ].map((f) => (
+                      <div key={f.label}>
+                        <label className="mb-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                          {f.label}
+                        </label>
+                        <div className="relative">
+                          <select
+                            value={f.value}
+                            onChange={(e) => f.setter(e.target.value)}
+                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                          >
+                            <option value="all">{f.allLabel}</option>
+                            {f.options.map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
+                          <FiChevronDown
+                            className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                            size={14}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-4 flex items-start gap-2 rounded-xl border border-amber-200/70 bg-amber-50/60 p-3 text-xs text-amber-800">
+                    <FiAlertTriangle className="mt-0.5 shrink-0" size={14} />
+                    <span className="break-words">
+                      Customer, vendor, branch, and company filters use values returned by the
+                      current APIs for the selected reporting period.
+                    </span>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* API error banner */}
+          {hasApiError && (
+            <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50/80 p-4 text-sm text-rose-800 shadow-sm">
+              <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-rose-100 text-rose-600">
+                <FiAlertTriangle size={16} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold">Some report APIs could not be loaded</p>
+                <div className="mt-1 space-y-0.5 text-xs text-rose-700/90">
+                  {invError && <p>Sales: {invError}</p>}
+                  {purchaseError && <p>Purchases: {purchaseError}</p>}
+                  {paymentError && <p>Payments: {paymentError}</p>}
+                  {ledgerError && <p>Ledger: {ledgerError}</p>}
+                  {gstr1Error && <p>GST sales: {gstr1Error}</p>}
+                </div>
+              </div>
             </div>
-          </div>
-        )}
-
-        <div className="p-4 md:p-6">
-          {/* Dashboard */}
-          {activeCategory === 'dashboard' && (
-            <DashboardReport
-              summary={dashboardSummary}
-              invoices={invoices}
-              purchases={purchaseInvoices}
-              payments={payments}
-              loading={isRefreshing}
-              dateFrom={dateFrom}
-              dateTo={dateTo}
-            />
           )}
 
-          {/* Sales */}
-          {activeCategory === 'sales' && (
-            <>
-              {!activeSubReport && (
-                <EmptyReport
-                  title="Sales Reports"
-                  description="Select a sales report from the navigation above."
-                  icon={<FiShoppingCart size={24} />}
-                />
-              )}
-              {activeSubReport === 'Sales Summary' && (
-                <SalesSummaryApiReport
-                  data={advancedSalesSummary}
-                  loading={advancedSalesSummaryLoading}
-                  error={advancedSalesSummaryError}
-                />
-              )}
-              {activeSubReport === 'Sales Register' && (
-                <SalesRegisterApiTable
-                  data={advancedSalesRegister}
-                  loading={advancedSalesRegisterLoading}
-                  error={advancedSalesRegisterError}
-                />
-              )}
-              {activeSubReport === 'Sales by Customer' && (
-                <SalesByCustomerApiTable
-                  data={advancedSalesByCustomer}
-                  loading={advancedSalesByCustomerLoading}
-                  error={advancedSalesByCustomerError}
-                />
-              )}
-              {activeSubReport === 'Sales by Product' && (
-                <SalesByProductApiTable
-                  data={advancedSalesByProduct}
-                  loading={advancedSalesByProductLoading}
-                  error={advancedSalesByProductError}
-                />
-              )}
-              {activeSubReport === 'Outstanding Sales' && (
-                <OutstandingSalesApiTable
-                  data={advancedOutstandingSales}
-                  loading={advancedOutstandingSalesLoading}
-                  error={advancedOutstandingSalesError}
-                />
-              )}
-              {activeSubReport === 'GST Sales Report' && (
-                <GstReportTable
-                  title="GST Sales Report"
-                  description="Outward supplies (sales) returns"
-                  data={filteredGstr1}
-                  loading={gstr1Loading}
-                  onCSV={() =>
-                    exportCSV(
-                      filteredGstr1,
-                      ['invoice_no', 'invoice_date', 'customer_name', 'gstin', 'taxable_value', 'cgst', 'sgst', 'igst', 'cess', 'total_tax', 'total_value'],
-                      'gst-sales.csv'
-                    )
-                  }
-                />
-              )}
-              {activeSubReport && !['Sales Summary', 'Sales Register', 'Sales by Customer', 'Sales by Product', 'GST Sales Report', 'Outstanding Sales'].includes(activeSubReport) && (
-                <ComingSoonReport title={activeSubReport} />
-              )}
-            </>
-          )}
+          {/* Report surface */}
+          <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            {SUB_REPORTS[activeCategory] && (
+              <div className="border-b border-slate-100 bg-slate-50/70 px-3 py-3 sm:px-4">
+                <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+                  {SUB_REPORTS[activeCategory].map((report) => {
+                    const active = activeSubReport === report.label;
+                    return (
+                      <button
+                        key={report.label}
+                        type="button"
+                        onClick={() => setActiveSubReport(report.label)}
+                        className={cn(
+                          'inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition',
+                          active
+                            ? 'border-slate-900 bg-slate-900 text-white shadow-sm'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50',
+                        )}
+                      >
+                        {report.icon}
+                        {report.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
-          {/* Purchases */}
-          {activeCategory === 'purchases' && (
-            <>
-              {!activeSubReport && (
-                <EmptyReport
-                  title="Purchase Reports"
-                  description="Select a purchase report from the navigation above."
-                  icon={<FiPackage size={24} />}
-                />
-              )}
-              {activeSubReport === 'Purchase Summary' && (
-                <PurchaseSummaryApiTable
-                  data={advancedPurchaseSummary}
-                  loading={advancedPurchaseSummaryLoading}
-                  error={advancedPurchaseSummaryError}
-                />
-              )}
-              {activeSubReport === 'Purchase Register' && (
-                <PurchaseRegisterApiTable
-                  data={advancedPurchaseRegister}
-                  loading={advancedPurchaseRegisterLoading}
-                  error={advancedPurchaseRegisterError}
-                />
-              )}
-              {activeSubReport === 'Purchase by Vendor' && (
-                <PurchaseByVendorApiTable
-                  data={advancedPurchaseByVendor}
-                  loading={advancedPurchaseByVendorLoading}
-                  error={advancedPurchaseByVendorError}
-                />
-              )}
-              {activeSubReport === 'Outstanding Purchase' && (
-                <OutstandingPurchasesApiTable
-                  data={advancedOutstandingPurchases}
-                  loading={advancedOutstandingPurchasesLoading}
-                  error={advancedOutstandingPurchasesError}
-                />
-              )}
-              {activeSubReport && !['Purchase Summary', 'Purchase Register', 'Purchase by Vendor', 'Outstanding Purchase'].includes(activeSubReport) && (
-                <ComingSoonReport title={activeSubReport} />
-              )}
-            </>
-          )}
+            <CardContent className="bg-white p-4 sm:p-6">
+              <div ref={printRef}>
+                {activeCategory === 'dashboard' && (
+                  <DashboardReport
+                    summary={dashboardSummary}
+                    invoices={invoices}
+                    purchases={purchaseInvoices}
+                    payments={payments}
+                    loading={isRefreshing}
+                    dateFrom={dateFrom}
+                    dateTo={dateTo}
+                  />
+                )}
 
-          {/* Accounts */}
-          {activeCategory === 'accounts' && (
-            <>
-              {!activeSubReport && (
-                <EmptyReport
-                  title="Accounts & Finance"
-                  description="Select a financial report from the navigation above."
-                  icon={<FiDollarSign size={24} />}
-                />
-              )}
-              {activeSubReport === 'General Ledger' && (
-                <GeneralLedgerApiTable
-                  data={advancedGeneralLedger}
-                  loading={advancedGeneralLedgerLoading}
-                  error={advancedGeneralLedgerError}
-                />
-              )}
-              {activeSubReport === 'Profit & Loss' && (
-                <ProfitLossStatement
-                  data={advancedProfitLossSummary || advancedProfitLoss}
-                  loading={advancedProfitLossSummaryLoading || advancedProfitLossLoading}
-                  error={advancedProfitLossSummaryError || advancedProfitLossError}
-                  onRefresh={() => {
-                    // Trigger refresh by clearing cache - will re-fetch
-                  }}
-                />
-              )}
-              {activeSubReport === 'Profitability Overview' && (
-                <ProfitabilityOverviewPanel
-                  data={advancedProfitLossSummary}
-                  loading={advancedProfitLossSummaryLoading}
-                  error={advancedProfitLossSummaryError}
-                />
-              )}
-              {activeSubReport === 'Bill-wise Profitability' && (
-                <InvoiceProfitabilityTable
-                  data={advancedInvoiceProfitability}
-                  loading={advancedInvoiceProfitabilityLoading}
-                  error={advancedInvoiceProfitabilityError}
-                />
-              )}
-              {activeSubReport === 'Product Profitability' && (
-                <ProductProfitabilityTable
-                  data={advancedProductProfitability}
-                  loading={advancedProductProfitabilityLoading}
-                  error={advancedProductProfitabilityError}
-                />
-              )}
-              {activeSubReport === 'Customer Profitability' && (
-                <DimensionProfitabilityTable
-                  title="Customer Profitability"
-                  data={advancedCustomerProfitability?.data ?? []}
-                  loading={advancedCustomerProfitabilityLoading}
-                  error={advancedCustomerProfitabilityError}
-                  valueKey="gross_profit"
-                  labelKey="customer"
-                />
-              )}
-              {activeSubReport === 'Branch Profitability' && (
-                <DimensionProfitabilityTable
-                  title="Branch Profitability"
-                  data={advancedBranchProfitability?.data ?? []}
-                  loading={advancedBranchProfitabilityLoading}
-                  error={advancedBranchProfitabilityError}
-                  valueKey="gross_profit"
-                  labelKey="branch"
-                />
-              )}
-              {activeSubReport && !['General Ledger', 'Profit & Loss', 'Profitability Overview', 'Bill-wise Profitability', 'Product Profitability', 'Customer Profitability', 'Branch Profitability'].includes(activeSubReport) && (
-                <ComingSoonReport title={activeSubReport} />
-              )}
-            </>
-          )}
+                {activeCategory === 'sales' && (
+                  <>
+                    {!activeSubReport && (
+                      <EmptyReport
+                        title="Sales reports"
+                        description="Select a sales report from the navigation above."
+                        icon={<FiShoppingCart size={22} />}
+                      />
+                    )}
+                    {activeSubReport === 'Sales Summary' && (
+                      <SalesSummaryApiReport
+                        data={advancedSalesSummary}
+                        loading={advancedSalesSummaryLoading}
+                        error={advancedSalesSummaryError}
+                      />
+                    )}
+                    {activeSubReport === 'Sales Register' && (
+                      <SalesRegisterApiTable
+                        data={advancedSalesRegister}
+                        loading={advancedSalesRegisterLoading}
+                        error={advancedSalesRegisterError}
+                      />
+                    )}
+                    {activeSubReport === 'Sales by Customer' && (
+                      <SalesByCustomerApiTable
+                        data={advancedSalesByCustomer}
+                        loading={advancedSalesByCustomerLoading}
+                        error={advancedSalesByCustomerError}
+                      />
+                    )}
+                    {activeSubReport === 'Sales by Product' && (
+                      <SalesByProductApiTable
+                        data={advancedSalesByProduct}
+                        loading={advancedSalesByProductLoading}
+                        error={advancedSalesByProductError}
+                      />
+                    )}
+                    {activeSubReport === 'Outstanding Sales' && (
+                      <OutstandingSalesApiTable
+                        data={advancedOutstandingSales}
+                        loading={advancedOutstandingSalesLoading}
+                        error={advancedOutstandingSalesError}
+                      />
+                    )}
+                    {activeSubReport === 'GST Sales Report' && (
+                      <GstReportTable
+                        title="GST Sales Report"
+                        description="Outward supplies (sales) returns"
+                        data={filteredGstr1}
+                        loading={gstr1Loading}
+                        onCSV={() =>
+                          exportCSV(
+                            filteredGstr1 as unknown as Record<string, unknown>[],
+                            [
+                              'invoice_no',
+                              'invoice_date',
+                              'customer_name',
+                              'gstin',
+                              'taxable_value',
+                              'cgst',
+                              'sgst',
+                              'igst',
+                              'cess',
+                              'total_tax',
+                              'total_value',
+                            ],
+                            'gst-sales.csv',
+                          )
+                        }
+                      />
+                    )}
+                  </>
+                )}
 
-          {/* GST */}
-          {activeCategory === 'gst' && (
-            <>
-              {!activeSubReport && (
-                <EmptyReport
-                  title="GST / Tax Reports"
-                  description="Select a GST report from the navigation above. Data is fetched from the GST APIs."
-                  icon={<FiFileText size={24} />}
-                />
-              )}
-              {activeSubReport === 'GSTR-1' && (
-                <GstReportTable
-                  title="GST Sales Report"
-                  description="Outward supplies (sales) returns"
-                  data={filteredGstr1}
-                  loading={gstr1Loading}
-                  onCSV={() =>
-                    exportCSV(
-                      filteredGstr1,
-                      ['invoice_no', 'invoice_date', 'customer_name', 'gstin', 'taxable_value', 'cgst', 'sgst', 'igst', 'cess', 'total_tax', 'total_value'],
-                      'gst-sales.csv'
-                    )
-                  }
-                />
-              )}
-              {activeSubReport && !['GSTR-1'].includes(activeSubReport) && (
-                <ComingSoonReport title={activeSubReport} />
-              )}
-            </>
-          )}
+                {activeCategory === 'purchases' && (
+                  <>
+                    {!activeSubReport && (
+                      <EmptyReport
+                        title="Purchase reports"
+                        description="Select a purchase report from the navigation above."
+                        icon={<FiPackage size={22} />}
+                      />
+                    )}
+                    {activeSubReport === 'Purchase Summary' && (
+                      <PurchaseSummaryApiTable
+                        data={advancedPurchaseSummary}
+                        loading={advancedPurchaseSummaryLoading}
+                        error={advancedPurchaseSummaryError}
+                      />
+                    )}
+                    {activeSubReport === 'Purchase Register' && (
+                      <PurchaseRegisterApiTable
+                        data={advancedPurchaseRegister}
+                        loading={advancedPurchaseRegisterLoading}
+                        error={advancedPurchaseRegisterError}
+                      />
+                    )}
+                    {activeSubReport === 'Purchase by Vendor' && (
+                      <PurchaseByVendorApiTable
+                        data={advancedPurchaseByVendor}
+                        loading={advancedPurchaseByVendorLoading}
+                        error={advancedPurchaseByVendorError}
+                      />
+                    )}
+                    {activeSubReport === 'Outstanding Purchase' && (
+                      <OutstandingPurchasesApiTable
+                        data={advancedOutstandingPurchases}
+                        loading={advancedOutstandingPurchasesLoading}
+                        error={advancedOutstandingPurchasesError}
+                      />
+                    )}
+                  </>
+                )}
 
-          {/* Expenses */}
-          {activeCategory === 'expenses' && (
-            <>
-              {!activeSubReport && (
-                <EmptyReport
-                  title="Expense Reports"
-                  description="Select an expense report from the navigation above."
-                  icon={<FiCreditCard size={24} />}
-                />
-              )}
-              {activeSubReport && <ComingSoonReport title={activeSubReport} />}
-            </>
-          )}
+                {activeCategory === 'accounts' && (
+                  <>
+                    {!activeSubReport && (
+                      <EmptyReport
+                        title="Accounts & finance"
+                        description="Select a financial report from the navigation above."
+                        icon={<FiDollarSign size={22} />}
+                      />
+                    )}
+                    {activeSubReport === 'General Ledger' && (
+                      <GeneralLedgerApiTable
+                        data={advancedGeneralLedger}
+                        loading={advancedGeneralLedgerLoading}
+                        error={advancedGeneralLedgerError}
+                      />
+                    )}
+                    {activeSubReport === 'Profit & Loss' && (
+                      <ProfitLossStatement
+                        data={advancedProfitLossSummary || advancedProfitLoss}
+                        loading={advancedProfitLossSummaryLoading || advancedProfitLossLoading}
+                        error={advancedProfitLossSummaryError || advancedProfitLossError}
+                        onRefresh={() => {}}
+                      />
+                    )}
+                    {activeSubReport === 'Profitability Overview' && (
+                      <ProfitabilityOverviewPanel
+                        data={advancedProfitLossSummary}
+                        loading={advancedProfitLossSummaryLoading}
+                        error={advancedProfitLossSummaryError}
+                      />
+                    )}
+                    {activeSubReport === 'Bill-wise Profitability' && (
+                      <InvoiceProfitabilityTable
+                        data={advancedInvoiceProfitability}
+                        loading={advancedInvoiceProfitabilityLoading}
+                        error={advancedInvoiceProfitabilityError}
+                      />
+                    )}
+                    {activeSubReport === 'Product Profitability' && (
+                      <ProductProfitabilityTable
+                        data={advancedProductProfitability}
+                        loading={advancedProductProfitabilityLoading}
+                        error={advancedProductProfitabilityError}
+                      />
+                    )}
+                    {activeSubReport === 'Customer Profitability' && (
+                      <DimensionProfitabilityTable
+                        title="Customer Profitability"
+                        data={advancedCustomerProfitability?.data ?? []}
+                        loading={advancedCustomerProfitabilityLoading}
+                        error={advancedCustomerProfitabilityError}
+                        valueKey="gross_profit"
+                        labelKey="customer"
+                      />
+                    )}
+                    {activeSubReport === 'Branch Profitability' && (
+                      <DimensionProfitabilityTable
+                        title="Branch Profitability"
+                        data={advancedBranchProfitability?.data ?? []}
+                        loading={advancedBranchProfitabilityLoading}
+                        error={advancedBranchProfitabilityError}
+                        valueKey="gross_profit"
+                        labelKey="branch"
+                      />
+                    )}
+                  </>
+                )}
+
+                {activeCategory === 'gst' && (
+                  <>
+                    {!activeSubReport && (
+                      <EmptyReport
+                        title="GST / Tax reports"
+                        description="Select a GST report from the navigation above."
+                        icon={<FiFileText size={22} />}
+                      />
+                    )}
+                    {activeSubReport === 'GSTR-1' && (
+                      <GstReportTable
+                        title="GSTR-1"
+                        description="Outward supplies (sales) returns"
+                        data={filteredGstr1}
+                        loading={gstr1Loading}
+                        onCSV={() =>
+                          exportCSV(
+                            filteredGstr1 as unknown as Record<string, unknown>[],
+                            [
+                              'invoice_no',
+                              'invoice_date',
+                              'customer_name',
+                              'gstin',
+                              'taxable_value',
+                              'cgst',
+                              'sgst',
+                              'igst',
+                              'cess',
+                              'total_tax',
+                              'total_value',
+                            ],
+                            'gstr-1.csv',
+                          )
+                        }
+                      />
+                    )}
+                  </>
+                )}
+
+                {activeCategory === 'expenses' && (
+                  <>
+                    {!activeSubReport && (
+                      <EmptyReport
+                        title="Expense reports"
+                        description="Select an expense report from the navigation above."
+                        icon={<FiCreditCard size={22} />}
+                      />
+                    )}
+                    {activeSubReport && <ComingSoonReport title={activeSubReport} />}
+                  </>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <footer className="flex flex-col gap-2 px-1 text-[11px] text-slate-400 sm:flex-row sm:items-center sm:justify-between">
+            <span>Business reports · Live API data</span>
+            <span className="inline-flex items-center gap-1">
+              <FiActivity size={12} />
+              {isRefreshing ? 'Refreshing…' : 'Up to date'}
+            </span>
+          </footer>
         </div>
       </div>
-
-      {/* Footer */}
-      <footer className="mt-5 flex flex-col gap-2 px-1 text-[11px] text-slate-400 sm:flex-row sm:items-center sm:justify-between">
-        <span>Business Reports</span>
-        <span className="inline-flex items-center gap-1">
-          <FiActivity size={12} />
-          Live API-powered reporting
-        </span>
-      </footer>
-    </div>
+    </>
   );
 }
 
-// ============================================================
-// DASHBOARD REPORT
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Dashboard report                                                    */
+/* ------------------------------------------------------------------ */
 
 function DashboardReport({
   summary,
@@ -2084,14 +1714,13 @@ function DashboardReport({
 }) {
   return (
     <div>
-      {/* Header */}
       <div className="mb-6 flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <div className="mb-2 inline-flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.14em] text-cyan-600">
             <FiActivity size={14} />
-            Business Overview
+            Business overview
           </div>
-          <h2 className="text-2xl font-black tracking-tight text-slate-950">Financial Snapshot</h2>
+          <h2 className="text-2xl font-black tracking-tight text-slate-950">Financial snapshot</h2>
           <p className="mt-1 text-sm text-slate-500">
             {dateFrom || 'All dates'} — {dateTo || 'All dates'}
           </p>
@@ -2102,7 +1731,6 @@ function DashboardReport({
         </div>
       </div>
 
-      {/* KPI Cards */}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <ReportStatCard
           title="Total Sales"
@@ -2156,7 +1784,7 @@ function DashboardReport({
           title="Stock Value"
           value="Not available"
           count="No stock API connected"
-          icon={<FiBox />}
+          icon={<FiPackage />}
           tone="slate"
           loading={false}
         />
@@ -2170,7 +1798,6 @@ function DashboardReport({
         />
       </div>
 
-      {/* Comparison */}
       <div className="mt-6 grid gap-5 lg:grid-cols-2">
         <div className="rounded-2xl border border-slate-200 bg-white p-5">
           <div className="mb-5 flex items-center justify-between">
@@ -2182,8 +1809,18 @@ function DashboardReport({
               <FiTrendingUp size={16} />
             </div>
           </div>
-          <ComparisonBar label="Sales" value={summary.sales} max={Math.max(summary.sales, summary.purchases, 1)} tone="cyan" />
-          <ComparisonBar label="Purchases" value={summary.purchases} max={Math.max(summary.sales, summary.purchases, 1)} tone="blue" />
+          <ComparisonBar
+            label="Sales"
+            value={summary.sales}
+            max={Math.max(summary.sales, summary.purchases, 1)}
+            tone="cyan"
+          />
+          <ComparisonBar
+            label="Purchases"
+            value={summary.purchases}
+            max={Math.max(summary.sales, summary.purchases, 1)}
+            tone="blue"
+          />
         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-5">
           <div className="mb-5 flex items-center justify-between">
@@ -2195,18 +1832,26 @@ function DashboardReport({
               <FiCreditCard size={16} />
             </div>
           </div>
-          <ComparisonBar label="Receivables" value={summary.receivables} max={Math.max(summary.receivables, summary.payables, 1)} tone="amber" />
-          <ComparisonBar label="Payables" value={summary.payables} max={Math.max(summary.receivables, summary.payables, 1)} tone="rose" />
+          <ComparisonBar
+            label="Receivables"
+            value={summary.receivables}
+            max={Math.max(summary.receivables, summary.payables, 1)}
+            tone="amber"
+          />
+          <ComparisonBar
+            label="Payables"
+            value={summary.payables}
+            max={Math.max(summary.receivables, summary.payables, 1)}
+            tone="rose"
+          />
         </div>
       </div>
 
-      {/* Recent data */}
       <div className="mt-6 grid gap-5 xl:grid-cols-2">
         <RecentInvoices invoices={invoices} />
         <RecentPurchases purchases={purchases} />
       </div>
 
-      {/* Payment data status */}
       <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
         <div className="flex items-start gap-3">
           <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white text-slate-600 shadow-sm">
@@ -2226,9 +1871,9 @@ function DashboardReport({
   );
 }
 
-// ============================================================
-// GST REPORT TABLE
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* GST report table                                                    */
+/* ------------------------------------------------------------------ */
 
 function GstReportTable({
   title,
@@ -2277,24 +1922,43 @@ function GstReportTable({
               <EmptyRow colSpan={11} />
             ) : (
               data.map((entry, index) => (
-                <tr key={`${entry.invoice_no || 'gst'}-${entry.invoice_date || 'date'}-${index}`} className="border-b border-slate-100 transition hover:bg-slate-50">
+                <tr
+                  key={`${entry.invoice_no || 'gst'}-${entry.invoice_date || 'date'}-${index}`}
+                  className="border-b border-slate-100 transition hover:bg-slate-50"
+                >
                   <td className="px-4 py-3.5 font-bold text-slate-900">{entry.invoice_no || '-'}</td>
                   <td className="px-4 py-3.5 text-slate-500">{formatDate(entry.invoice_date)}</td>
                   <td className="px-4 py-3.5 text-slate-600">{entry.customer_name || '-'}</td>
                   <td className="px-4 py-3.5 text-slate-600">{entry.gstin || '-'}</td>
-                  <td className="px-4 py-3.5 text-right font-medium text-slate-900">{formatCurrency(safeNum(entry.taxable_value))}</td>
-                  <td className="px-4 py-3.5 text-right text-slate-600">{formatCurrency(safeNum(entry.cgst))}</td>
-                  <td className="px-4 py-3.5 text-right text-slate-600">{formatCurrency(safeNum(entry.sgst))}</td>
-                  <td className="px-4 py-3.5 text-right text-slate-600">{formatCurrency(safeNum(entry.igst))}</td>
-                  <td className="px-4 py-3.5 text-right text-slate-600">{formatCurrency(safeNum(entry.cess))}</td>
-                  <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(safeNum(entry.total_tax))}</td>
-                  <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(safeNum(entry.total_value))}</td>
+                  <td className="px-4 py-3.5 text-right font-medium text-slate-900">
+                    {formatCurrency(safeNum(entry.taxable_value))}
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-slate-600">
+                    {formatCurrency(safeNum(entry.cgst))}
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-slate-600">
+                    {formatCurrency(safeNum(entry.sgst))}
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-slate-600">
+                    {formatCurrency(safeNum(entry.igst))}
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-slate-600">
+                    {formatCurrency(safeNum(entry.cess))}
+                  </td>
+                  <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                    {formatCurrency(safeNum(entry.total_tax))}
+                  </td>
+                  <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                    {formatCurrency(safeNum(entry.total_value))}
+                  </td>
                 </tr>
               ))
             )}
             {!loading && data.length > 0 && (
               <tr className="bg-slate-50 font-bold">
-                <td colSpan={4} className="px-4 py-3 text-right text-slate-700">Totals</td>
+                <td colSpan={4} className="px-4 py-3 text-right text-slate-700">
+                  Totals
+                </td>
                 <td className="px-4 py-3 text-right text-slate-900">{formatCurrency(totalTaxable)}</td>
                 <td className="px-4 py-3 text-right text-slate-900">{formatCurrency(totalCgst)}</td>
                 <td className="px-4 py-3 text-right text-slate-900">{formatCurrency(totalSgst)}</td>
@@ -2312,9 +1976,9 @@ function GstReportTable({
   );
 }
 
-// ============================================================
-// STAT CARD
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Stat card                                                           */
+/* ------------------------------------------------------------------ */
 
 function ReportStatCard({
   title,
@@ -2345,9 +2009,9 @@ function ReportStatCard({
 
   return (
     <div className="relative overflow-hidden rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
-      <div className={clsx('absolute bottom-0 left-0 h-0.5 w-full', current.line)} />
+      <div className={cn('absolute bottom-0 left-0 h-0.5 w-full', current.line)} />
       <div className="flex items-start justify-between gap-3">
-        <div className={clsx('grid h-11 w-11 place-items-center rounded-xl', current.icon)}>
+        <div className={cn('grid h-11 w-11 place-items-center rounded-xl', current.icon)}>
           {icon}
         </div>
         <FiArrowUpRight size={15} className="text-slate-300" />
@@ -2370,9 +2034,9 @@ function ReportStatCard({
   );
 }
 
-// ============================================================
-// COMPARISON BAR
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Comparison bar                                                      */
+/* ------------------------------------------------------------------ */
 
 function ComparisonBar({
   label,
@@ -2400,27 +2064,31 @@ function ComparisonBar({
         <span className="text-xs font-bold text-slate-900">{formatCurrency(value)}</span>
       </div>
       <div className="h-2.5 overflow-hidden rounded-full bg-slate-100">
-        <div className={clsx('h-full rounded-full transition-all duration-500', classes[tone])} style={{ width: `${width}%` }} />
+        <div
+          className={cn('h-full rounded-full transition-all duration-500', classes[tone])}
+          style={{ width: `${width}%` }}
+        />
       </div>
     </div>
   );
 }
 
-// ============================================================
-// RECENT INVOICES
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Recent invoices                                                     */
+/* ------------------------------------------------------------------ */
 
 function RecentInvoices({ invoices }: { invoices: Invoice[] | null }) {
-  const rows = invoices
-    ?.slice()
-    .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')))
-    .slice(0, 5) ?? [];
+  const rows =
+    invoices
+      ?.slice()
+      .sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')))
+      .slice(0, 5) ?? [];
 
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
       <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
         <div>
-          <h3 className="text-sm font-bold text-slate-900">Recent Sales</h3>
+          <h3 className="text-sm font-bold text-slate-900">Recent sales</h3>
           <p className="mt-0.5 text-[11px] text-slate-500">Latest invoices returned by API</p>
         </div>
         <FiShoppingCart size={17} className="text-cyan-600" />
@@ -2433,10 +2101,14 @@ function RecentInvoices({ invoices }: { invoices: Invoice[] | null }) {
             <div key={invoice.id} className="flex items-center justify-between gap-3 px-5 py-3.5">
               <div className="min-w-0">
                 <p className="truncate text-xs font-bold text-slate-800">{invoice.invoice_no}</p>
-                <p className="mt-0.5 truncate text-[11px] text-slate-500">{invoice.customer?.name || 'Customer not provided'}</p>
+                <p className="mt-0.5 truncate text-[11px] text-slate-500">
+                  {invoice.customer?.name || 'Customer not provided'}
+                </p>
               </div>
               <div className="shrink-0 text-right">
-                <p className="text-xs font-bold text-slate-900">{formatCurrency(safeNum(invoice.total_amount))}</p>
+                <p className="text-xs font-bold text-slate-900">
+                  {formatCurrency(safeNum(invoice.total_amount))}
+                </p>
                 <StatusBadge status={invoice.status} />
               </div>
             </div>
@@ -2447,21 +2119,22 @@ function RecentInvoices({ invoices }: { invoices: Invoice[] | null }) {
   );
 }
 
-// ============================================================
-// RECENT PURCHASES
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Recent purchases                                                    */
+/* ------------------------------------------------------------------ */
 
 function RecentPurchases({ purchases }: { purchases: PurchaseInvoice[] | null }) {
-  const rows = purchases
-    ?.slice()
-    .sort((a, b) => String(b.purchase_date ?? '').localeCompare(String(a.purchase_date ?? '')))
-    .slice(0, 5) ?? [];
+  const rows =
+    purchases
+      ?.slice()
+      .sort((a, b) => String(b.purchase_date ?? '').localeCompare(String(a.purchase_date ?? '')))
+      .slice(0, 5) ?? [];
 
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
       <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
         <div>
-          <h3 className="text-sm font-bold text-slate-900">Recent Purchases</h3>
+          <h3 className="text-sm font-bold text-slate-900">Recent purchases</h3>
           <p className="mt-0.5 text-[11px] text-slate-500">Latest purchase records returned by API</p>
         </div>
         <FiPackage size={17} className="text-blue-600" />
@@ -2473,11 +2146,17 @@ function RecentPurchases({ purchases }: { purchases: PurchaseInvoice[] | null })
           rows.map((purchase) => (
             <div key={purchase.id} className="flex items-center justify-between gap-3 px-5 py-3.5">
               <div className="min-w-0">
-                <p className="truncate text-xs font-bold text-slate-800">{purchase.purchase_number}</p>
-                <p className="mt-0.5 truncate text-[11px] text-slate-500">{purchase.supplier?.name || 'Supplier not provided'}</p>
+                <p className="truncate text-xs font-bold text-slate-800">
+                  {purchase.purchase_number}
+                </p>
+                <p className="mt-0.5 truncate text-[11px] text-slate-500">
+                  {purchase.supplier?.name || 'Supplier not provided'}
+                </p>
               </div>
               <div className="shrink-0 text-right">
-                <p className="text-xs font-bold text-slate-900">{formatCurrency(safeNum(purchase.grand_total))}</p>
+                <p className="text-xs font-bold text-slate-900">
+                  {formatCurrency(safeNum(purchase.grand_total))}
+                </p>
                 <StatusBadge status={purchase.status} />
               </div>
             </div>
@@ -2488,171 +2167,9 @@ function RecentPurchases({ purchases }: { purchases: PurchaseInvoice[] | null })
   );
 }
 
-// ============================================================
-// SALES TABLE
-// ============================================================
-
-function SalesTable({
-  invoices,
-  loading,
-  onCSV,
-}: {
-  invoices: Invoice[];
-  loading: boolean;
-  onCSV: () => void;
-}) {
-  return (
-    <ReportSection
-      title="Sales Summary"
-      description="Sales invoices returned by the invoices API for the selected period."
-      count={invoices.length}
-    >
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] text-sm">
-          <thead>
-            <tr className="border-b border-slate-200 bg-slate-50">
-              <TableHeader>Invoice No.</TableHeader>
-              <TableHeader>Customer</TableHeader>
-              <TableHeader align="right">Amount</TableHeader>
-              <TableHeader>Date</TableHeader>
-              <TableHeader>Status</TableHeader>
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <LoadingRow colSpan={5} />
-            ) : !invoices.length ? (
-              <EmptyRow colSpan={5} />
-            ) : (
-              invoices.map((invoice) => (
-                <tr key={invoice.id} className="border-b border-slate-100 transition hover:bg-slate-50">
-                  <td className="px-4 py-3.5 font-bold text-slate-900">{invoice.invoice_no}</td>
-                  <td className="px-4 py-3.5 text-slate-600">{invoice.customer?.name || '-'}</td>
-                  <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(safeNum(invoice.total_amount))}</td>
-                  <td className="px-4 py-3.5 text-slate-500">{formatDate(invoice.created_at)}</td>
-                  <td className="px-4 py-3.5"><StatusBadge status={invoice.status} /></td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-      <ExportButtons onCSV={onCSV} onPrint={() => window.print()} />
-    </ReportSection>
-  );
-}
-
-// ============================================================
-// PURCHASE TABLE
-// ============================================================
-
-function PurchaseTable({
-  purchases,
-  loading,
-  onCSV,
-}: {
-  purchases: PurchaseInvoice[];
-  loading: boolean;
-  onCSV: () => void;
-}) {
-  return (
-    <ReportSection
-      title="Purchase Summary"
-      description="Purchase invoices returned by the purchase API for the selected period."
-      count={purchases.length}
-    >
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[760px] text-sm">
-          <thead>
-            <tr className="border-b border-slate-200 bg-slate-50">
-              <TableHeader>Purchase No.</TableHeader>
-              <TableHeader>Supplier</TableHeader>
-              <TableHeader align="right">Amount</TableHeader>
-              <TableHeader>Date</TableHeader>
-              <TableHeader>Status</TableHeader>
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <LoadingRow colSpan={5} />
-            ) : !purchases.length ? (
-              <EmptyRow colSpan={5} />
-            ) : (
-              purchases.map((purchase) => (
-                <tr key={purchase.id} className="border-b border-slate-100 transition hover:bg-slate-50">
-                  <td className="px-4 py-3.5 font-bold text-slate-900">{purchase.purchase_number}</td>
-                  <td className="px-4 py-3.5 text-slate-600">{purchase.supplier?.name || '-'}</td>
-                  <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(safeNum(purchase.grand_total))}</td>
-                  <td className="px-4 py-3.5 text-slate-500">{formatDate(purchase.purchase_date)}</td>
-                  <td className="px-4 py-3.5"><StatusBadge status={purchase.status} /></td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-      <ExportButtons onCSV={onCSV} onPrint={() => window.print()} />
-    </ReportSection>
-  );
-}
-
-// ============================================================
-// LEDGER TABLE
-// ============================================================
-
-function LedgerTable({
-  ledger,
-  loading,
-  onCSV,
-}: {
-  ledger: LedgerEntry[];
-  loading: boolean;
-  onCSV: () => void;
-}) {
-  return (
-    <ReportSection
-      title="General Ledger"
-      description="Ledger transactions returned by the accounting statements API for the selected period."
-      count={ledger.length}
-    >
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[850px] text-sm">
-          <thead>
-            <tr className="border-b border-slate-200 bg-slate-50">
-              <TableHeader>Date</TableHeader>
-              <TableHeader>Description</TableHeader>
-              <TableHeader align="right">Debit</TableHeader>
-              <TableHeader align="right">Credit</TableHeader>
-              <TableHeader align="right">Balance</TableHeader>
-            </tr>
-          </thead>
-          <tbody>
-            {loading ? (
-              <LoadingRow colSpan={5} />
-            ) : !ledger.length ? (
-              <EmptyRow colSpan={5} />
-            ) : (
-              ledger.map((entry) => (
-                <tr key={entry.id} className="border-b border-slate-100 transition hover:bg-slate-50">
-                  <td className="px-4 py-3.5 text-slate-500">{formatDate(entry.date)}</td>
-                  <td className="px-4 py-3.5 font-semibold text-slate-800">{entry.description}</td>
-                  <td className="px-4 py-3.5 text-right font-medium text-rose-600">{formatCurrency(safeNum(entry.debit))}</td>
-                  <td className="px-4 py-3.5 text-right font-medium text-emerald-600">{formatCurrency(safeNum(entry.credit))}</td>
-                  <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(safeNum(entry.balance))}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-      <ExportButtons onCSV={onCSV} onPrint={() => window.print()} />
-    </ReportSection>
-  );
-}
-
-// ============================================================
-// REPORT SECTION
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Report section                                                      */
+/* ------------------------------------------------------------------ */
 
 function ReportSection({
   title,
@@ -2677,29 +2194,27 @@ function ReportSection({
               </span>
             )}
           </div>
-          {description && <p className="mt-1 text-xs leading-5 text-slate-500">{description}</p>}
+          {description && (
+            <p className="mt-1 text-xs leading-5 text-slate-500">{description}</p>
+          )}
         </div>
         <div className="inline-flex items-center gap-1.5 self-start rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700 sm:self-auto">
           <FiCheckCircle size={12} />
           API Data
         </div>
       </div>
-      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">{children}</div>
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+        {children}
+      </div>
     </section>
   );
 }
 
-// ============================================================
-// EXPORT BUTTONS
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Export buttons                                                      */
+/* ------------------------------------------------------------------ */
 
-function ExportButtons({
-  onCSV,
-  onPrint,
-}: {
-  onCSV: () => void;
-  onPrint: () => void;
-}) {
+function ExportButtons({ onCSV, onPrint }: { onCSV: () => void; onPrint: () => void }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50/60 p-4">
       <p className="text-[11px] text-slate-400">Exporting current API-loaded records</p>
@@ -2725,9 +2240,9 @@ function ExportButtons({
   );
 }
 
-// ============================================================
-// TABLE HEADER
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Table header                                                        */
+/* ------------------------------------------------------------------ */
 
 function TableHeader({
   children,
@@ -2738,9 +2253,9 @@ function TableHeader({
 }) {
   return (
     <th
-      className={clsx(
+      className={cn(
         'px-4 py-3 text-[10px] font-bold uppercase tracking-[0.08em] text-slate-500',
-        align === 'right' ? 'text-right' : 'text-left'
+        align === 'right' ? 'text-right' : 'text-left',
       )}
     >
       {children}
@@ -2748,30 +2263,9 @@ function TableHeader({
   );
 }
 
-// ============================================================
-// FILTER FIELD
-// ============================================================
-
-function FilterField({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div>
-      <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-500">
-        {label}
-      </label>
-      {children}
-    </div>
-  );
-}
-
-// ============================================================
-// STATUS BADGE
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Status badge                                                        */
+/* ------------------------------------------------------------------ */
 
 function StatusBadge({ status }: { status?: string }) {
   const normalized = status?.toLowerCase() ?? '';
@@ -2790,16 +2284,21 @@ function StatusBadge({ status }: { status?: string }) {
   }
 
   return (
-    <span className={clsx('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] font-bold uppercase tracking-wide', classes)}>
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] font-bold uppercase tracking-wide',
+        classes,
+      )}
+    >
       <Icon size={10} />
       {status || 'Unknown'}
     </span>
   );
 }
 
-// ============================================================
-// LOADING ROW
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Loading row                                                         */
+/* ------------------------------------------------------------------ */
 
 function LoadingRow({ colSpan }: { colSpan: number }) {
   return (
@@ -2819,9 +2318,9 @@ function LoadingRow({ colSpan }: { colSpan: number }) {
   );
 }
 
-// ============================================================
-// EMPTY ROW
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Empty row                                                           */
+/* ------------------------------------------------------------------ */
 
 function EmptyRow({ colSpan }: { colSpan: number }) {
   return (
@@ -2841,9 +2340,9 @@ function EmptyRow({ colSpan }: { colSpan: number }) {
   );
 }
 
-// ============================================================
-// EMPTY LIST
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Empty list                                                          */
+/* ------------------------------------------------------------------ */
 
 function EmptyList() {
   return (
@@ -2856,9 +2355,9 @@ function EmptyList() {
   );
 }
 
-// ============================================================
-// EMPTY REPORT
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Empty report                                                        */
+/* ------------------------------------------------------------------ */
 
 function EmptyReport({
   title,
@@ -2884,9 +2383,9 @@ function EmptyReport({
   );
 }
 
-// ============================================================
-// PROFIT & LOSS REPORT
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Profit & loss                                                       */
+/* ------------------------------------------------------------------ */
 
 function ProfitLossStatement({
   data,
@@ -2905,7 +2404,7 @@ function ProfitLossStatement({
         <div className="grid h-16 w-16 place-items-center rounded-2xl border border-rose-100 bg-white text-rose-500 shadow-sm">
           <FiAlertTriangle size={24} />
         </div>
-        <h3 className="mt-5 text-lg font-black text-slate-800">Unable to Load Report</h3>
+        <h3 className="mt-5 text-lg font-black text-slate-800">Unable to load report</h3>
         <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">{error}</p>
         <button
           onClick={onRefresh}
@@ -2920,28 +2419,47 @@ function ProfitLossStatement({
   if (loading || !data) {
     return (
       <div className="flex min-h-[440px] items-center justify-center">
-        <div className="text-center">
-          <div className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-4 py-2">
-            <div className="h-2 w-2 animate-pulse rounded-full bg-slate-400"></div>
-            Loading Profit & Loss...
-          </div>
+        <div className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm text-slate-600">
+          <div className="h-2 w-2 animate-pulse rounded-full bg-slate-400" />
+          Loading profit & loss...
         </div>
       </div>
     );
   }
 
-  const payload = (data as any)?.data ?? data;
-  const isDetailed = !!payload && typeof payload === 'object' && 'revenue' in payload && payload.revenue && typeof payload.revenue === 'object';
+  const payload = (data as { data?: unknown })?.data ?? data;
+  const isDetailed =
+    payload &&
+    typeof payload === 'object' &&
+    'revenue' in payload &&
+    (payload as { revenue?: unknown }).revenue &&
+    typeof (payload as { revenue: unknown }).revenue === 'object';
+
   const formatCurr = (val: number) => formatCurrency(val);
   const formatPct = (val: number) => `${Number(val || 0).toFixed(2)}%`;
 
   if (!isDetailed) {
-    const summary = payload && typeof payload === 'object' ? (payload as ProfitLossSummaryReport['data']) : null;
+    const summary =
+      payload && typeof payload === 'object'
+        ? (payload as {
+            gross_revenue?: number;
+            cogs?: number;
+            gross_profit?: number;
+            net_profit?: number;
+            net_revenue?: number;
+            gross_margin?: number;
+            operating_profit?: number;
+            net_margin?: number;
+            contribution_margin?: number;
+          })
+        : null;
 
     if (!summary) {
       return (
         <div className="flex min-h-[440px] items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 px-5 text-center">
-          <div className="text-sm text-slate-500">No P&amp;L summary data is available for the selected range.</div>
+          <div className="text-sm text-slate-500">
+            No P&amp;L summary data is available for the selected range.
+          </div>
         </div>
       );
     }
@@ -2955,28 +2473,65 @@ function ProfitLossStatement({
           <KpiCard label="Net Profit" value={formatCurr(Number(summary.net_profit || 0))} highlight />
         </div>
 
-        <ReportSection title="Profitability Summary" description="Real API summary data for the selected period">
+        <ReportSection
+          title="Profitability Summary"
+          description="Real API summary data for the selected period"
+        >
           <div className="space-y-3 p-6">
-            <div className="flex justify-between text-sm"><span className="text-slate-600">Net Revenue</span><span className="font-semibold">{formatCurr(Number(summary.net_revenue || 0))}</span></div>
-            <div className="flex justify-between text-sm"><span className="text-slate-600">Gross Margin</span><span className="font-semibold">{formatPct(Number(summary.gross_margin || 0))}</span></div>
-            <div className="flex justify-between text-sm"><span className="text-slate-600">Operating Profit</span><span className="font-semibold">{formatCurr(Number(summary.operating_profit || 0))}</span></div>
-            <div className="flex justify-between text-sm"><span className="text-slate-600">Net Margin</span><span className="font-semibold">{formatPct(Number(summary.net_margin || 0))}</span></div>
-            <div className="flex justify-between text-sm"><span className="text-slate-600">Contribution Margin</span><span className="font-semibold">{formatCurr(Number(summary.contribution_margin || 0))}</span></div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-600">Net Revenue</span>
+              <span className="font-semibold">{formatCurr(Number(summary.net_revenue || 0))}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-600">Gross Margin</span>
+              <span className="font-semibold">{formatPct(Number(summary.gross_margin || 0))}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-600">Operating Profit</span>
+              <span className="font-semibold">
+                {formatCurr(Number(summary.operating_profit || 0))}
+              </span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-600">Net Margin</span>
+              <span className="font-semibold">{formatPct(Number(summary.net_margin || 0))}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-600">Contribution Margin</span>
+              <span className="font-semibold">
+                {formatCurr(Number(summary.contribution_margin || 0))}
+              </span>
+            </div>
           </div>
         </ReportSection>
       </div>
     );
   }
 
-  const pl = payload && typeof payload === 'object' ? (payload as ProfitLossReport['data']) : null;
-
-  if (!pl) {
-    return (
-      <div className="flex min-h-[440px] items-center justify-center rounded-2xl border border-dashed border-slate-300 bg-slate-50/70 px-5 text-center">
-        <div className="text-sm text-slate-500">No detailed P&amp;L data is available for the selected range.</div>
-      </div>
-    );
-  }
+  const pl = payload as {
+    revenue: {
+      gross_sales: number;
+      sales_returns: number;
+      sales_discounts: number;
+      net_sales: number;
+    };
+    cogs: {
+      opening_stock: number;
+      purchases: number;
+      purchase_returns: number;
+      closing_stock: number;
+      cost_of_goods_sold: number;
+    };
+    gross_profit: number;
+    gross_margin: number;
+    operating_expenses: { name: string; amount: number }[];
+    total_operating_expenses: number;
+    operating_profit: number;
+    other_income: number;
+    other_expenses: number;
+    net_profit: number;
+    net_margin: number;
+  };
 
   return (
     <div className="space-y-6">
@@ -2992,27 +2547,64 @@ function ProfitLossStatement({
           <div>
             <h4 className="font-bold text-slate-900">Revenue</h4>
             <div className="mt-3 space-y-2 border-b border-slate-200 pb-4">
-              <div className="flex justify-between text-sm"><span className="text-slate-600">Gross Sales</span><span className="font-semibold">{formatCurr(pl.revenue.gross_sales)}</span></div>
-              <div className="flex justify-between text-sm"><span className="text-slate-600">Less: Sales Returns</span><span className="font-semibold text-rose-600">({formatCurr(pl.revenue.sales_returns)})</span></div>
-              <div className="flex justify-between text-sm"><span className="text-slate-600">Less: Discounts</span><span className="font-semibold text-rose-600">({formatCurr(pl.revenue.sales_discounts)})</span></div>
-              <div className="flex justify-between text-base font-bold"><span>Net Sales</span><span>{formatCurr(pl.revenue.net_sales)}</span></div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Gross Sales</span>
+                <span className="font-semibold">{formatCurr(pl.revenue.gross_sales)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Less: Sales Returns</span>
+                <span className="font-semibold text-rose-600">
+                  ({formatCurr(pl.revenue.sales_returns)})
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Less: Discounts</span>
+                <span className="font-semibold text-rose-600">
+                  ({formatCurr(pl.revenue.sales_discounts)})
+                </span>
+              </div>
+              <div className="flex justify-between text-base font-bold">
+                <span>Net Sales</span>
+                <span>{formatCurr(pl.revenue.net_sales)}</span>
+              </div>
             </div>
           </div>
 
           <div>
             <h4 className="font-bold text-slate-900">Cost of Goods Sold</h4>
             <div className="mt-3 space-y-2 border-b border-slate-200 pb-4">
-              <div className="flex justify-between text-sm"><span className="text-slate-600">Opening Stock</span><span>{formatCurr(pl.cogs.opening_stock)}</span></div>
-              <div className="flex justify-between text-sm"><span className="text-slate-600">Add: Purchases</span><span>{formatCurr(pl.cogs.purchases)}</span></div>
-              <div className="flex justify-between text-sm"><span className="text-slate-600">Less: Purchase Returns</span><span className="text-rose-600">({formatCurr(pl.cogs.purchase_returns)})</span></div>
-              <div className="flex justify-between text-sm"><span className="text-slate-600">Less: Closing Stock</span><span className="text-rose-600">({formatCurr(pl.cogs.closing_stock)})</span></div>
-              <div className="flex justify-between text-base font-bold"><span>COGS</span><span>{formatCurr(pl.cogs.cost_of_goods_sold)}</span></div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Opening Stock</span>
+                <span>{formatCurr(pl.cogs.opening_stock)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Add: Purchases</span>
+                <span>{formatCurr(pl.cogs.purchases)}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Less: Purchase Returns</span>
+                <span className="text-rose-600">({formatCurr(pl.cogs.purchase_returns)})</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-600">Less: Closing Stock</span>
+                <span className="text-rose-600">({formatCurr(pl.cogs.closing_stock)})</span>
+              </div>
+              <div className="flex justify-between text-base font-bold">
+                <span>COGS</span>
+                <span>{formatCurr(pl.cogs.cost_of_goods_sold)}</span>
+              </div>
             </div>
           </div>
 
           <div className="rounded-lg bg-emerald-50 p-3">
-            <div className="flex justify-between text-base font-bold text-emerald-900"><span>Gross Profit</span><span>{formatCurr(pl.gross_profit)}</span></div>
-            <div className="mt-1 flex justify-between text-sm text-emerald-600"><span>Gross Margin</span><span>{formatPct(pl.gross_margin)}</span></div>
+            <div className="flex justify-between text-base font-bold text-emerald-900">
+              <span>Gross Profit</span>
+              <span>{formatCurr(pl.gross_profit)}</span>
+            </div>
+            <div className="mt-1 flex justify-between text-sm text-emerald-600">
+              <span>Gross Margin</span>
+              <span>{formatPct(pl.gross_margin)}</span>
+            </div>
           </div>
 
           <div>
@@ -3020,33 +2612,66 @@ function ProfitLossStatement({
             <div className="mt-3 space-y-2 border-b border-slate-200 pb-4">
               {pl.operating_expenses.length > 0 ? (
                 pl.operating_expenses.map((exp, idx) => (
-                  <div key={idx} className="flex justify-between text-sm"><span className="text-slate-600">{exp.name || `Expense ${idx + 1}`}</span><span>{formatCurr(exp.amount)}</span></div>
+                  <div key={idx} className="flex justify-between text-sm">
+                    <span className="text-slate-600">{exp.name || `Expense ${idx + 1}`}</span>
+                    <span>{formatCurr(exp.amount)}</span>
+                  </div>
                 ))
               ) : (
                 <div className="text-sm text-slate-500">No expenses recorded</div>
               )}
-              <div className="flex justify-between text-base font-bold"><span>Total Operating Expenses</span><span>{formatCurr(pl.total_operating_expenses)}</span></div>
+              <div className="flex justify-between text-base font-bold">
+                <span>Total Operating Expenses</span>
+                <span>{formatCurr(pl.total_operating_expenses)}</span>
+              </div>
             </div>
           </div>
 
           <div className="rounded-lg bg-blue-50 p-3">
-            <div className="flex justify-between text-base font-bold text-blue-900"><span>Operating Profit</span><span>{formatCurr(pl.operating_profit)}</span></div>
+            <div className="flex justify-between text-base font-bold text-blue-900">
+              <span>Operating Profit</span>
+              <span>{formatCurr(pl.operating_profit)}</span>
+            </div>
           </div>
 
           <div>
-            <div className="flex justify-between text-sm"><span className="text-slate-600">Add: Other Income</span><span className="font-semibold text-emerald-600">+{formatCurr(pl.other_income)}</span></div>
-            <div className="flex justify-between text-sm"><span className="text-slate-600">Less: Other Expenses</span><span className="font-semibold text-rose-600">({formatCurr(pl.other_expenses)})</span></div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-600">Add: Other Income</span>
+              <span className="font-semibold text-emerald-600">
+                +{formatCurr(pl.other_income)}
+              </span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-slate-600">Less: Other Expenses</span>
+              <span className="font-semibold text-rose-600">
+                ({formatCurr(pl.other_expenses)})
+              </span>
+            </div>
           </div>
 
           <div className="rounded-lg bg-gradient-to-r from-emerald-50 to-cyan-50 p-4">
-            <div className="flex justify-between text-lg font-black text-slate-900"><span>Net Profit</span><span className={pl.net_profit >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{formatCurr(pl.net_profit)}</span></div>
-            <div className="mt-2 flex justify-between text-sm text-slate-600"><span>Net Margin</span><span className={pl.net_margin >= 0 ? 'text-emerald-600' : 'text-rose-600'}>{formatPct(pl.net_margin)}</span></div>
+            <div className="flex justify-between text-lg font-black text-slate-900">
+              <span>Net Profit</span>
+              <span className={pl.net_profit >= 0 ? 'text-emerald-600' : 'text-rose-600'}>
+                {formatCurr(pl.net_profit)}
+              </span>
+            </div>
+            <div className="mt-2 flex justify-between text-sm text-slate-600">
+              <span>Net Margin</span>
+              <span className={pl.net_margin >= 0 ? 'text-emerald-600' : 'text-rose-600'}>
+                {formatPct(pl.net_margin)}
+              </span>
+            </div>
           </div>
         </div>
       </ReportSection>
     </div>
   );
 }
+
+/* ------------------------------------------------------------------ */
+/* Profitability panels                                                */
+/* ------------------------------------------------------------------ */
 
 function ProfitabilityOverviewPanel({
   data,
@@ -3058,17 +2683,28 @@ function ProfitabilityOverviewPanel({
   error: string | null;
 }) {
   if (error) {
-    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
   }
 
   if (loading || !data?.data) {
-    return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading profitability overview...</div>;
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading profitability overview...
+      </div>
+    );
   }
 
   const d = data.data;
 
   return (
-    <ReportSection title="Profitability Overview" description="Real backend profitability snapshot for the selected period">
+    <ReportSection
+      title="Profitability Overview"
+      description="Real backend profitability snapshot for the selected period"
+    >
       <div className="space-y-5 p-5">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <KpiCard label="Gross Revenue" value={formatCurrency(d.gross_revenue)} />
@@ -3097,15 +2733,27 @@ function InvoiceProfitabilityTable({
   error: string | null;
 }) {
   if (error) {
-    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
   }
 
   if (loading || !data?.data) {
-    return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading bill-wise profitability...</div>;
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading bill-wise profitability...
+      </div>
+    );
   }
 
   return (
-    <ReportSection title="Bill-wise Profitability" description="Profitability by invoice using actual item sales and historical purchase cost" count={data.data.length}>
+    <ReportSection
+      title="Bill-wise Profitability"
+      description="Profitability by invoice using actual item sales and historical purchase cost"
+      count={data.data.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[1100px] text-sm">
           <thead>
@@ -3124,12 +2772,22 @@ function InvoiceProfitabilityTable({
             {data.data.map((item) => (
               <tr key={item.invoice_id} className="border-b border-slate-100 hover:bg-slate-50">
                 <td className="px-4 py-3.5 font-semibold text-slate-800">{item.invoice_no}</td>
-                <td className="px-4 py-3.5 text-slate-600">{formatDate(item.invoice_date || undefined)}</td>
+                <td className="px-4 py-3.5 text-slate-600">
+                  {formatDate(item.invoice_date || undefined)}
+                </td>
                 <td className="px-4 py-3.5 text-slate-700">{item.customer_name || '-'}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(item.revenue)}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(item.cogs)}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-emerald-700">{formatCurrency(item.gross_profit)}</td>
-                <td className="px-4 py-3.5 text-right font-semibold text-slate-700">{Number(item.profit_margin || 0).toFixed(2)}%</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(item.revenue)}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(item.cogs)}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-emerald-700">
+                  {formatCurrency(item.gross_profit)}
+                </td>
+                <td className="px-4 py-3.5 text-right font-semibold text-slate-700">
+                  {Number(item.profit_margin || 0).toFixed(2)}%
+                </td>
                 <td className="px-4 py-3.5 text-right text-slate-600">{item.status}</td>
               </tr>
             ))}
@@ -3150,15 +2808,27 @@ function ProductProfitabilityTable({
   error: string | null;
 }) {
   if (error) {
-    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
   }
 
   if (loading || !data?.data) {
-    return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading product profitability...</div>;
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading product profitability...
+      </div>
+    );
   }
 
   return (
-    <ReportSection title="Product Profitability" description="Gross profit by sold product from real invoice data" count={data.data.length}>
+    <ReportSection
+      title="Product Profitability"
+      description="Gross profit by sold product from real invoice data"
+      count={data.data.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[900px] text-sm">
           <thead>
@@ -3177,11 +2847,21 @@ function ProductProfitabilityTable({
               <tr key={item.product_id} className="border-b border-slate-100 hover:bg-slate-50">
                 <td className="px-4 py-3.5 font-semibold text-slate-800">{item.product_name}</td>
                 <td className="px-4 py-3.5 text-slate-600">{item.sku || '-'}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{Number(item.quantity_sold || 0).toLocaleString()}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(item.sales_value)}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(item.cost_value)}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-emerald-700">{formatCurrency(item.gross_profit)}</td>
-                <td className="px-4 py-3.5 text-right font-semibold text-slate-700">{Number(item.margin_percent || 0).toFixed(2)}%</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {Number(item.quantity_sold || 0).toLocaleString()}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(item.sales_value)}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(item.cost_value)}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-emerald-700">
+                  {formatCurrency(item.gross_profit)}
+                </td>
+                <td className="px-4 py-3.5 text-right font-semibold text-slate-700">
+                  {Number(item.margin_percent || 0).toFixed(2)}%
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3200,22 +2880,34 @@ function DimensionProfitabilityTable({
   labelKey,
 }: {
   title: string;
-  data: Array<Record<string, any>>;
+  data: Array<Record<string, unknown>>;
   loading: boolean;
   error: string | null;
   valueKey: string;
   labelKey: string;
 }) {
   if (error) {
-    return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
   }
 
   if (loading) {
-    return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading {title.toLowerCase()}...</div>;
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading {title.toLowerCase()}...
+      </div>
+    );
   }
 
   return (
-    <ReportSection title={title} description="Profitability by dimension across the selected period" count={data.length}>
+    <ReportSection
+      title={title}
+      description="Profitability by dimension across the selected period"
+      count={data.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[700px] text-sm">
           <thead>
@@ -3230,10 +2922,19 @@ function DimensionProfitabilityTable({
               <EmptyRow colSpan={3} />
             ) : (
               data.map((row, index) => (
-                <tr key={`${row[labelKey] || index}`} className="border-b border-slate-100 hover:bg-slate-50">
-                  <td className="px-4 py-3.5 font-semibold text-slate-800">{row[labelKey] || '-'}</td>
-                  <td className="px-4 py-3.5 text-right font-bold text-emerald-700">{formatCurrency(Number(row[valueKey] || 0))}</td>
-                  <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.margin_percent || 0).toFixed(2)}%</td>
+                <tr
+                  key={`${String(row[labelKey] ?? index)}`}
+                  className="border-b border-slate-100 hover:bg-slate-50"
+                >
+                  <td className="px-4 py-3.5 font-semibold text-slate-800">
+                    {String(row[labelKey] ?? '-')}
+                  </td>
+                  <td className="px-4 py-3.5 text-right font-bold text-emerald-700">
+                    {formatCurrency(Number(row[valueKey] || 0))}
+                  </td>
+                  <td className="px-4 py-3.5 text-right text-slate-700">
+                    {Number(row.margin_percent || 0).toFixed(2)}%
+                  </td>
                 </tr>
               ))
             )}
@@ -3244,9 +2945,9 @@ function DimensionProfitabilityTable({
   );
 }
 
-// ============================================================
-// KPI CARD
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* KPI card                                                            */
+/* ------------------------------------------------------------------ */
 
 function KpiCard({
   label,
@@ -3259,23 +2960,22 @@ function KpiCard({
 }) {
   return (
     <div
-      className={`rounded-lg border p-4 ${
-        highlight
-          ? 'border-emerald-200 bg-emerald-50'
-          : 'border-slate-200 bg-white'
-      }`}
+      className={cn(
+        'rounded-lg border p-4',
+        highlight ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white',
+      )}
     >
       <div className="text-xs font-semibold text-slate-500">{label}</div>
-      <div
-        className={`mt-2 text-lg font-bold ${
-          highlight ? 'text-emerald-700' : 'text-slate-900'
-        }`}
-      >
+      <div className={cn('mt-2 text-lg font-bold', highlight ? 'text-emerald-700' : 'text-slate-900')}>
         {value}
       </div>
     </div>
   );
 }
+
+/* ------------------------------------------------------------------ */
+/* API-backed sales report tables                                      */
+/* ------------------------------------------------------------------ */
 
 function SalesSummaryApiReport({
   data,
@@ -3286,11 +2986,27 @@ function SalesSummaryApiReport({
   loading: boolean;
   error: string | null;
 }) {
-  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
-  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading sales summary...</div>;
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (loading || !data?.data) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading sales summary...
+      </div>
+    );
+  }
 
   return (
-    <ReportSection title="Sales Summary" description="Sales totals from the live backend report endpoint" count={data.data.length}>
+    <ReportSection
+      title="Sales Summary"
+      description="Sales totals from the live backend report endpoint"
+      count={data.data.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px] text-sm">
           <thead>
@@ -3311,11 +3027,21 @@ function SalesSummaryApiReport({
                 <td className="px-4 py-3.5 font-semibold text-slate-800">{row.invoice_number}</td>
                 <td className="px-4 py-3.5 text-slate-600">{formatDate(row.invoice_date)}</td>
                 <td className="px-4 py-3.5 text-slate-700">{row.customer || '-'}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.tax || 0))}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.due_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.taxable_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.tax || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                  {formatCurrency(Number(row.total || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.due_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right">
+                  <StatusBadge status={row.status} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3330,17 +3056,33 @@ function SalesRegisterApiTable({
   loading,
   error,
 }: {
-  data: any | null;
+  data: { data?: Record<string, unknown>[] } | null;
   loading: boolean;
   error: string | null;
 }) {
-  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
-  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading sales register...</div>;
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (loading || !data?.data) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading sales register...
+      </div>
+    );
+  }
 
-  const rows = data.data as Array<any>;
+  const rows = data.data as Array<Record<string, unknown>>;
 
   return (
-    <ReportSection title="Sales Register" description="Transaction-level sales register from the API" count={rows.length}>
+    <ReportSection
+      title="Sales Register"
+      description="Transaction-level sales register from the API"
+      count={rows.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px] text-sm">
           <thead>
@@ -3357,15 +3099,30 @@ function SalesRegisterApiTable({
           </thead>
           <tbody>
             {rows.map((row, index) => (
-              <tr key={`${row.invoice_number || 'invoice'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.date)}</td>
-                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.invoice_number}</td>
-                <td className="px-4 py-3.5 text-slate-700">{row.customer || '-'}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.item_count || 0)}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_value || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.gst || 0))}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total || 0))}</td>
-                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              <tr
+                key={`${String(row.invoice_number ?? 'invoice')}-${index}`}
+                className="border-b border-slate-100 hover:bg-slate-50"
+              >
+                <td className="px-4 py-3.5 text-slate-600">{formatDate(String(row.date ?? ''))}</td>
+                <td className="px-4 py-3.5 font-semibold text-slate-800">
+                  {String(row.invoice_number ?? '')}
+                </td>
+                <td className="px-4 py-3.5 text-slate-700">{String(row.customer ?? '-')}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {Number(row.item_count || 0)}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.taxable_value || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.gst || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                  {formatCurrency(Number(row.total || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right">
+                  <StatusBadge status={String(row.status ?? '')} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3380,17 +3137,33 @@ function SalesByCustomerApiTable({
   loading,
   error,
 }: {
-  data: any | null;
+  data: { data?: Record<string, unknown>[] } | null;
   loading: boolean;
   error: string | null;
 }) {
-  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
-  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading sales by customer...</div>;
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (loading || !data?.data) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading sales by customer...
+      </div>
+    );
+  }
 
-  const rows = data.data as Array<any>;
+  const rows = data.data as Array<Record<string, unknown>>;
 
   return (
-    <ReportSection title="Sales by Customer" description="Customer-wise sales totals from the live API" count={rows.length}>
+    <ReportSection
+      title="Sales by Customer"
+      description="Customer-wise sales totals from the live API"
+      count={rows.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[900px] text-sm">
           <thead>
@@ -3406,14 +3179,31 @@ function SalesByCustomerApiTable({
           </thead>
           <tbody>
             {rows.map((row, index) => (
-              <tr key={`${row.customer || 'customer'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.customer || '-'}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.invoice_count || 0)}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_sales || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.gst || 0))}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total_sales || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-emerald-700">{formatCurrency(Number(row.paid || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-amber-700">{formatCurrency(Number(row.outstanding || 0))}</td>
+              <tr
+                key={`${String(row.customer ?? 'customer')}-${index}`}
+                className="border-b border-slate-100 hover:bg-slate-50"
+              >
+                <td className="px-4 py-3.5 font-semibold text-slate-800">
+                  {String(row.customer ?? '-')}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {Number(row.invoice_count || 0)}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.taxable_sales || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.gst || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                  {formatCurrency(Number(row.total_sales || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-emerald-700">
+                  {formatCurrency(Number(row.paid || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-amber-700">
+                  {formatCurrency(Number(row.outstanding || 0))}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3428,17 +3218,33 @@ function SalesByProductApiTable({
   loading,
   error,
 }: {
-  data: any | null;
+  data: { data?: Record<string, unknown>[] } | null;
   loading: boolean;
   error: string | null;
 }) {
-  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
-  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading sales by product...</div>;
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (loading || !data?.data) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading sales by product...
+      </div>
+    );
+  }
 
-  const rows = data.data as Array<any>;
+  const rows = data.data as Array<Record<string, unknown>>;
 
   return (
-    <ReportSection title="Sales by Product" description="Product-wise sales totals from the live API" count={rows.length}>
+    <ReportSection
+      title="Sales by Product"
+      description="Product-wise sales totals from the live API"
+      count={rows.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[900px] text-sm">
           <thead>
@@ -3447,21 +3253,36 @@ function SalesByProductApiTable({
               <TableHeader>SKU</TableHeader>
               <TableHeader align="right">Qty</TableHeader>
               <TableHeader align="right">Taxable</TableHeader>
-              <TableHeader align="right"> GST </TableHeader>
+              <TableHeader align="right">GST</TableHeader>
               <TableHeader align="right">Total Sales</TableHeader>
               <TableHeader align="right">Avg Price</TableHeader>
             </tr>
           </thead>
           <tbody>
             {rows.map((row, index) => (
-              <tr key={`${row.product || 'product'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.product || '-'}</td>
-                <td className="px-4 py-3.5 text-slate-600">{row.sku || '-'}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.quantity || 0)}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_sales || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.gst || 0))}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total_sales || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.avg_selling_price || 0))}</td>
+              <tr
+                key={`${String(row.product ?? 'product')}-${index}`}
+                className="border-b border-slate-100 hover:bg-slate-50"
+              >
+                <td className="px-4 py-3.5 font-semibold text-slate-800">
+                  {String(row.product ?? '-')}
+                </td>
+                <td className="px-4 py-3.5 text-slate-600">{String(row.sku ?? '-')}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {Number(row.quantity || 0)}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.taxable_sales || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.gst || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                  {formatCurrency(Number(row.total_sales || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.avg_selling_price || 0))}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3476,17 +3297,33 @@ function OutstandingSalesApiTable({
   loading,
   error,
 }: {
-  data: any | null;
+  data: OutstandingSalesReport | null;
   loading: boolean;
   error: string | null;
 }) {
-  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
-  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading outstanding sales...</div>;
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (loading || !data?.data) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading outstanding sales...
+      </div>
+    );
+  }
 
-  const rows = data.data as Array<any>;
+  const rows = data.data as unknown as Array<Record<string, unknown>>;
 
   return (
-    <ReportSection title="Outstanding Sales" description="Unpaid sales invoice balances from the API" count={rows.length}>
+    <ReportSection
+      title="Outstanding Sales"
+      description="Unpaid sales invoice balances from the API"
+      count={rows.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px] text-sm">
           <thead>
@@ -3504,16 +3341,35 @@ function OutstandingSalesApiTable({
           </thead>
           <tbody>
             {rows.map((row, index) => (
-              <tr key={`${row.invoice || 'invoice'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.customer || '-'}</td>
-                <td className="px-4 py-3.5 text-slate-700">{row.invoice || '-'}</td>
-                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.invoice_date)}</td>
-                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.due_date)}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.invoice_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-emerald-700">{formatCurrency(Number(row.paid_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-amber-700">{formatCurrency(Number(row.outstanding_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.overdue_days || 0)}</td>
-                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              <tr
+                key={`${String(row.invoice ?? 'invoice')}-${index}`}
+                className="border-b border-slate-100 hover:bg-slate-50"
+              >
+                <td className="px-4 py-3.5 font-semibold text-slate-800">
+                  {String(row.customer ?? '-')}
+                </td>
+                <td className="px-4 py-3.5 text-slate-700">{String(row.invoice ?? '-')}</td>
+                <td className="px-4 py-3.5 text-slate-600">
+                  {formatDate(String(row.invoice_date ?? ''))}
+                </td>
+                <td className="px-4 py-3.5 text-slate-600">
+                  {formatDate(String(row.due_date ?? ''))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                  {formatCurrency(Number(row.invoice_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-emerald-700">
+                  {formatCurrency(Number(row.paid_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-amber-700">
+                  {formatCurrency(Number(row.outstanding_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {Number(row.overdue_days || 0)}
+                </td>
+                <td className="px-4 py-3.5 text-right">
+                  <StatusBadge status={String(row.status ?? '')} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3528,17 +3384,33 @@ function PurchaseSummaryApiTable({
   loading,
   error,
 }: {
-  data: any | null;
+  data: { data?: Record<string, unknown>[] } | null;
   loading: boolean;
   error: string | null;
 }) {
-  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
-  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading purchase summary...</div>;
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (loading || !data?.data) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading purchase summary...
+      </div>
+    );
+  }
 
-  const rows = data.data as Array<any>;
+  const rows = data.data as Array<Record<string, unknown>>;
 
   return (
-    <ReportSection title="Purchase Summary" description="Purchase totals from the live backend report endpoint" count={rows.length}>
+    <ReportSection
+      title="Purchase Summary"
+      description="Purchase totals from the live backend report endpoint"
+      count={rows.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px] text-sm">
           <thead>
@@ -3555,15 +3427,32 @@ function PurchaseSummaryApiTable({
           </thead>
           <tbody>
             {rows.map((row, index) => (
-              <tr key={`${row.purchase_number || 'purchase'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.purchase_number}</td>
-                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.purchase_date)}</td>
-                <td className="px-4 py-3.5 text-slate-700">{row.supplier || '-'}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.tax || 0))}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.due_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              <tr
+                key={`${String(row.purchase_number ?? 'purchase')}-${index}`}
+                className="border-b border-slate-100 hover:bg-slate-50"
+              >
+                <td className="px-4 py-3.5 font-semibold text-slate-800">
+                  {String(row.purchase_number ?? '')}
+                </td>
+                <td className="px-4 py-3.5 text-slate-600">
+                  {formatDate(String(row.purchase_date ?? ''))}
+                </td>
+                <td className="px-4 py-3.5 text-slate-700">{String(row.supplier ?? '-')}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.taxable_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.tax || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                  {formatCurrency(Number(row.total || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.due_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right">
+                  <StatusBadge status={String(row.status ?? '')} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3578,17 +3467,33 @@ function OutstandingPurchasesApiTable({
   loading,
   error,
 }: {
-  data: any | null;
+  data: { data?: Record<string, unknown>[] } | null;
   loading: boolean;
   error: string | null;
 }) {
-  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
-  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading outstanding purchases...</div>;
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (loading || !data?.data) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading outstanding purchases...
+      </div>
+    );
+  }
 
-  const rows = data.data as Array<any>;
+  const rows = data.data as Array<Record<string, unknown>>;
 
   return (
-    <ReportSection title="Outstanding Purchase" description="Unpaid purchase invoice balances from the API" count={rows.length}>
+    <ReportSection
+      title="Outstanding Purchase"
+      description="Unpaid purchase invoice balances from the API"
+      count={rows.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px] text-sm">
           <thead>
@@ -3606,16 +3511,37 @@ function OutstandingPurchasesApiTable({
           </thead>
           <tbody>
             {rows.map((row, index) => (
-              <tr key={`${row.purchase_number || 'purchase'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.supplier || '-'}</td>
-                <td className="px-4 py-3.5 text-slate-700">{row.purchase_number || '-'}</td>
-                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.purchase_date)}</td>
-                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.due_date)}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.purchase_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-emerald-700">{formatCurrency(Number(row.paid_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-amber-700">{formatCurrency(Number(row.outstanding_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.overdue_days || 0)}</td>
-                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              <tr
+                key={`${String(row.purchase_number ?? 'purchase')}-${index}`}
+                className="border-b border-slate-100 hover:bg-slate-50"
+              >
+                <td className="px-4 py-3.5 font-semibold text-slate-800">
+                  {String(row.supplier ?? '-')}
+                </td>
+                <td className="px-4 py-3.5 text-slate-700">
+                  {String(row.purchase_number ?? '-')}
+                </td>
+                <td className="px-4 py-3.5 text-slate-600">
+                  {formatDate(String(row.purchase_date ?? ''))}
+                </td>
+                <td className="px-4 py-3.5 text-slate-600">
+                  {formatDate(String(row.due_date ?? ''))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                  {formatCurrency(Number(row.purchase_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-emerald-700">
+                  {formatCurrency(Number(row.paid_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-amber-700">
+                  {formatCurrency(Number(row.outstanding_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {Number(row.overdue_days || 0)}
+                </td>
+                <td className="px-4 py-3.5 text-right">
+                  <StatusBadge status={String(row.status ?? '')} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3630,17 +3556,33 @@ function PurchaseRegisterApiTable({
   loading,
   error,
 }: {
-  data: any | null;
+  data: { data?: Record<string, unknown>[] } | null;
   loading: boolean;
   error: string | null;
 }) {
-  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
-  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading purchase register...</div>;
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (loading || !data?.data) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading purchase register...
+      </div>
+    );
+  }
 
-  const rows = data.data as Array<any>;
+  const rows = data.data as Array<Record<string, unknown>>;
 
   return (
-    <ReportSection title="Purchase Register" description="Transaction-level purchase register from the live API" count={rows.length}>
+    <ReportSection
+      title="Purchase Register"
+      description="Transaction-level purchase register from the live API"
+      count={rows.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[980px] text-sm">
           <thead>
@@ -3657,15 +3599,32 @@ function PurchaseRegisterApiTable({
           </thead>
           <tbody>
             {rows.map((row, index) => (
-              <tr key={`${row.purchase_number || 'purchase'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-3.5 text-slate-600">{formatDate(row.purchase_date)}</td>
-                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.purchase_number}</td>
-                <td className="px-4 py-3.5 text-slate-700">{row.supplier || '-'}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.item_count || 0)}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.tax || 0))}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.due_amount || 0))}</td>
-                <td className="px-4 py-3.5 text-right"><StatusBadge status={row.status} /></td>
+              <tr
+                key={`${String(row.purchase_number ?? 'purchase')}-${index}`}
+                className="border-b border-slate-100 hover:bg-slate-50"
+              >
+                <td className="px-4 py-3.5 text-slate-600">
+                  {formatDate(String(row.purchase_date ?? ''))}
+                </td>
+                <td className="px-4 py-3.5 font-semibold text-slate-800">
+                  {String(row.purchase_number ?? '')}
+                </td>
+                <td className="px-4 py-3.5 text-slate-700">{String(row.supplier ?? '-')}</td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {Number(row.item_count || 0)}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.tax || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                  {formatCurrency(Number(row.total || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.due_amount || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right">
+                  <StatusBadge status={String(row.status ?? '')} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3680,17 +3639,33 @@ function PurchaseByVendorApiTable({
   loading,
   error,
 }: {
-  data: any | null;
+  data: { data?: Record<string, unknown>[] } | null;
   loading: boolean;
   error: string | null;
 }) {
-  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
-  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading purchase by vendor...</div>;
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (loading || !data?.data) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading purchase by vendor...
+      </div>
+    );
+  }
 
-  const rows = data.data as Array<any>;
+  const rows = data.data as Array<Record<string, unknown>>;
 
   return (
-    <ReportSection title="Purchase by Vendor" description="Supplier-wise purchase totals from the live API" count={rows.length}>
+    <ReportSection
+      title="Purchase by Vendor"
+      description="Supplier-wise purchase totals from the live API"
+      count={rows.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[900px] text-sm">
           <thead>
@@ -3706,14 +3681,31 @@ function PurchaseByVendorApiTable({
           </thead>
           <tbody>
             {rows.map((row, index) => (
-              <tr key={`${row.supplier || 'supplier'}-${index}`} className="border-b border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-3.5 font-semibold text-slate-800">{row.supplier || '-'}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{Number(row.purchase_count || 0)}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.taxable_purchases || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-slate-700">{formatCurrency(Number(row.gst || 0))}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(row.total_purchases || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-emerald-700">{formatCurrency(Number(row.paid || 0))}</td>
-                <td className="px-4 py-3.5 text-right text-amber-700">{formatCurrency(Number(row.outstanding || 0))}</td>
+              <tr
+                key={`${String(row.supplier ?? 'supplier')}-${index}`}
+                className="border-b border-slate-100 hover:bg-slate-50"
+              >
+                <td className="px-4 py-3.5 font-semibold text-slate-800">
+                  {String(row.supplier ?? '-')}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {Number(row.purchase_count || 0)}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.taxable_purchases || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-slate-700">
+                  {formatCurrency(Number(row.gst || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                  {formatCurrency(Number(row.total_purchases || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-emerald-700">
+                  {formatCurrency(Number(row.paid || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right text-amber-700">
+                  {formatCurrency(Number(row.outstanding || 0))}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3728,17 +3720,33 @@ function GeneralLedgerApiTable({
   loading,
   error,
 }: {
-  data: any | null;
+  data: { data?: Record<string, unknown>[] } | null;
   loading: boolean;
   error: string | null;
 }) {
-  if (error) return <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">{error}</div>;
-  if (loading || !data?.data) return <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">Loading general ledger...</div>;
+  if (error) {
+    return (
+      <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-sm text-rose-700">
+        {error}
+      </div>
+    );
+  }
+  if (loading || !data?.data) {
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
+        Loading general ledger...
+      </div>
+    );
+  }
 
-  const rows = data.data as Array<any>;
+  const rows = data.data as Array<Record<string, unknown>>;
 
   return (
-    <ReportSection title="General Ledger" description="Ledger transactions built from actual sales, payments, and purchase entries for the selected period." count={rows.length}>
+    <ReportSection
+      title="General Ledger"
+      description="Ledger transactions built from actual sales, payments, and purchase entries for the selected period."
+      count={rows.length}
+    >
       <div className="overflow-x-auto">
         <table className="w-full min-w-[900px] text-sm">
           <thead>
@@ -3751,13 +3759,23 @@ function GeneralLedgerApiTable({
             </tr>
           </thead>
           <tbody>
-            {rows.map((entry) => (
-              <tr key={entry.id} className="border-b border-slate-100 hover:bg-slate-50">
-                <td className="px-4 py-3.5 text-slate-500">{formatDate(entry.date)}</td>
-                <td className="px-4 py-3.5 font-semibold text-slate-800">{entry.description}</td>
-                <td className="px-4 py-3.5 text-right font-medium text-rose-600">{formatCurrency(Number(entry.debit || 0))}</td>
-                <td className="px-4 py-3.5 text-right font-medium text-emerald-600">{formatCurrency(Number(entry.credit || 0))}</td>
-                <td className="px-4 py-3.5 text-right font-bold text-slate-900">{formatCurrency(Number(entry.balance || 0))}</td>
+            {rows.map((entry, index) => (
+              <tr key={`${String(entry.id ?? index)}`} className="border-b border-slate-100 hover:bg-slate-50">
+                <td className="px-4 py-3.5 text-slate-500">
+                  {formatDate(String(entry.date ?? ''))}
+                </td>
+                <td className="px-4 py-3.5 font-semibold text-slate-800">
+                  {String(entry.description ?? '')}
+                </td>
+                <td className="px-4 py-3.5 text-right font-medium text-rose-600">
+                  {formatCurrency(Number(entry.debit || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-medium text-emerald-600">
+                  {formatCurrency(Number(entry.credit || 0))}
+                </td>
+                <td className="px-4 py-3.5 text-right font-bold text-slate-900">
+                  {formatCurrency(Number(entry.balance || 0))}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -3767,9 +3785,9 @@ function GeneralLedgerApiTable({
   );
 }
 
-// ============================================================
-// COMING SOON / API NOT CONNECTED
-// ============================================================
+/* ------------------------------------------------------------------ */
+/* Coming soon                                                         */
+/* ------------------------------------------------------------------ */
 
 function ComingSoonReport({ title }: { title: string }) {
   return (
@@ -3779,7 +3797,8 @@ function ComingSoonReport({ title }: { title: string }) {
       </div>
       <h3 className="mt-5 text-lg font-black text-slate-800">{title}</h3>
       <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">
-        This report is not displayed with fabricated or mock values. Connect its backend API before showing real report results.
+        This report is not displayed with fabricated or mock values. Connect its backend API
+        before showing real report results.
       </p>
       <div className="mt-5 inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-white px-3 py-2 text-xs font-semibold text-amber-700">
         <FiDatabase size={13} />
@@ -3788,3 +3807,5 @@ function ComingSoonReport({ title }: { title: string }) {
     </div>
   );
 }
+
+export default ReportsPage;

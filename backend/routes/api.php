@@ -1,5 +1,5 @@
 <?php
-
+use App\Http\Controllers\Api\AutomationController;
 use App\Http\Controllers\Api\AccountingController;
 use App\Http\Controllers\Api\AttendanceController;
 use App\Http\Controllers\Api\AuthController;
@@ -1667,3 +1667,64 @@ Route::get(
     'marketing/gbp-locations',
     [MarketingController::class, 'gbpLocations']
 );
+Route::get(
+    'invoices/summary',
+    [InvoiceController::class, 'summary']
+);
+
+Route::post(
+    'invoices/bulk-status',
+    [InvoiceController::class, 'bulkStatus']
+);
+
+Route::post(
+    'invoices/bulk-delete',
+    [InvoiceController::class, 'bulkDelete']
+);
+/*
+|--------------------------------------------------------------------------
+| Automation
+|--------------------------------------------------------------------------
+*/
+
+Route::prefix('automation')->group(function () {
+    Route::get(
+        'workflows',
+        [AutomationController::class, 'workflows']
+    );
+
+    Route::post(
+        'workflows',
+        [AutomationController::class, 'store']
+    );
+
+    Route::put(
+        'workflows/{workflow}',
+        [AutomationController::class, 'update']
+    );
+
+    Route::delete(
+        'workflows/{workflow}',
+        [AutomationController::class, 'destroy']
+    );
+
+    Route::post(
+        'workflows/{workflow}/run',
+        [AutomationController::class, 'run']
+    );
+
+    Route::post(
+        'workflows/{workflow}/duplicate',
+        [AutomationController::class, 'duplicate']
+    );
+
+    Route::get(
+        'runs',
+        [AutomationController::class, 'runs']
+    );
+
+    Route::get(
+        'stats',
+        [AutomationController::class, 'stats']
+    );
+});

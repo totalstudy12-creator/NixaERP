@@ -6,15 +6,29 @@ interface OffcanvasProps {
   children: ReactNode;
   onClose: () => void;
   footer?: ReactNode;
+  className?: string;
 }
 
-export function Offcanvas({ isOpen, title, children, onClose, footer }: OffcanvasProps) {
+export function Offcanvas({
+  isOpen,
+  title,
+  children,
+  onClose,
+  footer,
+  className = '',
+}: OffcanvasProps) {
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex">
-      <div className="absolute inset-0 bg-slate-950/60 transition-opacity" onClick={onClose} />
-      <div className="relative ml-auto flex h-full w-full max-w-md flex-col overflow-hidden bg-white shadow-2xl ring-1 ring-slate-200">
+      <div
+        className="absolute inset-0 bg-slate-950/60 transition-opacity"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div
+        className={`relative ml-auto flex h-full w-full max-w-md flex-col overflow-hidden bg-white shadow-2xl ring-1 ring-slate-200 ${className}`}
+      >
         <div className="flex items-center justify-between border-b border-slate-200 px-6 py-5">
           <div>
             <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Create / Edit</p>
@@ -23,17 +37,18 @@ export function Offcanvas({ isOpen, title, children, onClose, footer }: Offcanva
           <button
             onClick={onClose}
             className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-slate-200 text-slate-600 transition hover:bg-slate-100"
+            aria-label="Close panel"
           >
             ×
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-6 py-5">
-          {children}
-        </div>
+        <div className="flex-1 overflow-y-auto px-6 py-5">{children}</div>
         {footer && (
-          <div className="border-t border-slate-200 px-6 py-4 bg-slate-50">{footer}</div>
+          <div className="border-t border-slate-200 bg-slate-50 px-6 py-4">{footer}</div>
         )}
       </div>
     </div>
   );
 }
+
+export default Offcanvas;

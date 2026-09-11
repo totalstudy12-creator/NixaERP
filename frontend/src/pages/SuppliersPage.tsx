@@ -1,71 +1,35 @@
-import { useEffect, useState, useCallback, useMemo, useRef, lazy, Suspense, memo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  FiPlus, FiRefreshCw, FiTrash2, FiEdit, FiDownload,
-  FiUsers, FiUserCheck, FiUserX, FiCreditCard, FiAlertCircle,
-  FiFilter, FiSearch, FiX
-} from 'react-icons/fi';
-
-const ModernDataTable = lazy(() =>
-  import('../components/ModernDataTable').then(m => ({ default: m.ModernDataTable }))
-);
-const Offcanvas = lazy(() =>
-  import('../components/Offcanvas').then(m => ({ default: m.Offcanvas }))
-);
+  AlertCircle, ArrowDown, ArrowUp, Building2, CalendarDays, CheckCircle2,
+  ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
+  CreditCard, Download, Eye, FileText, Filter, GitBranch, IndianRupee,
+  Landmark, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2, UserCheck,
+  UserX, Users, WalletCards, X, MapPin, ShieldCheck, Ban, Phone, Mail,
+} from 'lucide-react';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { formatDate, formatDateTime } from '../utils/date';
 
-// ── Stable API Cache Hook (uses ref for fetcher to prevent infinite loops) ──
-function useApiCache<T>(
-  key: string,
-  fetcher: () => Promise<T>,
-  ttlMs = 300_000
-) {
-  const cache = useRef(new Map<string, { data: T; timestamp: number }>()).current;
-  const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Separator } from '@/components/ui/separator';
+import {
+  Sheet, SheetContent, SheetHeader, SheetTitle,
+} from '@/components/ui/sheet';
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from '@/components/ui/table';
 
-  const fetcherRef = useRef(fetcher);
-  useEffect(() => { fetcherRef.current = fetcher; });
-
-  const fetchData = useCallback(async (skipCache = false) => {
-    if (!skipCache) {
-      const entry = cache.get(key);
-      if (entry && Date.now() - entry.timestamp < ttlMs) {
-        setData(entry.data);
-        setLoading(false);
-        return;
-      }
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetcherRef.current();
-      const result = Array.isArray(res) ? res : (res as any).data ?? [];
-      cache.set(key, { data: result, timestamp: Date.now() });
-      setData(result);
-    } catch (err: any) {
-      const msg = err.message || 'Failed to load';
-      setError(msg);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, [key, ttlMs]);
-
-  useEffect(() => { fetchData(); }, [fetchData]);
-  return { data, loading, error, refresh: () => fetchData(true) };
-}
-
-// ── Types ──
 type Supplier = {
   id: number;
   company_id: number;
-  branch_id?: number;
-  parent_id?: number;
-  group_id?: number;
+  branch_id?: number | null;
+  parent_id?: number | null;
+  group_id?: number | null;
   name: string;
   type?: string;
   company_type?: string;
@@ -92,13 +56,13 @@ type Supplier = {
   territory?: string;
   zone?: string;
   status?: string;
-  credit_limit?: number;
-  outstanding_amount?: number;
-  wallet_balance?: number;
-  commission_rate?: number;
+  credit_limit?: number | string;
+  outstanding_amount?: number | string;
+  wallet_balance?: number | string;
+  commission_rate?: number | string;
   kyc_status?: string;
   approved_at?: string;
-  opening_balance?: number;
+  opening_balance?: number | string;
   due_days?: number | string;
   fax?: string;
   website?: string;
@@ -106,863 +70,1531 @@ type Supplier = {
   license_no?: string;
   custom_field_1?: string;
   custom_field_2?: string;
-  is_active: boolean;
+  is_active?: boolean;
   notes?: string;
   company?: { id: number; name: string };
   branch?: { id: number; name: string };
   parent?: { id: number; name: string };
   group?: { id: number; name: string };
+  [key: string]: unknown;
 };
 
-type SupplierFormData = Partial<Supplier> & { same_as_billing?: boolean };
+type Company = { id: number; name: string; code?: string | null };
+type Branch = { id: number; company_id: number; name: string; code?: string | null };
+type Group = { id: number; name: string };
 
-// ── Skeletons ──
-const StatCardSkeleton = memo(() => (
-  <div className="flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-4 animate-pulse">
-    <div className="h-10 w-10 rounded-xl bg-slate-200" />
-    <div className="space-y-2 flex-1">
-      <div className="h-3 w-16 bg-slate-200 rounded" />
-      <div className="h-6 w-8 bg-slate-200 rounded" />
-    </div>
-  </div>
-));
+type Form = Partial<Supplier> & { same_as_billing?: boolean };
 
-const TableSkeleton = memo(() => (
-  <div className="bg-white rounded-xl shadow-sm border p-6 space-y-4 animate-pulse">
-    <div className="h-6 w-48 bg-slate-200 rounded" />
-    {[...Array(8)].map((_, i) => (
-      <div key={i} className="flex gap-4">
-        <div className="h-4 w-1/4 bg-slate-200 rounded" />
-        <div className="h-4 w-1/5 bg-slate-200 rounded" />
-        <div className="h-4 w-1/6 bg-slate-200 rounded" />
-        <div className="h-4 w-1/6 bg-slate-200 rounded" />
-        <div className="h-4 w-1/4 bg-slate-200 rounded" />
-      </div>
-    ))}
-  </div>
-));
+const PAGE_SIZE = 15;
+const HEAD = 'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
 
-const StatCard = memo(({ icon: Icon, label, value, tone }: {
-  icon: any; label: string; value: number | string;
-  tone: 'blue' | 'emerald' | 'amber' | 'rose';
-}) => {
-  const bg = tone === 'blue' ? 'bg-blue-100 text-blue-600' :
-             tone === 'emerald' ? 'bg-emerald-100 text-emerald-600' :
-             tone === 'amber' ? 'bg-amber-100 text-amber-600' :
-             'bg-rose-100 text-rose-600';
+const num = (v: unknown) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const money = (v: unknown) =>
+  new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 2,
+  }).format(num(v));
+
+const normalize = <T,>(r: unknown): T[] => {
+  if (Array.isArray(r)) return r as T[];
+  if (r && typeof r === 'object') {
+    const x = r as { data?: unknown };
+    if (Array.isArray(x.data)) return x.data as T[];
+    if (x.data && typeof x.data === 'object') {
+      const y = x.data as { data?: unknown };
+      if (Array.isArray(y.data)) return y.data as T[];
+    }
+  }
+  return [];
+};
+
+const today = () => new Date().toISOString().slice(0, 10);
+
+const csvSafe = (v: unknown) => {
+  const s = String(v ?? '');
+  const safe = /^[=+\-@\t\r]/.test(s) ? `\t${s}` : s;
+  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+};
+
+function StatusBadge({ status }: { status?: string | null }) {
+  const value = String(status || 'active').toLowerCase();
+  const map: Record<string, string> = {
+    active: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+    inactive: 'border-rose-200 bg-rose-50 text-rose-700',
+    pending: 'border-amber-200 bg-amber-50 text-amber-700',
+  };
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
-      <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${bg}`}>
-        <Icon size={20} />
-      </div>
-      <div>
-        <p className="text-xs font-medium text-slate-500">{label}</p>
-        <p className="text-2xl font-bold text-slate-900">{value}</p>
+    <Badge variant="outline" className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${map[value] || map.active}`}>
+      {value}
+    </Badge>
+  );
+}
+
+function KycBadge({ value }: { value?: string | null }) {
+  const status = String(value || 'pending').toLowerCase();
+  const cls =
+    status === 'verified'
+      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+      : status === 'rejected'
+        ? 'border-rose-200 bg-rose-50 text-rose-700'
+        : 'border-amber-200 bg-amber-50 text-amber-700';
+
+  return (
+    <Badge variant="outline" className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${cls}`}>
+      {status}
+    </Badge>
+  );
+}
+
+function SelectBox({
+  value, onChange, options, label, disabled = false, className = '',
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  label: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  return (
+    <div className={`relative ${className}`}>
+      <select
+        aria-label={label}
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-500/10 disabled:bg-slate-50 disabled:text-slate-400"
+      >
+        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+      <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+    </div>
+  );
+}
+
+function Kpi({
+  title, value, icon: Icon, tone,
+}: {
+  title: string; value: string; icon: React.ElementType;
+  tone: 'blue' | 'emerald' | 'rose' | 'amber';
+}) {
+  const c = {
+    blue: 'bg-blue-50 text-blue-600',
+    emerald: 'bg-emerald-50 text-emerald-600',
+    rose: 'bg-rose-50 text-rose-600',
+    amber: 'bg-amber-50 text-amber-600',
+  }[tone];
+
+  return (
+    <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,.04)]">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[.14em] text-slate-400">{title}</p>
+          <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">{value}</p>
+        </div>
+        <div className={`grid h-10 w-10 place-items-center rounded-xl ${c}`}><Icon className="h-5 w-5" /></div>
       </div>
     </div>
   );
-});
-
-// ── GST Lookup (reused) ──
-function useGstLookup() {
-  const [lookingUp, setLookingUp] = useState(false);
-  const lookupGst = useCallback(async (gstin: string) => {
-    if (!gstin || gstin.length < 10) return null;
-    setLookingUp(true);
-    try {
-      const result = await apiClient.lookupGst(gstin);
-      return result;
-    } catch { return null; }
-    finally { setLookingUp(false); }
-  }, []);
-  return { lookupGst, lookingUp };
 }
+
+const emptyForm = (): Form => ({
+  company_id: 0,
+  branch_id: undefined,
+  parent_id: undefined,
+  group_id: undefined,
+  name: '',
+  type: 'supplier',
+  company_type: '',
+  contact_person: '',
+  contact_no: '',
+  email: '',
+  phone: '',
+  gst_number: '',
+  registration_type: '',
+  pan: '',
+  billing_street: '',
+  billing_landmark: '',
+  billing_city: '',
+  billing_state: '',
+  billing_country: 'India',
+  billing_pincode: '',
+  shipping_street: '',
+  shipping_landmark: '',
+  shipping_city: '',
+  shipping_state: '',
+  shipping_country: 'India',
+  shipping_pincode: '',
+  eway_bill_distance: '',
+  territory: '',
+  zone: '',
+  status: 'active',
+  credit_limit: 0,
+  outstanding_amount: 0,
+  wallet_balance: 0,
+  commission_rate: 0,
+  kyc_status: 'pending',
+  approved_at: '',
+  opening_balance: 0,
+  due_days: '',
+  fax: '',
+  website: '',
+  note: '',
+  license_no: '',
+  custom_field_1: '',
+  custom_field_2: '',
+  is_active: true,
+  notes: '',
+  same_as_billing: true,
+});
 
 export function SuppliersPage() {
   const { showSuccess, showError } = useNotification();
 
-  // Fetch all suppliers (per_page=1000)
-  const {
-    data: suppliers,
-    loading,
-    error,
-    refresh,
-  } = useApiCache<Supplier[]>('suppliers', () => apiClient.getSuppliers());
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Other data
-  const { data: companies } = useApiCache<any[]>('companies', () => apiClient.getCompanies());
-  const { data: branches } = useApiCache<any[]>('branches', () => apiClient.getBranches());
-  const { data: supplierGroups, refresh: refreshGroups } = useApiCache<any[]>('supplierGroups', () => apiClient.getSupplierGroups());
+  const [search, setSearch] = useState('');
+  const [company, setCompany] = useState('all');
+  const [branch, setBranch] = useState('all');
+  const [status, setStatus] = useState('all');
+  const [territory, setTerritory] = useState('all');
+  const [zone, setZone] = useState('all');
+  const [kyc, setKyc] = useState('all');
+  const [group, setGroup] = useState('all');
+  const [balanceFilter, setBalanceFilter] = useState('all');
 
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterStatus, setFilterStatus] = useState('all');
-  const [filterTerritory, setFilterTerritory] = useState('all');
-  const [filterZone, setFilterZone] = useState('all');
+  const [page, setPage] = useState(1);
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
-  // Form
-  const [isPanelOpen, setIsPanelOpen] = useState(false);
+  const [viewing, setViewing] = useState<Supplier | null>(null);
+  const [viewOpen, setViewOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [formData, setFormData] = useState<SupplierFormData>({
-    company_id: 0,
-    branch_id: undefined,
-    parent_id: undefined,
-    group_id: undefined,
-    name: '',
-    type: 'supplier',
-    company_type: '',
-    contact_person: '',
-    contact_no: '',
-    email: '',
-    phone: '',
-    gst_number: '',
-    registration_type: '',
-    pan: '',
-    billing_street: '',
-    billing_landmark: '',
-    billing_city: '',
-    billing_state: '',
-    billing_country: 'India',
-    billing_pincode: '',
-    shipping_street: '',
-    shipping_landmark: '',
-    shipping_city: '',
-    shipping_state: '',
-    shipping_country: 'India',
-    shipping_pincode: '',
-    eway_bill_distance: '',
-    territory: '',
-    zone: '',
-    status: 'active',
-    credit_limit: 0,
-    outstanding_amount: 0,
-    wallet_balance: 0,
-    commission_rate: 0,
-    kyc_status: 'pending',
-    approved_at: undefined,
-    opening_balance: 0,
-    due_days: '',
-    fax: '',
-    website: '',
-    note: '',
-    license_no: '',
-    custom_field_1: '',
-    custom_field_2: '',
-    is_active: true,
-    notes: '',
-    same_as_billing: true,
-  });
-  const [submitting, setSubmitting] = useState(false);
+
+  const [form, setForm] = useState<Form>(emptyForm());
   const [formErrors, setFormErrors] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState(false);
 
-  const [showGroupModal, setShowGroupModal] = useState(false);
-  const [newGroupName, setNewGroupName] = useState('');
-  const [addingGroup, setAddingGroup] = useState(false);
+  const [newGroup, setNewGroup] = useState('');
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [groupSaving, setGroupSaving] = useState(false);
+  const [gstLoading, setGstLoading] = useState(false);
 
-  const [currentPage, setCurrentPage] = useState(1);
-  const rowsPerPage = 10;
+  const [menuId, setMenuId] = useState<number | null>(null);
 
-  // ── Derived data ──
-  const supplierList = useMemo(() => suppliers || [], [suppliers]);
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [s, c, b, g] = await Promise.all([
+        apiClient.getSuppliers(),
+        apiClient.getCompanies(),
+        apiClient.getBranches(),
+        apiClient.getSupplierGroups(),
+      ]);
 
-  const filteredSuppliers = useMemo(() => {
-    let filtered = [...supplierList];
-    const term = searchTerm.toLowerCase().trim();
-    if (term) {
-      filtered = filtered.filter(s =>
-        s.name?.toLowerCase().includes(term) ||
-        s.contact_person?.toLowerCase().includes(term) ||
-        s.territory?.toLowerCase().includes(term) ||
-        s.zone?.toLowerCase().includes(term) ||
-        s.email?.toLowerCase().includes(term)
-      );
+      setSuppliers(normalize<Supplier>(s));
+      setCompanies(normalize<Company>(c));
+      setBranches(normalize<Branch>(b));
+      setGroups(normalize<Group>(g));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to load suppliers.');
+    } finally {
+      setLoading(false);
     }
-    if (filterStatus !== 'all') filtered = filtered.filter(s => s.status === filterStatus);
-    if (filterTerritory !== 'all') filtered = filtered.filter(s => s.territory === filterTerritory);
-    if (filterZone !== 'all') filtered = filtered.filter(s => s.zone === filterZone);
-    return filtered;
-  }, [supplierList, searchTerm, filterStatus, filterTerritory, filterZone]);
+  }, []);
 
-  const totalPages = Math.ceil(filteredSuppliers.length / rowsPerPage);
-  const paginatedSuppliers = useMemo(() => {
-    const start = (currentPage - 1) * rowsPerPage;
-    return filteredSuppliers.slice(start, start + rowsPerPage);
-  }, [filteredSuppliers, currentPage]);
+  useEffect(() => { void load(); }, [load]);
 
-  useEffect(() => setCurrentPage(1), [searchTerm, filterStatus, filterTerritory, filterZone]);
+  const companyBranches = useMemo(
+    () => company === 'all'
+      ? branches
+      : branches.filter((b) => b.company_id === Number(company)),
+    [branches, company],
+  );
+
+  useEffect(() => {
+    if (branch !== 'all' && !companyBranches.some((b) => b.id === Number(branch))) {
+      setBranch('all');
+    }
+  }, [branch, companyBranches]);
+
+  const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+
+    return suppliers.filter((s) => {
+      if (term && ![
+        s.name, s.contact_person, s.contact_no, s.email, s.phone,
+        s.gst_number, s.pan, s.territory, s.zone, s.billing_city,
+      ].filter(Boolean).join(' ').toLowerCase().includes(term)) return false;
+
+      if (company !== 'all' && s.company_id !== Number(company)) return false;
+      if (branch !== 'all' && s.branch_id !== Number(branch)) return false;
+      if (status !== 'all' && String(s.status || 'active') !== status) return false;
+      if (territory !== 'all' && s.territory !== territory) return false;
+      if (zone !== 'all' && s.zone !== zone) return false;
+      if (kyc !== 'all' && String(s.kyc_status || 'pending') !== kyc) return false;
+      if (group !== 'all' && s.group_id !== Number(group)) return false;
+
+      const due = num(s.outstanding_amount);
+      if (balanceFilter === 'due' && due <= 0) return false;
+      if (balanceFilter === 'clear' && due > 0) return false;
+      if (balanceFilter === 'credit' && num(s.credit_limit) <= 0) return false;
+
+      return true;
+    });
+  }, [
+    suppliers, search, company, branch, status, territory, zone, kyc, group, balanceFilter,
+  ]);
+
+  useEffect(() => setPage(1), [
+    search, company, branch, status, territory, zone, kyc, group, balanceFilter,
+  ]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const rows = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
   const summary = useMemo(() => ({
-    total: supplierList.length,
-    active: supplierList.filter(s => s.status === 'active').length,
-    inactive: supplierList.filter(s => s.status === 'inactive').length,
-    totalCredit: supplierList.reduce((sum, s) => sum + (Number(s.credit_limit) || 0), 0),
-  }), [supplierList]);
+    total: suppliers.length,
+    active: suppliers.filter((s) => s.status === 'active').length,
+    inactive: suppliers.filter((s) => s.status === 'inactive').length,
+    credit: suppliers.reduce((a, s) => a + num(s.credit_limit), 0),
+    outstanding: suppliers.reduce((a, s) => a + num(s.outstanding_amount), 0),
+    verified: suppliers.filter((s) => s.kyc_status === 'verified').length,
+  }), [suppliers]);
 
-  const territories = useMemo(() => [...new Set(supplierList.map(s => s.territory).filter(Boolean))], [supplierList]);
-  const zones = useMemo(() => [...new Set(supplierList.map(s => s.zone).filter(Boolean))], [supplierList]);
+  const territories = useMemo(
+    () => [...new Set(suppliers.map((s) => s.territory).filter(Boolean))] as string[],
+    [suppliers],
+  );
 
-  // Branch filter for form
-  const filteredBranchesForm = useMemo(() => {
-    if (formData.company_id && branches) {
-      return branches.filter((b: any) => b.company_id === Number(formData.company_id));
+  const zones = useMemo(
+    () => [...new Set(suppliers.map((s) => s.zone).filter(Boolean))] as string[],
+    [suppliers],
+  );
+
+  const formBranches = useMemo(
+    () => branches.filter((b) => b.company_id === Number(form.company_id)),
+    [branches, form.company_id],
+  );
+
+  const validate = () => {
+    const e: Record<string, boolean> = {};
+    if (!form.name?.trim()) e.name = true;
+    if (!form.company_id) e.company_id = true;
+    if (!form.billing_city?.trim()) e.billing_city = true;
+    if (form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) e.email = true;
+    if (form.contact_no && !/^\d{10}$/.test(form.contact_no.replace(/\D/g, ''))) e.contact_no = true;
+
+    setFormErrors(e);
+
+    if (Object.keys(e).length) {
+      showError('Validation', 'Please fix the highlighted supplier fields.');
+      return false;
     }
-    return [];
-  }, [formData.company_id, branches]);
-
-  // ── GST Auto‑fill ──
-  const { lookupGst, lookingUp } = useGstLookup();
-  const handleGstChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData(prev => ({ ...prev, gst_number: e.target.value }));
-  };
-  const handleAutoFill = async () => {
-    if (!formData.gst_number) return;
-    const data = await lookupGst(formData.gst_number);
-    if (data) {
-      setFormData(prev => ({
-        ...prev,
-        name: data.company_name || prev.name,
-        billing_street: data.billing_street || prev.billing_street,
-        billing_city: data.billing_city || prev.billing_city,
-        billing_state: data.billing_state || prev.billing_state,
-        billing_pincode: data.billing_pincode || prev.billing_pincode,
-        billing_country: data.billing_country || prev.billing_country,
-        registration_type: data.registration_type || prev.registration_type,
-        pan: data.pan || prev.pan,
-      }));
-      showSuccess('GSTIN details auto‑filled');
-    } else {
-      showError('Unable to fetch GSTIN details.');
-    }
+    return true;
   };
 
-  // ── Same as Billing ──
-  const handleSameAsBillingToggle = (checked: boolean) => {
-    setFormData(prev => ({
-      ...prev,
-      same_as_billing: checked,
-      ...(checked ? {
-        shipping_street: prev.billing_street,
-        shipping_landmark: prev.billing_landmark,
-        shipping_city: prev.billing_city,
-        shipping_state: prev.billing_state,
-        shipping_country: prev.billing_country,
-        shipping_pincode: prev.billing_pincode,
-      } : {}),
-    }));
-  };
+  const saveSupplier = async () => {
+    if (!validate()) return;
 
-  // ── Group add ──
-  const handleAddGroup = async () => {
-    if (!newGroupName.trim()) return;
-    setAddingGroup(true);
-    try {
-      await apiClient.createSupplierGroup({ name: newGroupName.trim() });
-      refreshGroups();
-      setNewGroupName('');
-      setShowGroupModal(false);
-      showSuccess('Group added');
-    } catch (err: any) {
-      showError('Failed to add group', err.message);
-    } finally { setAddingGroup(false); }
-  };
+    const {
+      same_as_billing,
+      ...raw
+    } = form;
 
-  // ── CRUD ──
-  const handleCreate = useCallback(() => {
-    setEditingId(null);
-    setFormData({
-      company_id: 0, branch_id: undefined, parent_id: undefined, group_id: undefined,
-      name: '', type: 'supplier', company_type: '', contact_person: '', contact_no: '',
-      email: '', phone: '', gst_number: '', registration_type: '', pan: '',
-      billing_street: '', billing_landmark: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
-      shipping_street: '', shipping_landmark: '', shipping_city: '', shipping_state: '', shipping_country: 'India', shipping_pincode: '',
-      eway_bill_distance: '', territory: '', zone: '', status: 'active',
-      credit_limit: 0, outstanding_amount: 0, wallet_balance: 0, commission_rate: 0,
-      kyc_status: 'pending', approved_at: undefined, opening_balance: 0, due_days: '',
-      fax: '', website: '', note: '', license_no: '', custom_field_1: '', custom_field_2: '',
-      is_active: true, notes: '', same_as_billing: true,
-    });
-    setFormErrors({});
-    setIsPanelOpen(true);
-  }, []);
-
-  const handleEdit = useCallback((supplier: Supplier) => {
-    setEditingId(supplier.id);
-    setFormData({
-      ...supplier,
-      same_as_billing: !supplier.shipping_street ||
-        (supplier.shipping_street === supplier.billing_street &&
-         supplier.shipping_city === supplier.billing_city),
-    });
-    setFormErrors({});
-    setIsPanelOpen(true);
-  }, []);
-
-  const handleDelete = useCallback(async (supplier: Supplier) => {
-    if (!confirm(`Delete supplier ${supplier.name}?`)) return;
-    try {
-      await apiClient.deleteSupplier(supplier.id);
-      showSuccess('Supplier deleted', `${supplier.name} removed.`);
-      addAppLog({ module: 'Suppliers', action: 'Delete', status: 'success', message: `Deleted ${supplier.name}` });
-      refresh();
-    } catch (err: any) {
-      showError('Delete failed', err.message);
-    }
-  }, [refresh, showSuccess, showError]);
-
-  // ── Validation ──
-  const validateForm = (): boolean => {
-    const errors: Record<string, boolean> = {};
-    let valid = true;
-    if (!formData.name?.trim()) { errors.name = true; valid = false; }
-    if (!formData.company_id || formData.company_id === 0) { errors.company_id = true; valid = false; }
-    if (!formData.billing_city?.trim()) { errors.billing_city = true; valid = false; }
-    if (formData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
-      errors.email = true; valid = false;
-    }
-    if (formData.contact_no && !/^\d+$/.test(formData.contact_no.trim())) {
-      errors.contact_no = true; valid = false;
-    }
-    setFormErrors(errors);
-    if (!valid) showError('Validation', 'Please fix the highlighted required fields.');
-    return valid;
-  };
-
-  const handleSubmit = useCallback(async () => {
-    if (!validateForm()) return;
-    const { same_as_billing, ...payload } = {
-      ...formData,
-      company_id: Number(formData.company_id),
-      branch_id: formData.branch_id ? Number(formData.branch_id) : null,
-      parent_id: formData.parent_id ? Number(formData.parent_id) : null,
-      group_id: formData.group_id ? Number(formData.group_id) : null,
-      eway_bill_distance: formData.eway_bill_distance ? Number(formData.eway_bill_distance) : null,
-      credit_limit: Number(formData.credit_limit) || 0,
-      outstanding_amount: Number(formData.outstanding_amount) || 0,
-      wallet_balance: Number(formData.wallet_balance) || 0,
-      commission_rate: Number(formData.commission_rate) || 0,
-      opening_balance: Number(formData.opening_balance) || 0,
-      due_days: formData.due_days ? Number(formData.due_days) : null,
+    const payload = {
+      ...raw,
+      company_id: Number(form.company_id),
+      branch_id: form.branch_id ? Number(form.branch_id) : null,
+      parent_id: form.parent_id ? Number(form.parent_id) : null,
+      group_id: form.group_id ? Number(form.group_id) : null,
+      eway_bill_distance: form.eway_bill_distance ? Number(form.eway_bill_distance) : null,
+      credit_limit: num(form.credit_limit),
+      outstanding_amount: num(form.outstanding_amount),
+      wallet_balance: num(form.wallet_balance),
+      commission_rate: num(form.commission_rate),
+      opening_balance: num(form.opening_balance),
+      due_days: form.due_days ? Number(form.due_days) : null,
     };
 
-    setSubmitting(true);
+    setSaving(true);
     try {
       if (editingId) {
         await apiClient.updateSupplier(editingId, payload);
-        showSuccess('Supplier updated', `${payload.name} updated.`);
-        addAppLog({ module: 'Suppliers', action: 'Update', status: 'success', message: `Updated ${payload.name}` });
+        showSuccess('Supplier updated', `${form.name} updated successfully.`);
+        addAppLog({ module: 'Suppliers', action: 'Update', status: 'success', message: form.name || '' });
       } else {
         await apiClient.createSupplier(payload);
-        showSuccess('Supplier created', `${payload.name} added.`);
-        addAppLog({ module: 'Suppliers', action: 'Create', status: 'success', message: `Created ${payload.name}` });
+        showSuccess('Supplier created', `${form.name} added successfully.`);
+        addAppLog({ module: 'Suppliers', action: 'Create', status: 'success', message: form.name || '' });
       }
-      setIsPanelOpen(false);
-      refresh();
-    } catch (err: any) {
-      showError('Save failed', err.message);
-      addAppLog({ module: 'Suppliers', action: 'Save', status: 'error', message: err.message });
-    } finally { setSubmitting(false); }
-  }, [formData, editingId, refresh, showSuccess, showError]);
 
-  const handleExport = useCallback(() => {
-    const headers = ['Name', 'Contact', 'Email', 'Phone', 'Territory', 'Zone', 'Status', 'Credit Limit', 'Outstanding'];
-    const rows = filteredSuppliers.map(s => [
-      s.name, s.contact_person || '', s.email || '', s.phone || '',
-      s.territory || '', s.zone || '', s.status || '',
-      s.credit_limit || 0, s.outstanding_amount || 0
-    ]);
-    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
+      setEditOpen(false);
+      await load();
+    } catch (e) {
+      showError('Save failed', e instanceof Error ? e.message : 'Unable to save supplier.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openCreate = () => {
+    setEditingId(null);
+    setForm(emptyForm());
+    setFormErrors({});
+    setEditOpen(true);
+  };
+
+  const openEdit = (s: Supplier) => {
+    setMenuId(null);
+    setEditingId(s.id);
+    setForm({
+      ...s,
+      same_as_billing:
+        !s.shipping_street ||
+        (
+          s.shipping_street === s.billing_street &&
+          s.shipping_city === s.billing_city &&
+          s.shipping_state === s.billing_state
+        ),
+    });
+    setFormErrors({});
+    setEditOpen(true);
+  };
+
+  const openView = (s: Supplier) => {
+    setMenuId(null);
+    setViewing(s);
+    setViewOpen(true);
+  };
+
+  const deleteSupplier = async (s: Supplier) => {
+    setMenuId(null);
+
+    if (!window.confirm(`Delete supplier "${s.name}"? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      await apiClient.deleteSupplier(s.id);
+      showSuccess('Supplier deleted', `${s.name} removed successfully.`);
+      addAppLog({ module: 'Suppliers', action: 'Delete', status: 'success', message: s.name });
+      if (viewing?.id === s.id) {
+        setViewing(null);
+        setViewOpen(false);
+      }
+      await load();
+    } catch (e) {
+      showError('Delete failed', e instanceof Error ? e.message : 'Unable to delete supplier.');
+    }
+  };
+
+  const lookupGst = async () => {
+    const gst = String(form.gst_number || '').trim().toUpperCase();
+    if (gst.length < 10) {
+      showError('GSTIN', 'Enter a valid GSTIN first.');
+      return;
+    }
+
+    setGstLoading(true);
+    try {
+      const result = await apiClient.lookupGst(gst) as any;
+
+      if (!result) {
+        showError('GSTIN', 'GSTIN details were not returned.');
+        return;
+      }
+
+      setForm((current) => ({
+        ...current,
+        gst_number: gst,
+        name: result.company_name || current.name,
+        billing_street: result.billing_street || current.billing_street,
+        billing_city: result.billing_city || current.billing_city,
+        billing_state: result.billing_state || current.billing_state,
+        billing_pincode: result.billing_pincode || current.billing_pincode,
+        billing_country: result.billing_country || current.billing_country,
+        registration_type: result.registration_type || current.registration_type,
+        pan: result.pan || current.pan,
+      }));
+
+      showSuccess('GSTIN updated', 'Available GSTIN details were filled.');
+    } catch (e) {
+      showError('GSTIN lookup failed', e instanceof Error ? e.message : 'Unable to fetch GSTIN details.');
+    } finally {
+      setGstLoading(false);
+    }
+  };
+
+  const addGroup = async () => {
+    const name = newGroup.trim();
+    if (!name) return;
+
+    setGroupSaving(true);
+    try {
+      await apiClient.createSupplierGroup({ name });
+      const result = await apiClient.getSupplierGroups();
+      setGroups(normalize<Group>(result));
+      setNewGroup('');
+      setGroupOpen(false);
+      showSuccess('Group added', `${name} created successfully.`);
+    } catch (e) {
+      showError('Group creation failed', e instanceof Error ? e.message : 'Unable to create group.');
+    } finally {
+      setGroupSaving(false);
+    }
+  };
+
+  const exportCsv = () => {
+    if (!filtered.length) {
+      showError('Nothing to export', 'No suppliers match the current filters.');
+      return;
+    }
+
+    const headers = [
+      'Name', 'Company', 'Branch', 'Contact Person', 'Contact No', 'Email',
+      'GSTIN', 'PAN', 'Territory', 'Zone', 'Group', 'Status', 'KYC',
+      'Credit Limit', 'Outstanding', 'Wallet', 'Opening Balance', 'Due Days',
+    ];
+
+    const lines = filtered.map((s) => [
+      s.name,
+      companies.find((c) => c.id === s.company_id)?.name || '',
+      branches.find((b) => b.id === s.branch_id)?.name || '',
+      s.contact_person || '',
+      s.contact_no || '',
+      s.email || '',
+      s.gst_number || '',
+      s.pan || '',
+      s.territory || '',
+      s.zone || '',
+      groups.find((g) => g.id === s.group_id)?.name || '',
+      s.status || '',
+      s.kyc_status || '',
+      num(s.credit_limit).toFixed(2),
+      num(s.outstanding_amount).toFixed(2),
+      num(s.wallet_balance).toFixed(2),
+      num(s.opening_balance).toFixed(2),
+      s.due_days || '',
+    ].map(csvSafe).join(','));
+
+    const blob = new Blob(
+      [[headers.map(csvSafe).join(','), ...lines].join('\n')],
+      { type: 'text/csv;charset=utf-8;' },
+    );
+
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `suppliers-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `suppliers-${today()}.csv`;
+    document.body.appendChild(a);
     a.click();
-    window.URL.revokeObjectURL(url);
-    showSuccess('Export', 'Supplier data exported.');
-  }, [filteredSuppliers, showSuccess]);
+    a.remove();
+    URL.revokeObjectURL(url);
 
-  // ── Render field helper (red glow) ──
-  const renderField = (label: string, field: keyof SupplierFormData, type: 'text' | 'number' | 'email' = 'text', required = false) => {
-    const value = (formData as any)[field] ?? '';
-    const id = `field-${field}`;
-    const hasError = formErrors[field];
+    showSuccess('Export complete', `${filtered.length} supplier(s) exported.`);
+  };
+
+  const activeFilters = [
+    search,
+    company !== 'all' ? company : '',
+    branch !== 'all' ? branch : '',
+    status !== 'all' ? status : '',
+    territory !== 'all' ? territory : '',
+    zone !== 'all' ? zone : '',
+    kyc !== 'all' ? kyc : '',
+    group !== 'all' ? group : '',
+    balanceFilter !== 'all' ? balanceFilter : '',
+  ].filter(Boolean).length;
+
+  const field = (
+    label: string,
+    key: keyof Form,
+    type: 'text' | 'email' | 'number' = 'text',
+    required = false,
+  ) => {
+    const value = form[key] ?? '';
+    const hasError = !!formErrors[String(key)];
+
     return (
       <div>
-        <label htmlFor={id} className="block text-sm font-medium text-gray-700 mb-1">
-          {label} {required && <span className="text-red-500">*</span>}
+        <label className="mb-1.5 block text-xs font-semibold text-slate-600">
+          {label}{required && <span className="text-rose-500"> *</span>}
         </label>
-        <input
-          id={id}
+
+        <Input
           type={type}
           value={value as string | number}
-          onChange={(e) => setFormData(prev => ({ ...prev, [field]: e.target.value }))}
-          className={`w-full rounded-lg border bg-white px-3 py-2 text-sm shadow-sm transition ${
-            hasError ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200'
-          }`}
-          placeholder={`Enter ${label}`}
+          onChange={(e) =>
+            setForm((x) => ({ ...x, [key]: e.target.value }))
+          }
+          className={
+            hasError
+              ? 'border-rose-400 ring-4 ring-rose-100'
+              : ''
+          }
         />
       </div>
     );
   };
 
-  // ── Table Columns ──
-  const columns = useMemo(() => [
-    {
-      name: 'Name',
-      selector: (row: Supplier) => row.name,
-      sortable: true,
-      cell: (row: Supplier) => (
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-full bg-gradient-to-br from-emerald-500 to-green-600 flex items-center justify-center text-white text-xs font-bold">
-            {row.name?.[0] || 'S'}
-          </div>
-          <div>
-            <div className="font-medium text-slate-800">{row.name}</div>
-            <div className="text-xs text-slate-400">{row.contact_person || ''}</div>
-          </div>
-        </div>
-      ),
-      width: '200px',
-    },
-    {
-      name: 'Company',
-      selector: (row: Supplier) => row.company_id,
-      cell: (row: Supplier) => {
-        const comp = (companies || []).find((c: any) => c.id === row.company_id);
-        return <span className="text-sm">{comp?.name || `ID: ${row.company_id}`}</span>;
-      },
-      width: '130px',
-    },
-    {
-      name: 'Territory',
-      selector: (row: Supplier) => row.territory || '-',
-      cell: (row: Supplier) => <span className="text-sm">{row.territory || '-'}</span>,
-      width: '130px',
-    },
-    {
-      name: 'Zone',
-      selector: (row: Supplier) => row.zone || '-',
-      cell: (row: Supplier) => <span className="text-sm">{row.zone || '-'}</span>,
-      width: '100px',
-    },
-    {
-      name: 'Credit Limit',
-      selector: (row: Supplier) => Number(row.credit_limit) || 0,
-      cell: (row: Supplier) => <span className="text-sm">₹{(Number(row.credit_limit) || 0).toLocaleString()}</span>,
-      width: '120px',
-    },
-    {
-      name: 'Outstanding',
-      selector: (row: Supplier) => Number(row.outstanding_amount) || 0,
-      cell: (row: Supplier) => <span className={`text-sm ${Number(row.outstanding_amount) > 0 ? 'text-rose-600' : 'text-slate-600'}`}>₹{(Number(row.outstanding_amount) || 0).toLocaleString()}</span>,
-      width: '110px',
-    },
-    {
-      name: 'Status',
-      selector: (row: Supplier) => row.status || 'active',
-      cell: (row: Supplier) => {
-        const colors: Record<string, string> = {
-          active: 'bg-emerald-100 text-emerald-700',
-          inactive: 'bg-rose-100 text-rose-700',
-          pending: 'bg-amber-100 text-amber-700',
-        };
-        const status = row.status || 'active';
-        return <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${colors[status]}`}>{status}</span>;
-      },
-      width: '100px',
-    },
-    {
-      name: 'Actions',
-      cell: (row: Supplier) => (
-        <div className="flex items-center gap-2">
-          <button onClick={() => handleEdit(row)} className="p-1.5 rounded-lg text-blue-600 hover:bg-blue-50" title="Edit"><FiEdit size={16} /></button>
-          <button onClick={() => handleDelete(row)} className="p-1.5 rounded-lg text-rose-600 hover:bg-rose-50" title="Delete"><FiTrash2 size={16} /></button>
-        </div>
-      ),
-      width: '100px',
-    },
-  ], [handleEdit, handleDelete, companies]);
-
-  // ── Render ──
   return (
-    <div className="min-h-screen bg-[#f5f7fb] p-4 md:p-7 text-slate-800">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 mb-6 rounded-3xl bg-slate-950 px-5 py-6 md:px-8 md:py-7 shadow-xl shadow-slate-300/50">
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-300">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" /> Supplier Network
+    <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
+      <div className="mx-auto w-full max-w-[1900px] space-y-5 p-3 sm:p-4 lg:space-y-6 lg:p-6">
+
+        {/* Header */}
+        <section className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-950 px-5 py-6 shadow-[0_20px_40px_-20px_rgba(15,23,42,.45)] sm:px-7 lg:px-8">
+          <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-emerald-500/15 blur-3xl" />
+
+          <div className="relative flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+            <div>
+              <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[.18em] text-emerald-200">
+                <Users className="h-3 w-3" />
+                Purchase · Supplier Network
+              </div>
+
+              <h1 className="flex items-center gap-3 text-2xl font-bold tracking-tight text-white sm:text-3xl">
+                <Landmark className="h-7 w-7 text-emerald-300" />
+                Supplier workspace
+              </h1>
+
+              <p className="mt-1.5 max-w-2xl text-sm text-slate-300">
+                Manage suppliers, GSTIN, branches, groups, credit, outstanding,
+                KYC and contact information.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                onClick={exportCsv}
+                disabled={loading || !filtered.length}
+                className="h-10 rounded-xl border-white/10 bg-white/5 text-white hover:bg-white/10 hover:text-white"
+              >
+                <Download className="mr-2 h-4 w-4" />
+                Export
+              </Button>
+
+              <Button
+                onClick={openCreate}
+                className="h-10 rounded-xl bg-emerald-400 font-semibold text-slate-950 hover:bg-emerald-300"
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Add supplier
+              </Button>
+            </div>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white md:text-3xl flex items-center gap-3">
-            <FiUsers className="text-emerald-300" /> Suppliers
-            <span className="text-sm font-normal text-emerald-100/70 ml-2">Directory</span>
-          </h1>
-          <p className="text-sm text-slate-300">Manage suppliers, credit limits, and outstanding balances</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={refresh} disabled={loading} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20 disabled:opacity-60">
-            <FiRefreshCw className={loading ? 'animate-spin inline mr-1' : 'inline mr-1'} size={14} /> Refresh
-          </button>
-          <button onClick={handleExport} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20">
-            <FiDownload className="inline mr-1" size={14} /> Export
-          </button>
-          <button onClick={handleCreate} className="rounded-xl bg-emerald-400 text-slate-950 px-3 py-2 text-sm font-medium hover:bg-emerald-300 shadow-md shadow-emerald-500/20">
-            <FiPlus className="inline mr-1" size={14} /> Add Supplier
-          </button>
-        </div>
-      </div>
+        </section>
 
-      {/* Search & Filters */}
-      <div className="flex flex-col sm:flex-row gap-4 mb-6">
-        <div className="relative flex-1 max-w-md">
-          <FiSearch className="absolute left-3 top-2.5 text-slate-400" size={18} />
-          <input
-            type="text"
-            placeholder="Search by name, territory..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm outline-none placeholder:text-slate-400 focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 transition"
-          />
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <FiFilter size={16} className="text-slate-500" />
-          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm">
-            <option value="all">All Status</option>
-            <option value="active">Active</option>
-            <option value="inactive">Inactive</option>
-            <option value="pending">Pending</option>
-          </select>
-          <select value={filterTerritory} onChange={(e) => setFilterTerritory(e.target.value)} className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm">
-            <option value="all">All Territories</option>
-            {territories.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-          <select value={filterZone} onChange={(e) => setFilterZone(e.target.value)} className="rounded-xl border-slate-200 bg-white py-2 px-3 text-sm">
-            <option value="all">All Zones</option>
-            {zones.map(z => <option key={z} value={z}>{z}</option>)}
-          </select>
-        </div>
-      </div>
+        {/* KPI */}
+        <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+          <Kpi title="Suppliers" value={summary.total.toLocaleString('en-IN')} icon={Users} tone="blue" />
+          <Kpi title="Active" value={String(summary.active)} icon={UserCheck} tone="emerald" />
+          <Kpi title="Inactive" value={String(summary.inactive)} icon={UserX} tone="rose" />
+          <Kpi title="Verified KYC" value={String(summary.verified)} icon={ShieldCheck} tone="emerald" />
+          <Kpi title="Credit limit" value={money(summary.credit)} icon={CreditCard} tone="amber" />
+          <Kpi title="Outstanding" value={money(summary.outstanding)} icon={IndianRupee} tone="rose" />
+        </section>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        {loading ? (
-          [...Array(4)].map((_, i) => <StatCardSkeleton key={i} />)
-        ) : (
-          <>
-            <StatCard icon={FiUsers} label="Total Suppliers" value={summary.total} tone="blue" />
-            <StatCard icon={FiUserCheck} label="Active" value={summary.active} tone="emerald" />
-            <StatCard icon={FiUserX} label="Inactive" value={summary.inactive} tone="rose" />
-            <StatCard icon={FiCreditCard} label="Total Credit" value={`₹${summary.totalCredit.toLocaleString()}`} tone="amber" />
-          </>
-        )}
-      </div>
+        {/* Filters */}
+        <Card className="overflow-hidden rounded-2xl border-slate-200/80">
+          <CardHeader className="flex flex-row items-center justify-between gap-3 border-b border-slate-100 px-4 py-3.5 sm:px-5">
+            <div className="flex items-center gap-2.5">
+              <div className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-50 text-emerald-600">
+                <Filter className="h-4 w-4" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-slate-800">Supplier filters</p>
+                <p className="text-[11px] text-slate-500">
+                  {activeFilters
+                    ? `${activeFilters} active filter${activeFilters > 1 ? 's' : ''}`
+                    : 'Search, scope, status, KYC and balances'}
+                </p>
+              </div>
+            </div>
 
-      {/* Error */}
-      {error && (
-        <div className="mb-4 p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl flex items-center gap-2 animate-shake">
-          <FiAlertCircle size={20} /> {error}
-        </div>
-      )}
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="lg:hidden"
+                onClick={() => setFiltersOpen((v) => !v)}
+              >
+                <Filter className="mr-2 h-3.5 w-3.5" />
+                {filtersOpen ? 'Hide' : 'Show'}
+              </Button>
 
-      {/* Table */}
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <Suspense fallback={<TableSkeleton />}>
-          {loading ? (
-            <TableSkeleton />
-          ) : (
-            <>
-              <ModernDataTable
-                title="Supplier Directory"
-                columns={columns}
-                data={paginatedSuppliers}
-                loading={false}
-                striped
-                highlightOnHover
-                pointerOnHover
+              {activeFilters > 0 && (
+                <Button variant="ghost" size="sm" onClick={() => {
+                  setSearch('');
+                  setCompany('all');
+                  setBranch('all');
+                  setStatus('all');
+                  setTerritory('all');
+                  setZone('all');
+                  setKyc('all');
+                  setGroup('all');
+                  setBalanceFilter('all');
+                }}>
+                  <X className="mr-1.5 h-3.5 w-3.5" />
+                  Reset
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+
+          <CardContent className={`${filtersOpen ? 'block' : 'hidden'} space-y-3 p-4 sm:p-5 lg:block`}>
+            <div className="grid gap-3 lg:grid-cols-12">
+              <div className="relative lg:col-span-4">
+                <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                <Input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search supplier, GSTIN, phone, city…"
+                  className="h-10 rounded-xl pl-10"
+                />
+              </div>
+
+              <SelectBox
+                value={company}
+                onChange={(v) => { setCompany(v); setBranch('all'); }}
+                label="Company"
+                options={[
+                  { value: 'all', label: 'All companies' },
+                  ...companies.map((c) => ({ value: String(c.id), label: c.name })),
+                ]}
+                className="lg:col-span-2"
               />
-              {totalPages > 1 && (
-                <div className="flex items-center justify-between px-6 py-3 border-t">
-                  <span className="text-sm text-slate-600">
-                    Showing {((currentPage - 1) * rowsPerPage) + 1} to {Math.min(currentPage * rowsPerPage, filteredSuppliers.length)} of {filteredSuppliers.length}
+
+              <SelectBox
+                value={branch}
+                onChange={setBranch}
+                label="Branch"
+                options={[
+                  { value: 'all', label: 'All branches' },
+                  ...companyBranches.map((b) => ({ value: String(b.id), label: b.name })),
+                ]}
+                className="lg:col-span-2"
+              />
+
+              <SelectBox
+                value={status}
+                onChange={setStatus}
+                label="Status"
+                options={[
+                  { value: 'all', label: 'All status' },
+                  { value: 'active', label: 'Active' },
+                  { value: 'inactive', label: 'Inactive' },
+                  { value: 'pending', label: 'Pending' },
+                ]}
+                className="lg:col-span-2"
+              />
+
+              <SelectBox
+                value={kyc}
+                onChange={setKyc}
+                label="KYC"
+                options={[
+                  { value: 'all', label: 'All KYC' },
+                  { value: 'verified', label: 'Verified' },
+                  { value: 'pending', label: 'Pending' },
+                  { value: 'rejected', label: 'Rejected' },
+                ]}
+                className="lg:col-span-2"
+              />
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-12">
+              <SelectBox
+                value={territory}
+                onChange={setTerritory}
+                label="Territory"
+                options={[
+                  { value: 'all', label: 'All territories' },
+                  ...territories.map((v) => ({ value: v, label: v })),
+                ]}
+                className="lg:col-span-2"
+              />
+
+              <SelectBox
+                value={zone}
+                onChange={setZone}
+                label="Zone"
+                options={[
+                  { value: 'all', label: 'All zones' },
+                  ...zones.map((v) => ({ value: v, label: v })),
+                ]}
+                className="lg:col-span-2"
+              />
+
+              <SelectBox
+                value={group}
+                onChange={setGroup}
+                label="Supplier group"
+                options={[
+                  { value: 'all', label: 'All groups' },
+                  ...groups.map((g) => ({ value: String(g.id), label: g.name })),
+                ]}
+                className="lg:col-span-2"
+              />
+
+              <SelectBox
+                value={balanceFilter}
+                onChange={setBalanceFilter}
+                label="Balance"
+                options={[
+                  { value: 'all', label: 'All balances' },
+                  { value: 'due', label: 'Outstanding > 0' },
+                  { value: 'clear', label: 'No outstanding' },
+                  { value: 'credit', label: 'Has credit limit' },
+                ]}
+                className="lg:col-span-2"
+              />
+
+              <div className="flex items-end gap-2 lg:col-span-4">
+                <div className="flex flex-1 items-center rounded-xl border border-slate-200 bg-white p-1">
+                  <div className="px-2 text-slate-400">
+                    <CalendarDays className="h-4 w-4" />
+                  </div>
+                  <span className="text-xs text-slate-500">
+                    Live supplier directory · {filtered.length} matching
                   </span>
-                  <div className="flex gap-1">
-                    <button onClick={() => setCurrentPage(1)} disabled={currentPage === 1} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">««</button>
-                    <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">‹</button>
-                    <span className="px-3 py-1 text-sm font-medium">{currentPage} / {totalPages}</span>
-                    <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">›</button>
-                    <button onClick={() => setCurrentPage(totalPages)} disabled={currentPage === totalPages} className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40">»»</button>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {error && (
+          <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+            <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-rose-600" />
+            <div>
+              <p className="font-semibold">Unable to load suppliers</p>
+              <p className="mt-0.5">{error}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Table */}
+        <Card className="overflow-hidden rounded-2xl border-slate-200/80">
+          <CardHeader className="flex flex-col gap-2 border-b border-slate-100 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+            <div className="flex items-center gap-2.5">
+              <div className="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-slate-600">
+                <Users className="h-4 w-4" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold">Supplier directory</p>
+                <p className="text-[11px] text-slate-500">
+                  {loading ? 'Loading suppliers…' : `${filtered.length} matching supplier${filtered.length === 1 ? '' : 's'}`}
+                </p>
+              </div>
+            </div>
+          </CardHeader>
+
+          <div className="overflow-x-auto">
+            <Table className="min-w-[1180px]">
+              <TableHeader>
+                <TableRow className="bg-slate-50/70">
+                  <TableHead><span className={HEAD}>Supplier</span></TableHead>
+                  <TableHead><span className={HEAD}>Company / Branch</span></TableHead>
+                  <TableHead><span className={HEAD}>Contact</span></TableHead>
+                  <TableHead><span className={HEAD}>GST / KYC</span></TableHead>
+                  <TableHead><span className={HEAD}>Group</span></TableHead>
+                  <TableHead><span className={HEAD}>Credit</span></TableHead>
+                  <TableHead><span className={HEAD}>Outstanding</span></TableHead>
+                  <TableHead><span className={HEAD}>Status</span></TableHead>
+                  <TableHead className="w-12" />
+                </TableRow>
+              </TableHeader>
+
+              <TableBody>
+                {loading &&
+                  Array.from({ length: 8 }).map((_, i) => (
+                    <TableRow key={i}>
+                      {Array.from({ length: 9 }).map((__, x) => (
+                        <TableCell key={x}>
+                          <div className="h-4 animate-pulse rounded bg-slate-100" />
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+
+                {!loading && rows.map((s) => (
+                  <TableRow
+                    key={s.id}
+                    onClick={() => openView(s)}
+                    className="cursor-pointer border-slate-100 hover:bg-slate-50/80"
+                  >
+                    <TableCell>
+                      <div className="min-w-[190px]">
+                        <p className="font-semibold text-slate-900">{s.name}</p>
+                        <p className="mt-0.5 text-[11px] text-slate-400">
+                          {s.contact_person || 'No contact person'}
+                        </p>
+                      </div>
+                    </TableCell>
+
+                    <TableCell>
+                      <div className="min-w-[190px] space-y-1.5">
+                        <div className="flex items-center gap-1.5 text-xs text-slate-700">
+                          <Building2 className="h-3.5 w-3.5 text-indigo-500" />
+                          {s.company?.name || companies.find((c) => c.id === s.company_id)?.name || '—'}
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
+                          <GitBranch className="h-3.5 w-3.5 text-violet-500" />
+                          {s.branch?.name || branches.find((b) => b.id === s.branch_id)?.name || 'Main / unassigned'}
+                        </div>
+                      </div>
+                    </TableCell>
+
+                    <TableCell>
+                      <div className="min-w-[170px]">
+                        {s.contact_no && (
+                          <p className="flex items-center gap-1.5 text-xs text-slate-700">
+                            <Phone className="h-3 w-3 text-slate-400" />
+                            {s.contact_no}
+                          </p>
+                        )}
+                        {s.email && (
+                          <p className="mt-1 flex items-center gap-1.5 truncate text-[11px] text-slate-500">
+                            <Mail className="h-3 w-3 text-slate-400" />
+                            {s.email}
+                          </p>
+                        )}
+                        {(s.territory || s.zone) && (
+                          <p className="mt-1 text-[10px] text-slate-400">
+                            {s.territory || '—'} · {s.zone || '—'}
+                          </p>
+                        )}
+                      </div>
+                    </TableCell>
+
+                    <TableCell>
+                      <div className="space-y-1.5">
+                        <p className="text-xs font-medium text-slate-700">
+                          {s.gst_number || 'No GSTIN'}
+                        </p>
+                        <KycBadge value={s.kyc_status} />
+                      </div>
+                    </TableCell>
+
+                    <TableCell>
+                      <Badge variant="outline" className="rounded-full">
+                        {s.group?.name || groups.find((g) => g.id === s.group_id)?.name || 'No group'}
+                      </Badge>
+                    </TableCell>
+
+                    <TableCell className="whitespace-nowrap text-sm font-semibold tabular-nums text-slate-800">
+                      {money(s.credit_limit)}
+                    </TableCell>
+
+                    <TableCell className="whitespace-nowrap">
+                      <span className={`text-sm font-semibold tabular-nums ${
+                        num(s.outstanding_amount) > 0 ? 'text-rose-600' : 'text-emerald-600'
+                      }`}>
+                        {money(s.outstanding_amount)}
+                      </span>
+                    </TableCell>
+
+                    <TableCell>
+                      <StatusBadge status={s.status} />
+                    </TableCell>
+
+                    <TableCell onClick={(e) => e.stopPropagation()} className="text-right">
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => setMenuId((v) => v === s.id ? null : s.id)}
+                          className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                        >
+                          <MoreHorizontal className="h-4 w-4" />
+                        </button>
+
+                        {menuId === s.id && (
+                          <div className="absolute right-0 top-9 z-50 w-44 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 text-left shadow-xl">
+                            <button
+                              type="button"
+                              onClick={() => openView(s)}
+                              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                            >
+                              <Eye className="h-4 w-4 text-slate-400" />
+                              View details
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => openEdit(s)}
+                              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                            >
+                              <Pencil className="h-4 w-4 text-slate-400" />
+                              Edit supplier
+                            </button>
+
+                            <Separator className="my-1" />
+
+                            <button
+                              type="button"
+                              onClick={() => deleteSupplier(s)}
+                              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              Delete supplier
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+
+                {!loading && rows.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={9} className="py-20 text-center">
+                      <div className="mx-auto max-w-md">
+                        <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-slate-100">
+                          <Search className="h-6 w-6 text-slate-400" />
+                        </div>
+                        <p className="mt-4 font-semibold text-slate-800">No suppliers found</p>
+                        <p className="mt-1 text-sm text-slate-500">
+                          Adjust the search or filters and try again.
+                        </p>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </div>
+
+          <div className="flex flex-col gap-3 border-t border-slate-100 px-4 py-3.5 sm:px-5 md:flex-row md:items-center md:justify-between">
+            <p className="text-xs text-slate-500">
+              Showing{' '}
+              <b>{filtered.length ? (page - 1) * PAGE_SIZE + 1 : 0}</b>
+              {' – '}
+              <b>{Math.min(page * PAGE_SIZE, filtered.length)}</b>
+              {' of '}
+              <b>{filtered.length}</b>
+            </p>
+
+            <div className="flex items-center gap-1.5">
+              <Button variant="outline" size="icon" className="h-9 w-9" disabled={page === 1} onClick={() => setPage(1)}>
+                <ChevronsLeft className="h-4 w-4" />
+              </Button>
+              <Button variant="outline" size="icon" className="h-9 w-9" disabled={page === 1} onClick={() => setPage((p) => p - 1)}>
+                <ChevronLeft className="h-4 w-4" />
+              </Button>
+              <div className="min-w-[70px] rounded-lg bg-slate-100 px-3 py-1.5 text-center text-xs font-semibold">
+                {page} / {totalPages}
+              </div>
+              <Button variant="outline" size="icon" className="h-9 w-9" disabled={page === totalPages} onClick={() => setPage((p) => p + 1)}>
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+              <Button variant="outline" size="icon" className="h-9 w-9" disabled={page === totalPages} onClick={() => setPage(totalPages)}>
+                <ChevronsRight className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        </Card>
+      </div>
+
+      {/* View sheet */}
+      <Sheet open={viewOpen} onOpenChange={(open) => {
+        setViewOpen(open);
+        if (!open) setViewing(null);
+      }}>
+        <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-lg">
+          {viewing && (
+            <>
+              <div className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
+                <SheetHeader>
+                  <SheetTitle className="pr-8">
+                    <div className="flex items-center gap-3">
+                      <div className="grid h-9 w-9 place-items-center rounded-xl bg-emerald-50 text-emerald-600">
+                        <Users className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="truncate text-base font-bold">{viewing.name}</p>
+                        <p className="text-[11px] text-slate-400">Supplier #{viewing.id}</p>
+                      </div>
+                    </div>
+                  </SheetTitle>
+
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <StatusBadge status={viewing.status} />
+                    <KycBadge value={viewing.kyc_status} />
+                  </div>
+                </SheetHeader>
+              </div>
+
+              <div className="space-y-4 px-5 py-5">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-xl border bg-slate-50 p-3">
+                    <p className="text-[10px] uppercase text-slate-400">Credit limit</p>
+                    <p className="mt-1 text-lg font-bold">{money(viewing.credit_limit)}</p>
+                  </div>
+                  <div className={`rounded-xl border p-3 ${
+                    num(viewing.outstanding_amount) > 0
+                      ? 'border-rose-100 bg-rose-50'
+                      : 'border-emerald-100 bg-emerald-50'
+                  }`}>
+                    <p className="text-[10px] uppercase text-slate-500">Outstanding</p>
+                    <p className="mt-1 text-lg font-bold">{money(viewing.outstanding_amount)}</p>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border bg-white">
+                  <div className="border-b bg-slate-50/70 px-3.5 py-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide">Business scope</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 p-3.5">
+                    <div>
+                      <p className="text-[10px] uppercase text-slate-400">Company</p>
+                      <p className="mt-1 text-xs font-semibold">
+                        {viewing.company?.name || companies.find((c) => c.id === viewing.company_id)?.name || '—'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase text-slate-400">Branch</p>
+                      <p className="mt-1 text-xs font-semibold">
+                        {viewing.branch?.name || branches.find((b) => b.id === viewing.branch_id)?.name || '—'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase text-slate-400">Territory</p>
+                      <p className="mt-1 text-xs font-semibold">{viewing.territory || '—'}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase text-slate-400">Zone</p>
+                      <p className="mt-1 text-xs font-semibold">{viewing.zone || '—'}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border bg-white">
+                  <div className="border-b bg-slate-50/70 px-3.5 py-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide">Identity & contact</p>
+                  </div>
+                  <div className="divide-y">
+                    {[
+                      ['Contact person', viewing.contact_person],
+                      ['Phone', viewing.contact_no || viewing.phone],
+                      ['Email', viewing.email],
+                      ['GSTIN', viewing.gst_number],
+                      ['PAN', viewing.pan],
+                      ['Registration', viewing.registration_type],
+                    ].map(([label, value]) => (
+                      <div key={label} className="flex justify-between gap-4 px-3.5 py-3">
+                        <span className="text-[11px] text-slate-400">{label}</span>
+                        <span className="max-w-[60%] text-right text-xs font-semibold break-words">
+                          {String(value || '—')}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border bg-white">
+                  <div className="border-b bg-slate-50/70 px-3.5 py-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide">Balance & terms</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 p-3.5">
+                    <div>
+                      <p className="text-[10px] uppercase text-slate-400">Opening balance</p>
+                      <p className="mt-1 text-xs font-semibold">{money(viewing.opening_balance)}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase text-slate-400">Wallet</p>
+                      <p className="mt-1 text-xs font-semibold">{money(viewing.wallet_balance)}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase text-slate-400">Due days</p>
+                      <p className="mt-1 text-xs font-semibold">{viewing.due_days || '—'}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase text-slate-400">Commission</p>
+                      <p className="mt-1 text-xs font-semibold">{num(viewing.commission_rate)}%</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border bg-white p-3.5">
+                  <div className="flex items-center gap-2">
+                    <MapPin className="h-4 w-4 text-emerald-500" />
+                    <p className="text-xs font-semibold uppercase tracking-wide">Billing address</p>
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-slate-700">
+                    {[
+                      viewing.billing_street,
+                      viewing.billing_landmark,
+                      viewing.billing_city,
+                      viewing.billing_state,
+                      viewing.billing_pincode,
+                      viewing.billing_country,
+                    ].filter(Boolean).join(', ') || 'No address available.'}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pb-4">
+                  <Button variant="outline" className="h-10 rounded-xl" onClick={() => {
+                    setViewOpen(false);
+                    openEdit(viewing);
+                  }}>
+                    <Pencil className="mr-2 h-4 w-4" />
+                    Edit
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    className="h-10 rounded-xl !bg-rose-600 !text-white hover:!bg-rose-700"
+                    onClick={() => deleteSupplier(viewing)}
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Delete
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
+        </SheetContent>
+      </Sheet>
+
+      {/* Create/Edit */}
+      <Sheet open={editOpen} onOpenChange={setEditOpen}>
+        <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-xl">
+          <div className="sticky top-0 z-20 border-b bg-white/95 px-5 py-4 backdrop-blur">
+            <SheetHeader>
+              <SheetTitle className="flex items-center gap-2 pr-8">
+                <span className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-50 text-emerald-600">
+                  {editingId ? <Pencil className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+                </span>
+                {editingId ? 'Edit supplier' : 'Add supplier'}
+              </SheetTitle>
+            </SheetHeader>
+          </div>
+
+          <div className="space-y-4 px-5 py-5 pb-24">
+            <section className="rounded-2xl border bg-white p-4">
+              <p className="mb-3 text-sm font-semibold">Supplier details</p>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold">Company *</label>
+                  <select
+                    value={form.company_id || 0}
+                    onChange={(e) => setForm((x) => ({
+                      ...x,
+                      company_id: Number(e.target.value),
+                      branch_id: undefined,
+                    }))}
+                    className={`h-10 w-full rounded-xl border bg-white px-3 text-sm ${
+                      formErrors.company_id ? 'border-rose-400 ring-4 ring-rose-100' : 'border-slate-200'
+                    }`}
+                  >
+                    <option value={0}>Select company</option>
+                    {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold">Branch</label>
+                  <select
+                    value={form.branch_id || ''}
+                    disabled={!form.company_id}
+                    onChange={(e) => setForm((x) => ({
+                      ...x,
+                      branch_id: e.target.value ? Number(e.target.value) : undefined,
+                    }))}
+                    className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm disabled:bg-slate-50"
+                  >
+                    <option value="">Select branch</option>
+                    {formBranches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                  </select>
+                </div>
+
+                {field('Supplier name', 'name', 'text', true)}
+                {field('Contact person', 'contact_person')}
+                {field('Contact number', 'contact_no')}
+                {field('Email', 'email', 'email')}
+
+                <div className="sm:col-span-2">
+                  <label className="mb-1.5 block text-xs font-semibold">GSTIN</label>
+                  <div className="flex gap-2">
+                    <Input
+                      value={form.gst_number || ''}
+                      onChange={(e) => setForm((x) => ({
+                        ...x,
+                        gst_number: e.target.value.toUpperCase(),
+                      }))}
+                      placeholder="GSTIN"
+                    />
+                    <Button
+                      type="button"
+                      disabled={gstLoading || !form.gst_number}
+                      onClick={lookupGst}
+                      className="shrink-0 bg-indigo-600 hover:bg-indigo-700"
+                    >
+                      {gstLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : 'Auto fill'}
+                    </Button>
+                  </div>
+                </div>
+
+                {field('PAN', 'pan')}
+
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold">Registration</label>
+                  <select
+                    value={form.registration_type || ''}
+                    onChange={(e) => setForm((x) => ({
+                      ...x,
+                      registration_type: e.target.value,
+                    }))}
+                    className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm"
+                  >
+                    <option value="">Select</option>
+                    <option value="Registered">Registered</option>
+                    <option value="Unregistered">Unregistered</option>
+                  </select>
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-2xl border bg-white p-4">
+              <p className="mb-3 text-sm font-semibold">Billing address</p>
+
+              <div className="space-y-4">
+                {field('Address', 'billing_street')}
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {field('City', 'billing_city', 'text', true)}
+                  {field('State', 'billing_state')}
+                  {field('Country', 'billing_country')}
+                  {field('Pincode', 'billing_pincode')}
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-2xl border bg-white p-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold">Shipping address</p>
+
+                <label className="flex items-center gap-2 text-xs text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={form.same_as_billing ?? true}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+
+                      setForm((x) => ({
+                        ...x,
+                        same_as_billing: checked,
+                        ...(checked ? {
+                          shipping_street: x.billing_street,
+                          shipping_landmark: x.billing_landmark,
+                          shipping_city: x.billing_city,
+                          shipping_state: x.billing_state,
+                          shipping_country: x.billing_country,
+                          shipping_pincode: x.billing_pincode,
+                        } : {}),
+                      }));
+                    }}
+                  />
+                  Same as billing
+                </label>
+              </div>
+
+              {!form.same_as_billing && (
+                <div className="mt-4 space-y-4">
+                  {field('Address', 'shipping_street')}
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {field('City', 'shipping_city')}
+                    {field('State', 'shipping_state')}
+                    {field('Country', 'shipping_country')}
+                    {field('Pincode', 'shipping_pincode')}
                   </div>
                 </div>
               )}
-            </>
-          )}
-        </Suspense>
-      </div>
+            </section>
 
-      {/* Offcanvas – Full Supplier Form */}
-      {isPanelOpen && (
-        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
-          <Offcanvas
-            isOpen={isPanelOpen}
-            title={editingId ? 'Edit Supplier' : 'Add Supplier'}
-            onClose={() => setIsPanelOpen(false)}
-            footer={
-              <div className="flex justify-between w-full">
-                <button onClick={() => setIsPanelOpen(false)} className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50" disabled={submitting}>
-                  <FiX className="inline mr-1" /> Close
-                </button>
-                <button onClick={handleSubmit} disabled={submitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50">
-                  {submitting ? 'Saving...' : 'Save'}
+            <section className="rounded-2xl border bg-white p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <p className="text-sm font-semibold">Group & balances</p>
+                <button
+                  type="button"
+                  onClick={() => setGroupOpen(true)}
+                  className="text-xs font-semibold text-indigo-600 hover:underline"
+                >
+                  + Add group
                 </button>
               </div>
-            }
-          >
-            <div className="space-y-5 overflow-y-auto hide-scrollbar pr-2" style={{ maxHeight: '70vh' }}>
-              {/* Supplier Detail */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Supplier Detail
-                </legend>
-                <div className="mt-3 space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Company *</label>
-                      <select
-                        value={formData.company_id as number}
-                        onChange={(e) => setFormData(prev => ({ ...prev, company_id: Number(e.target.value), branch_id: undefined }))}
-                        className={`w-full rounded-lg border bg-white px-3 py-2 text-sm ${formErrors.company_id ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300'}`}
-                      >
-                        <option value={0}>Select Company</option>
-                        {(companies || []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Branch</label>
-                      <select
-                        value={formData.branch_id as number}
-                        onChange={(e) => setFormData(prev => ({ ...prev, branch_id: e.target.value ? Number(e.target.value) : undefined }))}
-                        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm"
-                      >
-                        <option value="">None</option>
-                        {filteredBranchesForm.map((b: any) => <option key={b.id} value={b.id}>{b.name}</option>)}
-                      </select>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">GSTIN</label>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        value={formData.gst_number || ''}
-                        onChange={handleGstChange}
-                        className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                        placeholder="Enter GSTIN"
-                      />
-                      <button type="button" onClick={handleAutoFill} disabled={lookingUp || !formData.gst_number} className="rounded-lg bg-blue-500 px-4 py-2 text-xs font-medium text-white hover:bg-blue-600 disabled:opacity-50 whitespace-nowrap">
-                        {lookingUp ? 'Fetching...' : 'Auto Fill'}
-                      </button>
-                    </div>
-                  </div>
-                  {renderField('Company Name *', 'name', 'text', true)}
-                  <div className="grid grid-cols-2 gap-4">
-                    {renderField('Contact Person', 'contact_person')}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Contact No</label>
-                      <input
-                        type="tel"
-                        value={formData.contact_no || ''}
-                        onChange={(e) => { const val = e.target.value.replace(/\D/g, ''); setFormData(prev => ({ ...prev, contact_no: val })); }}
-                        className={`w-full rounded-lg border bg-white px-3 py-2 text-sm ${formErrors.contact_no ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300'}`}
-                        placeholder="Enter Contact No"
-                        maxLength={10}
-                      />
-                    </div>
-                  </div>
-                  {renderField('Email', 'email', 'email')}
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Registration Type</label>
-                      <select value={formData.registration_type || ''} onChange={(e) => setFormData(prev => ({ ...prev, registration_type: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
-                        <option value="">Select</option>
-                        <option value="Registered">Registered</option>
-                        <option value="Unregistered">Unregistered</option>
-                      </select>
-                    </div>
-                    {renderField('PAN', 'pan')}
-                  </div>
-                </div>
-              </fieldset>
 
-              {/* Billing Address */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500"></span> Billing Address
-                </legend>
-                <div className="mt-3 space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
-                    <textarea value={formData.billing_street || ''} onChange={(e) => setFormData(prev => ({ ...prev, billing_street: e.target.value }))} rows={2} className={`w-full rounded-lg border bg-white px-3 py-2 text-sm ${formErrors.billing_city ? 'border-red-400 ring-2 ring-red-200' : 'border-gray-300'}`} placeholder="Enter Address" />
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    {renderField('City *', 'billing_city', 'text', true)}
-                    {renderField('State', 'billing_state')}
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    {renderField('Country', 'billing_country')}
-                    {renderField('Pincode', 'billing_pincode')}
-                  </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="sm:col-span-2">
+                  <label className="mb-1.5 block text-xs font-semibold">Supplier group</label>
+                  <select
+                    value={form.group_id || ''}
+                    onChange={(e) => setForm((x) => ({
+                      ...x,
+                      group_id: e.target.value ? Number(e.target.value) : undefined,
+                    }))}
+                    className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm"
+                  >
+                    <option value="">No group</option>
+                    {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select>
                 </div>
-              </fieldset>
 
-              {/* Shipping Address */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-teal-500"></span> Shipping Address
-                </legend>
-                <div className="mt-3">
-                  <label className="flex items-center gap-2 cursor-pointer mb-3">
-                    <input type="checkbox" checked={formData.same_as_billing ?? true} onChange={(e) => handleSameAsBillingToggle(e.target.checked)} className="rounded border-gray-300 text-blue-600" />
-                    <span className="text-sm text-gray-600">Same as Billing Address</span>
-                  </label>
-                  {!formData.same_as_billing && (
-                    <div className="space-y-4">
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
-                        <textarea value={formData.shipping_street || ''} onChange={(e) => setFormData(prev => ({ ...prev, shipping_street: e.target.value }))} rows={2} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" placeholder="Enter Shipping Address" />
-                      </div>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div><label className="block text-sm font-medium text-gray-700 mb-1">City</label><input type="text" value={formData.shipping_city || ''} onChange={(e) => setFormData(prev => ({ ...prev, shipping_city: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" placeholder="City" /></div>
-                        <div><label className="block text-sm font-medium text-gray-700 mb-1">State</label><input type="text" value={formData.shipping_state || ''} onChange={(e) => setFormData(prev => ({ ...prev, shipping_state: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" placeholder="State" /></div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div><label className="block text-sm font-medium text-gray-700 mb-1">Country</label><input type="text" value={formData.shipping_country || ''} onChange={(e) => setFormData(prev => ({ ...prev, shipping_country: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" placeholder="Country" /></div>
-                        <div><label className="block text-sm font-medium text-gray-700 mb-1">Pincode</label><input type="text" value={formData.shipping_pincode || ''} onChange={(e) => setFormData(prev => ({ ...prev, shipping_pincode: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" placeholder="Pincode" maxLength={6} /></div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </fieldset>
+                {field('Opening balance', 'opening_balance', 'number')}
+                {field('Credit limit', 'credit_limit', 'number')}
+                {field('Outstanding amount', 'outstanding_amount', 'number')}
+                {field('Wallet balance', 'wallet_balance', 'number')}
+                {field('Due days', 'due_days', 'number')}
+                {field('Commission rate %', 'commission_rate', 'number')}
+              </div>
+            </section>
 
-              {/* Group & Balance */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-purple-500"></span> Group & Balance
-                </legend>
-                <div className="mt-3 space-y-4">
-                  <div className="flex items-end gap-2">
-                    <div className="flex-1">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Group</label>
-                      <select value={formData.group_id as number} onChange={(e) => setFormData(prev => ({ ...prev, group_id: e.target.value ? Number(e.target.value) : undefined }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
-                        <option value="">Select Group</option>
-                        {(supplierGroups || []).map((g: any) => <option key={g.id} value={g.id}>{g.name}</option>)}
-                      </select>
-                    </div>
-                    <button type="button" onClick={() => setShowGroupModal(true)} className="mb-0.5 text-blue-600 text-sm hover:underline whitespace-nowrap">+ Add Group</button>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    {renderField('Opening Balance', 'opening_balance', 'number')}
-                    {renderField('Credit Limit', 'credit_limit', 'number')}
-                  </div>
-                  {renderField('Due Days', 'due_days', 'number')}
-                </div>
-              </fieldset>
+            <section className="rounded-2xl border bg-white p-4">
+              <p className="mb-3 text-sm font-semibold">Supplier settings</p>
 
-              {/* Supplier-specific fields */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500"></span> Supplier Settings
-                </legend>
-                <div className="mt-3 grid grid-cols-2 gap-4">
-                  {renderField('Territory', 'territory')}
-                  {renderField('Zone', 'zone')}
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
-                    <select value={formData.status || 'active'} onChange={(e) => setFormData(prev => ({ ...prev, status: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
-                      <option value="active">Active</option>
-                      <option value="inactive">Inactive</option>
-                      <option value="pending">Pending</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">KYC Status</label>
-                    <select value={formData.kyc_status || 'pending'} onChange={(e) => setFormData(prev => ({ ...prev, kyc_status: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm">
-                      <option value="pending">Pending</option>
-                      <option value="verified">Verified</option>
-                      <option value="rejected">Rejected</option>
-                    </select>
-                  </div>
-                  {renderField('Outstanding Amount', 'outstanding_amount', 'number')}
-                  {renderField('Wallet Balance', 'wallet_balance', 'number')}
-                  {renderField('Commission Rate (%)', 'commission_rate', 'number')}
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Approved At</label>
-                    <input type="datetime-local" value={formData.approved_at ? new Date(formData.approved_at).toISOString().slice(0, 16) : ''} onChange={(e) => setFormData(prev => ({ ...prev, approved_at: e.target.value }))} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
-                    <textarea value={formData.notes || ''} onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))} rows={2} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" placeholder="Notes" />
-                  </div>
-                </div>
-              </fieldset>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {field('Territory', 'territory')}
+                {field('Zone', 'zone')}
 
-              {/* Custom Fields */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-rose-500"></span> Custom Fields
-                </legend>
-                <div className="mt-3 grid grid-cols-3 gap-4">
-                  {renderField('License No.', 'license_no')}
-                  {renderField('Custom Field 1', 'custom_field_1')}
-                  {renderField('Custom Field 2', 'custom_field_2')}
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold">Status</label>
+                  <select
+                    value={form.status || 'active'}
+                    onChange={(e) => setForm((x) => ({
+                      ...x,
+                      status: e.target.value,
+                    }))}
+                    className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm"
+                  >
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                    <option value="pending">Pending</option>
+                  </select>
                 </div>
-              </fieldset>
 
-              {/* Additional Details */}
-              <fieldset className="border rounded-lg p-4">
-                <legend className="text-base font-semibold text-slate-700 flex items-center gap-2">
-                  <span className="w-2.5 h-2.5 rounded-full bg-indigo-500"></span> Additional Details
-                </legend>
-                <div className="mt-3 space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    {renderField('Fax No', 'fax')}
-                    {renderField('Website', 'website')}
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    {renderField('Credit Limit', 'credit_limit', 'number')}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">Note</label>
-                      <textarea value={formData.note || ''} onChange={(e) => setFormData(prev => ({ ...prev, note: e.target.value }))} rows={2} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm" placeholder="Enter Note" />
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 mt-2">
-                    <input type="checkbox" checked={formData.is_active ?? true} onChange={(e) => setFormData(prev => ({ ...prev, is_active: e.target.checked }))} className="rounded border-gray-300 text-blue-600" />
-                    <label className="text-sm text-gray-700">Enable – visible on all documents</label>
-                  </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-semibold">KYC</label>
+                  <select
+                    value={form.kyc_status || 'pending'}
+                    onChange={(e) => setForm((x) => ({
+                      ...x,
+                      kyc_status: e.target.value,
+                    }))}
+                    className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm"
+                  >
+                    <option value="pending">Pending</option>
+                    <option value="verified">Verified</option>
+                    <option value="rejected">Rejected</option>
+                  </select>
                 </div>
-              </fieldset>
+
+                {field('License number', 'license_no')}
+                {field('Website', 'website')}
+
+                <div className="sm:col-span-2">
+                  {field('Notes', 'notes')}
+                </div>
+
+                <label className="flex items-center gap-2 text-sm text-slate-600 sm:col-span-2">
+                  <input
+                    type="checkbox"
+                    checked={form.is_active ?? true}
+                    onChange={(e) => setForm((x) => ({
+                      ...x,
+                      is_active: e.target.checked,
+                    }))}
+                  />
+                  Supplier is active and available on documents
+                </label>
+              </div>
+            </section>
+          </div>
+
+          <div className="fixed bottom-0 right-0 z-30 w-full border-t bg-white/95 px-5 py-3 backdrop-blur sm:max-w-xl">
+            <div className="flex justify-between gap-2">
+              <Button
+                variant="outline"
+                disabled={saving}
+                onClick={() => setEditOpen(false)}
+                className="h-10 rounded-xl"
+              >
+                <X className="mr-2 h-4 w-4" />
+                Cancel
+              </Button>
+
+              <Button
+                disabled={saving}
+                onClick={saveSupplier}
+                className="h-10 rounded-xl bg-emerald-600 hover:bg-emerald-700"
+              >
+                {saving ? (
+                  <>
+                    <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                    Saving…
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="mr-2 h-4 w-4" />
+                    {editingId ? 'Update supplier' : 'Save supplier'}
+                  </>
+                )}
+              </Button>
             </div>
-          </Offcanvas>
-        </Suspense>
-      )}
+          </div>
+        </SheetContent>
+      </Sheet>
 
-      {/* Add Group Modal */}
-      {showGroupModal && (
-        <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center">
-          <div className="bg-white rounded-xl shadow-lg p-6 w-full max-w-md">
-            <h3 className="text-lg font-semibold mb-4">Add Supplier Group</h3>
-            <input type="text" value={newGroupName} onChange={(e) => setNewGroupName(e.target.value)} className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm mb-4" placeholder="Group name" />
-            <div className="flex justify-end gap-3">
-              <button onClick={() => { setShowGroupModal(false); setNewGroupName(''); }} className="px-4 py-2 rounded-lg border text-sm" disabled={addingGroup}>Cancel</button>
-              <button onClick={handleAddGroup} disabled={addingGroup || !newGroupName.trim()} className="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
-                {addingGroup ? 'Adding...' : 'Add Group'}
+      {/* Group modal */}
+      {groupOpen && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-slate-900">Add supplier group</h3>
+              <button onClick={() => setGroupOpen(false)} className="text-slate-400 hover:text-slate-700">
+                <X className="h-5 w-5" />
               </button>
+            </div>
+
+            <Input
+              autoFocus
+              value={newGroup}
+              onChange={(e) => setNewGroup(e.target.value)}
+              placeholder="Group name"
+              className="mt-4"
+            />
+
+            <div className="mt-4 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setGroupOpen(false)} disabled={groupSaving}>
+                Cancel
+              </Button>
+
+              <Button
+                onClick={addGroup}
+                disabled={groupSaving || !newGroup.trim()}
+                className="bg-indigo-600 hover:bg-indigo-700"
+              >
+                {groupSaving ? 'Adding…' : 'Add group'}
+              </Button>
             </div>
           </div>
         </div>
       )}
-
-      <style>{`
-        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
-        .hide-scrollbar::-webkit-scrollbar { display: none; }
-      `}</style>
     </div>
   );
 }
+
+export default SuppliersPage;

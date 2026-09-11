@@ -13,7 +13,6 @@ import React, {
 import ReactDOM from 'react-dom';
 import {
   FiPlus,
-  FiRefreshCw,
   FiTrash2,
   FiDownload,
   FiEye,
@@ -22,22 +21,18 @@ import {
   FiAlertCircle,
   FiFilter,
   FiSearch,
-  FiDollarSign,
-  FiCalendar,
-  FiClock,
-  FiUser,
-  FiHash,
   FiChevronDown,
-  FiChevronRight,
-  FiMail,
   FiPrinter,
   FiPackage,
   FiCreditCard,
   FiCopy,
   FiMoreVertical,
-  FiFileText,
   FiUpload,
   FiX,
+  FiTrendingUp,
+  FiTrendingDown,
+  FiCalendar,
+  FiHome,
 } from 'react-icons/fi';
 import { Link, useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
@@ -45,162 +40,370 @@ import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
 import InvoicePrint from '../components/InvoicePrint';
 
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+
 // ---------- Lazy loaded heavy components ----------
-const ModernDataTable = lazy(() =>
-  import('../components/ModernDataTable').then(m => ({ default: m.ModernDataTable }))
-);
 const Offcanvas = lazy(() =>
-  import('../components/Offcanvas').then(m => ({ default: m.Offcanvas }))
+  import('../components/Offcanvas').then((m) => ({ default: m.Offcanvas }))
 );
 
-// ---------- Types ----------
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
+
 interface Supplier {
   id: number;
   name: string;
-  email?: string;
+  email?: string | null;
+}
+
+interface PurchaseItem {
+  id?: number;
+  product_id?: number;
+  product_name?: string | null;
+  quantity?: number | string | null;
+  purchase_price?: number | string | null;
+  total?: number | string | null;
 }
 
 interface PurchaseInvoice {
   id: number;
   purchase_number: string;
-  bill_number?: string;
+  bill_number?: string | null;
   supplier_id: number;
-  supplier: Supplier;
+  supplier?: Supplier | null;
   grand_total: number | string;
   paid_amount: number | string;
   status: string;
   payment_status: string;
   purchase_date: string;
-  due_date: string | null;
-  warehouse?: string;
-  created_at?: string;
-  updated_at?: string;
-  items?: any[];
-  payments?: any[];
+  due_date?: string | null;
+  warehouse?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  items?: PurchaseItem[];
+  payments?: Array<{ id?: number; amount?: number | string | null; payment_direction?: string | null }>;
   company_id?: number;
+  company?: { id: number; name: string } | null;
+  branch_id?: number | null;
+  [key: string]: unknown;
 }
 
-// ---------- Simple API Cache Hook (with cleanup) ----------
-const cache = new Map<string, { data: any; timestamp: number }>();
+interface Company {
+  id: number;
+  name: string;
+}
 
-function useApiCache<T>(
-  key: string,
-  fetcher: () => Promise<T>,
-  ttlMs = 300_000
-) {
+interface Branch {
+  id: number;
+  company_id: number;
+  name: string;
+}
+
+interface AppLogEntry {
+  module: string;
+  action: string;
+  status: 'success' | 'error' | 'info';
+  message: string;
+}
+
+interface ApiErrorLike {
+  message?: string;
+  status?: number;
+  response?: { status?: number; data?: { message?: string } };
+}
+
+/* ------------------------------------------------------------------ */
+/* Constants                                                           */
+/* ------------------------------------------------------------------ */
+
+const PAYMENT_STATUS_OPTIONS = [
+  { value: 'all', label: 'All payment states' },
+  { value: 'Paid', label: 'Fully paid' },
+  { value: 'Partial', label: 'Partially paid' },
+  { value: 'Unpaid', label: 'Unpaid' },
+] as const;
+
+const STATUS_OPTIONS = [
+  { value: 'all', label: 'All statuses' },
+  { value: 'Draft', label: 'Draft' },
+  { value: 'Ordered', label: 'Ordered' },
+  { value: 'Received', label: 'Received' },
+  { value: 'Completed', label: 'Completed' },
+  { value: 'Cancelled', label: 'Cancelled' },
+] as const;
+
+const TABLE_COLUMN_COUNT = 10; // checkbox + 8 data columns + action
+const CACHE_TTL_MS = 300_000;
+const SEARCH_DEBOUNCE_MS = 350;
+const TABLE_HEAD_CLASS = 'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
+
+/* ------------------------------------------------------------------ */
+/* Safe helpers                                                        */
+/* ------------------------------------------------------------------ */
+
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (typeof error === 'object' && error !== null) {
+    const e = error as ApiErrorLike;
+    const candidate = e.response?.data?.message || e.message;
+    if (typeof candidate === 'string' && candidate.trim()) return candidate;
+  }
+  if (error instanceof Error && error.message) return error.message;
+  return fallback;
+}
+
+function safeLog(entry: AppLogEntry): void {
+  try {
+    addAppLog(entry);
+  } catch {
+    /* no-op */
+  }
+}
+
+function safeNum(value: unknown): number {
+  const n = typeof value === 'number' ? value : parseFloat(String(value ?? ''));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function unwrapList<T>(response: unknown): T[] {
+  if (Array.isArray(response)) return response as T[];
+  if (response && typeof response === 'object' && Array.isArray((response as { data?: unknown }).data)) {
+    return (response as { data: T[] }).data;
+  }
+  return [];
+}
+
+function escapeCsvField(value: unknown): string {
+  const raw = String(value ?? '');
+  const dangerous = /^[=+\-@\t\r]/.test(raw);
+  const safe = dangerous ? `\t${raw}` : raw;
+  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+}
+
+function formatCurrency(value: unknown): string {
+  return new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 2,
+  }).format(safeNum(value));
+}
+
+/** Safely format any date-like value. */
+function formatDate(value: unknown): string {
+  if (!value) return '—';
+  const str = typeof value === 'string' ? value : String(value);
+  const dateValue = str.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) return '—';
+  const [year, month, day] = dateValue.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  if (Number.isNaN(date.getTime())) return '—';
+  return new Intl.DateTimeFormat('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  }).format(date);
+}
+
+function getLocalToday(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getMonthStart(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Cache hook (race-safe)                                              */
+/* ------------------------------------------------------------------ */
+
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+}
+
+const cache = new Map<string, CacheEntry<unknown>>();
+
+function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TTL_MS) {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
   const mountedRef = useRef(true);
+  const fetcherRef = useRef(fetcher);
 
-  const fetchData = useCallback(async (skipCache = false) => {
-    if (!skipCache) {
-      const entry = cache.get(key);
-      if (entry && Date.now() - entry.timestamp < ttlMs) {
-        setData(entry.data);
-        setLoading(false);
-        return;
+  useEffect(() => {
+    fetcherRef.current = fetcher;
+  }, [fetcher]);
+
+  const fetchData = useCallback(
+    async (skipCache = false) => {
+      const requestId = ++requestIdRef.current;
+
+      if (!skipCache) {
+        const entry = cache.get(key);
+        if (entry && Date.now() - entry.timestamp < ttlMs) {
+          if (!mountedRef.current || requestId !== requestIdRef.current) return;
+          setData(entry.data as T);
+          setLoading(false);
+          setError(null);
+          return;
+        }
       }
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetcher();
-      if (!mountedRef.current) return;
-      const result = Array.isArray(res) ? res : (res as any).data ?? [];
-      cache.set(key, { data: result, timestamp: Date.now() });
-      setData(result);
-    } catch (err: any) {
-      if (!mountedRef.current) return;
-      setError(err.message || 'Failed to load');
-    } finally {
-      if (mountedRef.current) setLoading(false);
-    }
-  }, [key, fetcher, ttlMs]);
+
+      setLoading(true);
+      setError(null);
+
+      try {
+        const res = await fetcherRef.current();
+        if (!mountedRef.current || requestId !== requestIdRef.current) return;
+        const result = Array.isArray(res)
+          ? res
+          : ((res as { data?: T })?.data ?? ([] as unknown as T));
+        cache.set(key, { data: result, timestamp: Date.now() });
+        setData(result as T);
+      } catch (err: unknown) {
+        if (!mountedRef.current || requestId !== requestIdRef.current) return;
+        setError(getErrorMessage(err, 'Failed to load'));
+      } finally {
+        if (mountedRef.current && requestId === requestIdRef.current) setLoading(false);
+      }
+    },
+    [key, ttlMs]
+  );
 
   useEffect(() => {
     mountedRef.current = true;
-    fetchData();
+    void fetchData();
     return () => {
       mountedRef.current = false;
+      requestIdRef.current += 1;
     };
   }, [fetchData]);
 
-  return { data, loading, error, refresh: () => fetchData(true) };
+  const refresh = useCallback(() => {
+    cache.delete(key);
+    return fetchData(true);
+  }, [fetchData, key]);
+
+  return { data, loading, error, refresh };
 }
 
-// ---------- Skeleton Components ----------
+/* ------------------------------------------------------------------ */
+/* Shared table header label                                           */
+/* ------------------------------------------------------------------ */
+
+function TableHeadLabel({
+  children,
+  align = 'left',
+}: {
+  children: React.ReactNode;
+  align?: 'left' | 'right';
+}) {
+  const alignClass = align === 'right' ? 'justify-end' : '';
+  return (
+    <span className={`inline-flex items-center gap-1 ${alignClass} ${TABLE_HEAD_CLASS}`}>
+      {children}
+    </span>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Skeletons                                                           */
+/* ------------------------------------------------------------------ */
+
 const StatCardSkeleton = memo(() => (
-  <div className="flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-4 animate-pulse">
-    <div className="h-10 w-10 rounded-xl bg-slate-200" />
-    <div className="space-y-2 flex-1">
-      <div className="h-3 w-16 bg-slate-200 rounded" />
-      <div className="h-6 w-8 bg-slate-200 rounded" />
+  <div className="flex items-start gap-3 rounded-2xl border border-slate-200/80 bg-white p-4">
+    <div className="h-10 w-10 shrink-0 animate-pulse rounded-xl bg-slate-200" />
+    <div className="flex-1 space-y-2">
+      <div className="h-3 w-20 animate-pulse rounded bg-slate-200" />
+      <div className="h-6 w-24 animate-pulse rounded bg-slate-200" />
     </div>
   </div>
 ));
+StatCardSkeleton.displayName = 'StatCardSkeleton';
 
-const TableSkeleton = memo(() => (
-  <div className="bg-white rounded-xl shadow-sm border p-6 space-y-4 animate-pulse">
-    <div className="h-6 w-48 bg-slate-200 rounded" />
-    {[...Array(10)].map((_, i) => (
-      <div key={i} className="flex gap-4">
-        <div className="h-4 w-1/4 bg-slate-200 rounded" />
-        <div className="h-4 w-1/5 bg-slate-200 rounded" />
-        <div className="h-4 w-1/6 bg-slate-200 rounded" />
-        <div className="h-4 w-1/6 bg-slate-200 rounded" />
-        <div className="h-4 w-1/4 bg-slate-200 rounded" />
-      </div>
-    ))}
-  </div>
-));
+/* ------------------------------------------------------------------ */
+/* Stat card                                                           */
+/* ------------------------------------------------------------------ */
+
+type Accent = 'indigo' | 'emerald' | 'rose' | 'amber' | 'violet' | 'teal';
 
 const StatCard = memo(
   ({
     icon: Icon,
     label,
     value,
-    tone,
+    accent = 'indigo',
     prefix,
   }: {
-    icon: any;
+    icon: React.ElementType;
     label: string;
     value: string | number;
-    tone: 'blue' | 'emerald' | 'amber' | 'rose' | 'purple' | 'teal' | 'slate';
+    accent?: Accent;
     prefix?: string;
   }) => {
-    const bg =
-      tone === 'blue'
-        ? 'bg-blue-100 text-blue-600'
-        : tone === 'emerald'
-        ? 'bg-emerald-100 text-emerald-600'
-        : tone === 'amber'
-        ? 'bg-amber-100 text-amber-600'
-        : tone === 'rose'
-        ? 'bg-rose-100 text-rose-600'
-        : tone === 'purple'
-        ? 'bg-purple-100 text-purple-600'
-        : tone === 'slate'
-        ? 'bg-slate-100 text-slate-600'
-        : 'bg-teal-100 text-teal-600';
+    const accents: Record<Accent, { bg: string; icon: string; ring: string }> = {
+      indigo: { bg: 'bg-indigo-50', icon: 'text-indigo-600', ring: 'ring-indigo-500/10' },
+      emerald: { bg: 'bg-emerald-50', icon: 'text-emerald-600', ring: 'ring-emerald-500/10' },
+      rose: { bg: 'bg-rose-50', icon: 'text-rose-600', ring: 'ring-rose-500/10' },
+      amber: { bg: 'bg-amber-50', icon: 'text-amber-600', ring: 'ring-amber-500/10' },
+      violet: { bg: 'bg-violet-50', icon: 'text-violet-600', ring: 'ring-violet-500/10' },
+      teal: { bg: 'bg-teal-50', icon: 'text-teal-600', ring: 'ring-teal-500/10' },
+    };
+    const style = accents[accent];
+
     return (
-      <div className="flex items-center gap-3 rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
-        <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${bg}`}>
-          <Icon size={20} />
-        </div>
-        <div>
-          <p className="text-xs font-medium text-slate-500">{label}</p>
-          <p className="text-2xl font-bold text-slate-900">
-            {prefix}
-            {value}
-          </p>
+      <div className="group relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:-translate-y-0.5 hover:border-slate-300/80 hover:shadow-[0_8px_24px_-12px_rgba(15,23,42,0.15)]">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+              {label}
+            </p>
+            <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
+              {prefix}
+              {value}
+            </p>
+          </div>
+          <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${style.bg} ring-1 ${style.ring}`}>
+            <Icon size={18} className={style.icon} />
+          </div>
         </div>
       </div>
     );
   }
 );
+StatCard.displayName = 'StatCard';
 
-// ---------- Portal-based Action Dropdown ----------
+/* ------------------------------------------------------------------ */
+/* Portal-based Action Dropdown                                        */
+/* ------------------------------------------------------------------ */
+
+const MENU_WIDTH = 200;
+const MENU_HEIGHT = 260;
+const MENU_MARGIN = 8;
+
 const ActionDropdown = memo(
   ({
     row,
@@ -222,21 +425,19 @@ const ActionDropdown = memo(
 
     const toggle = useCallback(() => {
       startTransition(() => {
-        setOpen(prev => {
+        setOpen((prev) => {
           const willOpen = !prev;
           if (willOpen && buttonRef.current) {
             const rect = buttonRef.current.getBoundingClientRect();
-            const viewportHeight = window.innerHeight;
+            const left = Math.min(
+              Math.max(MENU_MARGIN, rect.right - MENU_WIDTH),
+              window.innerWidth - MENU_WIDTH - MENU_MARGIN
+            );
             const top =
-              rect.bottom + 4 + 280 > viewportHeight
-                ? rect.top - 4 - 280
-                : rect.bottom + 4;
-            setMenuStyle({
-              position: 'fixed',
-              left: rect.left,
-              top: top,
-              minWidth: 200,
-            });
+              rect.bottom + MENU_HEIGHT <= window.innerHeight - MENU_MARGIN
+                ? rect.bottom + 4
+                : Math.max(MENU_MARGIN, rect.top - MENU_HEIGHT - 4);
+            setMenuStyle({ position: 'fixed', left, top, width: MENU_WIDTH, zIndex: 9999 });
           }
           return willOpen;
         });
@@ -255,8 +456,15 @@ const ActionDropdown = memo(
           startTransition(() => setOpen(false));
         }
       };
+      const onScrollOrResize = () => startTransition(() => setOpen(false));
       document.addEventListener('mousedown', handler);
-      return () => document.removeEventListener('mousedown', handler);
+      window.addEventListener('resize', onScrollOrResize);
+      window.addEventListener('scroll', onScrollOrResize, true);
+      return () => {
+        document.removeEventListener('mousedown', handler);
+        window.removeEventListener('resize', onScrollOrResize);
+        window.removeEventListener('scroll', onScrollOrResize, true);
+      };
     }, [open]);
 
     const closeAndAct = useCallback((action: () => void) => {
@@ -269,7 +477,12 @@ const ActionDropdown = memo(
         <button
           ref={buttonRef}
           onClick={toggle}
-          className="p-1.5 rounded-lg text-slate-600 hover:bg-slate-50 transition-colors"
+          aria-label={`Actions for ${row.purchase_number}`}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          className={`grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 ${
+            open ? 'bg-slate-100 text-slate-700' : ''
+          }`}
           title="More actions"
         >
           <FiMoreVertical size={16} />
@@ -278,45 +491,46 @@ const ActionDropdown = memo(
           ReactDOM.createPortal(
             <div
               ref={menuRef}
+              role="menu"
               style={menuStyle}
-              className="z-[9999] bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 animate-fadeIn"
+              className="animate-fadeIn overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10"
             >
               <Link
                 to={`/purchases/${row.id}/edit`}
-                className="w-full text-left px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors"
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
                 onClick={() => closeAndAct(() => {})}
               >
-                <FiEdit size={16} className="text-slate-500" /> Edit
+                <FiEdit size={16} className="text-slate-400" /> Edit
               </Link>
 
               <button
                 onClick={() => closeAndAct(() => onDuplicate(row))}
-                className="w-full text-left px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors"
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
               >
-                <FiCopy size={16} className="text-slate-500" /> Duplicate
+                <FiCopy size={16} className="text-slate-400" /> Duplicate
               </button>
 
-              <div className="border-t border-slate-200 my-1"></div>
+              <div className="my-1 border-t border-slate-100" />
 
               <button
                 onClick={() => closeAndAct(() => onPrint(row))}
-                className="w-full text-left px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors"
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
               >
-                <FiPrinter size={16} className="text-slate-500" /> Print
+                <FiPrinter size={16} className="text-slate-400" /> Print (A4)
               </button>
 
               <button
                 onClick={() => closeAndAct(() => onRecordPayment(row))}
-                className="w-full text-left px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors"
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
               >
-                <FiCreditCard size={16} className="text-slate-500" /> Record Payment
+                <FiCreditCard size={16} className="text-slate-400" /> Record Payment
               </button>
 
-              <div className="border-t border-slate-200 my-1"></div>
+              <div className="my-1 border-t border-slate-100" />
 
               <button
                 onClick={() => closeAndAct(() => onDelete(row))}
-                className="w-full text-left px-4 py-2.5 text-sm font-medium text-rose-600 hover:bg-rose-50 flex items-center gap-2 transition-colors"
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-rose-600 transition hover:bg-rose-50"
               >
                 <FiTrash2 size={16} /> Delete
               </button>
@@ -327,10 +541,14 @@ const ActionDropdown = memo(
     );
   }
 );
+ActionDropdown.displayName = 'ActionDropdown';
 
-// ---------- CSV Parser ----------
+/* ------------------------------------------------------------------ */
+/* CSV Parser                                                          */
+/* ------------------------------------------------------------------ */
+
 function parseCSV(text: string): Record<string, string>[] {
-  const lines = text.split(/\r?\n/).filter(line => line.trim() !== '');
+  const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
   if (lines.length === 0) return [];
 
   const parseLine = (line: string): string[] => {
@@ -357,15 +575,12 @@ function parseCSV(text: string): Record<string, string>[] {
     return result;
   };
 
-  const headers = parseLine(lines[0]).map(h => h.trim().toLowerCase());
+  const headers = parseLine(lines[0]).map((h) => h.trim().toLowerCase());
   const rows: Record<string, string>[] = [];
 
   for (let i = 1; i < lines.length; i++) {
     const values = parseLine(lines[i]);
-    if (values.length !== headers.length) {
-      console.warn(`Row ${i + 1} has mismatched columns`);
-      continue;
-    }
+    if (values.length !== headers.length) continue;
     const row: Record<string, string> = {};
     headers.forEach((header, idx) => {
       row[header] = values[idx].trim();
@@ -375,758 +590,644 @@ function parseCSV(text: string): Record<string, string>[] {
   return rows;
 }
 
-// ---------- Purchase Import Modal ----------
-const PurchaseImportModal = memo(
-  ({ isOpen, onClose, onImported }: { isOpen: boolean; onClose: () => void; onImported: () => void }) => {
-    const { showSuccess, showError } = useNotification();
-    const fileInputRef = useRef<HTMLInputElement>(null);
-    const [parsedRows, setParsedRows] = useState<Record<string, any>[]>([]);
-    const [fileName, setFileName] = useState('');
-    const [isImporting, setIsImporting] = useState(false);
-    const [importProgress, setImportProgress] = useState({ current: 0, total: 0 });
-    const [error, setError] = useState<string | null>(null);
+/* ------------------------------------------------------------------ */
+/* Import helpers                                                      */
+/* ------------------------------------------------------------------ */
 
-    const [companies, setCompanies] = useState<any[]>([]);
-    const [branches, setBranches] = useState<any[]>([]);
-    const [suppliers, setSuppliers] = useState<any[]>([]);
-    const [defaultCompanyId, setDefaultCompanyId] = useState<string>('');
-    const [defaultBranchId, setDefaultBranchId] = useState<string>('');
-    const [loadingCompanies, setLoadingCompanies] = useState(false);
-    const [loadingBranches, setLoadingBranches] = useState(false);
-    const [loadingSuppliers, setLoadingSuppliers] = useState(false);
-
-    useEffect(() => {
-      if (isOpen) {
-        setLoadingCompanies(true);
-        setLoadingSuppliers(true);
-
-        apiClient.getCompanies()
-          .then((res: any) => {
-            const list = Array.isArray(res) ? res : (res?.data ?? []);
-            setCompanies(list);
-            if (list.length > 0) setDefaultCompanyId(String(list[0].id));
-          })
-          .catch((err: any) => console.warn('Failed to load companies', err))
-          .finally(() => setLoadingCompanies(false));
-
-        apiClient.request('GET', '/suppliers')
-          .then((res: any) => {
-            const list = Array.isArray(res) ? res : (res?.data ?? []);
-            setSuppliers(list);
-          })
-          .catch((err: any) => console.warn('Failed to load suppliers', err))
-          .finally(() => setLoadingSuppliers(false));
-      } else {
-        setParsedRows([]);
-        setFileName('');
-        setError(null);
-        setImportProgress({ current: 0, total: 0 });
-        setCompanies([]);
-        setBranches([]);
-        setSuppliers([]);
-        setDefaultCompanyId('');
-        setDefaultBranchId('');
+function extractId(obj: unknown, depth = 0): number | null {
+  if (depth > 4 || obj == null) return null;
+  if (typeof obj === 'number') return Number.isFinite(obj) ? obj : null;
+  if (typeof obj === 'string' && /^\d+$/.test(obj)) return parseInt(obj, 10);
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      const id = extractId(item, depth + 1);
+      if (id) return id;
+    }
+    return null;
+  }
+  if (typeof obj === 'object') {
+    const record = obj as Record<string, unknown>;
+    if ('id' in record) {
+      const idVal = record.id;
+      if (typeof idVal === 'number') return idVal;
+      if (typeof idVal === 'string' && /^\d+$/.test(idVal)) return parseInt(idVal, 10);
+    }
+    if ('data' in record && record.data && typeof record.data === 'object' && !Array.isArray(record.data)) {
+      const dataId = extractId(record.data, depth + 1);
+      if (dataId) return dataId;
+    }
+    for (const key of Object.keys(record)) {
+      if (key.toLowerCase().includes('id')) {
+        const val = record[key];
+        if (typeof val === 'number') return val;
+        if (typeof val === 'string' && /^\d+$/.test(val)) return parseInt(val, 10);
       }
-    }, [isOpen]);
-
-    useEffect(() => {
-      if (!defaultCompanyId) {
-        setBranches([]);
-        setDefaultBranchId('');
-        return;
+    }
+    for (const key of Object.keys(record)) {
+      const val = record[key];
+      if (val && typeof val === 'object') {
+        const id = extractId(val, depth + 1);
+        if (id) return id;
       }
-      setLoadingBranches(true);
-      apiClient.getBranchesByCompany(Number(defaultCompanyId))
-        .then((res: any) => {
-          const list = Array.isArray(res) ? res : (res?.data ?? []);
-          setBranches(list);
-          if (list.length > 0) setDefaultBranchId(String(list[0].id));
-          else setDefaultBranchId('');
-        })
-        .catch(() => {
+    }
+  }
+  return null;
+}
+
+async function resolveSupplier(
+  row: Record<string, unknown>,
+  knownSuppliers: Supplier[],
+  setSuppliers: (list: Supplier[]) => void
+): Promise<number | null> {
+  if (row.supplier_id && !isNaN(Number(row.supplier_id))) return Number(row.supplier_id);
+  if (!row.supplier_name) return null;
+
+  let allSuppliers = knownSuppliers;
+  if (allSuppliers.length === 0) {
+    try {
+      const res = await apiClient.request('GET', '/suppliers');
+      allSuppliers = unwrapList<Supplier>(res);
+      setSuppliers(allSuppliers);
+    } catch {
+      /* silent */
+    }
+  }
+
+  const email = String(row.supplier_email ?? '').toLowerCase();
+  const name = String(row.supplier_name ?? '').toLowerCase();
+  const matched = allSuppliers.find(
+    (s) => (email && s.email?.toLowerCase() === email) || s.name.toLowerCase() === name
+  );
+  if (matched) return matched.id;
+
+  try {
+    const newSupplier = await apiClient.request('POST', '/suppliers', {
+      name: row.supplier_name,
+      email: row.supplier_email || undefined,
+    });
+    return extractId(newSupplier);
+  } catch {
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Purchase Import Modal                                               */
+/* ------------------------------------------------------------------ */
+
+interface ImportModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onImported: () => void;
+}
+
+type ImportRow = Record<string, unknown>;
+
+const PurchaseImportModal = memo(({ isOpen, onClose, onImported }: ImportModalProps) => {
+  const { showSuccess, showError } = useNotification();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [parsedRows, setParsedRows] = useState<ImportRow[]>([]);
+  const [fileName, setFileName] = useState('');
+  const [isImporting, setIsImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState({ current: 0, total: 0 });
+  const [error, setError] = useState<string | null>(null);
+
+  const [companies, setCompanies] = useState<Company[]>([]);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [defaultCompanyId, setDefaultCompanyId] = useState('');
+  const [defaultBranchId, setDefaultBranchId] = useState('');
+  const [loadingCompanies, setLoadingCompanies] = useState(false);
+  const [loadingBranches, setLoadingBranches] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    let active = true;
+    setLoadingCompanies(true);
+
+    apiClient
+      .getCompanies()
+      .then((res: unknown) => {
+        if (!active) return;
+        const list = unwrapList<Company>(res);
+        setCompanies(list);
+        if (list.length > 0) setDefaultCompanyId(String(list[0].id));
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setLoadingCompanies(false);
+      });
+
+    apiClient
+      .request('GET', '/suppliers')
+      .then((res: unknown) => {
+        if (!active) return;
+        setSuppliers(unwrapList<Supplier>(res));
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setParsedRows([]);
+      setFileName('');
+      setError(null);
+      setImportProgress({ current: 0, total: 0 });
+      setCompanies([]);
+      setBranches([]);
+      setSuppliers([]);
+      setDefaultCompanyId('');
+      setDefaultBranchId('');
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!defaultCompanyId) {
+      setBranches([]);
+      setDefaultBranchId('');
+      return;
+    }
+    let active = true;
+    setLoadingBranches(true);
+    apiClient
+      .getBranchesByCompany(Number(defaultCompanyId))
+      .then((res: unknown) => {
+        if (!active) return;
+        const list = unwrapList<Branch>(res);
+        setBranches(list);
+        setDefaultBranchId(list.length > 0 ? String(list[0].id) : '');
+      })
+      .catch(() => {
+        if (active) {
           setBranches([]);
           setDefaultBranchId('');
-        })
-        .finally(() => setLoadingBranches(false));
-    }, [defaultCompanyId]);
-
-    const handleFile = (file: File) => {
-      setError(null);
-      setParsedRows([]);
-      setFileName(file.name);
-
-      const extension = file.name.split('.').pop()?.toLowerCase();
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const text = e.target?.result as string;
-        try {
-          if (extension === 'json') {
-            const data = JSON.parse(text);
-            if (!Array.isArray(data)) throw new Error('JSON file must contain an array of purchase objects.');
-            setParsedRows(data);
-          } else if (extension === 'csv') {
-            setParsedRows(parseCSV(text));
-          } else {
-            throw new Error('Unsupported file type. Please upload .csv or .json.');
-          }
-        } catch (err: any) {
-          setError(err.message);
-          setParsedRows([]);
         }
-      };
-      reader.readAsText(file);
+      })
+      .finally(() => {
+        if (active) setLoadingBranches(false);
+      });
+    return () => {
+      active = false;
     };
+  }, [defaultCompanyId]);
 
-    const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (file) handleFile(file);
-    };
+  const handleFile = useCallback((file: File) => {
+    setError(null);
+    setParsedRows([]);
+    setFileName(file.name);
 
-    const downloadTemplate = (type: 'csv' | 'json') => {
-      if (type === 'csv') {
-        const csvContent = `purchase_number,supplier_id,supplier_name,supplier_email,purchase_date,due_date,grand_total,paid_amount,status,payment_status,warehouse,company_id,branch_id,payment_amount,payment_method,payment_reference,payment_date,payment_notes,payment_direction\nPO-2024-001,1,ABC Supplies,supplier@abc.com,2024-01-15,2024-02-15,1000.00,500.00,Ordered,Partial,Main Warehouse,1,1,500.00,Bank Transfer,REF001,2024-01-15,Partial payment,outward`;
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'purchase_template.csv';
-        a.click();
-        URL.revokeObjectURL(url);
-      } else {
-        const jsonData = [
-          {
-            purchase_number: 'PO-2024-001',
-            supplier_id: 1,
-            supplier_name: 'ABC Supplies',
-            supplier_email: 'supplier@abc.com',
-            purchase_date: '2024-01-15',
-            due_date: '2024-02-15',
-            grand_total: 1000.00,
-            paid_amount: 500.00,
-            status: 'Ordered',
-            payment_status: 'Partial',
-            warehouse: 'Main Warehouse',
-            company_id: 1,
-            branch_id: 1,
-            items: [
-              {
-                product_id: 1,
-                quantity: 1,
-                unit_price: 1000.00,
-                discount_type: 'percent',
-                discount_percent: 0,
-                discount_amount: 0,
-                gst_slab: 18,
-                is_inter_state: true,
-                cgst_percent: 0,
-                sgst_percent: 0,
-                igst_percent: 18,
-                cgst_amount: 0,
-                sgst_amount: 0,
-                igst_amount: 180.00,
-                total: 1180.00,
-              },
-            ],
-            payments: [
-              {
-                amount: 500.00,
-                payment_method: 'Bank Transfer',
-                reference: 'REF001',
-                payment_date: '2024-01-15',
-                notes: 'Partial payment',
-                payment_direction: 'outward',
-                company_id: 1,
-                branch_id: 1,
-              },
-            ],
-          },
-        ];
-        const blob = new Blob([JSON.stringify(jsonData, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'purchase_template.json';
-        a.click();
-        URL.revokeObjectURL(url);
+    const extension = file.name.split('.').pop()?.toLowerCase();
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = (e.target?.result as string) ?? '';
+      try {
+        if (extension === 'json') {
+          const data = JSON.parse(text);
+          if (!Array.isArray(data)) {
+            throw new Error('JSON file must contain an array of purchase objects.');
+          }
+          setParsedRows(data as ImportRow[]);
+        } else if (extension === 'csv') {
+          setParsedRows(parseCSV(text));
+        } else {
+          throw new Error('Unsupported file type. Please upload .csv or .json.');
+        }
+      } catch (err: unknown) {
+        setError(getErrorMessage(err, 'Failed to parse file.'));
+        setParsedRows([]);
       }
     };
+    reader.onerror = () => setError('Failed to read file.');
+    reader.readAsText(file);
+  }, []);
 
-    const findOrCreateSupplier = async (row: Record<string, any>) => {
-      if (row.supplier_id && !isNaN(Number(row.supplier_id))) return Number(row.supplier_id);
-      if (row.supplier_name) {
-        let allSuppliers = suppliers;
-        if (allSuppliers.length === 0) {
-          try {
-            const res = await apiClient.request('GET', '/suppliers');
-            allSuppliers = Array.isArray(res) ? res : (res?.data ?? []);
-            setSuppliers(allSuppliers);
-          } catch (err) {
-            console.warn('Failed to fetch suppliers', err);
-          }
-        }
-        const matched = allSuppliers.find(
-          (s: any) =>
-            (row.supplier_email && s.email?.toLowerCase() === row.supplier_email.toLowerCase()) ||
-            s.name.toLowerCase() === row.supplier_name.toLowerCase()
+  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleFile(file);
+  };
+
+  const downloadTemplate = (type: 'csv' | 'json') => {
+    if (type === 'csv') {
+      const csvContent = `purchase_number,supplier_id,supplier_name,supplier_email,purchase_date,due_date,grand_total,paid_amount,status,payment_status,warehouse,company_id,branch_id,payment_amount,payment_method,payment_reference,payment_date,payment_notes,payment_direction\nPO-2024-001,1,ABC Supplies,supplier@abc.com,2024-01-15,2024-02-15,1000.00,500.00,Ordered,Partial,Main Warehouse,1,1,500.00,Bank Transfer,REF001,2024-01-15,Partial payment,outward`;
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'purchase_template.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    } else {
+      const jsonData = [
+        {
+          purchase_number: 'PO-2024-001',
+          supplier_id: 1,
+          supplier_name: 'ABC Supplies',
+          supplier_email: 'supplier@abc.com',
+          purchase_date: '2024-01-15',
+          due_date: '2024-02-15',
+          grand_total: 1000.0,
+          paid_amount: 500.0,
+          status: 'Ordered',
+          payment_status: 'Partial',
+          warehouse: 'Main Warehouse',
+          company_id: 1,
+          branch_id: 1,
+          items: [{ product_id: 1, quantity: 1, unit_price: 1000.0, total: 1180.0 }],
+          payments: [
+            {
+              amount: 500.0,
+              payment_method: 'Bank Transfer',
+              reference: 'REF001',
+              payment_date: '2024-01-15',
+              notes: 'Partial payment',
+              payment_direction: 'outward',
+              company_id: 1,
+              branch_id: 1,
+            },
+          ],
+        },
+      ];
+      const blob = new Blob([JSON.stringify(jsonData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'purchase_template.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  const handleImport = async () => {
+    if (parsedRows.length === 0) {
+      setError('No data to import.');
+      return;
+    }
+    const firstRow = parsedRows[0];
+    const keys = Object.keys(firstRow).map((k) => k.toLowerCase());
+    const required = ['purchase_number', 'grand_total'];
+    const missing = required.filter((f) => !keys.includes(f));
+    if (missing.length > 0) {
+      setError(`Missing required columns: ${missing.join(', ')}`);
+      return;
+    }
+    if (!defaultCompanyId) {
+      setError('Please select a default company.');
+      return;
+    }
+
+    setIsImporting(true);
+    setImportProgress({ current: 0, total: parsedRows.length });
+    let successCount = 0;
+    const errors: string[] = [];
+
+    for (let i = 0; i < parsedRows.length; i++) {
+      const row = parsedRows[i];
+      const normalizedRow: Record<string, unknown> = {};
+      Object.keys(row).forEach((key) => {
+        normalizedRow[key.toLowerCase()] = row[key];
+      });
+
+      try {
+        const supplierId = await resolveSupplier(normalizedRow, suppliers, setSuppliers);
+        if (!supplierId) throw new Error('Supplier not found and could not be created.');
+
+        const companyId = normalizedRow.company_id
+          ? Number(normalizedRow.company_id)
+          : Number(defaultCompanyId);
+        const branchId = normalizedRow.branch_id
+          ? Number(normalizedRow.branch_id)
+          : defaultBranchId
+            ? Number(defaultBranchId)
+            : undefined;
+
+        const grandTotal = safeNum(normalizedRow.grand_total);
+        const paidAmount = safeNum(normalizedRow.paid_amount);
+
+        const status = String(normalizedRow.status || 'Ordered');
+        const paymentStatus = String(
+          normalizedRow.payment_status ||
+            (paidAmount >= grandTotal ? 'Paid' : paidAmount > 0 ? 'Partial' : 'Unpaid')
         );
-        if (matched) return matched.id;
-        try {
-          const newSupplier = await apiClient.request('POST', '/suppliers', {
-            name: row.supplier_name,
-            email: row.supplier_email || undefined,
-            ...(row.supplier_phone && { contact_no: row.supplier_phone }),
-            ...(row.supplier_address && { address: row.supplier_address }),
-          });
-          return newSupplier?.id ?? (newSupplier as any)?.data?.id;
-        } catch (err) {
-          console.warn('Supplier creation failed', err);
-          return null;
+
+        const payload: Record<string, unknown> = {
+          purchase_number: normalizedRow.purchase_number,
+          supplier_id: supplierId,
+          purchase_date: normalizedRow.purchase_date || getLocalToday(),
+          due_date: normalizedRow.due_date || null,
+          grand_total: grandTotal,
+          paid_amount: paidAmount,
+          status,
+          payment_status: paymentStatus,
+          warehouse: normalizedRow.warehouse || undefined,
+          company_id: companyId,
+          branch_id: branchId,
+          items: Array.isArray(normalizedRow.items)
+            ? (normalizedRow.items as Record<string, unknown>[]).map((item) => ({
+                product_id: Number(item.product_id),
+                product_name: item.product_name || '',
+                quantity: Number(item.quantity || 1),
+                purchase_price: Number(item.purchase_price || item.unit_price || 0),
+                total: Number(item.total || safeNum(item.quantity) * safeNum(item.purchase_price)),
+              }))
+            : [],
+        };
+        Object.keys(payload).forEach((key) => payload[key] === undefined && delete payload[key]);
+
+        let newPurchaseResponse: unknown;
+        if (typeof (apiClient as { createPurchaseInvoice?: unknown }).createPurchaseInvoice === 'function') {
+          newPurchaseResponse = await (
+            apiClient as { createPurchaseInvoice: (p: unknown) => Promise<unknown> }
+          ).createPurchaseInvoice(payload);
+        } else {
+          newPurchaseResponse = await apiClient.request('POST', '/purchase-invoices', payload);
         }
-      }
-      return null;
-    };
 
-    // Enhanced ID extraction with better diagnostics
-    const extractId = (obj: any): number | null => {
-      if (!obj) return null;
-      if (typeof obj === 'number') return obj;
-      if (typeof obj === 'string' && /^\d+$/.test(obj)) return parseInt(obj, 10);
-      if (Array.isArray(obj)) {
-        for (const item of obj) {
-          const id = extractId(item);
-          if (id) return id;
-        }
-        return null;
-      }
-      if (typeof obj === 'object') {
-        // First check: direct 'id' property (most common case for direct responses)
-        if ('id' in obj && obj.id) {
-          const idVal = obj.id;
-          if (typeof idVal === 'number') return idVal;
-          if (typeof idVal === 'string' && /^\d+$/.test(idVal)) return parseInt(idVal, 10);
-        }
-        
-        // Second check: 'data' wrapper that might contain the object
-        if ('data' in obj && obj.data && typeof obj.data === 'object' && !Array.isArray(obj.data)) {
-          const dataId = extractId(obj.data);
-          if (dataId) return dataId;
-        }
-        
-        // Third check: any property with 'id' in the name
-        for (const key of Object.keys(obj)) {
-          const val = obj[key];
-          if (val == null) continue;
-          const lowerKey = key.toLowerCase();
-          if (lowerKey.includes('id')) {
-            if (typeof val === 'number') return val;
-            if (typeof val === 'string' && /^\d+$/.test(val)) return parseInt(val, 10);
-          }
-        }
-        
-        // Fallback: recursively search nested objects and arrays
-        for (const key of Object.keys(obj)) {
-          const val = obj[key];
-          if (val && typeof val === 'object') {
-            const id = extractId(val);
-            if (id) return id;
-          }
-        }
-      }
-      return null;
-    };
+        const newPurchaseId = extractId(newPurchaseResponse);
+        if (!newPurchaseId) throw new Error('Purchase created but ID extraction failed.');
 
-    // Fallback: wait and search for purchase by number
-    const waitForPurchaseByNumber = async (purchaseNumber: string, retries = 3): Promise<number | null> => {
-      for (let attempt = 0; attempt < retries; attempt++) {
-        try {
-          // Try list endpoint
-          const listRes = await apiClient.getPurchaseInvoices();
-          const list = Array.isArray(listRes) ? listRes : (listRes as any)?.data ?? [];
-          const match = list.find((p: any) => p.purchase_number === purchaseNumber);
-          if (match?.id) return match.id;
-
-          // Try search endpoint
-          try {
-            const searchRes = await apiClient.request('GET', `/purchases?search=${encodeURIComponent(purchaseNumber)}`);
-            const searchData = Array.isArray(searchRes) ? searchRes : (searchRes as any)?.data ?? [];
-            const searchMatch = searchData.find((p: any) => p.purchase_number === purchaseNumber);
-            if (searchMatch?.id) return searchMatch.id;
-          } catch {}
-
-          // Wait before retrying
-          if (attempt < retries - 1) {
-            await new Promise(res => setTimeout(res, 500));
-          }
-        } catch (err) {
-          console.warn('Fallback purchase lookup attempt failed:', err);
-        }
-      }
-      return null;
-    };
-
-    const handleImport = async () => {
-      if (parsedRows.length === 0) {
-        setError('No data to import.');
-        return;
-      }
-
-      const firstRow = parsedRows[0];
-      const keys = Object.keys(firstRow).map(k => k.toLowerCase());
-      const required = ['purchase_number', 'grand_total'];
-      const missing = required.filter(f => !keys.includes(f));
-      if (missing.length > 0) {
-        setError(`Missing required columns: ${missing.join(', ')}`);
-        return;
-      }
-
-      if (!defaultCompanyId) {
-        setError('Please select a default company.');
-        return;
-      }
-
-      setIsImporting(true);
-      setImportProgress({ current: 0, total: parsedRows.length });
-      let successCount = 0;
-      const errors: string[] = [];
-
-      for (let i = 0; i < parsedRows.length; i++) {
-        const row = parsedRows[i];
-        const normalizedRow: Record<string, any> = {};
-        Object.keys(row).forEach(key => {
-          normalizedRow[key.toLowerCase()] = row[key];
-        });
-
-        try {
-          const supplierId = await findOrCreateSupplier(normalizedRow);
-          if (!supplierId) throw new Error('Supplier not found and could not be created.');
-
-          const companyId = normalizedRow.company_id ? Number(normalizedRow.company_id) : Number(defaultCompanyId);
-          const branchId = normalizedRow.branch_id ? Number(normalizedRow.branch_id) : (defaultBranchId ? Number(defaultBranchId) : undefined);
-
-          const grandTotal = parseFloat(normalizedRow.grand_total);
-          const paidAmount = parseFloat(normalizedRow.paid_amount || '0');
-
-          let status = normalizedRow.status || 'Ordered';
-          let paymentStatus = normalizedRow.payment_status;
-          if (!paymentStatus) {
-            paymentStatus = paidAmount >= grandTotal ? 'Paid' : paidAmount > 0 ? 'Partial' : 'Unpaid';
-          }
-
-          const payload: any = {
-            purchase_number: normalizedRow.purchase_number,
-            supplier_id: supplierId,
-            purchase_date: normalizedRow.purchase_date || new Date().toISOString().split('T')[0],
-            due_date: normalizedRow.due_date || null,
-            grand_total: grandTotal,
-            paid_amount: paidAmount,
-            status: status,
-            payment_status: paymentStatus,
-            warehouse: normalizedRow.warehouse || undefined,
+        const paymentAmount = safeNum(normalizedRow.payment_amount);
+        if (paymentAmount > 0) {
+          await apiClient.request('POST', '/payments', {
             company_id: companyId,
-            branch_id: branchId,
-            bill_number: normalizedRow.bill_number || undefined,
-            supplier_address: normalizedRow.supplier_address || undefined,
-            contact_person: normalizedRow.contact_person || undefined,
-            phone_no: normalizedRow.phone_no || undefined,
-            gstin: normalizedRow.gstin || undefined,
-            pan: normalizedRow.pan || undefined,
-            reverse_charge: normalizedRow.reverse_charge ? Boolean(normalizedRow.reverse_charge) : undefined,
-            ship_to: normalizedRow.ship_to || undefined,
-            place_of_supply: normalizedRow.place_of_supply || undefined,
-            challan_no: normalizedRow.challan_no || undefined,
-            challan_date: normalizedRow.challan_date || undefined,
-            po_no: normalizedRow.po_no || undefined,
-            po_date: normalizedRow.po_date || undefined,
-            lr_no: normalizedRow.lr_no || undefined,
-            eway_no: normalizedRow.eway_no || undefined,
-            delivery_mode: normalizedRow.delivery_mode || undefined,
-            payment_type: normalizedRow.payment_type || undefined,
-            payment_term: normalizedRow.payment_term || undefined,
-            bank_id: normalizedRow.bank_id ? Number(normalizedRow.bank_id) : undefined,
-            packing_charges: normalizedRow.packing_charges ? Number(normalizedRow.packing_charges) : 0,
-            general_discount_percent: normalizedRow.general_discount_percent ? Number(normalizedRow.general_discount_percent) : 0,
-            general_discount_amount: normalizedRow.general_discount_amount ? Number(normalizedRow.general_discount_amount) : 0,
-            tcs_percent: normalizedRow.tcs_percent ? Number(normalizedRow.tcs_percent) : 0,
-            round_off: normalizedRow.round_off ? Number(normalizedRow.round_off) : 0,
-            terms_title: normalizedRow.terms_title || undefined,
-            terms_detail: normalizedRow.terms_detail || undefined,
-            document_note: normalizedRow.document_note || undefined,
-            internal_note: normalizedRow.internal_note || undefined,
-            additional_charges: normalizedRow.additional_charges || [],
-            total_amount: normalizedRow.total_amount || grandTotal,
-            tax_amount: normalizedRow.tax_amount ? Number(normalizedRow.tax_amount) : 0,
-            discount_amount: normalizedRow.discount_amount ? Number(normalizedRow.discount_amount) : 0,
-          };
-
-          Object.keys(payload).forEach(key => payload[key] === undefined && delete payload[key]);
-
-          if (Array.isArray(normalizedRow.items)) {
-            payload.items = normalizedRow.items.map((item: any) => ({
-              product_id: Number(item.product_id),
-              product_name: item.product_name || '',
-              hsn_sac_code: item.hsn_sac_code || '',
-              unit: item.unit || 'PCS',
-              quantity: Number(item.quantity || 1),
-              purchase_price: Number(item.purchase_price || item.unit_price || 0),
-              discount_type: item.discount_type || 'percent',
-              discount_percent: Number(item.discount_percent || 0),
-              discount_amount: Number(item.discount_amount || 0),
-              gst_slab: Number(item.gst_slab || 0),
-              is_inter_state: Boolean(item.is_inter_state),
-              cgst_percent: Number(item.cgst_percent || 0),
-              sgst_percent: Number(item.sgst_percent || 0),
-              igst_percent: Number(item.igst_percent || 0),
-              cgst_amount: Number(item.cgst_amount || 0),
-              sgst_amount: Number(item.sgst_amount || 0),
-              igst_amount: Number(item.igst_amount || 0),
-              total: Number(item.total || (item.quantity * item.purchase_price)),
-            }));
-          } else {
-            payload.items = [];
-          }
-
-          // Attempt to create purchase invoice
-          let newPurchaseResponse: any;
-          try {
-            if (typeof (apiClient as any).createPurchaseInvoice === 'function') {
-              newPurchaseResponse = await (apiClient as any).createPurchaseInvoice(payload);
-            } else {
-              newPurchaseResponse = await apiClient.request('POST', '/purchase-invoices', payload);
-            }
-          } catch (apiError: any) {
-            // Handle network errors (status 0)
-            if (apiError.status === 0) {
-              console.error(
-                `Network error while creating purchase invoice.\n` +
-                `Error: ${apiError.backendMessage}\n` +
-                `Purchase Number: ${normalizedRow.purchase_number}`
-              );
-              throw new Error(
-                `Network error creating purchase: ${apiError.backendMessage}. ` +
-                `Check that the backend API server is running and accessible. ` +
-                `See browser console for full diagnostics.`
-              );
-            }
-            
-            // If we get an API error with status 302 or 3xx, it indicates a redirect issue
-            if (apiError.status >= 300 && apiError.status < 400) {
-              console.error(
-                `Purchase creation returned redirect (${apiError.status}).\n` +
-                `This usually means: authentication failed, permission denied, or server misconfiguration.\n` +
-                `Check that your session is active and you have permission to create purchases.\n` +
-                `Error: ${apiError.message}`
-              );
-              throw new Error(
-                `Purchase creation failed with redirect (${apiError.status}). ` +
-                `Please verify you are logged in and have permission to create purchases. ` +
-                `Details: ${apiError.message}`
-              );
-            }
-            throw apiError;
-          }
-
-          let newPurchaseId = extractId(newPurchaseResponse);
-          
-          // Check if the response indicates a redirect happened but ID was extracted from Location header
-          if (newPurchaseResponse && newPurchaseResponse.status && newPurchaseResponse.status >= 300 && newPurchaseResponse.status < 400) {
-            console.warn(`Purchase created with redirect status ${newPurchaseResponse.status}, but ID was extracted from Location header.`);
-          }
-
-          // If not found, try fallback with retries
-          if (!newPurchaseId) {
-            console.warn(
-              `ID not found in response, attempting fallback search by purchase_number: ${normalizedRow.purchase_number}`
-            );
-            newPurchaseId = await waitForPurchaseByNumber(normalizedRow.purchase_number);
-          }
-
-          if (!newPurchaseId) {
-            const responseStr = JSON.stringify(newPurchaseResponse, null, 2);
-            console.error(
-              `Purchase import failed: Cannot extract ID from response.\n` +
-              `Purchase Number: ${normalizedRow.purchase_number}\n` +
-              `Response Structure: ${responseStr}\n` +
-              `Response Type: ${typeof newPurchaseResponse}\n` +
-              `Is Array: ${Array.isArray(newPurchaseResponse)}\n` +
-              `Has 'id': ${'id' in (newPurchaseResponse || {})}\n` +
-              `Has 'data': ${'data' in (newPurchaseResponse || {})}`
-            );
-            throw new Error(
-              `Purchase created but ID extraction failed. ` +
-              `Response structure: ${JSON.stringify(Object.keys(newPurchaseResponse || {})).substring(0, 100)}. ` +
-              `Check browser console for full details.`
-            );
-          }
-          
-          console.log(`Purchase invoice created successfully with ID: ${newPurchaseId}`);
-
-          const paymentsToCreate: any[] = [];
-          if (Array.isArray(normalizedRow.payments)) {
-            normalizedRow.payments.forEach((payment: any) => {
-              paymentsToCreate.push({
-                amount: Number(payment.amount),
-                payment_method: payment.payment_method || 'bank_transfer',
-                reference_no: payment.reference_no || payment.reference || `PAY-${newPurchaseId}-${paymentsToCreate.length + 1}`,
-                payment_date: payment.payment_date || new Date().toISOString().split('T')[0],
-                bank_name: payment.bank_name || '',
-                account_number: payment.account_number || '',
-                remarks: payment.notes || payment.remarks || '',
-                payment_direction: payment.payment_direction || 'outward',
-                company_id: payment.company_id ? Number(payment.company_id) : companyId,
-                branch_id: payment.branch_id ? Number(payment.branch_id) : branchId,
-              });
-            });
-          } else {
-            const paymentAmount = parseFloat(normalizedRow.payment_amount || '0');
-            if (paymentAmount > 0) {
-              paymentsToCreate.push({
-                amount: paymentAmount,
-                payment_method: normalizedRow.payment_method || 'bank_transfer',
-                reference_no: normalizedRow.payment_reference || normalizedRow.payment_reference_no || `PAY-${newPurchaseId}-1`,
-                payment_date: normalizedRow.payment_date || new Date().toISOString().split('T')[0],
-                bank_name: normalizedRow.payment_bank_name || '',
-                account_number: normalizedRow.payment_account_number || '',
-                remarks: normalizedRow.payment_notes || normalizedRow.payment_remarks || '',
-                payment_direction: normalizedRow.payment_direction || 'outward',
-                company_id: normalizedRow.payment_company_id ? Number(normalizedRow.payment_company_id) : companyId,
-                branch_id: normalizedRow.payment_branch_id ? Number(normalizedRow.payment_branch_id) : branchId,
-              });
-            }
-          }
-
-          if (paymentsToCreate.length > 0) {
-            for (const payment of paymentsToCreate) {
-              await apiClient.request('POST', '/payments', {
-                company_id: payment.company_id,
-                invoice_id: newPurchaseId,
-                reference_no: payment.reference_no,
-                amount: payment.amount,
-                payment_method: payment.payment_method,
-                status: 'completed',
-                payment_direction: payment.payment_direction,
-                transaction_date: payment.payment_date,
-                bank_name: payment.bank_name,
-                account_number: payment.account_number,
-                ledger_reference: payment.reference_no,
-                remarks: payment.remarks,
-                ...(payment.branch_id && { branch_id: payment.branch_id }),
-              });
-            }
-          }
-
-          successCount++;
-        } catch (err: any) {
-          errors.push(`Row ${i + 1}: ${err.message}`);
+            invoice_id: newPurchaseId,
+            reference_no: String(normalizedRow.payment_reference || `PAY-${newPurchaseId}-1`),
+            amount: paymentAmount,
+            payment_method: String(normalizedRow.payment_method || 'bank_transfer'),
+            status: 'completed',
+            payment_direction: String(normalizedRow.payment_direction || 'outward'),
+            transaction_date: normalizedRow.payment_date || getLocalToday(),
+            remarks: String(normalizedRow.payment_notes || ''),
+            ...(branchId && { branch_id: branchId }),
+          });
         }
-        setImportProgress({ current: i + 1, total: parsedRows.length });
-      }
 
-      setIsImporting(false);
-      if (successCount > 0) {
-        showSuccess('Import completed', `${successCount} purchase(s) created.`);
-        addAppLog({
-          module: 'Purchases',
-          action: 'Import',
-          status: 'success',
-          message: `Imported ${successCount} purchases from ${fileName}`,
-        });
-        onImported();
+        successCount++;
+      } catch (err: unknown) {
+        errors.push(`Row ${i + 1}: ${getErrorMessage(err, 'Unknown error')}`);
       }
-      if (errors.length > 0) {
-        showError('Some rows failed', errors.slice(0, 5).join('; '));
-        setError(errors.slice(0, 5).join('; '));
-      }
-      if (errors.length === 0 && successCount === parsedRows.length) {
-        onClose();
-      }
-    };
+      setImportProgress({ current: i + 1, total: parsedRows.length });
+    }
 
-    if (!isOpen) return null;
+    setIsImporting(false);
+    if (successCount > 0) {
+      showSuccess('Import completed', `${successCount} purchase(s) created.`);
+      safeLog({
+        module: 'Purchases',
+        action: 'Import',
+        status: 'success',
+        message: `Imported ${successCount} purchases from ${fileName}`,
+      });
+      onImported();
+    }
+    if (errors.length > 0) {
+      const summary = errors.slice(0, 5).join('; ');
+      showError('Some rows failed', summary);
+      setError(summary);
+    } else if (successCount === parsedRows.length) {
+      onClose();
+    }
+  };
 
-    return (
-      <div className="fixed inset-0 z-[100] overflow-y-auto">
-        <div className="flex min-h-full items-center justify-center p-4">
-          <div className="fixed inset-0 bg-black/50" onClick={onClose} />
-          <div className="relative bg-white rounded-xl shadow-xl w-full max-w-2xl p-6 animate-fadeIn max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-xl font-bold text-slate-800">Import Purchases</h2>
-              <button onClick={onClose} className="text-slate-500 hover:text-slate-700">
-                <FiX size={20} />
-              </button>
-            </div>
+  if (!isOpen) return null;
 
-            <div className="grid grid-cols-2 gap-4 mb-4">
+  return (
+    <div className="fixed inset-0 z-[100] overflow-y-auto">
+      <div className="flex min-h-full items-center justify-center p-4">
+        <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm" onClick={onClose} />
+        <div className="animate-fadeIn relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+          <div className="mb-5 flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600 ring-1 ring-indigo-500/10">
+                <FiUpload size={18} />
+              </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Default Company *</label>
+                <h2 className="text-lg font-bold tracking-tight text-slate-900">Import Purchases</h2>
+                <p className="text-xs text-slate-500">Upload a CSV or JSON file to bulk create purchases.</p>
+              </div>
+            </div>
+            <button
+              onClick={onClose}
+              className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+              aria-label="Close"
+            >
+              <FiX size={18} />
+            </button>
+          </div>
+
+          <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Default Company *
+              </label>
+              <div className="relative">
                 <select
                   value={defaultCompanyId}
                   onChange={(e) => setDefaultCompanyId(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-200 outline-none"
+                  className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                   disabled={loadingCompanies}
                 >
                   <option value="">Select Company</option>
-                  {companies.map((c: any) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
+                  {companies.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
                   ))}
                 </select>
-                {loadingCompanies && <FiRefreshCw className="animate-spin inline ml-2" size={14} />}
+                <FiChevronDown
+                  className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                  size={16}
+                />
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">Default Branch</label>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Default Branch
+              </label>
+              <div className="relative">
                 <select
                   value={defaultBranchId}
                   onChange={(e) => setDefaultBranchId(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-200 outline-none"
+                  className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
                   disabled={loadingBranches || !defaultCompanyId}
                 >
                   <option value="">Select Branch</option>
-                  {branches.map((b: any) => (
-                    <option key={b.id} value={b.id}>{b.name}</option>
+                  {branches.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
                   ))}
                 </select>
-                {loadingBranches && <FiRefreshCw className="animate-spin inline ml-2" size={14} />}
+                <FiChevronDown
+                  className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                  size={16}
+                />
               </div>
             </div>
+          </div>
 
-            <div className="bg-slate-50 rounded-lg p-4 mb-4 text-sm text-slate-600">
-              <p className="font-medium mb-2">File format requirements:</p>
-              <ul className="list-disc pl-5 space-y-1">
-                <li>CSV or JSON file.</li>
-                <li>CSV: first row must be headers (case‑insensitive).</li>
-                <li>Required columns: <code>purchase_number</code>, <code>grand_total</code></li>
-                <li>Supplier: <code>supplier_id</code> or <code>supplier_name</code> + <code>supplier_email</code></li>
-                <li>Optional: <code>purchase_date</code>, <code>due_date</code>, <code>paid_amount</code>, <code>status</code>, <code>payment_status</code>, <code>warehouse</code>, <code>supplier_address</code>, <code>gstin</code>, etc.</li>
-                <li>Company/Branch: <code>company_id</code>, <code>branch_id</code> (fallback to defaults).</li>
-                <li>Payments (CSV): <code>payment_amount</code>, <code>payment_method</code>, <code>payment_reference</code>, <code>payment_date</code>, <code>payment_notes</code>, <code>payment_direction</code> (inward/outward, default outward).</li>
-                <li>Payments (JSON): <code>payments</code> array with same fields; <code>payment_direction</code> can be set.</li>
-                <li>Items are only supported in JSON via <code>items</code> array.</li>
-                <li>If <code>supplier_id</code> is absent, we will try to match an existing supplier by name/email, or create a new one.</li>
-              </ul>
+          <div className="mb-4 rounded-xl border border-dashed border-slate-200 bg-slate-50/60 p-4 text-xs text-slate-600">
+            <p className="mb-2 font-semibold text-slate-700">File format requirements</p>
+            <ul className="list-disc space-y-1 pl-5">
+              <li>CSV or JSON file.</li>
+              <li>
+                Required columns: <code className="rounded bg-slate-100 px-1">purchase_number</code>,{' '}
+                <code className="rounded bg-slate-100 px-1">grand_total</code>
+              </li>
+              <li>
+                Supplier: <code className="rounded bg-slate-100 px-1">supplier_id</code> or{' '}
+                <code className="rounded bg-slate-100 px-1">supplier_name</code>
+              </li>
+              <li>Company/Branch fall back to the defaults above.</li>
+              <li>Payments supported via dedicated columns or a JSON array.</li>
+            </ul>
+          </div>
+
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.json"
+              onChange={onFileChange}
+              className="hidden"
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
+            >
+              <FiUpload size={16} /> Choose File
+            </button>
+            <span className="truncate text-sm text-slate-500">{fileName || 'No file selected'}</span>
+          </div>
+
+          <div className="mb-4 flex flex-wrap gap-4">
+            <button
+              onClick={() => downloadTemplate('csv')}
+              className="text-sm font-medium text-indigo-600 underline-offset-2 hover:underline"
+            >
+              Download CSV template
+            </button>
+            <button
+              onClick={() => downloadTemplate('json')}
+              className="text-sm font-medium text-indigo-600 underline-offset-2 hover:underline"
+            >
+              Download JSON template
+            </button>
+          </div>
+
+          {error && (
+            <div className="mb-4 flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50/80 p-3 text-sm text-rose-700">
+              <FiAlertCircle className="mt-0.5 shrink-0" size={16} />
+              <span className="break-words">{error}</span>
             </div>
+          )}
 
-            <div className="flex gap-3 items-center mb-4">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".csv,.json"
-                onChange={onFileChange}
-                className="hidden"
-              />
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 text-sm"
-              >
-                <FiUpload size={16} /> Choose File
-              </button>
-              <span className="text-sm text-slate-500 truncate">{fileName || 'No file selected'}</span>
-            </div>
-
-            <div className="flex gap-2 mb-4">
-              <button
-                onClick={() => downloadTemplate('csv')}
-                className="text-sm text-blue-600 underline hover:text-blue-800"
-              >
-                Download CSV template
-              </button>
-              <button
-                onClick={() => downloadTemplate('json')}
-                className="text-sm text-blue-600 underline hover:text-blue-800"
-              >
-                Download JSON template
-              </button>
-            </div>
-
-            {error && (
-              <div className="mb-4 p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-lg text-sm">
-                {error}
-              </div>
-            )}
-
-            {parsedRows.length > 0 && (
-              <div className="mb-4 max-h-64 overflow-auto border rounded-lg">
-                <table className="w-full text-sm">
-                  <thead className="bg-slate-100 sticky top-0">
-                    <tr>
-                      {Object.keys(parsedRows[0]).slice(0, 8).map(key => (
-                        <th key={key} className="px-2 py-2 text-left text-xs font-medium text-slate-500">
+          {parsedRows.length > 0 && (
+            <div className="mb-4 max-h-64 overflow-auto rounded-xl border border-slate-200">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-slate-50">
+                  <tr>
+                    {Object.keys(parsedRows[0])
+                      .slice(0, 8)
+                      .map((key) => (
+                        <th
+                          key={key}
+                          className="px-2 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500"
+                        >
                           {key}
                         </th>
                       ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {parsedRows.slice(0, 10).map((row, idx) => (
-                      <tr key={idx} className="border-t">
-                        {Object.values(row).slice(0, 8).map((value: any, i) => (
-                          <td key={i} className="px-2 py-1 text-xs truncate max-w-[150px]">
+                  </tr>
+                </thead>
+                <tbody>
+                  {parsedRows.slice(0, 10).map((row, idx) => (
+                    <tr key={idx} className="border-t border-slate-100">
+                      {Object.values(row)
+                        .slice(0, 8)
+                        .map((value, i) => (
+                          <td key={i} className="max-w-[150px] truncate px-2 py-1.5 text-xs">
                             {typeof value === 'object' ? JSON.stringify(value) : String(value)}
                           </td>
                         ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {parsedRows.length > 10 && (
-                  <div className="text-xs text-slate-500 p-2">Showing first 10 of {parsedRows.length} rows</div>
-                )}
-              </div>
-            )}
-
-            {isImporting && (
-              <div className="mb-4">
-                <div className="flex items-center gap-2 text-sm text-slate-600">
-                  <FiRefreshCw className="animate-spin" size={16} />
-                  Importing... {importProgress.current}/{importProgress.total}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {parsedRows.length > 10 && (
+                <div className="border-t border-slate-100 p-2 text-xs text-slate-500">
+                  Showing first 10 of {parsedRows.length} rows
                 </div>
-                <div className="w-full bg-slate-200 rounded-full h-2 mt-2">
-                  <div
-                    className="bg-blue-600 h-2 rounded-full transition-all"
-                    style={{ width: `${(importProgress.current / importProgress.total) * 100}%` }}
-                  />
-                </div>
-              </div>
-            )}
-
-            <div className="flex justify-end gap-3 mt-6">
-              <button
-                onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-300 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                disabled={isImporting}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleImport}
-                disabled={parsedRows.length === 0 || isImporting}
-                className="px-5 py-2 rounded-lg bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
-              >
-                {isImporting ? 'Importing...' : 'Import Purchases'}
-              </button>
+              )}
             </div>
+          )}
+
+          {isImporting && (
+            <div className="mb-4">
+              <div className="flex items-center gap-2 text-sm text-slate-600">
+                <FiPackage className="animate-spin" size={16} />
+                Importing… {importProgress.current}/{importProgress.total}
+              </div>
+              <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                <div
+                  className="h-2 rounded-full bg-indigo-600 transition-all"
+                  style={{
+                    width: `${
+                      importProgress.total > 0
+                        ? (importProgress.current / importProgress.total) * 100
+                        : 0
+                    }%`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="mt-6 flex justify-end gap-3">
+            <button
+              onClick={onClose}
+              disabled={isImporting}
+              className="h-10 rounded-xl border border-slate-200 px-4 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleImport}
+              disabled={parsedRows.length === 0 || isImporting}
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {isImporting ? 'Importing…' : 'Import Purchases'}
+            </button>
           </div>
         </div>
       </div>
-    );
-  }
-);
+    </div>
+  );
+});
+PurchaseImportModal.displayName = 'PurchaseImportModal';
 
-// ---------- Main Component ----------
+/* ------------------------------------------------------------------ */
+/* Main component                                                      */
+/* ------------------------------------------------------------------ */
+
 export function PurchasePage() {
   const navigate = useNavigate();
   const { showSuccess, showError } = useNotification();
 
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterStatus, setFilterStatus] = useState<string>('all');
-  const [filterMonth, setFilterMonth] = useState<string>(() => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-  });
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+  const [filterStatus, setFilterStatus] = useState('all');
+  const [filterPaymentStatus, setFilterPaymentStatus] = useState('all');
+  const [filterCompanyId, setFilterCompanyId] = useState<number | undefined>(undefined);
+  const [filterDateFrom, setFilterDateFrom] = useState(getMonthStart());
+  const [filterDateTo, setFilterDateTo] = useState(getLocalToday());
 
   const [isViewPanelOpen, setIsViewPanelOpen] = useState(false);
   const [viewingPurchase, setViewingPurchase] = useState<PurchaseInvoice | null>(null);
-
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
-
   const [printInvoice, setPrintInvoice] = useState<PurchaseInvoice | null>(null);
   const printTriggered = useRef(false);
 
@@ -1138,16 +1239,33 @@ export function PurchasePage() {
   const [paySubmitting, setPaySubmitting] = useState(false);
 
   const [isImportOpen, setIsImportOpen] = useState(false);
+  const [companies, setCompanies] = useState<Company[]>([]);
 
-  const [companies, setCompanies] = useState<any[]>([]);
+  /* -------------------- Search debounce -------------------- */
+
   useEffect(() => {
-    apiClient.getCompanies()
-      .then((res: any) => {
-        const list = Array.isArray(res) ? res : (res?.data ?? []);
-        setCompanies(list);
+    const timer = window.setTimeout(() => {
+      setSearch(searchInput.trim());
+    }, SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+
+  /* -------------------- Load companies -------------------- */
+
+  useEffect(() => {
+    let active = true;
+    apiClient
+      .getCompanies()
+      .then((res: unknown) => {
+        if (active) setCompanies(unwrapList<Company>(res));
       })
       .catch(() => {});
+    return () => {
+      active = false;
+    };
   }, []);
+
+  /* -------------------- Data fetch -------------------- */
 
   const {
     data: purchases,
@@ -1156,50 +1274,76 @@ export function PurchasePage() {
     refresh,
   } = useApiCache<PurchaseInvoice[]>('purchase-invoices', () => apiClient.getPurchaseInvoices());
 
+  /* -------------------- Client-side filtering -------------------- */
+
   const filteredPurchases = useMemo(() => {
     if (!purchases) return [];
     let filtered = [...purchases];
-    if (searchTerm.trim()) {
-      const term = searchTerm.toLowerCase();
+
+    if (search) {
+      const term = search.toLowerCase();
       filtered = filtered.filter(
-        p =>
+        (p) =>
           p.purchase_number?.toLowerCase().includes(term) ||
           (p.supplier?.name || '').toLowerCase().includes(term) ||
           p.status?.toLowerCase().includes(term)
       );
     }
-    if (filterStatus !== 'all') {
-      filtered = filtered.filter(p => p.status === filterStatus);
-    }
-    if (filterMonth) {
-      filtered = filtered.filter(p => p.purchase_date?.startsWith(filterMonth));
-    }
-    return filtered;
-  }, [purchases, searchTerm, filterStatus, filterMonth]);
 
-  const safeNum = (val: any) => {
-    const n = typeof val === 'number' ? val : parseFloat(val);
-    return isNaN(n) ? 0 : n;
-  };
+    if (filterStatus !== 'all') {
+      filtered = filtered.filter((p) => p.status === filterStatus);
+    }
+
+    if (filterPaymentStatus !== 'all') {
+      filtered = filtered.filter((p) => p.payment_status === filterPaymentStatus);
+    }
+
+    if (filterCompanyId) {
+      filtered = filtered.filter((p) => p.company_id === filterCompanyId);
+    }
+
+    if (filterDateFrom) {
+      filtered = filtered.filter((p) => p.purchase_date && p.purchase_date >= filterDateFrom);
+    }
+    if (filterDateTo) {
+      filtered = filtered.filter((p) => p.purchase_date && p.purchase_date <= filterDateTo);
+    }
+
+    return filtered;
+  }, [purchases, search, filterStatus, filterPaymentStatus, filterCompanyId, filterDateFrom, filterDateTo]);
+
+  /* -------------------- Summary (from filtered data) -------------------- */
 
   const summary = useMemo(() => {
-    if (!purchases) return { total: 0, totalAmount: 0, paidAmount: 0, outstanding: 0 };
-    const total = purchases.length;
-    const totalAmount = purchases.reduce((s, p) => s + safeNum(p.grand_total), 0);
-    const paidAmount = purchases.reduce((s, p) => s + safeNum(p.paid_amount), 0);
+    const rows = filteredPurchases;
+    const total = rows.length;
+    const totalAmount = rows.reduce((s, p) => s + safeNum(p.grand_total), 0);
+    const paidAmount = rows.reduce((s, p) => s + safeNum(p.paid_amount), 0);
     const outstanding = totalAmount - paidAmount;
     return { total, totalAmount, paidAmount, outstanding };
-  }, [purchases]);
+  }, [filteredPurchases]);
+
+  /* -------------------- Pagination -------------------- */
 
   const [currentPage, setCurrentPage] = useState(1);
   const rowsPerPage = 15;
-  const totalPages = Math.ceil(filteredPurchases.length / rowsPerPage);
+  const totalPages = Math.max(1, Math.ceil(filteredPurchases.length / rowsPerPage));
   const paginatedPurchases = useMemo(() => {
     const start = (currentPage - 1) * rowsPerPage;
     return filteredPurchases.slice(start, start + rowsPerPage);
   }, [filteredPurchases, currentPage]);
 
-  useEffect(() => setCurrentPage(1), [searchTerm, filterStatus, filterMonth]);
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, filterStatus, filterPaymentStatus, filterCompanyId, filterDateFrom, filterDateTo]);
+
+  /* -------------------- Clear selection on filter change -------------------- */
+
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [search, filterStatus, filterPaymentStatus, filterCompanyId, filterDateFrom, filterDateTo, currentPage]);
+
+  /* -------------------- A4 Print -------------------- */
 
   const handlePrint = useCallback((invoice: PurchaseInvoice) => {
     setPrintInvoice(invoice);
@@ -1212,36 +1356,52 @@ export function PurchasePage() {
         window.print();
         printTriggered.current = true;
         setPrintInvoice(null);
-      }, 200);
+      }, 250);
       return () => clearTimeout(timer);
     }
   }, [printInvoice]);
 
+  /* -------------------- Bulk actions -------------------- */
+
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0) return;
-    if (!confirm(`Delete ${selectedIds.length} purchase(s)?`)) return;
+    if (!window.confirm(`Delete ${selectedIds.length} purchase(s)?`)) return;
     try {
-      await Promise.all(selectedIds.map(id => apiClient.deletePurchaseInvoice(id)));
+      await Promise.all(selectedIds.map((id) => apiClient.deletePurchaseInvoice(id)));
       showSuccess('Bulk delete', `${selectedIds.length} purchase(s) deleted.`);
-      addAppLog({ module: 'Purchases', action: 'Bulk delete', status: 'success', message: `Deleted ${selectedIds.length} purchases` });
+      safeLog({
+        module: 'Purchases',
+        action: 'Bulk delete',
+        status: 'success',
+        message: `Deleted ${selectedIds.length} purchases`,
+      });
       startTransition(() => setSelectedIds([]));
       refresh();
-    } catch (err: any) {
-      showError('Bulk delete failed', err.message);
+    } catch (err: unknown) {
+      showError('Bulk delete failed', getErrorMessage(err, 'Bulk delete failed.'));
     }
   };
 
   const handleBulkStatusChange = async (status: string) => {
     if (selectedIds.length === 0) return;
-    if (!confirm(`Change ${selectedIds.length} purchase(s) to "${status}"?`)) return;
+    if (!window.confirm(`Change ${selectedIds.length} purchase(s) to "${status}"?`)) return;
     try {
-      await Promise.all(selectedIds.map(id => apiClient.updatePurchaseInvoice(id, { status } as any)));
+      await Promise.all(
+        selectedIds.map((id) =>
+          apiClient.updatePurchaseInvoice(id, { status } as Partial<PurchaseInvoice>)
+        )
+      );
       showSuccess('Bulk update', `${selectedIds.length} purchase(s) updated.`);
-      addAppLog({ module: 'Purchases', action: 'Bulk status change', status: 'success', message: `Changed status to ${status} for ${selectedIds.length} purchases` });
+      safeLog({
+        module: 'Purchases',
+        action: 'Bulk status change',
+        status: 'success',
+        message: `Changed status to ${status} for ${selectedIds.length} purchases`,
+      });
       startTransition(() => setSelectedIds([]));
       refresh();
-    } catch (err: any) {
-      showError('Bulk update failed', err.message);
+    } catch (err: unknown) {
+      showError('Bulk update failed', getErrorMessage(err, 'Bulk update failed.'));
     }
   };
 
@@ -1252,24 +1412,37 @@ export function PurchasePage() {
 
   const handleDelete = useCallback(
     async (purchase: PurchaseInvoice) => {
-      if (!confirm(`Delete purchase ${purchase.purchase_number}?`)) return;
+      if (!window.confirm(`Delete purchase ${purchase.purchase_number}?`)) return;
       try {
         await apiClient.deletePurchaseInvoice(purchase.id);
         showSuccess('Purchase deleted', `Purchase ${purchase.purchase_number} removed.`);
-        addAppLog({ module: 'Purchases', action: 'Delete', status: 'success', message: `Deleted ${purchase.purchase_number}` });
+        safeLog({
+          module: 'Purchases',
+          action: 'Delete',
+          status: 'success',
+          message: `Deleted ${purchase.purchase_number}`,
+        });
         refresh();
-      } catch (err: any) {
-        showError('Delete failed', err.message);
+      } catch (err: unknown) {
+        showError('Delete failed', getErrorMessage(err, 'Delete failed.'));
       }
     },
     [refresh, showSuccess, showError]
   );
 
+  /* -------------------- Duplicate: prefill create page -------------------- */
+
   const handleDuplicate = useCallback(
-    async (purchase: PurchaseInvoice) => {
-      showError('Not available', 'Duplicate feature is not yet integrated.');
+    (purchase: PurchaseInvoice) => {
+      const params = new URLSearchParams();
+      params.set('duplicate_from', String(purchase.id));
+      if (purchase.supplier_id) params.set('supplier_id', String(purchase.supplier_id));
+      if (purchase.company_id) params.set('company_id', String(purchase.company_id));
+      if (purchase.branch_id) params.set('branch_id', String(purchase.branch_id));
+      navigate(`/purchases/create?${params.toString()}`);
+      showSuccess('Duplicating', `Prefilling new purchase from ${purchase.purchase_number}.`);
     },
-    [showError]
+    [navigate, showSuccess]
   );
 
   const handleRecordPaymentTrigger = useCallback((purchase: PurchaseInvoice) => {
@@ -1283,13 +1456,13 @@ export function PurchasePage() {
   const handleRecordPaymentSubmit = async () => {
     if (!payingPurchase) return;
     const amount = parseFloat(payAmt);
-    if (isNaN(amount) || amount <= 0) {
+    if (!Number.isFinite(amount) || amount <= 0) {
       showError('Validation', 'Please enter a valid amount.');
       return;
     }
     setPaySubmitting(true);
     try {
-      const companyId = payingPurchase.company_id || (companies[0]?.id ?? 1);
+      const companyId = payingPurchase.company_id || companies[0]?.id || 1;
       await apiClient.request('POST', '/payments', {
         company_id: companyId,
         invoice_id: payingPurchase.id,
@@ -1298,14 +1471,11 @@ export function PurchasePage() {
         payment_method: payMethod.toLowerCase().replace(' ', '_'),
         status: 'completed',
         payment_direction: payDirection,
-        transaction_date: new Date().toISOString().split('T')[0],
-        bank_name: '',
-        account_number: '',
-        ledger_reference: `PAY-${payingPurchase.id}-${Date.now()}`,
+        transaction_date: getLocalToday(),
         remarks: '',
       });
-      showSuccess('Payment recorded', `₹${amount.toFixed(2)} paid.`);
-      addAppLog({
+      showSuccess('Payment recorded', `₹${amount.toFixed(2)} recorded.`);
+      safeLog({
         module: 'Purchases',
         action: 'Record Payment',
         status: 'success',
@@ -1314,356 +1484,785 @@ export function PurchasePage() {
       setShowPaymentModal(false);
       setPayingPurchase(null);
       refresh();
-    } catch (err: any) {
-      showError('Payment failed', err.message);
+    } catch (err: unknown) {
+      showError('Payment failed', getErrorMessage(err, 'Payment failed.'));
     } finally {
       setPaySubmitting(false);
     }
   };
 
-  const escapeCsvField = (value: string) => {
-    if (/[",\n\r]/.test(value)) return '"' + value.replace(/"/g, '""') + '"';
-    return value;
-  };
+  /* -------------------- Export -------------------- */
 
   const handleExport = useCallback(() => {
     if (filteredPurchases.length === 0) {
       showError('Export failed', 'No data');
       return;
     }
-    const headers = ['Purchase #', 'Supplier', 'Date', 'Total', 'Paid', 'Outstanding', 'Status', 'Payment'];
-    const rows = filteredPurchases.map(p =>
+    const headers = ['Purchase #', 'Supplier', 'Company', 'Date', 'Total', 'Paid', 'Outstanding', 'Status', 'Payment'];
+    const rows = filteredPurchases.map((p) =>
       [
         escapeCsvField(p.purchase_number),
         escapeCsvField(p.supplier?.name || ''),
-        p.purchase_date,
+        escapeCsvField(p.company?.name || ''),
+        escapeCsvField(p.purchase_date),
         safeNum(p.grand_total).toFixed(2),
         safeNum(p.paid_amount).toFixed(2),
         (safeNum(p.grand_total) - safeNum(p.paid_amount)).toFixed(2),
-        p.status,
-        p.payment_status,
+        escapeCsvField(p.status),
+        escapeCsvField(p.payment_status),
       ].join(',')
     );
     const csv = [headers.join(','), ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `purchases-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `purchases-${getLocalToday()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
     showSuccess('Export', 'File downloaded.');
   }, [filteredPurchases, showSuccess, showError]);
 
-  const columns = useMemo(
-    () => [
-      {
-        name: 'Purchase #',
-        selector: (row: PurchaseInvoice) => row.purchase_number,
-        sortable: true,
-        cell: (row: PurchaseInvoice) => (
-          <span className="font-medium text-blue-700">{row.purchase_number}</span>
-        ),
-        width: '140px',
-      },
-      {
-        name: 'Supplier',
-        selector: (row: PurchaseInvoice) => row.supplier?.name || '-',
-        cell: (row: PurchaseInvoice) => (
-          <span className="text-sm">{row.supplier?.name || '-'}</span>
-        ),
-        width: '180px',
-      },
-      {
-        name: 'Date',
-        selector: (row: PurchaseInvoice) => row.purchase_date,
-        sortable: true,
-        width: '100px',
-      },
-      {
-        name: 'Total',
-        selector: (row: PurchaseInvoice) => safeNum(row.grand_total),
-        sortable: true,
-        cell: (row: PurchaseInvoice) => (
-          <span className="font-medium">₹{safeNum(row.grand_total).toFixed(2)}</span>
-        ),
-        width: '120px',
-      },
-      {
-        name: 'Outstanding',
-        selector: (row: PurchaseInvoice) => safeNum(row.grand_total) - safeNum(row.paid_amount),
-        sortable: true,
-        cell: (row: PurchaseInvoice) => {
-          const out = safeNum(row.grand_total) - safeNum(row.paid_amount);
-          return (
-            <span className={`font-medium ${out > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-              ₹{out.toFixed(2)}
-            </span>
-          );
-        },
-        width: '120px',
-      },
-      {
-        name: 'Status',
-        selector: (row: PurchaseInvoice) => row.status,
-        cell: (row: PurchaseInvoice) => {
-          const colors: Record<string, string> = {
-            Draft: 'bg-slate-100 text-slate-600',
-            Ordered: 'bg-indigo-100 text-indigo-700',
-            Received: 'bg-cyan-100 text-cyan-700',
-            Completed: 'bg-emerald-100 text-emerald-700',
-            Cancelled: 'bg-rose-100 text-rose-700',
-          };
-          return (
-            <span
-              className={`px-2.5 py-1 rounded-full text-xs font-medium ${colors[row.status] || 'bg-slate-100'}`}
-            >
-              {row.status}
-            </span>
-          );
-        },
-        width: '120px',
-      },
-      {
-        name: 'Payment',
-        selector: (row: PurchaseInvoice) => row.payment_status,
-        cell: (row: PurchaseInvoice) => {
-          const paid = row.payment_status === 'Paid';
-          return (
-            <span
-              className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                paid ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
-              }`}
-            >
-              {row.payment_status}
-            </span>
-          );
-        },
-        width: '100px',
-      },
-      {
-        name: 'Actions',
-        cell: (row: PurchaseInvoice) => (
-          <div className="flex items-center gap-1">
-            <button
-              onClick={() => handleView(row)}
-              className="p-1.5 rounded-lg text-slate-600 hover:bg-slate-50 transition-colors"
-              title="View details"
-            >
-              <FiEye size={16} />
-            </button>
-            <ActionDropdown
-              row={row}
-              onPrint={handlePrint}
-              onRecordPayment={handleRecordPaymentTrigger}
-              onDuplicate={handleDuplicate}
-              onDelete={handleDelete}
-            />
-          </div>
-        ),
-        width: '120px',
-      },
-    ],
-    [handleView, handleDelete, handleDuplicate, handlePrint, handleRecordPaymentTrigger]
+  /* -------------------- Filter presets -------------------- */
+
+  const setDatePreset = (preset: 'today' | '7d' | '30d' | 'month' | 'all') => {
+    const today = getLocalToday();
+    if (preset === 'today') {
+      setFilterDateFrom(today);
+      setFilterDateTo(today);
+    } else if (preset === '7d') {
+      const d = new Date();
+      d.setDate(d.getDate() - 6);
+      setFilterDateFrom(d.toISOString().slice(0, 10));
+      setFilterDateTo(today);
+    } else if (preset === '30d') {
+      const d = new Date();
+      d.setDate(d.getDate() - 29);
+      setFilterDateFrom(d.toISOString().slice(0, 10));
+      setFilterDateTo(today);
+    } else if (preset === 'month') {
+      setFilterDateFrom(getMonthStart());
+      setFilterDateTo(today);
+    } else {
+      setFilterDateFrom('');
+      setFilterDateTo('');
+    }
+  };
+
+  const clearFilters = useCallback(() => {
+    setSearchInput('');
+    setSearch('');
+    setFilterStatus('all');
+    setFilterPaymentStatus('all');
+    setFilterCompanyId(undefined);
+    setFilterDateFrom(getMonthStart());
+    setFilterDateTo(getLocalToday());
+  }, []);
+
+  const activeFilterCount = [
+    search,
+    filterStatus !== 'all' ? filterStatus : undefined,
+    filterPaymentStatus !== 'all' ? filterPaymentStatus : undefined,
+    filterCompanyId,
+  ].filter(Boolean).length;
+
+  const allSelected = Boolean(
+    paginatedPurchases.length > 0 &&
+      paginatedPurchases.every((p) => selectedIds.includes(p.id))
   );
+
+  const toggleSelectAll = useCallback(() => {
+    const pageIds = paginatedPurchases.map((p) => p.id);
+    if (!pageIds.length) return;
+    if (allSelected) {
+      setSelectedIds((current) => current.filter((id) => !pageIds.includes(id)));
+    } else {
+      setSelectedIds((current) => Array.from(new Set([...current, ...pageIds])));
+    }
+  }, [allSelected, paginatedPurchases]);
+
+  const toggleSelected = useCallback((id: number) => {
+    setSelectedIds((current) =>
+      current.includes(id) ? current.filter((v) => v !== id) : [...current, id]
+    );
+  }, []);
+
+  /* -------------------- Error state -------------------- */
 
   if (error) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="bg-white p-8 rounded-xl shadow text-center max-w-md">
-          <FiAlertCircle size={48} className="mx-auto text-rose-500" />
-          <h2 className="text-xl font-bold mt-4">Failed to load purchases</h2>
-          <p className="text-slate-600 mt-2">{error}</p>
-          <button
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiAlertCircle size={24} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Failed to load purchases</h2>
+          <p className="mt-1.5 text-sm text-slate-500">{error}</p>
+          <Button
             onClick={refresh}
-            className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            className="mt-5 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800"
           >
             Try Again
-          </button>
+          </Button>
         </div>
       </div>
     );
   }
 
+  /* -------------------- Render -------------------- */
+
   return (
-    <div className="min-h-screen bg-[#f5f7fb] p-4 md:p-7 text-slate-800">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5 mb-6 rounded-3xl bg-slate-950 px-5 py-6 md:px-8 md:py-7 shadow-xl">
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" /> Purchase Management
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white md:text-3xl flex items-center gap-3">
-            <FiPackage className="text-cyan-300" /> Purchases
-          </h1>
-          <p className="text-sm text-slate-300">Procurement & supplier payments</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={refresh}
-            disabled={loading}
-            className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20 disabled:opacity-60 transition-colors"
-          >
-            <FiRefreshCw className={loading ? 'animate-spin inline mr-1' : 'inline mr-1'} size={14} /> Refresh
-          </button>
-          <button
-            onClick={handleExport}
-            className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20 transition-colors"
-          >
-            <FiDownload className="inline mr-1" size={14} /> Export
-          </button>
-          <button
-            onClick={() => setIsImportOpen(true)}
-            className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20 transition-colors"
-          >
-            <FiUpload className="inline mr-1" size={14} /> Import
-          </button>
-          <Link
-            to="/purchases/create"
-            className="rounded-xl bg-cyan-400 text-slate-950 px-3 py-2 text-sm font-medium hover:bg-cyan-300 shadow-md inline-flex items-center transition-colors"
-          >
-            <FiPlus className="mr-1" size={14} /> Create Purchase
-          </Link>
-        </div>
-      </div>
+    <>
+      <style>{`
+        @media print {
+          @page { size: A4 portrait; margin: 12mm; }
+          body * { visibility: hidden !important; }
+          #a4-print-root, #a4-print-root * { visibility: visible !important; }
+          #a4-print-root { position: absolute; left: 0; top: 0; width: 100%; }
+          .no-print { display: none !important; }
+        }
+        .animate-fadeIn { animation: fadeIn 0.2s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+      `}</style>
 
-      <div className="flex flex-col sm:flex-row gap-4 mb-6">
-        <div className="relative flex-1 max-w-md">
-          <FiSearch className="absolute left-3 top-2.5 text-slate-400" size={18} />
-          <input
-            type="text"
-            placeholder="Search by purchase #, supplier..."
-            value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
-            className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-10 pr-4 text-sm outline-none focus:border-cyan-400 focus:ring-4 focus:ring-cyan-100 transition-all duration-200"
-          />
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <FiFilter size={16} className="text-slate-500" />
-          <select
-            value={filterStatus}
-            onChange={e => setFilterStatus(e.target.value)}
-            className="w-36 text-sm rounded-xl border-slate-200 bg-white py-2 px-3 focus:ring-cyan-100"
-          >
-            <option value="all">All Status</option>
-            <option value="Draft">Draft</option>
-            <option value="Ordered">Ordered</option>
-            <option value="Received">Received</option>
-            <option value="Completed">Completed</option>
-          </select>
-          <input
-            type="month"
-            value={filterMonth}
-            onChange={e => setFilterMonth(e.target.value)}
-            className="w-44 text-sm rounded-xl border-slate-200 bg-white py-2 px-3 focus:ring-cyan-100"
-          />
-        </div>
-      </div>
+      <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
+        <div className="mx-auto w-full max-w-[1900px] space-y-5 p-3 sm:p-4 lg:space-y-6 lg:p-6">
+          {/* Hero */}
+          <section className="relative overflow-hidden rounded-2xl border border-slate-800/10 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 px-5 py-6 shadow-[0_20px_40px_-20px_rgba(15,23,42,0.45)] sm:px-7 lg:px-8">
+            <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-indigo-500/20 blur-3xl" />
+            <div className="pointer-events-none absolute -bottom-24 right-24 h-56 w-56 rounded-full bg-cyan-500/10 blur-3xl" />
 
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        {purchases ? (
-          <>
-            <StatCard icon={FiPackage} label="Total Purchases" value={summary.total} tone="blue" />
-            <StatCard icon={FiDollarSign} label="Total Amount" value={summary.totalAmount.toFixed(2)} tone="teal" prefix="₹" />
-            <StatCard icon={FiCheckCircle} label="Paid" value={summary.paidAmount.toFixed(2)} tone="emerald" prefix="₹" />
-            <StatCard icon={FiAlertCircle} label="Outstanding" value={summary.outstanding.toFixed(2)} tone="rose" prefix="₹" />
-          </>
-        ) : (
-          [...Array(4)].map((_, i) => <StatCardSkeleton key={i} />)
-        )}
-      </div>
+            <div className="relative flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+              <div className="min-w-0">
+                <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200 backdrop-blur">
+                  <FiPackage size={12} />
+                  Finance · Purchases
+                </div>
+                <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl lg:text-[32px]">
+                  Purchase workspace
+                </h1>
+                <p className="mt-1.5 max-w-2xl text-sm text-slate-300">
+                  Track supplier invoices, payments and outstanding balances in one place.
+                </p>
+              </div>
 
-      {selectedIds.length > 0 && (
-        <div className="bg-white p-3 rounded-xl shadow-sm border mb-4 flex flex-wrap items-center gap-3 animate-fadeIn">
-          <span className="text-sm font-medium text-slate-700">{selectedIds.length} selected</span>
-          <button
-            onClick={() => handleBulkStatusChange('Received')}
-            className="inline-flex items-center gap-2 rounded-lg bg-cyan-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-cyan-600 transition-colors"
-          >
-            <FiCheckCircle size={16} /> Mark Received
-          </button>
-          <button
-            onClick={handleBulkDelete}
-            className="inline-flex items-center gap-2 rounded-lg bg-rose-500 px-3 py-1.5 text-sm font-medium text-white hover:bg-rose-600 transition-colors"
-          >
-            <FiTrash2 size={16} /> Delete
-          </button>
-          <button
-            onClick={() => startTransition(() => setSelectedIds([]))}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors"
-          >
-            Clear
-          </button>
-        </div>
-      )}
-
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200">
-        <Suspense fallback={<TableSkeleton />}>
-          {loading ? (
-            <TableSkeleton />
-          ) : (
-            <ModernDataTable
-              title="Purchase Orders"
-              columns={columns}
-              data={paginatedPurchases}
-              loading={false}
-              selectable
-              selectedIds={selectedIds}
-              onSelectionChange={(ids: number[]) => startTransition(() => setSelectedIds(ids))}
-              striped
-              highlightOnHover
-              pointerOnHover
-            />
-          )}
-        </Suspense>
-        {!loading && totalPages > 1 && (
-          <div className="flex items-center justify-between px-6 py-3 border-t">
-            <span className="text-sm text-slate-600">
-              Page {currentPage} of {totalPages}
-            </span>
-            <div className="flex gap-1">
-              <button
-                onClick={() => startTransition(() => setCurrentPage(1))}
-                disabled={currentPage === 1}
-                className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40"
-              >
-                ««
-              </button>
-              <button
-                onClick={() => startTransition(() => setCurrentPage(p => Math.max(1, p - 1)))}
-                disabled={currentPage === 1}
-                className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40"
-              >
-                ‹
-              </button>
-              <span className="px-3 py-1 text-sm font-medium">
-                {currentPage}/{totalPages}
-              </span>
-              <button
-                onClick={() =>
-                  startTransition(() => setCurrentPage(p => Math.min(totalPages, p + 1)))
-                }
-                disabled={currentPage === totalPages}
-                className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40"
-              >
-                ›
-              </button>
-              <button
-                onClick={() => startTransition(() => setCurrentPage(totalPages))}
-                disabled={currentPage === totalPages}
-                className="px-3 py-1 text-sm rounded-lg border disabled:opacity-40"
-              >
-                »»
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="outline"
+                  onClick={handleExport}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                >
+                  <FiDownload className="mr-2" size={14} />
+                  Export
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => setIsImportOpen(true)}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                >
+                  <FiUpload className="mr-2" size={14} />
+                  Import
+                </Button>
+                <Button
+                  onClick={() => navigate('/purchases/create')}
+                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                >
+                  <FiPlus className="mr-2" size={14} />
+                  New purchase
+                </Button>
+              </div>
             </div>
-          </div>
-        )}
+          </section>
+
+          {/* KPI */}
+          <section className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
+            {purchases ? (
+              <>
+                <StatCard
+                  icon={FiPackage}
+                  label="Total purchases"
+                  value={summary.total.toLocaleString('en-IN')}
+                  accent="indigo"
+                />
+                <StatCard
+                  icon={FiTrendingUp}
+                  label="Total amount"
+                  value={summary.totalAmount.toFixed(2)}
+                  prefix="₹"
+                  accent="violet"
+                />
+                <StatCard
+                  icon={FiCheckCircle}
+                  label="Paid"
+                  value={summary.paidAmount.toFixed(2)}
+                  prefix="₹"
+                  accent="emerald"
+                />
+                <StatCard
+                  icon={FiTrendingDown}
+                  label="Outstanding"
+                  value={summary.outstanding.toFixed(2)}
+                  prefix="₹"
+                  accent="rose"
+                />
+              </>
+            ) : (
+              Array.from({ length: 4 }).map((_, i) => <StatCardSkeleton key={i} />)
+            )}
+          </section>
+
+          {/* Filters */}
+          <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <CardHeader className="flex flex-row items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-5">
+              <div className="flex items-center gap-2.5">
+                <div className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600 ring-1 ring-indigo-500/10">
+                  <FiFilter size={14} />
+                </div>
+                <div>
+                  <CardTitle className="text-sm font-semibold text-slate-800">Filters</CardTitle>
+                  <CardDescription className="text-[11px] text-slate-500">
+                    {activeFilterCount > 0
+                      ? `${activeFilterCount} active filter${activeFilterCount > 1 ? 's' : ''}`
+                      : 'Refine purchases by scope, payment and date'}
+                  </CardDescription>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {(activeFilterCount > 0 ||
+                  filterDateFrom !== getMonthStart() ||
+                  filterDateTo !== getLocalToday()) && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-9 rounded-lg text-slate-500 hover:text-slate-800"
+                    onClick={clearFilters}
+                  >
+                    <FiX className="mr-1.5" size={14} />
+                    Reset
+                  </Button>
+                )}
+              </div>
+            </CardHeader>
+
+            <CardContent className="bg-white p-4 sm:p-5">
+              {/* Row 1: search + selects */}
+              <div className="grid gap-3 lg:grid-cols-12">
+                <div className="relative lg:col-span-4">
+                  <FiSearch
+                    className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                    size={16}
+                  />
+                  <Input
+                    value={searchInput}
+                    onChange={(e) => setSearchInput(e.target.value)}
+                    className="h-10 rounded-xl border-slate-200 pl-10 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
+                    placeholder="Search purchase #, supplier, status…"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+
+                <div className="lg:col-span-3">
+                  <div className="relative">
+                    <select
+                      aria-label="Company"
+                      value={filterCompanyId ? String(filterCompanyId) : 'all'}
+                      onChange={(e) =>
+                        setFilterCompanyId(e.target.value === 'all' ? undefined : Number(e.target.value))
+                      }
+                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                    >
+                      <option value="all">All companies</option>
+                      {companies.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                    <FiChevronDown
+                      className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                      size={14}
+                    />
+                  </div>
+                </div>
+
+                <div className="lg:col-span-2">
+                  <div className="relative">
+                    <select
+                      aria-label="Purchase status"
+                      value={filterStatus}
+                      onChange={(e) => setFilterStatus(e.target.value)}
+                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                    >
+                      {STATUS_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    <FiChevronDown
+                      className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                      size={14}
+                    />
+                  </div>
+                </div>
+
+                <div className="lg:col-span-3">
+                  <div className="relative">
+                    <select
+                      aria-label="Payment status"
+                      value={filterPaymentStatus}
+                      onChange={(e) => setFilterPaymentStatus(e.target.value)}
+                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                    >
+                      {PAYMENT_STATUS_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    <FiChevronDown
+                      className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                      size={14}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Row 2: date range + presets */}
+              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-12">
+                <div className="flex min-w-0 flex-col gap-2 sm:flex-row lg:col-span-5">
+                  <div className="relative min-w-0 flex-1">
+                    <FiCalendar
+                      className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                      size={14}
+                    />
+                    <Input
+                      type="date"
+                      aria-label="Purchase date from"
+                      value={filterDateFrom}
+                      onChange={(e) => setFilterDateFrom(e.target.value)}
+                      className="h-10 rounded-xl border-slate-200 pl-9 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
+                    />
+                  </div>
+                  <div className="hidden items-center justify-center px-1 text-slate-300 sm:flex">→</div>
+                  <div className="relative min-w-0 flex-1">
+                    <FiCalendar
+                      className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                      size={14}
+                    />
+                    <Input
+                      type="date"
+                      aria-label="Purchase date to"
+                      value={filterDateTo}
+                      min={filterDateFrom || undefined}
+                      onChange={(e) => setFilterDateTo(e.target.value)}
+                      className="h-10 rounded-xl border-slate-200 pl-9 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 lg:col-span-7 lg:justify-end">
+                  <div className="flex items-center rounded-xl border border-slate-200 bg-white p-0.5 shadow-sm">
+                    {[
+                      { key: 'today', label: 'Today' },
+                      { key: '7d', label: '7 days' },
+                      { key: '30d', label: '30 days' },
+                      { key: 'month', label: 'This month' },
+                      { key: 'all', label: 'All' },
+                    ].map((preset) => {
+                      const isAll = preset.key === 'all';
+                      const isActive =
+                        (!isAll && filterDateFrom && filterDateTo) ||
+                        (isAll && !filterDateFrom && !filterDateTo);
+                      return (
+                        <button
+                          key={preset.key}
+                          type="button"
+                          onClick={() => setDatePreset(preset.key as 'today' | '7d' | '30d' | 'month' | 'all')}
+                          className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                            isActive
+                              ? 'bg-slate-900 text-white shadow-sm'
+                              : 'text-slate-600 hover:bg-slate-100'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Bulk toolbar */}
+          {selectedIds.length > 0 && (
+            <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
+              <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
+                <div className="mr-1 flex items-center gap-2 rounded-lg bg-indigo-50 px-2.5 py-1 text-indigo-700 ring-1 ring-indigo-500/10">
+                  <span className="text-sm font-bold">{selectedIds.length}</span>
+                  <span className="text-xs font-medium">selected</span>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9 rounded-lg"
+                  onClick={() => handleBulkStatusChange('Received')}
+                >
+                  <FiCheckCircle className="mr-1.5 text-emerald-600" size={14} /> Mark received
+                </Button>
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  className="h-9 rounded-lg bg-rose-600 hover:bg-rose-700"
+                  onClick={handleBulkDelete}
+                >
+                  <FiTrash2 className="mr-1.5" size={14} /> Delete
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="ml-auto h-9 rounded-lg text-slate-500 hover:text-slate-800"
+                  onClick={() => startTransition(() => setSelectedIds([]))}
+                >
+                  Clear
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Table card */}
+          <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <CardHeader className="flex flex-col gap-3 border-b border-slate-100 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+              <div className="flex items-center gap-2.5">
+                <div className="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-slate-600">
+                  <FiPackage size={14} />
+                </div>
+                <div>
+                  <CardTitle className="text-sm font-semibold text-slate-800">Purchase orders</CardTitle>
+                  <CardDescription className="text-[11px] text-slate-500">
+                    {loading
+                      ? 'Loading purchases…'
+                      : `${filteredPurchases.length.toLocaleString('en-IN')} record${
+                          filteredPurchases.length === 1 ? '' : 's'
+                        }`}
+                    {filterDateFrom && filterDateTo && (
+                      <>
+                        {' · '}
+                        {formatDate(filterDateFrom)} – {formatDate(filterDateTo)}
+                      </>
+                    )}
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+
+            <div className="overflow-x-auto">
+              <Table className="min-w-[1180px]">
+                <TableHeader>
+                  <TableRow className="border-slate-100 bg-slate-50/70 hover:bg-slate-50/70">
+                    <TableHead className="w-11 px-3">
+                      <input
+                        aria-label="Select all purchases on page"
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={(event) => {
+                          event.stopPropagation();
+                          toggleSelectAll();
+                        }}
+                        onClick={(event) => event.stopPropagation()}
+                        className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                      />
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>Purchase #</TableHeadLabel>
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>Supplier</TableHeadLabel>
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>Company</TableHeadLabel>
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>Date</TableHeadLabel>
+                    </TableHead>
+                    <TableHead className="text-right">
+                      <TableHeadLabel align="right">Total</TableHeadLabel>
+                    </TableHead>
+                    <TableHead className="text-right">
+                      <TableHeadLabel align="right">Outstanding</TableHeadLabel>
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>Status</TableHeadLabel>
+                    </TableHead>
+                    <TableHead>
+                      <TableHeadLabel>Payment</TableHeadLabel>
+                    </TableHead>
+                    <TableHead className="w-12" />
+                  </TableRow>
+                </TableHeader>
+
+                <TableBody>
+                  {loading &&
+                    Array.from({ length: 8 }).map((_, index) => (
+                      <TableRow key={`skeleton-${index}`} className="border-slate-100">
+                        {Array.from({ length: TABLE_COLUMN_COUNT }).map((__, cellIndex) => (
+                          <TableCell key={cellIndex}>
+                            <div className="h-4 animate-pulse rounded bg-slate-100" />
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    ))}
+
+                  {!loading &&
+                    paginatedPurchases.map((purchase) => {
+                      const outstanding = safeNum(purchase.grand_total) - safeNum(purchase.paid_amount);
+                      const selected = selectedIds.includes(purchase.id);
+                      const statusColors: Record<string, string> = {
+                        Draft: 'border-slate-200 bg-slate-50 text-slate-600',
+                        Ordered: 'border-indigo-200/70 bg-indigo-50 text-indigo-700',
+                        Received: 'border-cyan-200/70 bg-cyan-50 text-cyan-700',
+                        Completed: 'border-emerald-200/70 bg-emerald-50 text-emerald-700',
+                        Cancelled: 'border-rose-200/70 bg-rose-50 text-rose-700',
+                      };
+                      const paymentColors: Record<string, string> = {
+                        Paid: 'border-emerald-200/70 bg-emerald-50 text-emerald-700',
+                        Partial: 'border-sky-200/70 bg-sky-50 text-sky-700',
+                        Unpaid: 'border-rose-200/70 bg-rose-50 text-rose-700',
+                      };
+                      return (
+                        <TableRow
+                          key={purchase.id}
+                          data-state={selected ? 'selected' : undefined}
+                          className={`cursor-pointer border-slate-100 transition-colors hover:bg-slate-50/70 ${
+                            selected ? 'bg-indigo-50/40 hover:bg-indigo-50/60' : ''
+                          }`}
+                          onClick={() => handleView(purchase)}
+                        >
+                          <TableCell className="px-3">
+                            <input
+                              aria-label={`Select ${purchase.purchase_number}`}
+                              type="checkbox"
+                              checked={selected}
+                              onChange={(event) => {
+                                event.stopPropagation();
+                                toggleSelected(purchase.id);
+                              }}
+                              onClick={(event) => event.stopPropagation()}
+                              className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                            />
+                          </TableCell>
+
+                          <TableCell>
+                            <div className="min-w-[140px]">
+                              <Link
+                                to={`/purchases/${purchase.id}`}
+                                onClick={(event) => event.stopPropagation()}
+                                className="text-sm font-semibold text-slate-900 transition hover:text-indigo-600"
+                              >
+                                {purchase.purchase_number}
+                              </Link>
+                              <p className="mt-0.5 text-[11px] font-medium text-slate-400">
+                                #{purchase.id}
+                              </p>
+                            </div>
+                          </TableCell>
+
+                          <TableCell>
+                            <div className="min-w-[180px]">
+                              <p className="text-sm font-medium text-slate-800">
+                                {purchase.supplier?.name || '—'}
+                              </p>
+                              {purchase.supplier?.email && (
+                                <p className="truncate text-[11px] text-slate-500">
+                                  {purchase.supplier.email}
+                                </p>
+                              )}
+                            </div>
+                          </TableCell>
+
+                          <TableCell>
+                            <div className="flex min-w-[140px] items-center gap-1.5">
+                              {purchase.company?.name ? (
+                                <>
+                                  <span className="grid h-6 w-6 place-items-center rounded-md bg-indigo-50 text-indigo-600">
+                                    <FiHome size={11} />
+                                  </span>
+                                  <span className="text-sm text-slate-700">
+                                    {purchase.company.name}
+                                  </span>
+                                </>
+                              ) : (
+                                <span className="text-sm text-slate-400">—</span>
+                              )}
+                            </div>
+                          </TableCell>
+
+                          <TableCell className="whitespace-nowrap text-sm text-slate-600">
+                            {formatDate(purchase.purchase_date)}
+                          </TableCell>
+
+                          <TableCell className="whitespace-nowrap text-right text-sm font-semibold tabular-nums text-slate-900">
+                            {formatCurrency(purchase.grand_total)}
+                          </TableCell>
+
+                          <TableCell className="whitespace-nowrap text-right">
+                            <span
+                              className={`inline-flex items-center rounded-lg px-2 py-1 text-sm font-semibold tabular-nums ${
+                                outstanding > 0
+                                  ? 'bg-rose-50 text-rose-600'
+                                  : 'bg-emerald-50 text-emerald-600'
+                              }`}
+                            >
+                              {formatCurrency(outstanding)}
+                            </span>
+                          </TableCell>
+
+                          <TableCell>
+                            <Badge
+                              variant="outline"
+                              className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
+                                statusColors[purchase.status] ||
+                                'border-slate-200 bg-slate-50 text-slate-600'
+                              }`}
+                            >
+                              {purchase.status || '—'}
+                            </Badge>
+                          </TableCell>
+
+                          <TableCell>
+                            <Badge
+                              variant="outline"
+                              className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
+                                paymentColors[purchase.payment_status] ||
+                                'border-slate-200 bg-slate-50 text-slate-600'
+                              }`}
+                            >
+                              {purchase.payment_status || '—'}
+                            </Badge>
+                          </TableCell>
+
+                          <TableCell
+                            className="text-right"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                onClick={() => handleView(purchase)}
+                                className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                                title="View details"
+                              >
+                                <FiEye size={16} />
+                              </button>
+                              <ActionDropdown
+                                row={purchase}
+                                onPrint={handlePrint}
+                                onRecordPayment={handleRecordPaymentTrigger}
+                                onDuplicate={handleDuplicate}
+                                onDelete={handleDelete}
+                              />
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+
+                  {!loading && !paginatedPurchases.length && (
+                    <TableRow>
+                      <TableCell colSpan={TABLE_COLUMN_COUNT} className="py-20 text-center">
+                        <div className="mx-auto max-w-md px-4">
+                          <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 ring-1 ring-slate-200/70">
+                            <FiSearch className="h-6 w-6 text-slate-400" />
+                          </div>
+                          <p className="mt-4 text-base font-semibold text-slate-800">No purchases found</p>
+                          <p className="mt-1 text-sm text-slate-500">
+                            Try adjusting the date range, company, payment status, search term, or status.
+                          </p>
+                          <Button
+                            className="mt-5 rounded-lg"
+                            variant="outline"
+                            onClick={clearFilters}
+                          >
+                            <FiFilter className="mr-2" size={14} />
+                            Reset filters
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+
+            {/* Pagination */}
+            {!loading && totalPages > 1 && (
+              <div className="flex flex-col gap-3 border-t border-slate-100 bg-white px-4 py-3.5 sm:px-5 md:flex-row md:items-center md:justify-between">
+                <p className="text-xs text-slate-500 sm:text-[13px]">
+                  Page <span className="font-semibold text-slate-700">{currentPage}</span> of{' '}
+                  <span className="font-semibold text-slate-700">{totalPages}</span>
+                </p>
+                <div className="flex items-center justify-between gap-1.5 sm:justify-end">
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-9 w-9 rounded-lg"
+                    disabled={currentPage === 1}
+                    onClick={() => startTransition(() => setCurrentPage(1))}
+                    aria-label="First page"
+                  >
+                    «
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-9 w-9 rounded-lg"
+                    disabled={currentPage === 1}
+                    onClick={() => startTransition(() => setCurrentPage((p) => Math.max(1, p - 1)))}
+                    aria-label="Previous page"
+                  >
+                    ‹
+                  </Button>
+                  <div className="mx-1 min-w-[76px] rounded-lg bg-slate-100 px-3 py-1.5 text-center text-xs font-semibold text-slate-700">
+                    {currentPage} / {totalPages}
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-9 w-9 rounded-lg"
+                    disabled={currentPage === totalPages}
+                    onClick={() =>
+                      startTransition(() => setCurrentPage((p) => Math.min(totalPages, p + 1)))
+                    }
+                    aria-label="Next page"
+                  >
+                    ›
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-9 w-9 rounded-lg"
+                    disabled={currentPage === totalPages}
+                    onClick={() => startTransition(() => setCurrentPage(totalPages))}
+                    aria-label="Last page"
+                  >
+                    »
+                  </Button>
+                </div>
+              </div>
+            )}
+          </Card>
+        </div>
       </div>
 
+      {/* Detail offcanvas */}
       {isViewPanelOpen && (
         <Suspense
           fallback={
-            <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
-              <div className="bg-white p-8 rounded-2xl">Loading details...</div>
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
+              <div className="rounded-2xl bg-white p-8 text-sm text-slate-600 shadow-xl">
+                Loading details…
+              </div>
             </div>
           }
         >
@@ -1674,27 +2273,108 @@ export function PurchasePage() {
           >
             {viewingPurchase && (
               <div className="space-y-4">
-                <div>
-                  <h3 className="text-lg font-semibold">{viewingPurchase.purchase_number}</h3>
-                  <p className="text-sm text-slate-500">{viewingPurchase.supplier?.name}</p>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-bold tracking-tight text-slate-900">
+                      {viewingPurchase.purchase_number}
+                    </h3>
+                    <p className="text-sm text-slate-500">{viewingPurchase.supplier?.name || '—'}</p>
+                  </div>
+                  <Badge
+                    variant="outline"
+                    className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
+                      viewingPurchase.payment_status === 'Paid'
+                        ? 'border-emerald-200/70 bg-emerald-50 text-emerald-700'
+                        : viewingPurchase.payment_status === 'Partial'
+                          ? 'border-sky-200/70 bg-sky-50 text-sky-700'
+                          : 'border-rose-200/70 bg-rose-50 text-rose-700'
+                    }`}
+                  >
+                    {viewingPurchase.payment_status || '—'}
+                  </Badge>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <p className="text-xs text-slate-500">Date</p>
-                    <p>{viewingPurchase.purchase_date}</p>
+
+                <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                      Date
+                    </span>
+                    <span className="text-xs font-semibold text-slate-800">
+                      {formatDate(viewingPurchase.purchase_date)}
+                    </span>
                   </div>
-                  <div>
-                    <p className="text-xs text-slate-500">Due Date</p>
-                    <p>{viewingPurchase.due_date || '-'}</p>
+                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                      Due date
+                    </span>
+                    <span className="text-xs font-semibold text-slate-800">
+                      {formatDate(viewingPurchase.due_date)}
+                    </span>
                   </div>
-                  <div>
-                    <p className="text-xs text-slate-500">Grand Total</p>
-                    <p className="font-bold">₹{safeNum(viewingPurchase.grand_total).toFixed(2)}</p>
+                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                      Status
+                    </span>
+                    <span className="text-xs font-semibold text-slate-800">
+                      {viewingPurchase.status}
+                    </span>
                   </div>
-                  <div>
-                    <p className="text-xs text-slate-500">Paid</p>
-                    <p>₹{safeNum(viewingPurchase.paid_amount).toFixed(2)}</p>
+                  <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                      Warehouse
+                    </span>
+                    <span className="text-xs font-semibold text-slate-800">
+                      {viewingPurchase.warehouse || '—'}
+                    </span>
                   </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-slate-500">
+                      Total
+                    </p>
+                    <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">
+                      {formatCurrency(viewingPurchase.grand_total)}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-emerald-200/70 bg-emerald-50/60 p-2.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-emerald-700/80">
+                      Paid
+                    </p>
+                    <p className="mt-0.5 text-sm font-bold tabular-nums text-emerald-700">
+                      {formatCurrency(viewingPurchase.paid_amount)}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-rose-200/70 bg-rose-50/60 p-2.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-rose-700/80">
+                      Due
+                    </p>
+                    <p className="mt-0.5 text-sm font-bold tabular-nums text-rose-600">
+                      {formatCurrency(
+                        safeNum(viewingPurchase.grand_total) - safeNum(viewingPurchase.paid_amount)
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <Button
+                    size="sm"
+                    className="h-9 rounded-xl bg-slate-900 text-xs hover:bg-slate-800"
+                    onClick={() => navigate(`/purchases/${viewingPurchase.id}`)}
+                  >
+                    Open full purchase
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-9 rounded-xl text-xs"
+                    onClick={() => handlePrint(viewingPurchase)}
+                  >
+                    <FiPrinter className="mr-1.5" size={14} />
+                    Print (A4)
+                  </Button>
                 </div>
               </div>
             )}
@@ -1702,71 +2382,127 @@ export function PurchasePage() {
         </Suspense>
       )}
 
+      {/* Payment modal */}
       {showPaymentModal && payingPurchase && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
-            <h3 className="text-lg font-semibold mb-4">Record Payment</h3>
-            <p className="text-sm mb-4">
-              For {payingPurchase.purchase_number} - {payingPurchase.supplier?.name}
-            </p>
-            <div className="space-y-3">
-              <input
-                type="number"
-                value={payAmt}
-                onChange={e => setPayAmt(e.target.value)}
-                placeholder="Amount"
-                className="w-full rounded-lg border px-3 py-2"
-              />
-              <select
-                value={payMethod}
-                onChange={e => setPayMethod(e.target.value)}
-                className="w-full rounded-lg border px-3 py-2"
-              >
-                <option>Cash</option>
-                <option>Bank Transfer</option>
-                <option>Cheque</option>
-                <option>UPI</option>
-              </select>
-              <select
-                value={payDirection}
-                onChange={e => setPayDirection(e.target.value as 'inward' | 'outward')}
-                className="w-full rounded-lg border px-3 py-2"
-              >
-                <option value="outward">Outward (Payment to Supplier)</option>
-                <option value="inward">Inward (Refund/Receipt)</option>
-              </select>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm"
+            onClick={() => !paySubmitting && setShowPaymentModal(false)}
+          />
+          <div className="animate-fadeIn relative w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+            <div className="mb-5 flex items-center gap-3">
+              <div className="grid h-10 w-10 place-items-center rounded-xl bg-violet-50 text-violet-600 ring-1 ring-violet-500/10">
+                <FiCreditCard size={18} />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Record payment</h3>
+                <p className="text-xs text-slate-500">
+                  {payingPurchase.purchase_number} · {payingPurchase.supplier?.name}
+                </p>
+              </div>
             </div>
-            <div className="flex justify-end gap-2 mt-4">
-              <button
+
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Amount
+                </label>
+                <Input
+                  type="number"
+                  value={payAmt}
+                  onChange={(e) => setPayAmt(e.target.value)}
+                  placeholder="0.00"
+                  className="h-10 rounded-xl border-slate-200 text-sm font-medium focus-visible:ring-4 focus-visible:ring-indigo-500/10"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Method
+                </label>
+                <div className="relative">
+                  <select
+                    value={payMethod}
+                    onChange={(e) => setPayMethod(e.target.value)}
+                    className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                  >
+                    <option>Cash</option>
+                    <option>Bank Transfer</option>
+                    <option>Cheque</option>
+                    <option>UPI</option>
+                  </select>
+                  <FiChevronDown
+                    className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                    size={14}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Direction
+                </label>
+                <div className="relative">
+                  <select
+                    value={payDirection}
+                    onChange={(e) => setPayDirection(e.target.value as 'inward' | 'outward')}
+                    className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                  >
+                    <option value="outward">Outward (payment to supplier)</option>
+                    <option value="inward">Inward (refund / receipt)</option>
+                  </select>
+                  <FiChevronDown
+                    className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                    size={14}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <Button
+                variant="outline"
                 onClick={() => setShowPaymentModal(false)}
                 disabled={paySubmitting}
-                className="px-4 py-2 rounded-lg border text-slate-600 hover:bg-slate-50 disabled:opacity-60 transition-colors"
+                className="h-10 rounded-xl"
               >
                 Cancel
-              </button>
-              <button
+              </Button>
+              <Button
                 onClick={handleRecordPaymentSubmit}
                 disabled={paySubmitting}
-                className="px-4 py-2 rounded-lg bg-purple-600 text-white font-medium hover:bg-purple-700 disabled:opacity-60 transition-colors flex items-center gap-2"
+                className="h-10 rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
               >
-                {paySubmitting && <FiRefreshCw className="animate-spin" size={14} />}
-                Save Payment
-              </button>
+                {paySubmitting && <FiPackage className="mr-2 animate-spin" size={14} />}
+                Save payment
+              </Button>
             </div>
           </div>
         </div>
       )}
 
+      {/* ✅ FIX: normalize all nullable fields on the invoice before passing to
+          <InvoicePrint />. `InvoicePrint`'s InvoiceItem declares a non-null
+          `product_name?: string` and `product?: { name: string; ... }`, and its
+          Invoice declares `customer?: Customer` (not `Supplier`), so we:
+            1. cast `supplier` → `customer`
+            2. coerce `product_name` to a plain string per item
+            3. cast the entire object through `unknown` to
+               `React.ComponentProps<typeof InvoicePrint>['invoice']` so any
+               remaining structural mismatch is accepted without further churn. */}
       {printInvoice && (
         <InvoicePrint
-          invoice={{
-            ...printInvoice,
-            invoice_no: printInvoice.purchase_number,
-            customer: printInvoice.supplier,
-            total_amount: printInvoice.grand_total,
-            tax_amount: 0,
-            items: printInvoice.items ?? [],
-          }}
+          invoice={
+            {
+              ...printInvoice,
+              invoice_no: printInvoice.purchase_number,
+              customer: printInvoice.supplier ?? undefined,
+              total_amount: printInvoice.grand_total,
+              tax_amount: 0,
+              items: (printInvoice.items ?? []).map((item) => ({
+                ...item,
+                product_name: item.product_name ?? 'Item',
+              })),
+            } as unknown as React.ComponentProps<typeof InvoicePrint>['invoice']
+          }
           onReady={() => {}}
         />
       )}
@@ -1776,16 +2512,8 @@ export function PurchasePage() {
         onClose={() => setIsImportOpen(false)}
         onImported={refresh}
       />
-
-      <style>{`
-        .animate-fadeIn { animation: fadeIn 0.3s ease-out; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-        .rdt_TableHeader .search-container,
-        .rdt_TableHeader input[type="text"] { display: none !important; }
-        .rdt_TableHeader > div:last-child { display: none !important; }
-        .rdt_TableCol:first-child,
-        .rdt_TableCell:first-child { display: none !important; }
-      `}</style>
-    </div>
+    </>
   );
 }
+
+export default PurchasePage;
