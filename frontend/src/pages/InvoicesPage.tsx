@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Link, useSearchParams, useNavigate } from 'react-router-dom';
 import {
   AlertCircle,
@@ -176,6 +177,16 @@ const MENU_HEIGHT = 168;
 const MENU_MARGIN = 8;
 const UNWRAP_DEPTH = 3;
 const TABLE_COLUMN_COUNT = 9;
+
+/**
+ * Aggregate-fetch tuning. The KPI cards pull every page of the current
+ * filtered set so the totals reflect the whole filter — not just the
+ * visible page. The caps below protect against runaway requests.
+ */
+const TOTALS_BATCH_SIZE = 500;      // rows requested per page during the sweep
+const TOTALS_MAX_PAGES = 40;        // hard cap on pages fetched (40 × 500 = 20k)
+const TOTALS_PARALLEL = 4;          // concurrent page requests
+const TOTALS_DEBOUNCE_MS = 120;     // coalesce rapid filter changes
 
 /** Shared class for every table header cell so all columns match exactly. */
 const TABLE_HEAD_CLASS =
@@ -365,6 +376,21 @@ function normalizePaginated(
   };
 }
 
+/** Aggregate totals across a set of invoices — used for KPI cards. */
+function summarizeInvoices(rows: Invoice[]): InvoiceSummary {
+  const summary: InvoiceSummary = { ...EMPTY_SUMMARY, total: rows.length };
+  for (const invoice of rows) {
+    summary.total_amount += toNumber(invoice.total_amount);
+    summary.received_amount += getReceived(invoice);
+    summary.outstanding_amount += getOutstanding(invoice);
+    summary.tax_amount += toNumber(invoice.tax_amount);
+    const payment = getPaymentStatus(invoice);
+    if (payment === 'overdue') summary.overdue += 1;
+    else if (payment === 'partial') summary.partial += 1;
+  }
+  return summary;
+}
+
 /* ------------------------------------------------------------------ */
 /* Presentational bits                                                 */
 /* ------------------------------------------------------------------ */
@@ -464,12 +490,14 @@ function KpiCard({
   icon: Icon,
   accent = 'indigo',
   hint,
+  updating,
 }: {
   title: string;
   value: string;
   icon: React.ElementType;
   accent?: 'indigo' | 'emerald' | 'rose' | 'amber' | 'violet';
   hint?: string;
+  updating?: boolean;
 }) {
   const accents: Record<string, { ring: string; icon: string; bg: string }> = {
     indigo: { ring: 'ring-indigo-500/10', icon: 'text-indigo-600', bg: 'bg-indigo-50' },
@@ -484,7 +512,12 @@ function KpiCard({
     <div className="group relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-transparent transition-all duration-200 hover:-translate-y-0.5 hover:border-slate-300/80 hover:shadow-[0_8px_24px_-12px_rgba(15,23,42,0.15)]">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">{title}</p>
+          <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+            {title}
+            {updating && (
+              <span className="inline-flex h-3 w-3 animate-spin items-center justify-center rounded-full border border-slate-300 border-t-transparent" />
+            )}
+          </p>
           <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">{value}</p>
           {hint && <p className="mt-1.5 text-xs text-slate-500">{hint}</p>}
         </div>
@@ -534,6 +567,14 @@ function NativeSelect({
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* RowActions                                                          */
+/*                                                                     */
+/* The dropdown is portal-rendered. The outside-click handler checks    */
+/* BOTH the trigger and the menu; without that, the first mousedown on  */
+/* a menu item unmounts the menu before its click handler can run.      */
+/* ------------------------------------------------------------------ */
+
 function RowActions({
   invoice,
   onView,
@@ -552,6 +593,7 @@ function RowActions({
   setOpenId: (id: number | null) => void;
 }) {
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
   const isOpen = openId === invoice.id;
 
@@ -570,7 +612,7 @@ function RowActions({
         rect.bottom + MENU_HEIGHT <= window.innerHeight - MENU_MARGIN
           ? rect.bottom + 4
           : Math.max(MENU_MARGIN, rect.top - MENU_HEIGHT - 4);
-      setMenuStyle({ position: 'fixed', left, top, width: MENU_WIDTH, zIndex: 1000 });
+      setMenuStyle({ position: 'fixed', left, top, width: MENU_WIDTH, zIndex: 9999 });
     }
     setOpenId(invoice.id);
   }, [invoice.id, isOpen, setOpenId]);
@@ -579,7 +621,9 @@ function RowActions({
     if (!isOpen) return;
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (buttonRef.current && !buttonRef.current.contains(target)) onClose();
+      const inButton = buttonRef.current?.contains(target) ?? false;
+      const inMenu = menuRef.current?.contains(target) ?? false;
+      if (!inButton && !inMenu) onClose();
     };
     const onScrollOrResize = () => onClose();
 
@@ -609,60 +653,64 @@ function RowActions({
         <MoreHorizontal className="h-4 w-4" />
       </button>
 
-      {isOpen && (
-        <div
-          role="menu"
-          style={menuStyle}
-          className="overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10"
-        >
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setOpenId(null);
-              onView(invoice);
-            }}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
+      {isOpen &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="menu"
+            style={menuStyle}
+            onClick={(event) => event.stopPropagation()}
+            className="overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10"
           >
-            <Eye className="h-4 w-4 text-slate-400" />
-            View invoice
-          </button>
-          <Link
-            to={`/invoices/${invoice.id}/edit`}
-            role="menuitem"
-            onClick={() => setOpenId(null)}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 transition hover:bg-slate-50"
-          >
-            <FileText className="h-4 w-4 text-slate-400" />
-            Edit invoice
-          </Link>
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setOpenId(null);
-              onPrint(invoice);
-            }}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
-          >
-            <Download className="h-4 w-4 text-slate-400" />
-            Print invoice
-          </button>
-          <Separator className="my-1" />
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              setOpenId(null);
-              onDelete(invoice);
-            }}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-rose-600 transition hover:bg-rose-50"
-          >
-            <Trash2 className="h-4 w-4" />
-            Delete invoice
-          </button>
-        </div>
-      )}
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpenId(null);
+                onView(invoice);
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
+            >
+              <Eye className="h-4 w-4 text-slate-400" />
+              View invoice
+            </button>
+            <Link
+              to={`/invoices/${invoice.id}/edit`}
+              role="menuitem"
+              onClick={() => setOpenId(null)}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 transition hover:bg-slate-50"
+            >
+              <FileText className="h-4 w-4 text-slate-400" />
+              Edit invoice
+            </Link>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpenId(null);
+                onPrint(invoice);
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
+            >
+              <Download className="h-4 w-4 text-slate-400" />
+              Print invoice
+            </button>
+            <Separator className="my-1" />
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpenId(null);
+                onDelete(invoice);
+              }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-rose-600 transition hover:bg-rose-50"
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete invoice
+            </button>
+          </div>,
+          document.body,
+        )}
     </>
   );
 }
@@ -691,8 +739,17 @@ export function InvoicesPage() {
   const [actionMenuId, setActionMenuId] = useState<number | null>(null);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
+  /**
+   * Aggregate totals for the entire filtered set (not just the visible page).
+   * Fetched in the background whenever the filter signature changes.
+   */
+  const [totals, setTotals] = useState<InvoiceSummary | null>(null);
+  const [totalsLoading, setTotalsLoading] = useState(false);
+  const [totalsCapped, setTotalsCapped] = useState(false);
+
   const dateInitializedRef = useRef(false);
   const invoicesRequestIdRef = useRef(0);
+  const totalsRequestIdRef = useRef(0);
 
   /* -------------------- URL state -------------------- */
 
@@ -803,7 +860,7 @@ export function InvoicesPage() {
     };
   }, [companyId, branchId, updateParams, showError]);
 
-  /* -------------------- Query + loader -------------------- */
+  /* -------------------- Query + page loader -------------------- */
 
   const query: InvoiceQuery = useMemo(
     () => ({
@@ -849,23 +906,112 @@ export function InvoicesPage() {
     [],
   );
 
-  /* -------------------- Summary computed from current page -------------------- */
+  /* -------------------- Aggregate totals (whole filtered set) -------------------- */
 
-  const visibleSummary = useMemo<InvoiceSummary>(() => {
+  /**
+   * Fetches every page of the currently filtered result set and computes the
+   * KPI totals. Runs only when the filter signature changes (pagination and
+   * sorting do NOT retrigger it). Includes a per-request debounce and a hard
+   * cap on total pages to keep large datasets from spamming the server.
+   */
+  useEffect(() => {
+    const requestId = ++totalsRequestIdRef.current;
+    let cancelled = false;
+
+    setTotalsLoading(true);
+
+    const timer = window.setTimeout(async () => {
+      const filters = {
+        search: search || undefined,
+        company_id: companyId,
+        branch_id: branchId,
+        status: invoiceStatus !== 'all' ? invoiceStatus : undefined,
+        payment_state: paymentState !== 'all' ? paymentState : undefined,
+        date_from: dateFrom || undefined,
+        date_to: dateTo || undefined,
+      };
+
+      try {
+        // First page reveals how many pages we need.
+        const firstResponse = await apiClient.getInvoices({
+          ...filters,
+          page: 1,
+          per_page: TOTALS_BATCH_SIZE,
+        } as unknown as InvoiceQuery);
+
+        if (cancelled || requestId !== totalsRequestIdRef.current) return;
+
+        const first = normalizePaginated(firstResponse, 1, TOTALS_BATCH_SIZE);
+        const rows: Invoice[] = [...first.data];
+
+        const totalPages = Math.max(1, first.last_page);
+        const pagesToFetch = Math.min(totalPages, TOTALS_MAX_PAGES);
+        setTotalsCapped(totalPages > TOTALS_MAX_PAGES);
+
+        if (pagesToFetch > 1) {
+          const remainingPages: number[] = [];
+          for (let p = 2; p <= pagesToFetch; p += 1) remainingPages.push(p);
+
+          for (let i = 0; i < remainingPages.length; i += TOTALS_PARALLEL) {
+            if (cancelled || requestId !== totalsRequestIdRef.current) return;
+            const chunk = remainingPages.slice(i, i + TOTALS_PARALLEL);
+            const results = await Promise.allSettled(
+              chunk.map((p) =>
+                apiClient.getInvoices({
+                  ...filters,
+                  page: p,
+                  per_page: TOTALS_BATCH_SIZE,
+                } as unknown as InvoiceQuery),
+              ),
+            );
+            results.forEach((r) => {
+              if (r.status === 'fulfilled') {
+                const norm = normalizePaginated(r.value, 1, TOTALS_BATCH_SIZE);
+                rows.push(...norm.data);
+              }
+            });
+          }
+        }
+
+        if (cancelled || requestId !== totalsRequestIdRef.current) return;
+        setTotals(summarizeInvoices(rows));
+      } catch {
+        if (cancelled || requestId !== totalsRequestIdRef.current) return;
+        // Leave the previous totals in place; KPI will keep showing whatever
+        // we last successfully computed (or the page fallback on first run).
+      } finally {
+        if (!cancelled && requestId === totalsRequestIdRef.current) {
+          setTotalsLoading(false);
+        }
+      }
+    }, TOTALS_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [search, companyId, branchId, invoiceStatus, paymentState, dateFrom, dateTo]);
+
+  /* -------------------- Visible summary (KPI source of truth) -------------------- */
+
+  /**
+   * Prefer the aggregate across the entire filtered set. Fall back to the
+   * current page when the sweep hasn't completed yet, and clearly mark that
+   * fallback with a "This page only" hint.
+   */
+  const pageSummary = useMemo<InvoiceSummary>(() => {
     const rows = invoices?.data ?? [];
-    const calculated: InvoiceSummary = { ...EMPTY_SUMMARY };
-    calculated.total = invoices?.total ?? rows.length;
-    calculated.total_amount = rows.reduce((sum, invoice) => sum + toNumber(invoice.total_amount), 0);
-    calculated.received_amount = rows.reduce((sum, invoice) => sum + getReceived(invoice), 0);
-    calculated.outstanding_amount = rows.reduce((sum, invoice) => sum + getOutstanding(invoice), 0);
-    calculated.tax_amount = rows.reduce((sum, invoice) => sum + toNumber(invoice.tax_amount), 0);
-    rows.forEach((invoice) => {
-      const payment = getPaymentStatus(invoice);
-      if (payment === 'overdue') calculated.overdue += 1;
-      else if (payment === 'partial') calculated.partial += 1;
-    });
-    return calculated;
+    return summarizeInvoices(rows);
   }, [invoices]);
+
+  const visibleSummary = totals ?? pageSummary;
+
+  const summaryScopeHint: string | undefined = useMemo(() => {
+    if (totalsCapped) return `First ${TOTALS_MAX_PAGES * TOTALS_BATCH_SIZE} invoices`;
+    if (totals) return undefined;
+    if ((invoices?.last_page ?? 1) > 1) return 'This page only';
+    return undefined;
+  }, [totals, totalsCapped, invoices]);
 
   /* -------------------- Selection resets on filter change -------------------- */
 
@@ -937,6 +1083,8 @@ export function InvoicesPage() {
       current.includes(id) ? current.filter((value) => value !== id) : [...current, id],
     );
   }, []);
+
+  const closeActionMenu = useCallback(() => setActionMenuId(null), []);
 
   const handleView = useCallback(
     async (invoice: Invoice) => {
@@ -1117,6 +1265,13 @@ export function InvoicesPage() {
   const tableRows = invoices?.data ?? [];
   const lastPage = invoices?.last_page || 1;
 
+  const kpiDisplay = (value: number, formatter: (v: number) => string): string => {
+    // While the page hasn't loaded yet, show a placeholder. Once we have any
+    // numbers (page fallback or totals), always render them.
+    if (loading && !invoices && !totals) return '…';
+    return formatter(value);
+  };
+
   /* -------------------- Render -------------------- */
 
   return (
@@ -1166,37 +1321,47 @@ export function InvoicesPage() {
         <section className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-5">
           <KpiCard
             title="Invoices"
-            value={loading ? '…' : visibleSummary.total.toLocaleString('en-IN')}
+            value={kpiDisplay(visibleSummary.total, (v) => v.toLocaleString('en-IN'))}
             icon={FileText}
             accent="indigo"
-            hint={visibleSummary.overdue > 0 ? `${visibleSummary.overdue} overdue` : undefined}
+            hint={visibleSummary.overdue > 0 ? `${visibleSummary.overdue} overdue` : summaryScopeHint}
+            updating={totalsLoading && !!totals}
           />
           <KpiCard
             title="Sales value"
-            value={loading ? '…' : formatMoney(visibleSummary.total_amount)}
+            value={kpiDisplay(visibleSummary.total_amount, formatMoney)}
             icon={CircleDollarSign}
             accent="violet"
+            hint={summaryScopeHint}
+            updating={totalsLoading && !!totals}
           />
           <KpiCard
             title="Received"
-            value={loading ? '…' : formatMoney(visibleSummary.received_amount)}
+            value={kpiDisplay(visibleSummary.received_amount, formatMoney)}
             icon={CheckCircle2}
             accent="emerald"
+            hint={summaryScopeHint}
+            updating={totalsLoading && !!totals}
           />
           <KpiCard
             title="Outstanding"
-            value={loading ? '…' : formatMoney(visibleSummary.outstanding_amount)}
+            value={kpiDisplay(visibleSummary.outstanding_amount, formatMoney)}
             icon={Clock3}
             accent="rose"
             hint={
-              visibleSummary.partial > 0 ? `${visibleSummary.partial} partial payments` : undefined
+              visibleSummary.partial > 0
+                ? `${visibleSummary.partial} partial payments`
+                : summaryScopeHint
             }
+            updating={totalsLoading && !!totals}
           />
           <KpiCard
             title="Tax"
-            value={loading ? '…' : formatMoney(visibleSummary.tax_amount)}
+            value={kpiDisplay(visibleSummary.tax_amount, formatMoney)}
             icon={IndianRupee}
             accent="amber"
+            hint={summaryScopeHint}
+            updating={totalsLoading && !!totals}
           />
         </section>
 
@@ -1662,7 +1827,7 @@ export function InvoicesPage() {
                             onView={handleView}
                             onPrint={handlePrint}
                             onDelete={deleteInvoice}
-                            onClose={() => setActionMenuId(null)}
+                            onClose={closeActionMenu}
                             openId={actionMenuId}
                             setOpenId={setActionMenuId}
                           />
@@ -1935,14 +2100,7 @@ export function InvoicesPage() {
         </SheetContent>
       </Sheet>
 
-      {/* ✅ FIX: normalize every nullable field on `invoice` (including nested
-          `items[].product`) to match InvoicePrint's stricter prop types, then
-          cast the resulting object through `unknown` to guarantee structural
-          compatibility. `InvoicePrint`'s InvoiceItem declares
-          `product?: { name: string; hsn_sac_code?: string }` — a required,
-          non-null `name` — while the local Invoice allows `null` on
-          `product.name`. We synthesize a fresh `product` object with a
-          guaranteed string `name` for every item. */}
+      {/* Print pipeline */}
       {printInvoice && (
         <InvoicePrint
           invoice={
@@ -1952,8 +2110,7 @@ export function InvoicesPage() {
               branch: printInvoice.branch ?? undefined,
               customer: printInvoice.customer ?? undefined,
               items: (printInvoice.items ?? []).map((item) => {
-                const name =
-                  item.product?.name ?? item.product_name ?? 'Item';
+                const name = item.product?.name ?? item.product_name ?? 'Item';
                 return {
                   ...item,
                   product: { name },

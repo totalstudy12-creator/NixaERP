@@ -169,8 +169,60 @@ class SalesReturnController extends Controller
     }
 
     /**
+     * Return normalized line items for a sales invoice.
+     */
+    public function getInvoiceItems(int $invoiceId): JsonResponse
+    {
+        $invoice = Invoice::query()
+            ->with(['items.product', 'customer'])
+            ->find($invoiceId);
+
+        if (!$invoice) {
+            return response()->json([
+                'message' => 'Sales invoice not found.',
+                'code' => 'INVOICE_NOT_FOUND',
+            ], 404);
+        }
+
+        if (Schema::hasColumn('invoices', 'type') && $invoice->type !== 'sales') {
+            return response()->json([
+                'message' => 'Only sales invoices can be returned.',
+                'code' => 'NOT_A_SALES_INVOICE',
+            ], 422);
+        }
+
+        $items = $invoice->items->map(function ($item) use ($invoice) {
+            $soldQty = $this->itemQuantity($item);
+            $alreadyReturned = (float) ReturnItem::query()
+                ->where('sale_item_id', $item->id)
+                ->whereHas('salesReturn', fn ($q) => $q->where('original_sale_id', $invoice->id))
+                ->sum('return_qty');
+
+            return [
+                'id' => (int) $item->id,
+                'product_id' => (int) $item->product_id,
+                'variant_id' => $item->variant_id ?? null,
+                'product' => $item->product,
+                'quantity' => $soldQty,
+                'sold_qty' => $soldQty,
+                'already_returned_qty' => $alreadyReturned,
+                'returnable_qty' => max(0, $soldQty - $alreadyReturned),
+                'rate' => $this->itemRate($item),
+                'gst_rate' => $this->itemGstRate($item),
+                'discount_amount' => (float) ($item->discount_amount ?? 0),
+                'taxable_amount' => (float) ($item->taxable_amount ?? ($soldQty * $this->itemRate($item))),
+                'original_cgst_amount' => (float) ($item->cgst_amount ?? 0),
+                'original_sgst_amount' => (float) ($item->sgst_amount ?? 0),
+                'original_igst_amount' => (float) ($item->igst_amount ?? 0),
+            ];
+        })->values();
+
+        return response()->json(['data' => $items]);
+    }
+
+    /**
      * Load and normalize a sales invoice for creating a return.
-     * This intentionally returns {data: ...} so the frontend can consume one stable shape.
+     * Returns { data: ... } so the frontend can consume one stable shape.
      */
     public function getInvoiceDetails(int $invoiceId): JsonResponse
     {
@@ -207,6 +259,7 @@ class SalesReturnController extends Controller
             return [
                 'id' => (int) $item->id,
                 'product_id' => (int) $item->product_id,
+                'variant_id' => $item->variant_id ?? null,
                 'product' => $item->product,
                 'quantity' => $soldQty,
                 'sold_qty' => $soldQty,
@@ -214,6 +267,8 @@ class SalesReturnController extends Controller
                 'returnable_qty' => $returnableQty,
                 'rate' => $rate,
                 'gst_rate' => $gstRate,
+                'discount_amount' => (float) ($item->discount_amount ?? 0),
+                'taxable_amount' => (float) ($item->taxable_amount ?? ($soldQty * $rate)),
                 'original_cgst_amount' => (float) ($item->cgst_amount ?? 0),
                 'original_sgst_amount' => (float) ($item->sgst_amount ?? 0),
                 'original_igst_amount' => (float) ($item->igst_amount ?? 0),
@@ -227,18 +282,12 @@ class SalesReturnController extends Controller
             ], 422);
         }
 
-        $invoiceNumber = null;
-        foreach (['invoice_number', 'invoice_no', 'number', 'bill_no'] as $candidate) {
-            if (Schema::hasColumn('invoices', $candidate)) {
-                $invoiceNumber = $invoice->{$candidate};
-                break;
-            }
-        }
+        $invoiceNumber = $this->resolveInvoiceNumber($invoice);
 
         $payload = [
             'id' => (int) $invoice->id,
-            'invoice_number' => $invoiceNumber ?: 'INV-' . $invoice->id,
-            'invoice_no' => $invoiceNumber ?: 'INV-' . $invoice->id,
+            'invoice_number' => $invoiceNumber,
+            'invoice_no' => $invoiceNumber,
             'customer_id' => (int) $invoice->customer_id,
             'customer' => $invoice->customer,
             'company_id' => $this->safeAttribute($invoice, 'company_id'),
@@ -252,8 +301,7 @@ class SalesReturnController extends Controller
     }
 
     /**
-     * Create a sales return. Drafts only persist the draft; confirmed returns are validated
-     * server-side but should be followed by your stock/accounting transaction service.
+     * Create a sales return.
      */
     public function store(Request $request): JsonResponse
     {
@@ -272,30 +320,32 @@ class SalesReturnController extends Controller
 
                 $totals = $this->calculateTotals($normalizedItems);
                 $settlement = $this->validateSettlement($validated, $totals['grand_total']);
+                $invoiceNumber = $this->resolveInvoiceNumber($invoice);
 
                 $salesReturn = SalesReturn::create([
-                    'return_number' => $this->generateReturnNumber(),
-                    'company_id' => $validated['company_id'] ?? null,
-                    'branch_id' => $validated['branch_id'] ?? null,
-                    'warehouse_id' => $validated['warehouse_id'],
-                    'customer_id' => $validated['customer_id'],
-                    'original_sale_id' => $validated['original_sale_id'],
-                    'return_date' => $validated['return_date'],
-                    'status' => $validated['status'],
-                    'subtotal' => $totals['subtotal'],
-                    'discount_amount' => 0,
-                    'taxable_amount' => $totals['taxable_amount'],
-                    'cgst_amount' => $totals['cgst'],
-                    'sgst_amount' => $totals['sgst'],
-                    'igst_amount' => $totals['igst'],
-                    'total_tax' => $totals['total_tax'],
-                    'grand_total' => $totals['grand_total'],
-                    'refund_amount' => $settlement['refund_amount'],
-                    'credit_amount' => $settlement['credit_amount'],
-                    'refund_status' => $settlement['refund_status'],
-                    'reason' => trim($validated['reason']),
-                    'remark' => $validated['remark'] ?? null,
-                    'created_by' => auth()->id(),
+                    'return_number'       => $this->generateReturnNumber(),
+                    'company_id'          => $validated['company_id'] ?? null,
+                    'branch_id'           => $validated['branch_id'] ?? null,
+                    'warehouse_id'        => $validated['warehouse_id'],
+                    'customer_id'         => $validated['customer_id'],
+                    'original_sale_id'    => $validated['original_sale_id'],
+                    'original_invoice_no' => $invoiceNumber,
+                    'return_date'         => $validated['return_date'],
+                    'status'              => $validated['status'],
+                    'subtotal'            => $totals['subtotal'],
+                    'discount_amount'     => 0,
+                    'taxable_amount'      => $totals['taxable_amount'],
+                    'cgst_amount'         => $totals['cgst'],
+                    'sgst_amount'         => $totals['sgst'],
+                    'igst_amount'         => $totals['igst'],
+                    'total_tax'           => $totals['total_tax'],
+                    'grand_total'         => $totals['grand_total'],
+                    'refund_amount'       => $settlement['refund_amount'],
+                    'credit_amount'       => $settlement['credit_amount'],
+                    'refund_status'       => $settlement['refund_status'],
+                    'reason'              => trim($validated['reason']),
+                    'remark'              => $validated['remark'] ?? null,
+                    'created_by'          => auth()->id(),
                 ]);
 
                 foreach ($normalizedItems as $item) {
@@ -363,26 +413,28 @@ class SalesReturnController extends Controller
 
                 $totals = $this->calculateTotals($normalizedItems);
                 $settlement = $this->validateSettlement($validated, $totals['grand_total']);
+                $invoiceNumber = $this->resolveInvoiceNumber($invoice);
 
                 $salesReturn->update([
-                    'company_id' => $validated['company_id'] ?? $salesReturn->company_id,
-                    'branch_id' => $validated['branch_id'] ?? $salesReturn->branch_id,
-                    'warehouse_id' => $validated['warehouse_id'],
-                    'return_date' => $validated['return_date'],
-                    'status' => $validated['status'],
-                    'subtotal' => $totals['subtotal'],
-                    'discount_amount' => 0,
-                    'taxable_amount' => $totals['taxable_amount'],
-                    'cgst_amount' => $totals['cgst'],
-                    'sgst_amount' => $totals['sgst'],
-                    'igst_amount' => $totals['igst'],
-                    'total_tax' => $totals['total_tax'],
-                    'grand_total' => $totals['grand_total'],
-                    'refund_amount' => $settlement['refund_amount'],
-                    'credit_amount' => $settlement['credit_amount'],
-                    'refund_status' => $settlement['refund_status'],
-                    'reason' => trim($validated['reason']),
-                    'remark' => $validated['remark'] ?? null,
+                    'company_id'          => $validated['company_id'] ?? $salesReturn->company_id,
+                    'branch_id'           => $validated['branch_id'] ?? $salesReturn->branch_id,
+                    'warehouse_id'        => $validated['warehouse_id'],
+                    'original_invoice_no' => $invoiceNumber,
+                    'return_date'         => $validated['return_date'],
+                    'status'              => $validated['status'],
+                    'subtotal'            => $totals['subtotal'],
+                    'discount_amount'     => 0,
+                    'taxable_amount'      => $totals['taxable_amount'],
+                    'cgst_amount'         => $totals['cgst'],
+                    'sgst_amount'         => $totals['sgst'],
+                    'igst_amount'         => $totals['igst'],
+                    'total_tax'           => $totals['total_tax'],
+                    'grand_total'         => $totals['grand_total'],
+                    'refund_amount'       => $settlement['refund_amount'],
+                    'credit_amount'       => $settlement['credit_amount'],
+                    'refund_status'       => $settlement['refund_status'],
+                    'reason'              => trim($validated['reason']),
+                    'remark'              => $validated['remark'] ?? null,
                 ]);
 
                 $salesReturn->items()->delete();
@@ -421,7 +473,9 @@ class SalesReturnController extends Controller
                 }
 
                 if ($salesReturn->status !== 'draft') {
-                    throw ValidationException::withMessages(['status' => 'Only draft returns can be deleted. Processed returns must not be deleted.']);
+                    throw ValidationException::withMessages([
+                        'status' => 'Only draft returns can be deleted. Processed returns must not be deleted.',
+                    ]);
                 }
 
                 $salesReturn->items()->delete();
@@ -429,6 +483,8 @@ class SalesReturnController extends Controller
             }, 3);
 
             return response()->json(['message' => 'Sales return deleted successfully.']);
+        } catch (ValidationException $e) {
+            throw $e;
         } catch (Throwable $e) {
             report($e);
             return response()->json([
@@ -437,6 +493,10 @@ class SalesReturnController extends Controller
             ], 500);
         }
     }
+
+    /* ------------------------------------------------------------------ */
+    /* Internals                                                           */
+    /* ------------------------------------------------------------------ */
 
     private function validatePayload(Request $request, bool $isUpdate): array
     {
@@ -455,6 +515,7 @@ class SalesReturnController extends Controller
             'items' => 'required|array|min:1',
             'items.*.sale_item_id' => 'required|integer|exists:invoice_items,id',
             'items.*.product_id' => 'required|integer|exists:products,id',
+            'items.*.variant_id' => 'nullable|integer',
             'items.*.return_qty' => 'required|integer|min:1',
             'items.*.rate' => 'required|numeric|min:0',
             'items.*.gst_rate' => 'required|numeric|min:0|max:100',
@@ -480,6 +541,8 @@ class SalesReturnController extends Controller
         $invoiceItems = $invoice->items->keyBy('id');
         $seen = [];
         $normalized = [];
+
+        $hasVariantColumn = Schema::hasColumn('return_items', 'variant_id');
 
         foreach ($requestedItems as $input) {
             $saleItemId = (int) $input['sale_item_id'];
@@ -512,7 +575,10 @@ class SalesReturnController extends Controller
             $returnQty = (int) $input['return_qty'];
 
             if ($returnQty > $maxReturnable) {
-                throw ValidationException::withMessages(['items.'.$saleItemId.'.return_qty' => "Return quantity exceeds the returnable quantity of {$maxReturnable}."]);
+                throw ValidationException::withMessages([
+                    'items.' . $saleItemId . '.return_qty' =>
+                        "Return quantity exceeds the returnable quantity of {$maxReturnable}.",
+                ]);
             }
 
             $rate = round((float) $input['rate'], 2);
@@ -530,7 +596,6 @@ class SalesReturnController extends Controller
             $sgst = 0.0;
             $igst = 0.0;
 
-            $originalSoldTaxBase = $soldQty > 0 ? $soldQty * max(0, $this->itemRate($saleItem)) : 0;
             if ($originalIgst > 0 && $originalCgst == 0 && $originalSgst == 0) {
                 $igst = $this->proRataTax($originalIgst, $returnQty, $soldQty);
             } elseif ($originalCgst > 0 || $originalSgst > 0) {
@@ -556,7 +621,7 @@ class SalesReturnController extends Controller
                 }
             }
 
-            $normalized[] = [
+            $row = [
                 'sale_item_id' => $saleItemId,
                 'product_id' => (int) $input['product_id'],
                 'return_qty' => $returnQty,
@@ -571,6 +636,14 @@ class SalesReturnController extends Controller
                 'restock_status' => $input['restock_status'],
                 'reason' => $input['reason'] ?? null,
             ];
+
+            // Only include variant_id when the column exists — avoids SQL errors on
+            // older schemas that haven't been migrated yet.
+            if ($hasVariantColumn) {
+                $row['variant_id'] = $input['variant_id'] ?? ($saleItem->variant_id ?? null);
+            }
+
+            $normalized[] = $row;
         }
 
         return $normalized;
@@ -615,23 +688,33 @@ class SalesReturnController extends Controller
         $status = $data['status'];
 
         if ($refund > 0 && ($data['refund_method'] ?? null) === 'credit') {
-            throw ValidationException::withMessages(['refund_method' => 'Credit Note cannot be used with a cash/UPI/bank refund amount.']);
+            throw ValidationException::withMessages([
+                'refund_method' => 'Credit Note cannot be used with a cash/UPI/bank refund amount.',
+            ]);
         }
 
         if ($credit > 0 && ($data['refund_method'] ?? null) && $data['refund_method'] !== 'credit') {
-            throw ValidationException::withMessages(['refund_method' => 'Credit amount requires Credit Note as the refund method.']);
+            throw ValidationException::withMessages([
+                'refund_method' => 'Credit amount requires Credit Note as the refund method.',
+            ]);
         }
 
         if ($settlement > $grandTotal) {
-            throw ValidationException::withMessages(['refund_amount' => 'Refund plus credit cannot exceed the return grand total.']);
+            throw ValidationException::withMessages([
+                'refund_amount' => 'Refund plus credit cannot exceed the return grand total.',
+            ]);
         }
 
         if ($status !== 'draft' && $settlement <= 0) {
-            throw ValidationException::withMessages(['refund_amount' => 'A confirmed return must have a refund or credit settlement.']);
+            throw ValidationException::withMessages([
+                'refund_amount' => 'A confirmed return must have a refund or credit settlement.',
+            ]);
         }
 
         if ($status !== 'draft' && abs($settlement - $grandTotal) > 0.01) {
-            throw ValidationException::withMessages(['refund_amount' => 'Confirmed return settlement must equal the return grand total.']);
+            throw ValidationException::withMessages([
+                'refund_amount' => 'Confirmed return settlement must equal the return grand total.',
+            ]);
         }
 
         return [
@@ -646,7 +729,9 @@ class SalesReturnController extends Controller
     private function validateInvoiceOwnership(Invoice $invoice, int $customerId): void
     {
         if ((int) $invoice->customer_id !== $customerId) {
-            throw ValidationException::withMessages(['customer_id' => 'The selected invoice does not belong to the selected customer.']);
+            throw ValidationException::withMessages([
+                'customer_id' => 'The selected invoice does not belong to the selected customer.',
+            ]);
         }
     }
 
@@ -702,6 +787,20 @@ class SalesReturnController extends Controller
         }
 
         return round($originalTax * ($returnQty / $soldQty), 2);
+    }
+
+    private function resolveInvoiceNumber(Invoice $invoice): string
+    {
+        foreach (['invoice_number', 'invoice_no', 'number', 'bill_no'] as $candidate) {
+            if (Schema::hasColumn('invoices', $candidate)) {
+                $value = $invoice->{$candidate};
+                if ($value !== null && $value !== '') {
+                    return (string) $value;
+                }
+            }
+        }
+
+        return 'INV-' . $invoice->id;
     }
 
     private function generateReturnNumber(): string

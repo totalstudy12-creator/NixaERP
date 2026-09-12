@@ -12,6 +12,7 @@ class Payment extends Model
  
     protected $fillable = [
         'company_id',
+        'branch_id',
         'invoice_id',
         'payment_method',
         'reference_no',
@@ -39,4 +40,8 @@ class Payment extends Model
     {
         return $this->belongsTo(Invoice::class);
     }
+    public function branch()
+{
+    return $this->belongsTo(Branch::class);
+}
 }

@@ -452,26 +452,107 @@ export function SettingsPage() {
   // It is never sent to MCP token endpoints as an MCP token.
   // ---------------------------------------------------------------------------
 
-  const authToken = useMemo(() => {
-    try {
-      const state = localStorage.getItem(
-        'auth-storage'
-      );
+  const [authToken, setAuthToken] =
+    useState<string | null>(null);
 
-      if (!state) {
+  useEffect(() => {
+    const readToken = (): string | null => {
+      try {
+        const candidates = [
+          localStorage.getItem(
+            'auth-storage'
+          ),
+          localStorage.getItem(
+            'authStorage'
+          ),
+          localStorage.getItem('token'),
+          localStorage.getItem(
+            'access_token'
+          ),
+        ];
+
+        for (const raw of candidates) {
+          if (!raw) continue;
+
+          // Try to parse as JSON first
+          try {
+            const parsed = JSON.parse(raw);
+
+            const token =
+              parsed?.state?.token ??
+              parsed?.state?.accessToken ??
+              parsed?.token ??
+              parsed?.access_token ??
+              null;
+
+            if (
+              typeof token === 'string' &&
+              token.length > 0
+            ) {
+              return token;
+            }
+          } catch {
+            // Not JSON — treat as a raw token string
+            if (raw.length > 10) {
+              return raw;
+            }
+          }
+        }
+
+        return null;
+      } catch {
         return null;
       }
+    };
 
-      const parsed = JSON.parse(state);
+    setAuthToken(readToken());
 
-      return (
-        parsed?.state?.token ??
-        parsed?.token ??
-        null
+    const onStorage = (
+      event: StorageEvent
+    ) => {
+      if (
+        event.key === null ||
+        event.key === 'auth-storage' ||
+        event.key === 'authStorage' ||
+        event.key === 'token' ||
+        event.key === 'access_token'
+      ) {
+        setAuthToken(readToken());
+      }
+    };
+
+    window.addEventListener(
+      'storage',
+      onStorage
+    );
+
+    // Fallback: re-check a few times after mount in case
+    // auth-storage is written asynchronously by the login flow.
+    const timers = [
+      window.setTimeout(
+        () => setAuthToken(readToken()),
+        300
+      ),
+      window.setTimeout(
+        () => setAuthToken(readToken()),
+        1200
+      ),
+      window.setTimeout(
+        () => setAuthToken(readToken()),
+        2500
+      ),
+    ];
+
+    return () => {
+      window.removeEventListener(
+        'storage',
+        onStorage
       );
-    } catch {
-      return null;
-    }
+
+      timers.forEach((id) =>
+        window.clearTimeout(id)
+      );
+    };
   }, []);
 
   // ---------------------------------------------------------------------------
@@ -3793,23 +3874,29 @@ export function SettingsPage() {
 
             <div className="space-y-3 px-6 py-4">
               <div className="flex items-center gap-2">
-                <code className="flex-1 rounded-lg bg-slate-100 px-3 py-3 text-sm font-mono">
-                  {showAuthToken &&
-                  authToken
-                    ? authToken
-                    : '••••••••••••••••••••••••••••••'}
+                <code className="min-w-0 flex-1 break-all rounded-lg bg-slate-100 px-3 py-3 text-sm font-mono">
+                  {!authToken
+                    ? 'No ERP token found in storage'
+                    : showAuthToken
+                      ? authToken
+                      : '•'.repeat(
+                          Math.min(
+                            authToken.length,
+                            40
+                          )
+                        )}
                 </code>
 
                 <button
                   type="button"
                   onClick={() =>
                     setShowAuthToken(
-                      (
-                        previous
-                      ) => !previous
+                      (previous) =>
+                        !previous
                     )
                   }
-                  className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"
+                  disabled={!authToken}
+                  className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
                   title={
                     showAuthToken
                       ? 'Hide token'
@@ -3822,6 +3909,32 @@ export function SettingsPage() {
                     />
                   ) : (
                     <FiEye
+                      size={16}
+                    />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    authToken &&
+                    void copyToClipboard(
+                      'auth-token',
+                      authToken
+                    )
+                  }
+                  disabled={!authToken}
+                  className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+                  title="Copy token"
+                >
+                  {copiedKey ===
+                  'auth-token' ? (
+                    <FiCheck
+                      className="text-emerald-500"
+                      size={16}
+                    />
+                  ) : (
+                    <FiCopy
                       size={16}
                     />
                   )}

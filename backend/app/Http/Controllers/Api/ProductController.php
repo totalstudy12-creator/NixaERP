@@ -23,7 +23,6 @@ class ProductController extends Controller
     {
         $perPage = $request->input('per_page', 15);
 
-        // Allow fetching all products for client-side filtering
         if ($perPage === 'all') {
             try {
                 return Product::with(['company', 'branch'])
@@ -37,42 +36,40 @@ class ProductController extends Controller
         try {
             return Product::with(['company', 'branch'])
                 ->orderBy('name')
-                ->paginate((int)$perPage);
+                ->paginate((int) $perPage);
         } catch (\Exception $e) {
-            return Product::orderBy('name')->paginate((int)$perPage);
+            return Product::orderBy('name')->paginate((int) $perPage);
         }
     }
 
     /**
-     * Store a newly created product in storage.
+     * Store a newly created product.
      * Also creates initial stock record if stock_quantity > 0 and warehouse_id provided.
      */
     public function store(Request $request)
     {
         $data = $request->validate([
-            'company_id' => 'required|exists:companies,id',
-            'branch_id' => 'nullable|exists:branches,id',
-            'name' => 'required|string|max:255',
-            'sku' => 'required|string|max:100|unique:products,sku',
-            'barcode' => 'nullable|string|max:100|unique:products,barcode',
-            'brand' => 'nullable|string|max:255',
-            'unit' => 'nullable|string|max:50',
+            'company_id'     => 'required|exists:companies,id',
+            'branch_id'      => 'nullable|exists:branches,id',
+            'name'           => 'required|string|max:255',
+            'sku'            => 'required|string|max:100|unique:products,sku',
+            'barcode'        => 'nullable|string|max:100|unique:products,barcode',
+            'brand'          => 'nullable|string|max:255',
+            'unit'           => 'nullable|string|max:50',
             'purchase_price' => 'nullable|numeric|min:0',
-            'sale_price' => 'nullable|numeric|min:0',
-            'tax_rate' => 'nullable|numeric|min:0',
+            'sale_price'     => 'nullable|numeric|min:0',
+            'tax_rate'       => 'nullable|numeric|min:0',
             'stock_quantity' => 'nullable|integer|min:0',
-            'reorder_level' => 'nullable|integer|min:0',
-            'description' => 'nullable|string',
-            'active' => 'boolean',
-            'warehouse_id' => 'nullable|exists:warehouses,id', // added for initial stock assignment
+            'reorder_level'  => 'nullable|integer|min:0',
+            'description'    => 'nullable|string',
+            'active'         => 'boolean',
+            'warehouse_id'   => 'nullable|exists:warehouses,id',
         ]);
 
-        // Set empty barcode to null (to avoid unique constraint violation)
         if (isset($data['barcode']) && trim($data['barcode']) === '') {
             $data['barcode'] = null;
         }
 
-        // Apply default values
         $data = $this->prepareProductData($data);
 
         $product = Product::create($data);
@@ -82,7 +79,7 @@ class ProductController extends Controller
             $this->createInitialStock($product, $data['warehouse_id']);
         }
 
-        return $product;
+        return $product->fresh();
     }
 
     /**
@@ -117,14 +114,14 @@ class ProductController extends Controller
     public function import(Request $request)
     {
         $request->validate([
-            'file' => 'required|file|mimes:csv,txt|max:10240',
+            'file'             => 'required|file|mimes:csv,txt|max:10240',
             'duplicate_action' => 'required|in:skip,update,stop',
-            'dry_run' => 'boolean',
+            'dry_run'          => 'boolean',
         ]);
 
-        $file = $request->file('file');
+        $file            = $request->file('file');
         $duplicateAction = $request->input('duplicate_action');
-        $dryRun = $request->boolean('dry_run', false);
+        $dryRun          = $request->boolean('dry_run', false);
 
         $rows = $this->parseCsv($file);
         if (empty($rows)) {
@@ -136,9 +133,11 @@ class ProductController extends Controller
 
         $rows = $this->sanitizeArray($rows);
 
-        $expectedHeaders = ['company_id', 'branch_id', 'name', 'sku', 'barcode', 'brand', 'unit',
+        $expectedHeaders = [
+            'company_id', 'branch_id', 'name', 'sku', 'barcode', 'brand', 'unit',
             'purchase_price', 'sale_price', 'tax_rate', 'stock_quantity',
-            'reorder_level', 'description', 'active'];
+            'reorder_level', 'description', 'active',
+        ];
         $headers = array_keys($rows[0]);
         if (array_diff($expectedHeaders, $headers)) {
             return response()->json([
@@ -148,13 +147,17 @@ class ProductController extends Controller
         }
 
         $previewRows = [];
-        $errors = [];
-        $validCount = 0;
-        $allSku = [];
+        $errors      = [];
+        $validCount  = 0;
+        $allSku      = [];
 
         $companyIds = array_unique(array_column($rows, 'company_id'));
-        $companies = Company::whereIn('id', $companyIds)->pluck('id')->toArray();
-        $branches = Branch::whereIn('company_id', $companyIds)->get()->groupBy('company_id')->map->pluck('id')->toArray();
+        $companies  = Company::whereIn('id', $companyIds)->pluck('id')->toArray();
+        $branches   = Branch::whereIn('company_id', $companyIds)
+            ->get()
+            ->groupBy('company_id')
+            ->map->pluck('id')
+            ->toArray();
 
         foreach ($rows as $index => $row) {
             $rowNumber = $index + 1;
@@ -164,7 +167,7 @@ class ProductController extends Controller
                 $rowErrors['company_id'] = 'Invalid or missing company ID.';
             }
             if (empty($row['name'])) $rowErrors['name'] = 'Name is required.';
-            if (empty($row['sku'])) $rowErrors['sku'] = 'SKU is required.';
+            if (empty($row['sku']))  $rowErrors['sku']  = 'SKU is required.';
             if (!isset($row['sale_price']) || $row['sale_price'] === '' || !is_numeric($row['sale_price']) || $row['sale_price'] < 0) {
                 $rowErrors['sale_price'] = 'Sale price is required and must be non-negative.';
             }
@@ -225,7 +228,6 @@ class ProductController extends Controller
             $valid = empty($rowErrors);
             if ($valid) $validCount++;
 
-            // Convert numeric fields: empty -> 0
             $rowData = $row;
             foreach ($numericFields as $field) {
                 if (isset($rowData[$field]) && $rowData[$field] !== '') {
@@ -235,8 +237,7 @@ class ProductController extends Controller
                 }
             }
 
-            // Set empty barcode to null
-            if (isset($rowData['barcode']) && trim((string)$rowData['barcode']) === '') {
+            if (isset($rowData['barcode']) && trim((string) $rowData['barcode']) === '') {
                 $rowData['barcode'] = null;
             }
 
@@ -250,25 +251,29 @@ class ProductController extends Controller
             $rowData = $this->sanitizeArray($rowData);
 
             $previewRows[] = [
-                'row' => $rowNumber,
-                'data' => $rowData,
-                'valid' => $valid,
+                'row'    => $rowNumber,
+                'data'   => $rowData,
+                'valid'  => $valid,
                 'errors' => $rowErrors,
-                'sku' => $rowData['sku'] ?? '',
-                'name' => $rowData['name'] ?? '',
+                'sku'    => $rowData['sku'] ?? '',
+                'name'   => $rowData['name'] ?? '',
             ];
 
             if (!$valid) {
-                $errors[] = ['row' => $rowNumber, 'field' => implode(', ', array_keys($rowErrors)), 'message' => implode('; ', $rowErrors)];
+                $errors[] = [
+                    'row'     => $rowNumber,
+                    'field'   => implode(', ', array_keys($rowErrors)),
+                    'message' => implode('; ', $rowErrors),
+                ];
             }
         }
 
         if ($dryRun) {
             return response()->json([
                 'preview' => $previewRows,
-                'errors' => $errors,
-                'total' => count($rows),
-                'valid' => $validCount,
+                'errors'  => $errors,
+                'total'   => count($rows),
+                'valid'   => $validCount,
                 'invalid' => count($rows) - $validCount,
             ]);
         }
@@ -276,7 +281,7 @@ class ProductController extends Controller
         $created = 0;
         $updated = 0;
         $skipped = 0;
-        $failed = 0;
+        $failed  = 0;
 
         DB::beginTransaction();
         try {
@@ -288,7 +293,7 @@ class ProductController extends Controller
                 $data = $previewRow['data'];
                 unset($data['_duplicate'], $data['_existing_id']);
 
-                if (isset($data['barcode']) && trim((string)$data['barcode']) === '') {
+                if (isset($data['barcode']) && trim((string) $data['barcode']) === '') {
                     $data['barcode'] = null;
                 }
 
@@ -315,11 +320,11 @@ class ProductController extends Controller
                 'success' => true,
                 'message' => 'Import completed successfully.',
                 'summary' => [
-                    'total' => count($rows),
+                    'total'   => count($rows),
                     'created' => $created,
                     'updated' => $updated,
                     'skipped' => $skipped,
-                    'failed' => $failed,
+                    'failed'  => $failed,
                 ],
                 'errors' => $errors,
             ]);
@@ -329,11 +334,11 @@ class ProductController extends Controller
                 'success' => false,
                 'message' => 'Import failed: ' . $e->getMessage(),
                 'summary' => [
-                    'total' => count($rows),
+                    'total'   => count($rows),
                     'created' => 0,
                     'updated' => 0,
                     'skipped' => 0,
-                    'failed' => count($rows),
+                    'failed'  => count($rows),
                 ],
                 'errors' => $errors,
             ], 500);
@@ -345,7 +350,7 @@ class ProductController extends Controller
      */
     private function parseCsv($file)
     {
-        $rows = [];
+        $rows   = [];
         $handle = fopen($file->getRealPath(), 'r');
         if (!$handle) return [];
 
@@ -368,14 +373,12 @@ class ProductController extends Controller
 
             $allEmpty = true;
             foreach ($assoc as $value) {
-                if ($value !== null && trim((string)$value) !== '') {
+                if ($value !== null && trim((string) $value) !== '') {
                     $allEmpty = false;
                     break;
                 }
             }
-            if ($allEmpty) {
-                continue;
-            }
+            if ($allEmpty) continue;
 
             $rows[] = $assoc;
         }
@@ -401,11 +404,11 @@ class ProductController extends Controller
         }
         if ($request->filled('status')) {
             $status = $request->status;
-            if ($status === 'active') $query->where('active', true);
-            elseif ($status === 'inactive') $query->where('active', false);
-            elseif ($status === 'in_stock') $query->whereColumn('stock_quantity', '>', 'reorder_level');
-            elseif ($status === 'low') $query->where('stock_quantity', '>', 0)->whereColumn('stock_quantity', '<=', 'reorder_level');
-            elseif ($status === 'out') $query->where('stock_quantity', '<=', 0);
+            if ($status === 'active')        $query->where('active', true);
+            elseif ($status === 'inactive')  $query->where('active', false);
+            elseif ($status === 'in_stock')  $query->whereColumn('stock_quantity', '>', 'reorder_level');
+            elseif ($status === 'low')       $query->where('stock_quantity', '>', 0)->whereColumn('stock_quantity', '<=', 'reorder_level');
+            elseif ($status === 'out')       $query->where('stock_quantity', '<=', 0);
         }
         if ($request->filled('search')) {
             $search = $request->search;
@@ -431,7 +434,7 @@ class ProductController extends Controller
         $headers = [
             'ID', 'Company', 'Branch', 'Company ID', 'Branch ID', 'Name', 'SKU', 'Barcode',
             'Brand', 'Unit', 'Purchase Price', 'Sale Price', 'Tax Rate', 'Stock Quantity',
-            'Reorder Level', 'Description', 'Status', 'Created At', 'Updated At'
+            'Reorder Level', 'Description', 'Status', 'Created At', 'Updated At',
         ];
 
         $rows = $products->map(function ($product) {
@@ -468,8 +471,8 @@ class ProductController extends Controller
         fclose($output);
 
         return response($csv, 200, [
-            'Content-Type' => 'text/csv',
-            'Content-Disposition' => "attachment; filename=\"inventory-export-".date('Y-m-d').".csv\"",
+            'Content-Type'        => 'text/csv',
+            'Content-Disposition' => "attachment; filename=\"inventory-export-" . date('Y-m-d') . ".csv\"",
         ]);
     }
 
@@ -481,7 +484,7 @@ class ProductController extends Controller
         $headers = [
             'company_id', 'branch_id', 'name', 'sku', 'barcode', 'brand', 'unit',
             'purchase_price', 'sale_price', 'tax_rate', 'stock_quantity',
-            'reorder_level', 'description', 'active'
+            'reorder_level', 'description', 'active',
         ];
 
         $output = fopen('php://temp', 'r+');
@@ -491,7 +494,7 @@ class ProductController extends Controller
         fclose($output);
 
         return response($csv, 200, [
-            'Content-Type' => 'text/csv',
+            'Content-Type'        => 'text/csv',
             'Content-Disposition' => "attachment; filename=\"inventory_template.csv\"",
         ]);
     }
@@ -505,44 +508,50 @@ class ProductController extends Controller
     }
 
     /**
-     * Update the specified product in storage.
+     * Update the specified product.
      * Also tracks stock_quantity changes and creates adjustment movements.
      */
     public function update(Request $request, Product $product)
     {
         $data = $request->validate([
-            'company_id' => 'required|exists:companies,id',
-            'branch_id' => 'nullable|exists:branches,id',
-            'name' => 'required|string|max:255',
-            'sku' => 'required|string|max:100|unique:products,sku,' . $product->id,
-            'barcode' => 'nullable|string|max:100|unique:products,barcode,' . $product->id,
-            'brand' => 'nullable|string|max:255',
-            'unit' => 'nullable|string|max:50',
+            'company_id'     => 'required|exists:companies,id',
+            'branch_id'      => 'nullable|exists:branches,id',
+            'name'           => 'required|string|max:255',
+            'sku'            => 'required|string|max:100|unique:products,sku,' . $product->id,
+            'barcode'        => 'nullable|string|max:100|unique:products,barcode,' . $product->id,
+            'brand'          => 'nullable|string|max:255',
+            'unit'           => 'nullable|string|max:50',
             'purchase_price' => 'nullable|numeric|min:0',
-            'sale_price' => 'nullable|numeric|min:0',
-            'tax_rate' => 'nullable|numeric|min:0',
-            'stock_quantity' => 'nullable|integer|min:0',
-            'reorder_level' => 'nullable|integer|min:0',
-            'description' => 'nullable|string',
-            'active' => 'boolean',
+            'sale_price'     => 'nullable|numeric|min:0',
+            'tax_rate'       => 'nullable|numeric|min:0',
+            'stock_quantity' => 'nullable|integer',          // ← allow negative
+            'reorder_level'  => 'nullable|integer|min:0',
+            'description'    => 'nullable|string',
+            'active'         => 'boolean',
         ]);
 
-        $oldStock = $product->stock_quantity;
-        $data = $this->prepareProductData($data);
+        // Handle stock_quantity separately — it must be driven by warehouse stock
+        $requestedStock = $data['stock_quantity'] ?? null;
+        unset($data['stock_quantity']);
 
+        $data = $this->prepareProductData($data);
         $product->update($data);
 
-        // Adjust stock if stock_quantity changed
-        if ($oldStock != $product->stock_quantity) {
-            $difference = $product->stock_quantity - $oldStock;
+        if ($requestedStock !== null) {
+            $currentTotal = (int) ProductWarehouseStock::where('product_id', $product->id)->sum('quantity');
+            $difference   = (int) $requestedStock - $currentTotal;
+
             if ($difference > 0) {
                 $this->adjustStock($product, $difference, 'IN', 'adjustment', 'Manual stock increase');
-            } else {
+            } elseif ($difference < 0) {
                 $this->adjustStock($product, abs($difference), 'OUT', 'adjustment', 'Manual stock decrease');
             }
+
+            // adjustStock() already syncs, but call again to be safe
+            $this->syncProductStock($product);
         }
 
-        return $product;
+        return $product->fresh();
     }
 
     /**
@@ -556,15 +565,10 @@ class ProductController extends Controller
 
     // ======================= INVENTORY ENDPOINTS =======================
 
-    /**
-     * Get inventory summary for a product.
-     */
     public function inventorySummary(Product $product)
     {
-        // $this->authorize('inventory.view'); // Uncomment if you have policy set
-
-        $totalStock = $product->warehouseStocks()->sum('quantity');
-        $reservedStock = $product->warehouseStocks()->sum('reserved_quantity');
+        $totalStock     = $product->warehouseStocks()->sum('quantity');
+        $reservedStock  = $product->warehouseStocks()->sum('reserved_quantity');
         $availableStock = $product->warehouseStocks()->sum('available_quantity');
 
         $lastPurchase = $product->purchasePriceHistory()
@@ -581,95 +585,67 @@ class ProductController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => [
-                'total_stock' => $totalStock,
-                'reserved_stock' => $reservedStock,
-                'available_stock' => $availableStock,
-                'last_purchase_price' => $lastPurchase ? $lastPurchase->unit_price : null,
+            'data'    => [
+                'total_stock'            => $totalStock,
+                'reserved_stock'         => $reservedStock,
+                'available_stock'        => $availableStock,
+                'last_purchase_price'    => $lastPurchase ? $lastPurchase->unit_price : null,
                 'average_purchase_price' => $averagePurchase,
-                'last_sale_price' => $lastSale ? $lastSale->unit_price : null,
-            ]
+                'last_sale_price'        => $lastSale ? $lastSale->unit_price : null,
+            ],
         ]);
     }
 
-    /**
-     * Get warehouse-wise stock for a product.
-     */
     public function warehouseStock(Product $product)
     {
-        // $this->authorize('inventory.view');
-
         $stocks = $product->warehouseStocks()
             ->with('warehouse:id,name')
             ->get()
             ->map(function ($stock) {
                 return [
-                    'warehouse_id' => $stock->warehouse_id,
-                    'warehouse_name' => $stock->warehouse->name ?? 'Unknown',
-                    'quantity' => $stock->quantity,
-                    'reserved_quantity' => $stock->reserved_quantity,
-                    'available_quantity' => $stock->available_quantity,
-                    'average_cost' => $stock->average_cost,
+                    'warehouse_id'        => $stock->warehouse_id,
+                    'warehouse_name'      => $stock->warehouse->name ?? 'Unknown',
+                    'quantity'            => $stock->quantity,
+                    'reserved_quantity'   => $stock->reserved_quantity,
+                    'available_quantity'  => $stock->available_quantity,
+                    'average_cost'        => $stock->average_cost,
                     'last_purchase_price' => $stock->last_purchase_price,
                 ];
             });
 
         return response()->json([
             'success' => true,
-            'data' => $stocks,
+            'data'    => $stocks,
         ]);
     }
 
-    /**
-     * Get stock movements for a product with optional filters.
-     */
     public function stockMovements(Request $request, Product $product)
     {
-        // $this->authorize('inventory.view');
-
         $query = $product->stockMovements()
             ->with(['warehouse:id,name', 'creator:id,name']);
 
-        if ($request->filled('warehouse_id')) {
-            $query->where('warehouse_id', $request->warehouse_id);
-        }
-        if ($request->filled('transaction_type')) {
-            $query->where('transaction_type', $request->transaction_type);
-        }
-        if ($request->filled('reference_type')) {
-            $query->where('reference_type', $request->reference_type);
-        }
-        if ($request->filled('reference_id')) {
-            $query->where('reference_id', $request->reference_id);
-        }
-        if ($request->filled('user_id')) {
-            $query->where('created_by', $request->user_id);
-        }
-        if ($request->filled('date_from')) {
-            $query->whereDate('transaction_date', '>=', $request->date_from);
-        }
-        if ($request->filled('date_to')) {
-            $query->whereDate('transaction_date', '<=', $request->date_to);
-        }
+        if ($request->filled('warehouse_id'))    $query->where('warehouse_id', $request->warehouse_id);
+        if ($request->filled('transaction_type'))$query->where('transaction_type', $request->transaction_type);
+        if ($request->filled('reference_type'))  $query->where('reference_type', $request->reference_type);
+        if ($request->filled('reference_id'))    $query->where('reference_id', $request->reference_id);
+        if ($request->filled('user_id'))         $query->where('created_by', $request->user_id);
+        if ($request->filled('date_from'))       $query->whereDate('transaction_date', '>=', $request->date_from);
+        if ($request->filled('date_to'))         $query->whereDate('transaction_date', '<=', $request->date_to);
 
         $perPage = $request->input('per_page', 20);
-        $movements = $query->orderBy('transaction_date', 'desc')
-            ->paginate($perPage);
+
+        $movements = $query->orderBy('transaction_date', 'desc')->paginate($perPage);
 
         return response()->json([
             'success' => true,
-            'data' => $movements,
+            'data'    => $movements,
         ]);
     }
 
-    /**
-     * Get purchase price history for a product.
-     */
     public function purchasePriceHistory(Request $request, Product $product)
     {
-        // $this->authorize('inventory.price_history');
-
         $perPage = $request->input('per_page', 20);
+
         $history = $product->purchasePriceHistory()
             ->with(['supplier:id,name'])
             ->orderBy('purchase_date', 'desc')
@@ -677,56 +653,49 @@ class ProductController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $history,
+            'data'    => $history,
         ]);
     }
 
-    /**
-     * Get bill-wise transactions (sales/purchases) for a product.
-     */
     public function transactions(Request $request, Product $product)
     {
-        // $this->authorize('inventory.view');
-
-        // Sales
         $sales = $product->saleItems()
-            ->with(['sale.customer:id,name', 'sale' => function($q) {
+            ->with(['sale.customer:id,name', 'sale' => function ($q) {
                 $q->select('id', 'customer_id', 'invoice_number', 'sale_date', 'total_amount', 'discount', 'tax');
             }])
             ->get()
             ->map(function ($item) {
                 return [
-                    'type' => 'sale',
-                    'bill_number' => $item->sale->invoice_number ?? 'N/A',
-                    'party_name' => $item->sale->customer->name ?? 'Unknown',
-                    'date' => $item->sale->sale_date ?? $item->created_at,
-                    'unit_price' => $item->unit_price,
+                    'type'           => 'sale',
+                    'bill_number'    => $item->sale->invoice_number ?? 'N/A',
+                    'party_name'     => $item->sale->customer->name ?? 'Unknown',
+                    'date'           => $item->sale->sale_date ?? $item->created_at,
+                    'unit_price'     => $item->unit_price,
                     'price_with_tax' => $item->unit_price * (1 + $item->tax_rate / 100),
-                    'quantity' => $item->quantity,
-                    'item_discount' => $item->discount_percentage ?? 0,
-                    'item_net' => $item->total_price,
-                    'item_total' => $item->total_price,
+                    'quantity'       => $item->quantity,
+                    'item_discount'  => $item->discount_percentage ?? 0,
+                    'item_net'       => $item->total_price,
+                    'item_total'     => $item->total_price,
                 ];
             });
 
-        // Purchases
         $purchases = $product->purchaseItems()
-            ->with(['purchase.supplier:id,name', 'purchase' => function($q) {
+            ->with(['purchase.supplier:id,name', 'purchase' => function ($q) {
                 $q->select('id', 'supplier_id', 'bill_number', 'purchase_date', 'total_amount');
             }])
             ->get()
             ->map(function ($item) {
                 return [
-                    'type' => 'purchase',
-                    'bill_number' => $item->purchase->bill_number ?? 'N/A',
-                    'party_name' => $item->purchase->supplier->name ?? 'Unknown',
-                    'date' => $item->purchase->purchase_date ?? $item->created_at,
-                    'unit_price' => $item->unit_price,
+                    'type'           => 'purchase',
+                    'bill_number'    => $item->purchase->bill_number ?? 'N/A',
+                    'party_name'     => $item->purchase->supplier->name ?? 'Unknown',
+                    'date'           => $item->purchase->purchase_date ?? $item->created_at,
+                    'unit_price'     => $item->unit_price,
                     'price_with_tax' => $item->unit_price,
-                    'quantity' => $item->quantity,
-                    'item_discount' => 0,
-                    'item_net' => $item->total_price,
-                    'item_total' => $item->total_price,
+                    'quantity'       => $item->quantity,
+                    'item_discount'  => 0,
+                    'item_net'       => $item->total_price,
+                    'item_total'     => $item->total_price,
                 ];
             });
 
@@ -734,63 +703,54 @@ class ProductController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $all->values(),
+            'data'    => $all->values(),
         ]);
     }
 
-    /**
-     * Get party-wise transactions for a product.
-     */
     public function partyTransactions(Request $request, Product $product)
     {
-        // $this->authorize('inventory.view');
-
         $transactions = $this->transactions($request, $product)->original['data'] ?? [];
-        $grouped = collect($transactions)->groupBy('party_name');
+        $grouped      = collect($transactions)->groupBy('party_name');
 
         return response()->json([
             'success' => true,
-            'data' => $grouped,
+            'data'    => $grouped,
         ]);
     }
 
-    /**
-     * Get current price list for a product.
-     */
     public function priceList(Product $product)
     {
-        // $this->authorize('inventory.view');
-
         return response()->json([
             'success' => true,
-            'data' => [
-                'purchase_price' => $product->purchase_price,
-                'sale_price' => $product->sale_price,
-                'mrp' => $product->mrp ?? null,
-                'wholesale_price' => $product->wholesale_price ?? null,
-                'dealer_price' => $product->dealer_price ?? null,
+            'data'    => [
+                'purchase_price'    => $product->purchase_price,
+                'sale_price'        => $product->sale_price,
+                'mrp'               => $product->mrp ?? null,
+                'wholesale_price'   => $product->wholesale_price ?? null,
+                'dealer_price'      => $product->dealer_price ?? null,
                 'distributor_price' => $product->distributor_price ?? null,
-                'tax_rate' => $product->tax_rate,
-                'discount' => $product->discount ?? 0,
+                'tax_rate'          => $product->tax_rate,
+                'discount'          => $product->discount ?? 0,
             ],
         ]);
     }
 
     /**
      * Manual Stock IN.
+     *
+     * Accepts quantity >= 0 (allows creating a row with 0 to prepare for
+     * future stock-out without requiring an initial positive quantity).
      */
     public function stockIn(Request $request, Product $product)
     {
-        // $this->authorize('inventory.stock_in');
-
         $data = $request->validate([
-            'warehouse_id' => 'required|exists:warehouses,id',
-            'quantity' => 'required|integer|min:1',
-            'unit_cost' => 'nullable|numeric|min:0',
-            'reference_type' => 'required|in:purchase,return,adjustment,transfer,opening_stock,manual,other',
-            'reference_id' => 'nullable|string|max:100',
+            'warehouse_id'     => 'required|exists:warehouses,id',
+            'quantity'         => 'required|integer|min:0',   // ← was min:1
+            'unit_cost'        => 'nullable|numeric|min:0',
+            'reference_type'   => 'required|in:purchase,return,adjustment,transfer,opening_stock,manual,other',
+            'reference_id'     => 'nullable|string|max:100',
             'transaction_date' => 'required|date',
-            'remark' => 'nullable|string|max:255',
+            'remark'           => 'nullable|string|max:255',
         ]);
 
         try {
@@ -798,72 +758,75 @@ class ProductController extends Controller
 
             $stock = ProductWarehouseStock::firstOrCreate(
                 [
-                    'product_id' => $product->id,
+                    'product_id'   => $product->id,
                     'warehouse_id' => $data['warehouse_id'],
                 ],
                 [
-                    'company_id' => $product->company_id,
-                    'branch_id' => $product->branch_id,
-                    'quantity' => 0,
-                    'reserved_quantity' => 0,
+                    'company_id'         => $product->company_id,
+                    'branch_id'          => $product->branch_id,
+                    'quantity'           => 0,
+                    'reserved_quantity'  => 0,
                     'available_quantity' => 0,
-                    'average_cost' => 0,
+                    'average_cost'       => 0,
                 ]
             );
             $stock->lockForUpdate();
 
             $before = $stock->quantity;
-            $after = $before + $data['quantity'];
+            $after  = $before + $data['quantity'];
 
-            $stock->quantity = $after;
+            $stock->quantity           = $after;
             $stock->available_quantity = $after - $stock->reserved_quantity;
 
-            if (!is_null($data['unit_cost'])) {
+            if (!is_null($data['unit_cost']) && $data['quantity'] > 0) {
                 $totalCost = ($stock->average_cost * $before) + ($data['unit_cost'] * $data['quantity']);
-                $stock->average_cost = $after > 0 ? round($totalCost / $after, 2) : 0;
+                $stock->average_cost        = $after > 0 ? round($totalCost / $after, 2) : 0;
                 $stock->last_purchase_price = $data['unit_cost'];
             }
 
             $stock->save();
 
             StockMovement::create([
-                'product_id' => $product->id,
-                'warehouse_id' => $data['warehouse_id'],
-                'company_id' => $product->company_id,
-                'branch_id' => $product->branch_id,
+                'product_id'       => $product->id,
+                'warehouse_id'     => $data['warehouse_id'],
+                'company_id'       => $product->company_id,
+                'branch_id'        => $product->branch_id,
                 'transaction_type' => 'IN',
-                'reference_type' => $data['reference_type'],
-                'reference_id' => $data['reference_id'] ?? null,
-                'quantity' => $data['quantity'],
-                'unit_price' => $data['unit_cost'] ?? 0,
-                'stock_before' => $before,
-                'stock_after' => $after,
-                'remark' => $data['remark'] ?? null,
+                'reference_type'   => $data['reference_type'],
+                'reference_id'     => $data['reference_id'] ?? null,
+                'quantity'         => $data['quantity'],
+                'unit_price'       => $data['unit_cost'] ?? 0,
+                'stock_before'     => $before,
+                'stock_after'      => $after,
+                'remark'           => $data['remark'] ?? null,
                 'transaction_date' => $data['transaction_date'],
-                'created_by' => Auth::id(),
+                'created_by'       => Auth::id(),
             ]);
 
-            if ($data['reference_type'] === 'purchase') {
+            if ($data['reference_type'] === 'purchase' && $data['quantity'] > 0) {
                 ProductPurchasePriceHistory::create([
-                    'product_id' => $product->id,
-                    'bill_number' => $data['reference_id'] ?? null,
-                    'quantity' => $data['quantity'],
-                    'unit_price' => $data['unit_cost'] ?? 0,
+                    'product_id'    => $product->id,
+                    'bill_number'   => $data['reference_id'] ?? null,
+                    'quantity'      => $data['quantity'],
+                    'unit_price'    => $data['unit_cost'] ?? 0,
                     'purchase_date' => $data['transaction_date'],
                 ]);
             }
+
+            $this->syncProductStock($product);
 
             DB::commit();
 
             return response()->json([
                 'success' => true,
                 'message' => 'Stock IN successful',
-                'data' => [
-                    'product_id' => $product->id,
-                    'warehouse_id' => $data['warehouse_id'],
-                    'stock_before' => $before,
-                    'quantity' => $data['quantity'],
-                    'stock_after' => $after,
+                'data'    => [
+                    'product_id'          => $product->id,
+                    'warehouse_id'        => $data['warehouse_id'],
+                    'stock_before'        => $before,
+                    'quantity'            => $data['quantity'],
+                    'stock_after'         => $after,
+                    'product_total_stock' => (int) $product->stock_quantity,
                 ],
             ]);
         } catch (\Exception $e) {
@@ -877,80 +840,91 @@ class ProductController extends Controller
 
     /**
      * Manual Stock OUT.
+     *
+     * ✅ AUTO-CREATES a missing warehouse stock row (quantity 0) instead of
+     *    404'ing with "No stock record found for this warehouse".
+     * ✅ ALLOWS stock to go NEGATIVE (no insufficient-stock rejection), so a
+     *    sale of 13 with only 10 in stock leaves balance = -3.
      */
     public function stockOut(Request $request, Product $product)
     {
-        // $this->authorize('inventory.stock_out');
-
         $data = $request->validate([
-            'warehouse_id' => 'required|exists:warehouses,id',
-            'quantity' => 'required|integer|min:1',
-            'unit_price' => 'nullable|numeric|min:0',
-            'reference_type' => 'required|in:sale,return,adjustment,transfer,manual,other',
-            'reference_id' => 'nullable|string|max:100',
+            'warehouse_id'     => 'required|exists:warehouses,id',
+            'quantity'         => 'required|integer|min:1',
+            'unit_price'       => 'nullable|numeric|min:0',
+            'reference_type'   => 'required|in:sale,return,adjustment,transfer,manual,other',
+            'reference_id'     => 'nullable|string|max:100',
             'transaction_date' => 'required|date',
-            'remark' => 'nullable|string|max:255',
+            'remark'           => 'nullable|string|max:255',
         ]);
 
         try {
             DB::beginTransaction();
 
             $stock = ProductWarehouseStock::where([
-                'product_id' => $product->id,
+                'product_id'   => $product->id,
                 'warehouse_id' => $data['warehouse_id'],
             ])->lockForUpdate()->first();
 
+            // ✅ AUTO-CREATE the missing stock row (quantity 0) — no more 404
             if (!$stock) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'No stock record found for this warehouse.',
-                ], 404);
+                $stock = ProductWarehouseStock::create([
+                    'product_id'         => $product->id,
+                    'warehouse_id'       => $data['warehouse_id'],
+                    'company_id'         => $product->company_id,
+                    'branch_id'          => $product->branch_id,
+                    'quantity'           => 0,
+                    'reserved_quantity'  => 0,
+                    'available_quantity' => 0,
+                    'average_cost'       => $product->purchase_price ?? 0,
+                    'last_purchase_price'=> $product->purchase_price ?? 0,
+                ]);
+                // Re-fetch with lock so we own the row for the update below
+                $stock = ProductWarehouseStock::where('id', $stock->id)
+                    ->lockForUpdate()
+                    ->first();
             }
 
-            $available = $stock->available_quantity;
-            if ($data['quantity'] > $available) {
-                DB::rollBack();
-                return response()->json([
-                    'success' => false,
-                    'message' => "Insufficient stock. Available: {$available}, Requested: {$data['quantity']}",
-                ], 422);
-            }
+            // ✅ NEGATIVE STOCK ALLOWED — no insufficient-stock check.
 
             $before = $stock->quantity;
-            $after = $before - $data['quantity'];
+            $after  = $before - $data['quantity'];   // can be < 0
 
-            $stock->quantity = $after;
+            $stock->quantity           = $after;
             $stock->available_quantity = $after - $stock->reserved_quantity;
             $stock->save();
 
             StockMovement::create([
-                'product_id' => $product->id,
-                'warehouse_id' => $data['warehouse_id'],
-                'company_id' => $product->company_id,
-                'branch_id' => $product->branch_id,
+                'product_id'       => $product->id,
+                'warehouse_id'     => $data['warehouse_id'],
+                'company_id'       => $product->company_id,
+                'branch_id'        => $product->branch_id,
                 'transaction_type' => 'OUT',
-                'reference_type' => $data['reference_type'],
-                'reference_id' => $data['reference_id'] ?? null,
-                'quantity' => $data['quantity'],
-                'unit_price' => $data['unit_price'] ?? 0,
-                'stock_before' => $before,
-                'stock_after' => $after,
-                'remark' => $data['remark'] ?? null,
+                'reference_type'   => $data['reference_type'],
+                'reference_id'     => $data['reference_id'] ?? null,
+                'quantity'         => $data['quantity'],
+                'unit_price'       => $data['unit_price'] ?? 0,
+                'stock_before'     => $before,
+                'stock_after'      => $after,
+                'remark'           => $data['remark'] ?? null,
                 'transaction_date' => $data['transaction_date'],
-                'created_by' => Auth::id(),
+                'created_by'       => Auth::id(),
             ]);
+
+            $this->syncProductStock($product);
 
             DB::commit();
 
             return response()->json([
                 'success' => true,
                 'message' => 'Stock OUT successful',
-                'data' => [
-                    'product_id' => $product->id,
-                    'warehouse_id' => $data['warehouse_id'],
-                    'stock_before' => $before,
-                    'quantity' => $data['quantity'],
-                    'stock_after' => $after,
+                'data'    => [
+                    'product_id'          => $product->id,
+                    'warehouse_id'        => $data['warehouse_id'],
+                    'stock_before'        => $before,
+                    'quantity'            => $data['quantity'],
+                    'stock_after'         => $after,
+                    'product_total_stock' => (int) $product->stock_quantity,
                 ],
             ]);
         } catch (\Exception $e) {
@@ -964,24 +938,25 @@ class ProductController extends Controller
 
     /**
      * Warehouse Transfer.
+     *
+     * Source warehouse must have sufficient stock (transfer is a physical
+     * move — negative balances don't make sense here).
      */
     public function transfer(Request $request, Product $product)
     {
-        // $this->authorize('inventory.transfer');
-
         $data = $request->validate([
             'from_warehouse_id' => 'required|exists:warehouses,id|different:to_warehouse_id',
-            'to_warehouse_id' => 'required|exists:warehouses,id',
-            'quantity' => 'required|integer|min:1',
-            'remark' => 'nullable|string|max:255',
-            'transaction_date' => 'required|date',
+            'to_warehouse_id'   => 'required|exists:warehouses,id',
+            'quantity'          => 'required|integer|min:1',
+            'remark'            => 'nullable|string|max:255',
+            'transaction_date'  => 'required|date',
         ]);
 
         try {
             DB::beginTransaction();
 
             $fromStock = ProductWarehouseStock::where([
-                'product_id' => $product->id,
+                'product_id'   => $product->id,
                 'warehouse_id' => $data['from_warehouse_id'],
             ])->lockForUpdate()->first();
 
@@ -994,80 +969,82 @@ class ProductController extends Controller
             }
 
             $fromBefore = $fromStock->quantity;
-            $fromAfter = $fromBefore - $data['quantity'];
-            $fromStock->quantity = $fromAfter;
+            $fromAfter  = $fromBefore - $data['quantity'];
+            $fromStock->quantity           = $fromAfter;
             $fromStock->available_quantity = $fromAfter - $fromStock->reserved_quantity;
             $fromStock->save();
 
             $toStock = ProductWarehouseStock::firstOrCreate(
                 [
-                    'product_id' => $product->id,
+                    'product_id'   => $product->id,
                     'warehouse_id' => $data['to_warehouse_id'],
                 ],
                 [
-                    'company_id' => $product->company_id,
-                    'branch_id' => $product->branch_id,
-                    'quantity' => 0,
-                    'reserved_quantity' => 0,
+                    'company_id'         => $product->company_id,
+                    'branch_id'          => $product->branch_id,
+                    'quantity'           => 0,
+                    'reserved_quantity'  => 0,
                     'available_quantity' => 0,
-                    'average_cost' => $fromStock->average_cost,
+                    'average_cost'       => $fromStock->average_cost,
                 ]
             );
             $toStock->lockForUpdate();
 
             $toBefore = $toStock->quantity;
-            $toAfter = $toBefore + $data['quantity'];
-            $toStock->quantity = $toAfter;
+            $toAfter  = $toBefore + $data['quantity'];
+            $toStock->quantity           = $toAfter;
             $toStock->available_quantity = $toAfter - $toStock->reserved_quantity;
-            $toStock->average_cost = $fromStock->average_cost;
+            $toStock->average_cost       = $fromStock->average_cost;
             $toStock->save();
 
             $transferRef = 'TRF-' . uniqid();
 
             StockMovement::create([
-                'product_id' => $product->id,
-                'warehouse_id' => $data['from_warehouse_id'],
-                'company_id' => $product->company_id,
-                'branch_id' => $product->branch_id,
+                'product_id'       => $product->id,
+                'warehouse_id'     => $data['from_warehouse_id'],
+                'company_id'       => $product->company_id,
+                'branch_id'        => $product->branch_id,
                 'transaction_type' => 'OUT',
-                'reference_type' => 'transfer',
-                'reference_id' => $transferRef,
-                'quantity' => $data['quantity'],
-                'unit_price' => $fromStock->average_cost,
-                'stock_before' => $fromBefore,
-                'stock_after' => $fromAfter,
-                'remark' => $data['remark'] ?? 'Transfer OUT',
+                'reference_type'   => 'transfer',
+                'reference_id'     => $transferRef,
+                'quantity'         => $data['quantity'],
+                'unit_price'       => $fromStock->average_cost,
+                'stock_before'     => $fromBefore,
+                'stock_after'      => $fromAfter,
+                'remark'           => $data['remark'] ?? 'Transfer OUT',
                 'transaction_date' => $data['transaction_date'],
-                'created_by' => Auth::id(),
+                'created_by'       => Auth::id(),
             ]);
 
             StockMovement::create([
-                'product_id' => $product->id,
-                'warehouse_id' => $data['to_warehouse_id'],
-                'company_id' => $product->company_id,
-                'branch_id' => $product->branch_id,
+                'product_id'       => $product->id,
+                'warehouse_id'     => $data['to_warehouse_id'],
+                'company_id'       => $product->company_id,
+                'branch_id'        => $product->branch_id,
                 'transaction_type' => 'IN',
-                'reference_type' => 'transfer',
-                'reference_id' => $transferRef,
-                'quantity' => $data['quantity'],
-                'unit_price' => $fromStock->average_cost,
-                'stock_before' => $toBefore,
-                'stock_after' => $toAfter,
-                'remark' => $data['remark'] ?? 'Transfer IN',
+                'reference_type'   => 'transfer',
+                'reference_id'     => $transferRef,
+                'quantity'         => $data['quantity'],
+                'unit_price'       => $fromStock->average_cost,
+                'stock_before'     => $toBefore,
+                'stock_after'      => $toAfter,
+                'remark'           => $data['remark'] ?? 'Transfer IN',
                 'transaction_date' => $data['transaction_date'],
-                'created_by' => Auth::id(),
+                'created_by'       => Auth::id(),
             ]);
+
+            $this->syncProductStock($product);
 
             DB::commit();
 
             return response()->json([
                 'success' => true,
                 'message' => 'Warehouse transfer successful',
-                'data' => [
-                    'transfer_ref' => $transferRef,
+                'data'    => [
+                    'transfer_ref'      => $transferRef,
                     'from_warehouse_id' => $data['from_warehouse_id'],
-                    'to_warehouse_id' => $data['to_warehouse_id'],
-                    'quantity' => $data['quantity'],
+                    'to_warehouse_id'   => $data['to_warehouse_id'],
+                    'quantity'          => $data['quantity'],
                 ],
             ]);
         } catch (\Exception $e) {
@@ -1082,44 +1059,62 @@ class ProductController extends Controller
     // ======================= PRIVATE HELPER METHODS =======================
 
     /**
+     * Recalculate products.stock_quantity = SUM(product_warehouse_stocks.quantity).
+     * Call this after ANY change to product_warehouse_stocks.
+     */
+    private function syncProductStock(Product $product): void
+    {
+        $total = (int) ProductWarehouseStock::where('product_id', $product->id)->sum('quantity');
+
+        if ((int) $product->stock_quantity !== $total) {
+            $product->stock_quantity = $total;
+            $product->saveQuietly(); // use save() if you want updated_at bumped
+        }
+    }
+
+    /**
      * Create initial stock record when product is first created with stock.
      */
     private function createInitialStock(Product $product, int $warehouseId)
     {
         DB::transaction(function () use ($product, $warehouseId) {
             ProductWarehouseStock::create([
-                'product_id' => $product->id,
-                'warehouse_id' => $warehouseId,
-                'company_id' => $product->company_id,
-                'branch_id' => $product->branch_id,
-                'quantity' => $product->stock_quantity,
-                'reserved_quantity' => 0,
+                'product_id'         => $product->id,
+                'warehouse_id'       => $warehouseId,
+                'company_id'         => $product->company_id,
+                'branch_id'          => $product->branch_id,
+                'quantity'           => $product->stock_quantity,
+                'reserved_quantity'  => 0,
                 'available_quantity' => $product->stock_quantity,
-                'average_cost' => $product->purchase_price,
-                'last_purchase_price' => $product->purchase_price,
+                'average_cost'       => $product->purchase_price,
+                'last_purchase_price'=> $product->purchase_price,
             ]);
 
             StockMovement::create([
-                'product_id' => $product->id,
-                'warehouse_id' => $warehouseId,
-                'company_id' => $product->company_id,
-                'branch_id' => $product->branch_id,
+                'product_id'       => $product->id,
+                'warehouse_id'     => $warehouseId,
+                'company_id'       => $product->company_id,
+                'branch_id'        => $product->branch_id,
                 'transaction_type' => 'IN',
-                'reference_type' => 'opening_stock',
-                'reference_id' => null,
-                'quantity' => $product->stock_quantity,
-                'unit_price' => $product->purchase_price,
-                'stock_before' => 0,
-                'stock_after' => $product->stock_quantity,
-                'remark' => 'Opening stock',
+                'reference_type'   => 'opening_stock',
+                'reference_id'     => null,
+                'quantity'         => $product->stock_quantity,
+                'unit_price'       => $product->purchase_price,
+                'stock_before'     => 0,
+                'stock_after'      => $product->stock_quantity,
+                'remark'           => 'Opening stock',
                 'transaction_date' => now(),
-                'created_by' => Auth::id(),
+                'created_by'       => Auth::id(),
             ]);
+
+            $this->syncProductStock($product);
         });
     }
 
     /**
      * Adjust stock for a product (used on update when stock_quantity changes).
+     *
+     * ✅ NEGATIVE STOCK ALLOWED — the `$after < 0` guard was removed.
      */
     private function adjustStock(Product $product, int $qty, string $type, string $refType, string $remark)
     {
@@ -1128,49 +1123,53 @@ class ProductController extends Controller
             $defaultWarehouse = Warehouse::first();
             if (!$defaultWarehouse) return;
             $warehouse = ProductWarehouseStock::create([
-                'product_id' => $product->id,
-                'warehouse_id' => $defaultWarehouse->id,
-                'company_id' => $product->company_id,
-                'branch_id' => $product->branch_id,
-                'quantity' => 0,
-                'reserved_quantity' => 0,
+                'product_id'         => $product->id,
+                'warehouse_id'       => $defaultWarehouse->id,
+                'company_id'         => $product->company_id,
+                'branch_id'          => $product->branch_id,
+                'quantity'           => 0,
+                'reserved_quantity'  => 0,
                 'available_quantity' => 0,
-                'average_cost' => 0,
+                'average_cost'       => 0,
             ]);
         }
 
         DB::transaction(function () use ($product, $warehouse, $qty, $type, $refType, $remark) {
             $stock = ProductWarehouseStock::where('id', $warehouse->id)->lockForUpdate()->first();
             $before = $stock->quantity;
-            $after = $type === 'IN' ? $before + $qty : $before - $qty;
-            if ($after < 0) {
-                throw new \Exception('Stock cannot be negative');
-            }
-            $stock->quantity = $after;
+            $after  = $type === 'IN' ? $before + $qty : $before - $qty;
+
+            // ✅ Negative guard removed — adjustments may push stock below zero.
+
+            $stock->quantity           = $after;
             $stock->available_quantity = $after - $stock->reserved_quantity;
             $stock->save();
 
             StockMovement::create([
-                'product_id' => $product->id,
-                'warehouse_id' => $stock->warehouse_id,
-                'company_id' => $product->company_id,
-                'branch_id' => $product->branch_id,
+                'product_id'       => $product->id,
+                'warehouse_id'     => $stock->warehouse_id,
+                'company_id'       => $product->company_id,
+                'branch_id'        => $product->branch_id,
                 'transaction_type' => $type,
-                'reference_type' => $refType,
-                'reference_id' => null,
-                'quantity' => $qty,
-                'unit_price' => $product->purchase_price,
-                'stock_before' => $before,
-                'stock_after' => $after,
-                'remark' => $remark,
+                'reference_type'   => $refType,
+                'reference_id'     => null,
+                'quantity'         => $qty,
+                'unit_price'       => $product->purchase_price,
+                'stock_before'     => $before,
+                'stock_after'      => $after,
+                'remark'           => $remark,
                 'transaction_date' => now(),
-                'created_by' => Auth::id(),
+                'created_by'       => Auth::id(),
             ]);
+
+            $this->syncProductStock($product);
         });
     }
 
     /**
      * Prepare product data: set empty barcode to null, apply default numeric values.
+     * NOTE: stock_quantity is intentionally NOT defaulted here — it must be
+     * driven by warehouse stock, never by request payload.
      */
     private function prepareProductData(array $data): array
     {
@@ -1178,9 +1177,8 @@ class ProductController extends Controller
             $data['barcode'] = null;
         }
         $data['purchase_price'] = $data['purchase_price'] ?? 0;
-        $data['tax_rate'] = $data['tax_rate'] ?? 0;
-        $data['reorder_level'] = $data['reorder_level'] ?? 0;
-        $data['stock_quantity'] = $data['stock_quantity'] ?? 0;
+        $data['tax_rate']       = $data['tax_rate'] ?? 0;
+        $data['reorder_level']  = $data['reorder_level'] ?? 0;
         return $data;
     }
 }

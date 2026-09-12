@@ -8,7 +8,6 @@ import React, {
   lazy,
   Suspense,
   memo,
-  startTransition,
   type DragEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -42,6 +41,7 @@ import {
   FiPhone,
   FiMapPin,
   FiCalendar,
+  FiPrinter,
 } from 'react-icons/fi';
 
 import { apiClient } from '../api';
@@ -176,6 +176,11 @@ interface CustomerFormData {
   same_as_billing: boolean;
 }
 
+/**
+ * Related records returned from the API. `customer_id` + the alias set
+ * below are used to verify ownership before rendering — some backends
+ * expose the link as `party_id` / `dealer_id` / `contact_id` instead.
+ */
 interface InvoiceSummaryRow {
   id: number;
   invoice_no?: string;
@@ -184,6 +189,11 @@ interface InvoiceSummaryRow {
   invoice_date?: string;
   due_date?: string | null;
   payment_status?: string;
+  customer_id?: number | string | null;
+  party_id?: number | string | null;
+  dealer_id?: number | string | null;
+  client_id?: number | string | null;
+  contact_id?: number | string | null;
   [key: string]: unknown;
 }
 
@@ -196,6 +206,12 @@ interface PaymentRow {
   status?: string;
   transaction_date?: string;
   remarks?: string;
+  customer_id?: number | string | null;
+  party_id?: number | string | null;
+  dealer_id?: number | string | null;
+  client_id?: number | string | null;
+  contact_id?: number | string | null;
+  invoice_id?: number | string | null;
   [key: string]: unknown;
 }
 
@@ -207,6 +223,11 @@ interface OrderSummaryRow {
   source?: string;
   delivery_date?: string | null;
   created_at?: string;
+  customer_id?: number | string | null;
+  party_id?: number | string | null;
+  dealer_id?: number | string | null;
+  client_id?: number | string | null;
+  contact_id?: number | string | null;
   [key: string]: unknown;
 }
 
@@ -269,6 +290,24 @@ interface ApiErrorLike {
   response?: { status?: number };
 }
 
+interface LedgerEntry {
+  id?: number | string;
+  date?: string | null;
+  type?: string;
+  reference_no?: string | null;
+  particulars?: string | null;
+  narration?: string | null;
+  debit?: number | string | null;
+  credit?: number | string | null;
+  status?: string | null;
+  customer_id?: number | string | null;
+  party_id?: number | string | null;
+  dealer_id?: number | string | null;
+  client_id?: number | string | null;
+  contact_id?: number | string | null;
+  [key: string]: unknown;
+}
+
 /* ------------------------------------------------------------------ */
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
@@ -276,6 +315,7 @@ interface ApiErrorLike {
 const CACHE_TTL_MS = 300_000;
 const TABLE_COLUMN_COUNT = 9;
 const RELATED_LIMIT = 10;
+const MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
 
 const TYPE_OPTIONS = [
   { value: 'all', label: 'All types' },
@@ -284,7 +324,20 @@ const TYPE_OPTIONS = [
   { value: 'distributor', label: 'Distributor' },
 ] as const;
 
-const TABLE_HEAD_CLASS = 'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
+const TABLE_HEAD_CLASS =
+  'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
+
+/**
+ * Fields that may carry "this row belongs to customer X" on the API
+ * response. Order matters: the first non-empty field wins.
+ */
+const OWNERSHIP_KEYS = [
+  'customer_id',
+  'party_id',
+  'dealer_id',
+  'client_id',
+  'contact_id',
+] as const;
 
 /* ------------------------------------------------------------------ */
 /* Safe helpers                                                        */
@@ -314,7 +367,11 @@ function safeNum(value: unknown): number {
 
 function unwrapList<T>(response: unknown): T[] {
   if (Array.isArray(response)) return response as T[];
-  if (response && typeof response === 'object' && Array.isArray((response as { data?: unknown }).data)) {
+  if (
+    response &&
+    typeof response === 'object' &&
+    Array.isArray((response as { data?: unknown }).data)
+  ) {
     return (response as { data: T[] }).data;
   }
   return [];
@@ -337,7 +394,7 @@ function formatCurrency(value: unknown): string {
 
 function formatDate(value?: string | null): string {
   if (!value) return '—';
-  const dateValue = value.slice(0, 10);
+  const dateValue = String(value).slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) return '—';
   const [year, month, day] = dateValue.split('-').map(Number);
   const date = new Date(year, month - 1, day);
@@ -347,6 +404,679 @@ function formatDate(value?: string | null): string {
     month: 'short',
     year: 'numeric',
   }).format(date);
+}
+
+/* ------------------------------------------------------------------ */
+/* Ownership guard                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Does this row explicitly reference the given customer?
+ * Checks every alias in OWNERSHIP_KEYS and returns the first match.
+ */
+function rowBelongsToCustomer(
+  row: Record<string, unknown> | null | undefined,
+  customerId: number
+): boolean {
+  if (!row) return false;
+  for (const key of OWNERSHIP_KEYS) {
+    const value = row[key];
+    if (value === undefined || value === null || value === '') continue;
+    const n = typeof value === 'number' ? value : Number(value);
+    if (Number.isFinite(n)) {
+      return n === customerId;
+    }
+  }
+  return false;
+}
+
+/**
+ * Client-side safety net for related lists.
+ *
+ * - If the API returns rows that carry an ownership field, we filter
+ *   strictly and drop anything that does not match `customerId`.
+ * - If the API returns rows with *no* ownership field at all (can't be
+ *   verified), we trust the API filter and log a warning once — this
+ *   prevents blanking the whole tab on a backend we can't change yet.
+ */
+function filterByOwnership<T extends Record<string, unknown>>(
+  rows: T[],
+  customerId: number,
+  entityLabel: string
+): T[] {
+  if (rows.length === 0) return rows;
+
+  const hasOwnershipField = rows.some((row) =>
+    OWNERSHIP_KEYS.some(
+      (key) => row[key] !== undefined && row[key] !== null && row[key] !== ''
+    )
+  );
+
+  if (!hasOwnershipField) {
+    // Can't verify client-side — trust the API. Log once per fetch.
+    console.warn(
+      `[CustomersPage] ${entityLabel}: API returned no ownership fields ` +
+        `(customer_id / party_id / dealer_id / client_id / contact_id). ` +
+        `Trusting server-side filter for customer #${customerId}.`
+    );
+    return rows;
+  }
+
+  const filtered = rows.filter((row) => rowBelongsToCustomer(row, customerId));
+  if (filtered.length !== rows.length) {
+    console.warn(
+      `[CustomersPage] ${entityLabel}: dropped ${rows.length - filtered.length} ` +
+        `row(s) that did not belong to customer #${customerId}. ` +
+        `Check that the API filters by customer_id on the server.`
+    );
+  }
+  return filtered;
+}
+
+/* ------------------------------------------------------------------ */
+/* Ledger A4 utilities                                                 */
+/* ------------------------------------------------------------------ */
+
+function htmlEscape(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function inrPlain(value: unknown): string {
+  return new Intl.NumberFormat('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(safeNum(value));
+}
+
+function inrMoney(value: unknown): string {
+  return `\u20B9 ${inrPlain(value)}`;
+}
+
+function todayLabel(): string {
+  return new Intl.DateTimeFormat('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  }).format(new Date());
+}
+
+const ONES = [
+  '', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
+  'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen',
+  'Seventeen', 'Eighteen', 'Nineteen',
+];
+const TENS = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
+
+function twoDigits(n: number): string {
+  if (n < 20) return ONES[n];
+  const t = Math.floor(n / 10);
+  const o = n % 10;
+  return TENS[t] + (o ? ` ${ONES[o]}` : '');
+}
+
+function threeDigits(n: number): string {
+  if (n < 100) return twoDigits(n);
+  const h = Math.floor(n / 100);
+  const r = n % 100;
+  return `${ONES[h]} Hundred${r ? ` ${twoDigits(r)}` : ''}`;
+}
+
+function amountInWords(value: number): string {
+  const negative = value < 0;
+  const abs = Math.abs(value);
+  const rupees = Math.floor(abs);
+  const paise = Math.round((abs - rupees) * 100);
+
+  let words: string;
+  if (rupees === 0) {
+    words = 'Zero';
+  } else {
+    const crore = Math.floor(rupees / 10000000);
+    const lakh = Math.floor((rupees % 10000000) / 100000);
+    const thousand = Math.floor((rupees % 100000) / 1000);
+    const rest = rupees % 1000;
+
+    const parts: string[] = [];
+    if (crore) parts.push(`${threeDigits(crore)} Crore`);
+    if (lakh) parts.push(`${threeDigits(lakh)} Lakh`);
+    if (thousand) parts.push(`${threeDigits(thousand)} Thousand`);
+    if (rest) parts.push(threeDigits(rest));
+    words = parts.join(' ');
+  }
+
+  let out = `${negative ? 'Minus ' : ''}${words} Rupees`;
+  if (paise) out += ` and ${twoDigits(paise)} Paise`;
+  return `${out} Only`;
+}
+
+const LEDGER_TYPE_LABEL: Record<string, string> = {
+  invoice: 'Sales',
+  sales: 'Sales',
+  payment: 'Receipt',
+  receipt: 'Receipt',
+  credit_note: 'Credit Note',
+  debit_note: 'Debit Note',
+  opening: 'Opening',
+  journal: 'Journal',
+  order: 'Order',
+};
+
+function ledgerEntryParticulars(entry: LedgerEntry): string {
+  const explicit = entry.particulars ?? entry.narration;
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+  const ref = entry.reference_no ? String(entry.reference_no) : '';
+  const kind = LEDGER_TYPE_LABEL[String(entry.type ?? '').toLowerCase()] ?? 'Transaction';
+  return ref ? `${kind} ${ref}` : kind;
+}
+
+async function fetchLedgerEntries(customerId: number): Promise<LedgerEntry[]> {
+  const candidates = [
+    `/customers/${customerId}/ledger`,
+    `/ledger?customer_id=${customerId}`,
+    `/customers/${customerId}/ledger-entries`,
+  ];
+
+  for (const url of candidates) {
+    try {
+      const res = await apiClient.request('GET', url);
+      const list = unwrapList<LedgerEntry>(res);
+      if (list.length) {
+        // Guard: even the dedicated ledger endpoint should only return
+        // entries that reference this customer.
+        return filterByOwnership(
+          list as unknown as Record<string, unknown>[],
+          customerId,
+          `Ledger(${url})`
+        ) as unknown as LedgerEntry[];
+      }
+    } catch {
+      /* try next */
+    }
+  }
+
+  // Fallback: derive ledger from invoices + payments.
+  const [invRes, payRes] = await Promise.allSettled([
+    apiClient.request('GET', `/invoices?customer_id=${customerId}&per_page=500`),
+    apiClient.request('GET', `/payments?customer_id=${customerId}&per_page=500`),
+  ]);
+
+  const entries: LedgerEntry[] = [];
+
+  if (invRes.status === 'fulfilled') {
+    const rawInvoices = unwrapList<Record<string, unknown>>(invRes.value);
+    const ownedInvoices = filterByOwnership(
+      rawInvoices,
+      customerId,
+      'Ledger fallback / invoices'
+    );
+    ownedInvoices.forEach((inv, index) => {
+      const ref = (inv.invoice_no as string) ?? `#${inv.id ?? index + 1}`;
+      entries.push({
+        id: `inv-${inv.id ?? index}`,
+        date: (inv.invoice_date as string) ?? (inv.created_at as string) ?? '',
+        type: 'invoice',
+        reference_no: ref,
+        particulars: `Sales Invoice ${ref}`,
+        debit: safeNum(inv.total_amount),
+        credit: 0,
+        status: (inv.status as string) ?? null,
+      });
+    });
+  }
+
+  if (payRes.status === 'fulfilled') {
+    const rawPayments = unwrapList<Record<string, unknown>>(payRes.value);
+    const ownedPayments = filterByOwnership(
+      rawPayments,
+      customerId,
+      'Ledger fallback / payments'
+    );
+    ownedPayments.forEach((pay, index) => {
+      const ref = (pay.reference_no as string) ?? `#${pay.id ?? index + 1}`;
+      const direction = String(pay.payment_direction ?? 'inward').toLowerCase();
+      const inward = direction !== 'outward';
+      const amount = safeNum(pay.amount);
+      entries.push({
+        id: `pay-${pay.id ?? index}`,
+        date: (pay.transaction_date as string) ?? (pay.created_at as string) ?? '',
+        type: 'payment',
+        reference_no: ref,
+        particulars: `${inward ? 'Receipt' : 'Payment'} ${ref}${
+          pay.payment_method ? ` (${pay.payment_method})` : ''
+        }`,
+        debit: inward ? 0 : amount,
+        credit: inward ? amount : 0,
+        status: (pay.status as string) ?? null,
+      });
+    });
+  }
+
+  return entries;
+}
+
+function buildLedgerHtml(customer: Customer, entries: LedgerEntry[]): string {
+  const sorted = [...entries].sort((a, b) => {
+    const da = String(a.date ?? '').slice(0, 10);
+    const db = String(b.date ?? '').slice(0, 10);
+    if (da === db) return 0;
+    return da < db ? -1 : 1;
+  });
+
+  const opening = safeNum(customer.opening_balance);
+  let running = opening;
+  let totalDebit = 0;
+  let totalCredit = 0;
+
+  const rows = sorted.map((entry, i) => {
+    const debit = safeNum(entry.debit);
+    const credit = safeNum(entry.credit);
+    totalDebit += debit;
+    totalCredit += credit;
+    running += debit - credit;
+    return {
+      index: i + 1,
+      date: formatDate(entry.date),
+      typeLabel: LEDGER_TYPE_LABEL[String(entry.type ?? '').toLowerCase()] ?? '—',
+      reference: entry.reference_no ? String(entry.reference_no) : '—',
+      particulars: ledgerEntryParticulars(entry),
+      debit,
+      credit,
+      balance: running,
+    };
+  });
+
+  const closing = opening + totalDebit - totalCredit;
+
+  const companyName = customer.company?.name || 'Company';
+  const branchName = customer.branch?.name || '';
+
+  const addressLines = [
+    customer.billing_street,
+    customer.billing_landmark,
+    [customer.billing_city, customer.billing_state, customer.billing_pincode]
+      .filter(Boolean)
+      .join(', '),
+    customer.billing_country,
+  ].filter((line) => typeof line === 'string' && line.trim());
+
+  const bodyRows = rows
+    .map(
+      (row) => `
+      <tr>
+        <td class="c-idx">${row.index}</td>
+        <td class="c-date">${htmlEscape(row.date)}</td>
+        <td class="c-type">${htmlEscape(row.typeLabel)}</td>
+        <td class="c-ref">${htmlEscape(row.reference)}</td>
+        <td class="c-part">${htmlEscape(row.particulars)}</td>
+        <td class="c-amt">${row.debit ? inrPlain(row.debit) : '—'}</td>
+        <td class="c-amt">${row.credit ? inrPlain(row.credit) : '—'}</td>
+        <td class="c-amt c-bal">${inrPlain(Math.abs(row.balance))}
+          <span class="dr">${row.balance >= 0 ? 'Dr' : 'Cr'}</span>
+        </td>
+      </tr>`
+    )
+    .join('');
+
+  const emptyRow = `
+    <tr class="empty">
+      <td colspan="8">No transactions recorded for this customer.</td>
+    </tr>`;
+
+  const balWord = amountInWords(closing);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Ledger \u2013 ${htmlEscape(customer.name)}</title>
+<style>
+  * { box-sizing: border-box; }
+  @page { size: A4 portrait; margin: 12mm 10mm 14mm 10mm; }
+  html, body { margin: 0; padding: 0; background: #ffffff; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                 "Helvetica Neue", Arial, sans-serif;
+    font-size: 10px; line-height: 1.35; color: #0f172a;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .sheet { width: 190mm; margin: 0 auto; padding: 4mm 0; }
+  @media print { .sheet { width: 100%; margin: 0; padding: 0; } }
+
+  .doc-head {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 12px; padding-bottom: 8px; border-bottom: 2px solid #0f172a;
+  }
+  .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .brand-mark {
+    width: 34px; height: 34px; flex: 0 0 34px;
+    display: grid; place-items: center; border-radius: 8px;
+    background: #0f172a; color: #ffffff;
+    font-size: 13px; font-weight: 700; letter-spacing: .5px;
+  }
+  .brand-name { font-size: 13px; font-weight: 700; letter-spacing: -.2px; }
+  .brand-sub { font-size: 9px; color: #64748b; margin-top: 1px; }
+  .doc-title { text-align: right; }
+  .doc-title-main {
+    font-size: 15px; font-weight: 700; letter-spacing: .4px;
+    text-transform: uppercase;
+  }
+  .doc-title-sub { font-size: 9px; color: #64748b; margin-top: 2px; }
+
+  .meta {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+    margin-top: 10px; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden;
+  }
+  .meta-col { padding: 8px 10px; }
+  .meta-col + .meta-col { border-left: 1px solid #e2e8f0; }
+  .meta-label {
+    font-size: 8px; font-weight: 700; letter-spacing: .9px;
+    text-transform: uppercase; color: #94a3b8; margin-bottom: 4px;
+  }
+  .meta-name { font-size: 12px; font-weight: 700; color: #0f172a; }
+  .meta-line { font-size: 9.5px; color: #475569; margin-top: 1px; }
+  .meta-kv { display: flex; gap: 6px; font-size: 9.5px; margin-top: 2px; }
+  .meta-kv .k { color: #94a3b8; min-width: 62px; }
+  .meta-kv .v { color: #1e293b; font-weight: 600; word-break: break-word; }
+
+  .summary {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 0;
+    margin-top: 10px; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden;
+  }
+  .sum-cell { padding: 7px 9px; }
+  .sum-cell + .sum-cell { border-left: 1px solid #e2e8f0; }
+  .sum-label {
+    font-size: 8px; font-weight: 700; letter-spacing: .8px;
+    text-transform: uppercase; color: #94a3b8;
+  }
+  .sum-value {
+    font-size: 12px; font-weight: 700; margin-top: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .sum-value.dr { color: #b91c1c; }
+  .sum-value.cr { color: #047857; }
+  .sum-value.plain { color: #0f172a; }
+
+  .table-wrap { margin-top: 12px; }
+  table.ledger { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  table.ledger thead { display: table-header-group; }
+  table.ledger tr { page-break-inside: avoid; }
+  table.ledger th {
+    background: #f1f5f9; border-top: 1px solid #cbd5e1;
+    border-bottom: 1px solid #cbd5e1; padding: 6px 6px;
+    font-size: 8.5px; font-weight: 700; letter-spacing: .7px;
+    text-transform: uppercase; color: #475569; text-align: left; white-space: nowrap;
+  }
+  table.ledger th.c-amt { text-align: right; }
+  table.ledger td {
+    padding: 5px 6px; border-bottom: 1px solid #eef2f7;
+    font-size: 9.5px; color: #1e293b; vertical-align: top; word-wrap: break-word;
+  }
+  .c-idx  { width: 22px; text-align: center; color: #94a3b8; }
+  .c-date { width: 60px; white-space: nowrap; }
+  .c-type { width: 52px; white-space: nowrap; color: #475569; }
+  .c-ref  { width: 72px; }
+  .c-part { width: auto; }
+  .c-amt  { width: 66px; text-align: right; white-space: nowrap;
+            font-variant-numeric: tabular-nums; }
+  .c-bal  { font-weight: 700; }
+  .c-bal .dr { font-size: 7.5px; color: #94a3b8; margin-left: 2px; font-weight: 600; }
+  tbody tr:nth-child(even) td { background: #fafbfc; }
+  tr.empty td {
+    text-align: center; color: #94a3b8; padding: 22px 6px; font-style: italic;
+  }
+  tfoot td {
+    border-top: 2px solid #0f172a; border-bottom: none;
+    padding: 6px 6px; font-size: 10px; font-weight: 700;
+    background: #f8fafc;
+  }
+  tfoot td.c-amt { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .closing {
+    margin-top: 10px; display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 8px 10px; border: 1px solid #cbd5e1;
+    border-radius: 6px; background: #f8fafc;
+  }
+  .closing .label {
+    font-size: 9px; font-weight: 700; letter-spacing: .8px;
+    text-transform: uppercase; color: #475569;
+  }
+  .closing .words { font-size: 9px; color: #64748b; margin-top: 3px; }
+  .closing .value {
+    font-size: 14px; font-weight: 700;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .closing .value.dr { color: #b91c1c; }
+  .closing .value.cr { color: #047857; }
+
+  .doc-foot {
+    margin-top: 16px; padding-top: 8px;
+    border-top: 1px solid #e2e8f0; display: flex;
+    justify-content: space-between; gap: 12px;
+    font-size: 8px; color: #94a3b8;
+  }
+  .sign { margin-top: 26px; text-align: right; font-size: 9px; color: #475569; }
+  .sign-line {
+    display: inline-block; min-width: 150px; padding-top: 4px;
+    border-top: 1px solid #94a3b8; text-align: center;
+  }
+</style>
+</head>
+<body>
+  <div class="sheet">
+
+    <header class="doc-head">
+      <div class="brand">
+        <div class="brand-mark">${htmlEscape(companyName.slice(0, 2).toUpperCase())}</div>
+        <div>
+          <div class="brand-name">${htmlEscape(companyName)}</div>
+          ${branchName ? `<div class="brand-sub">${htmlEscape(branchName)}</div>` : ''}
+        </div>
+      </div>
+      <div class="doc-title">
+        <div class="doc-title-main">Customer Ledger</div>
+        <div class="doc-title-sub">Statement of Account</div>
+        <div class="doc-title-sub">As on ${htmlEscape(todayLabel())}</div>
+      </div>
+    </header>
+
+    <section class="meta">
+      <div class="meta-col">
+        <div class="meta-label">Account holder</div>
+        <div class="meta-name">${htmlEscape(customer.name)}</div>
+        ${
+          addressLines.length
+            ? addressLines.map((line) => `<div class="meta-line">${htmlEscape(line)}</div>`).join('')
+            : '<div class="meta-line">Address not provided</div>'
+        }
+      </div>
+      <div class="meta-col">
+        <div class="meta-label">Account details</div>
+        <div class="meta-kv"><span class="k">Account ID</span><span class="v">#${htmlEscape(customer.id)}</span></div>
+        ${
+          customer.type
+            ? `<div class="meta-kv"><span class="k">Type</span><span class="v" style="text-transform:capitalize">${htmlEscape(customer.type)}</span></div>`
+            : ''
+        }
+        ${
+          customer.contact_person
+            ? `<div class="meta-kv"><span class="k">Contact</span><span class="v">${htmlEscape(customer.contact_person)}</span></div>`
+            : ''
+        }
+        ${
+          customer.contact_no
+            ? `<div class="meta-kv"><span class="k">Phone</span><span class="v">${htmlEscape(customer.contact_no)}</span></div>`
+            : ''
+        }
+        ${
+          customer.email
+            ? `<div class="meta-kv"><span class="k">Email</span><span class="v">${htmlEscape(customer.email)}</span></div>`
+            : ''
+        }
+        ${
+          customer.gst_number
+            ? `<div class="meta-kv"><span class="k">GSTIN</span><span class="v">${htmlEscape(customer.gst_number)}</span></div>`
+            : ''
+        }
+        ${
+          customer.pan
+            ? `<div class="meta-kv"><span class="k">PAN</span><span class="v">${htmlEscape(customer.pan)}</span></div>`
+            : ''
+        }
+      </div>
+    </section>
+
+    <section class="summary">
+      <div class="sum-cell">
+        <div class="sum-label">Opening balance</div>
+        <div class="sum-value plain">${inrMoney(opening)}</div>
+      </div>
+      <div class="sum-cell">
+        <div class="sum-label">Total debit</div>
+        <div class="sum-value plain">${inrMoney(totalDebit)}</div>
+      </div>
+      <div class="sum-cell">
+        <div class="sum-label">Total credit</div>
+        <div class="sum-value plain">${inrMoney(totalCredit)}</div>
+      </div>
+      <div class="sum-cell">
+        <div class="sum-label">Closing balance</div>
+        <div class="sum-value ${closing > 0 ? 'dr' : closing < 0 ? 'cr' : 'plain'}">
+          ${inrMoney(Math.abs(closing))} ${closing >= 0 ? 'Dr' : 'Cr'}
+        </div>
+      </div>
+    </section>
+
+    <div class="table-wrap">
+      <table class="ledger">
+        <colgroup>
+          <col style="width:22px" />
+          <col style="width:60px" />
+          <col style="width:52px" />
+          <col style="width:72px" />
+          <col />
+          <col style="width:66px" />
+          <col style="width:66px" />
+          <col style="width:72px" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th class="c-idx">#</th>
+            <th>Date</th>
+            <th>Type</th>
+            <th>Voucher</th>
+            <th>Particulars</th>
+            <th class="c-amt">Debit</th>
+            <th class="c-amt">Credit</th>
+            <th class="c-amt">Balance</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="c-idx">0</td>
+            <td class="c-date">—</td>
+            <td class="c-type">Opening</td>
+            <td class="c-ref">—</td>
+            <td class="c-part">Opening Balance</td>
+            <td class="c-amt">—</td>
+            <td class="c-amt">—</td>
+            <td class="c-amt c-bal">${inrPlain(Math.abs(opening))}
+              <span class="dr">${opening >= 0 ? 'Dr' : 'Cr'}</span>
+            </td>
+          </tr>
+          ${rows.length ? bodyRows : emptyRow}
+        </tbody>
+        <tfoot>
+          <tr>
+            <td colspan="5">Total</td>
+            <td class="c-amt">${inrPlain(totalDebit)}</td>
+            <td class="c-amt">${inrPlain(totalCredit)}</td>
+            <td class="c-amt">${inrPlain(Math.abs(closing))}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <section class="closing">
+      <div>
+        <div class="label">Closing balance</div>
+        <div class="words">${htmlEscape(balWord)}</div>
+      </div>
+      <div class="value ${closing > 0 ? 'dr' : closing < 0 ? 'cr' : ''}">
+        ${inrMoney(Math.abs(closing))} ${closing >= 0 ? 'Dr' : 'Cr'}
+      </div>
+    </section>
+
+    <div class="sign">
+      <span class="sign-line">Authorised Signatory</span>
+    </div>
+
+    <footer class="doc-foot">
+      <span>Generated on ${htmlEscape(todayLabel())} · Computer-generated statement.</span>
+      <span>${htmlEscape(companyName)}${branchName ? ` · ${htmlEscape(branchName)}` : ''}</span>
+    </footer>
+
+  </div>
+</body>
+</html>`;
+}
+
+function printLedgerHtml(html: string): void {
+  const frame = document.createElement('iframe');
+  frame.setAttribute('aria-hidden', 'true');
+  frame.setAttribute('title', 'Ledger print frame');
+  frame.style.cssText = [
+    'position:fixed',
+    'left:-10000px',
+    'top:0',
+    'width:210mm',
+    'height:297mm',
+    'border:0',
+    'opacity:0',
+    'pointer-events:none',
+  ].join(';');
+
+  document.body.appendChild(frame);
+
+  let printed = false;
+  const run = () => {
+    if (printed) return;
+    printed = true;
+    const win = frame.contentWindow;
+    if (win) {
+      try {
+        win.focus();
+        win.print();
+      } catch {
+        /* user can print manually */
+      }
+    }
+    window.setTimeout(() => {
+      if (frame.parentNode) frame.remove();
+    }, 60_000);
+  };
+
+  const doc = frame.contentDocument;
+  if (!doc) {
+    frame.remove();
+    return;
+  }
+
+  doc.open();
+  doc.write(html);
+  doc.close();
+
+  if (doc.readyState === 'complete') {
+    window.setTimeout(run, 350);
+  } else {
+    frame.onload = () => window.setTimeout(run, 350);
+  }
+
+  window.setTimeout(run, 1500);
 }
 
 /* ------------------------------------------------------------------ */
@@ -426,7 +1156,7 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
 }
 
 /* ------------------------------------------------------------------ */
-/* Uniform table header                                                */
+/* Table header label                                                  */
 /* ------------------------------------------------------------------ */
 
 function TableHeadLabel({
@@ -494,22 +1224,6 @@ const StatCardSkeleton = memo(() => (
 ));
 StatCardSkeleton.displayName = 'StatCardSkeleton';
 
-const TableSkeleton = memo(() => (
-  <div className="space-y-3 bg-white p-6">
-    <div className="h-6 w-48 animate-pulse rounded bg-slate-200" />
-    {Array.from({ length: 8 }).map((_, i) => (
-      <div key={i} className="flex gap-4">
-        <div className="h-4 w-1/4 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/5 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/6 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/6 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/4 animate-pulse rounded bg-slate-200" />
-      </div>
-    ))}
-  </div>
-));
-TableSkeleton.displayName = 'TableSkeleton';
-
 /* ------------------------------------------------------------------ */
 /* Stat card                                                           */
 /* ------------------------------------------------------------------ */
@@ -564,11 +1278,11 @@ const StatCard = memo(
 StatCard.displayName = 'StatCard';
 
 /* ------------------------------------------------------------------ */
-/* Portal-based Action Dropdown (Edit / Ledger / Delete)               */
+/* Portal-based Action Dropdown                                        */
 /* ------------------------------------------------------------------ */
 
-const MENU_WIDTH = 200;
-const MENU_HEIGHT = 150;
+const MENU_WIDTH = 210;
+const MENU_HEIGHT = 200;
 const MENU_MARGIN = 8;
 
 const ActionDropdown = memo(
@@ -576,12 +1290,16 @@ const ActionDropdown = memo(
     customer,
     onEdit,
     onLedger,
+    onLedgerA4,
     onDelete,
+    ledgerLoading,
   }: {
     customer: Customer;
     onEdit: (customer: Customer) => void;
     onLedger: (customer: Customer) => void;
+    onLedgerA4: (customer: Customer) => void;
     onDelete: (customer: Customer) => void;
+    ledgerLoading?: boolean;
   }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
@@ -684,6 +1402,21 @@ const ActionDropdown = memo(
                 <FiBookOpen size={14} className="text-emerald-500" /> Ledger
               </button>
 
+              <button
+                type="button"
+                role="menuitem"
+                disabled={ledgerLoading}
+                onClick={() => {
+                  if (ledgerLoading) return;
+                  setIsOpen(false);
+                  onLedgerA4(customer);
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60"
+              >
+                <FiPrinter size={14} className="text-sky-500" />
+                {ledgerLoading ? 'Preparing…' : 'Ledger (A4)'}
+              </button>
+
               <div className="my-1 border-t border-slate-100" />
 
               <button
@@ -707,6 +1440,133 @@ const ActionDropdown = memo(
 ActionDropdown.displayName = 'ActionDropdown';
 
 /* ------------------------------------------------------------------ */
+/* Form field components (memoized)                                    */
+/* ------------------------------------------------------------------ */
+
+interface FormTextFieldProps {
+  label: string;
+  field: string;
+  type?: 'text' | 'number' | 'email' | 'tel';
+  required?: boolean;
+  value: string | number;
+  hasError?: boolean;
+  onChange: (field: string, value: string) => void;
+  placeholder?: string;
+  step?: string;
+  maxLength?: number;
+}
+
+const FormTextField = memo(function FormTextField({
+  label,
+  field,
+  type = 'text',
+  required = false,
+  value,
+  hasError = false,
+  onChange,
+  placeholder,
+  step,
+  maxLength,
+}: FormTextFieldProps) {
+  const id = `field-${field}`;
+  const base =
+    'h-10 w-full min-w-0 rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition';
+  const stateClass = hasError
+    ? 'border-rose-300 ring-2 ring-rose-200'
+    : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10';
+
+  return (
+    <div className="min-w-0">
+      <label
+        htmlFor={id}
+        className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500"
+      >
+        {label} {required && <span className="text-rose-500">*</span>}
+      </label>
+      <input
+        id={id}
+        type={type}
+        value={value as string | number}
+        onChange={(e) => onChange(field, e.target.value)}
+        className={`${base} ${stateClass}`}
+        placeholder={placeholder ?? `Enter ${label}`}
+        step={step ?? (type === 'number' ? '0.01' : undefined)}
+        maxLength={maxLength}
+      />
+    </div>
+  );
+});
+FormTextField.displayName = 'FormTextField';
+
+/* ------------------------------------------------------------------ */
+/* Empty tab helper                                                    */
+/* ------------------------------------------------------------------ */
+
+function EmptyTab({
+  icon: Icon,
+  title,
+  subtitle,
+}: {
+  icon: React.ElementType;
+  title: string;
+  subtitle: string;
+}) {
+  return (
+    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 py-10 text-center">
+      <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-white ring-1 ring-slate-200/70">
+        <Icon className="h-5 w-5 text-slate-400" />
+      </div>
+      <p className="mt-3 text-sm font-semibold text-slate-800">{title}</p>
+      <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Initial form state factory                                          */
+/* ------------------------------------------------------------------ */
+
+const createEmptyForm = (): CustomerFormData => ({
+  name: '',
+  type: 'customer',
+  company_type: '',
+  email: '',
+  contact_no: '',
+  contact_person: '',
+  gst_number: '',
+  registration_type: '',
+  pan: '',
+  billing_street: '',
+  billing_landmark: '',
+  billing_city: '',
+  billing_state: '',
+  billing_country: 'India',
+  billing_pincode: '',
+  shipping_street: '',
+  shipping_landmark: '',
+  shipping_city: '',
+  shipping_state: '',
+  shipping_country: 'India',
+  shipping_pincode: '',
+  eway_bill_distance: '',
+  group_id: '',
+  opening_balance: '',
+  credit_limit: '',
+  due_days: '',
+  outstanding_amount: '',
+  fax: '',
+  website: '',
+  note: '',
+  license_no: '',
+  custom_field_1: '',
+  custom_field_2: '',
+  is_active: true,
+  company_id: '',
+  branch_id: '',
+  same_as_billing: true,
+});
+
+/* ------------------------------------------------------------------ */
 /* Main component                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -722,45 +1582,7 @@ export function CustomersPage() {
   /* -------------------- Form state -------------------- */
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [formData, setFormData] = useState<CustomerFormData>({
-    name: '',
-    type: 'customer',
-    company_type: '',
-    email: '',
-    contact_no: '',
-    contact_person: '',
-    gst_number: '',
-    registration_type: '',
-    pan: '',
-    billing_street: '',
-    billing_landmark: '',
-    billing_city: '',
-    billing_state: '',
-    billing_country: 'India',
-    billing_pincode: '',
-    shipping_street: '',
-    shipping_landmark: '',
-    shipping_city: '',
-    shipping_state: '',
-    shipping_country: 'India',
-    shipping_pincode: '',
-    eway_bill_distance: '',
-    group_id: '',
-    opening_balance: '',
-    credit_limit: '',
-    due_days: '',
-    outstanding_amount: '',
-    fax: '',
-    website: '',
-    note: '',
-    license_no: '',
-    custom_field_1: '',
-    custom_field_2: '',
-    is_active: true,
-    company_id: '',
-    branch_id: '',
-    same_as_billing: true,
-  });
+  const [formData, setFormData] = useState<CustomerFormData>(createEmptyForm);
   const [submitting, setSubmitting] = useState(false);
   const [formErrors, setFormErrors] = useState<Record<string, boolean>>({});
 
@@ -790,9 +1612,16 @@ export function CustomersPage() {
   const [customerInvoices, setCustomerInvoices] = useState<InvoiceSummaryRow[]>([]);
   const [customerPayments, setCustomerPayments] = useState<PaymentRow[]>([]);
   const [customerOrders, setCustomerOrders] = useState<OrderSummaryRow[]>([]);
+  const detailRequestRef = useRef(0);
+
+  /* -------------------- Ledger A4 state -------------------- */
+  const [ledgerLoadingId, setLedgerLoadingId] = useState<number | null>(null);
 
   /* -------------------- Outstanding visibility -------------------- */
   const [outstandingVisibleIds, setOutstandingVisibleIds] = useState<Set<number>>(new Set());
+
+  /* -------------------- GST lookup state -------------------- */
+  const [lookingUp, setLookingUp] = useState(false);
 
   /* -------------------- Data fetching -------------------- */
   const {
@@ -814,8 +1643,14 @@ export function CustomersPage() {
     if (!customers) return [];
     let filtered = [...customers];
     if (filterType !== 'all') filtered = filtered.filter((c) => c.type === filterType);
-    if (filterCompany !== 'all') filtered = filtered.filter((c) => c.company_id === parseInt(filterCompany));
-    if (filterBranch !== 'all') filtered = filtered.filter((c) => c.branch_id === parseInt(filterBranch));
+    if (filterCompany !== 'all') {
+      const cid = Number.parseInt(filterCompany, 10);
+      if (!Number.isNaN(cid)) filtered = filtered.filter((c) => c.company_id === cid);
+    }
+    if (filterBranch !== 'all') {
+      const bid = Number.parseInt(filterBranch, 10);
+      if (!Number.isNaN(bid)) filtered = filtered.filter((c) => c.branch_id === bid);
+    }
     return filtered;
   }, [customers, filterType, filterCompany, filterBranch]);
 
@@ -829,11 +1664,15 @@ export function CustomersPage() {
     [customers]
   );
 
-  const activeFilterCount = [
-    filterType !== 'all' ? filterType : undefined,
-    filterCompany !== 'all' ? filterCompany : undefined,
-    filterBranch !== 'all' ? filterBranch : undefined,
-  ].filter(Boolean).length;
+  const activeFilterCount = useMemo(
+    () =>
+      [
+        filterType !== 'all' ? filterType : undefined,
+        filterCompany !== 'all' ? filterCompany : undefined,
+        filterBranch !== 'all' ? filterBranch : undefined,
+      ].filter(Boolean).length,
+    [filterType, filterCompany, filterBranch]
+  );
 
   const clearFilters = useCallback(() => {
     setFilterType('all');
@@ -842,8 +1681,11 @@ export function CustomersPage() {
   }, []);
 
   /* -------------------- Selection -------------------- */
-  const allSelected = Boolean(
-    filteredCustomers.length > 0 && filteredCustomers.every((c) => selectedIds.includes(c.id))
+  const allSelected = useMemo(
+    () =>
+      filteredCustomers.length > 0 &&
+      filteredCustomers.every((c) => selectedIds.includes(c.id)),
+    [filteredCustomers, selectedIds]
   );
 
   const toggleSelectAll = useCallback(() => {
@@ -865,21 +1707,25 @@ export function CustomersPage() {
   /* -------------------- Branch filters -------------------- */
   const filteredBranchesForm = useMemo(() => {
     if (formData.company_id && branches) {
-      const companyId = parseInt(String(formData.company_id));
-      return branches.filter((b) => b.company_id === companyId);
+      const companyId = Number.parseInt(String(formData.company_id), 10);
+      if (!Number.isNaN(companyId)) {
+        return branches.filter((b) => b.company_id === companyId);
+      }
     }
     return [];
   }, [formData.company_id, branches]);
 
   const filteredBranchesFilter = useMemo(() => {
     if (filterCompany !== 'all' && branches) {
-      return branches.filter((b) => b.company_id === parseInt(filterCompany));
+      const cid = Number.parseInt(filterCompany, 10);
+      if (!Number.isNaN(cid)) return branches.filter((b) => b.company_id === cid);
     }
     return branches || [];
   }, [filterCompany, branches]);
 
-  /* -------------------- Detail view handler -------------------- */
+  /* -------------------- Detail view handler (race-safe + ownership guard) -------------------- */
   const handleViewCustomer = useCallback(async (customer: Customer) => {
+    const reqId = ++detailRequestRef.current;
     setViewingCustomer(customer);
     setDetailTab('overview');
     setCustomerInvoices([]);
@@ -894,18 +1740,45 @@ export function CustomersPage() {
         apiClient.request('GET', `/orders?customer_id=${customer.id}&per_page=${RELATED_LIMIT}`),
       ]);
 
+      if (reqId !== detailRequestRef.current) return;
+
       if (invRes.status === 'fulfilled') {
-        setCustomerInvoices(unwrapList<InvoiceSummaryRow>(invRes.value).slice(0, RELATED_LIMIT));
+        const raw = unwrapList<InvoiceSummaryRow>(invRes.value);
+        const owned = filterByOwnership(
+          raw as unknown as Record<string, unknown>[],
+          customer.id,
+          'Invoices tab'
+        ) as unknown as InvoiceSummaryRow[];
+        setCustomerInvoices(owned.slice(0, RELATED_LIMIT));
       }
+
       if (payRes.status === 'fulfilled') {
-        setCustomerPayments(unwrapList<PaymentRow>(payRes.value).slice(0, RELATED_LIMIT));
+        const raw = unwrapList<PaymentRow>(payRes.value);
+        const owned = filterByOwnership(
+          raw as unknown as Record<string, unknown>[],
+          customer.id,
+          'Payments tab'
+        ) as unknown as PaymentRow[];
+        setCustomerPayments(owned.slice(0, RELATED_LIMIT));
       }
+
       if (ordRes.status === 'fulfilled') {
-        setCustomerOrders(unwrapList<OrderSummaryRow>(ordRes.value).slice(0, RELATED_LIMIT));
+        const raw = unwrapList<OrderSummaryRow>(ordRes.value);
+        const owned = filterByOwnership(
+          raw as unknown as Record<string, unknown>[],
+          customer.id,
+          'Orders tab'
+        ) as unknown as OrderSummaryRow[];
+        setCustomerOrders(owned.slice(0, RELATED_LIMIT));
       }
     } finally {
-      setDetailLoading(false);
+      if (reqId === detailRequestRef.current) setDetailLoading(false);
     }
+  }, []);
+
+  const closeDetailView = useCallback(() => {
+    detailRequestRef.current += 1;
+    setViewingCustomer(null);
   }, []);
 
   /* -------------------- Combined activity timeline -------------------- */
@@ -949,25 +1822,30 @@ export function CustomersPage() {
     });
 
     return entries
-      .sort((a, b) => (b.date > a.date ? 1 : -1))
+      .sort((a, b) => {
+        const da = a.date || '';
+        const db = b.date || '';
+        if (da === db) return 0;
+        return da < db ? 1 : -1;
+      })
       .slice(0, 20);
   }, [customerInvoices, customerPayments, customerOrders]);
 
   /* -------------------- GST auto-fill -------------------- */
-  const [lookingUp, setLookingUp] = useState(false);
+  const handleGstChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value.toUpperCase().replace(/\s+/g, '');
+    setFormData((prev) => ({ ...prev, gst_number: value }));
+  }, []);
 
-  const handleGstChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData((prev) => ({ ...prev, gst_number: e.target.value }));
-  };
-
-  const handleAutoFill = async () => {
-    if (!formData.gst_number || formData.gst_number.length < 10) {
+  const handleAutoFill = useCallback(async () => {
+    const gst = formData.gst_number.trim();
+    if (!gst || gst.length < 10) {
       showError('Invalid GSTIN', 'Please enter a valid GSTIN (min 10 characters).');
       return;
     }
     setLookingUp(true);
     try {
-      const data = (await apiClient.lookupGst(formData.gst_number)) as GstLookupResult;
+      const data = (await apiClient.lookupGst(gst)) as GstLookupResult | null;
       if (data) {
         setFormData((prev) => ({
           ...prev,
@@ -989,10 +1867,10 @@ export function CustomersPage() {
     } finally {
       setLookingUp(false);
     }
-  };
+  }, [formData.gst_number, showSuccess, showError]);
 
   /* -------------------- Same as billing -------------------- */
-  const handleSameAsBillingToggle = (checked: boolean) => {
+  const handleSameAsBillingToggle = useCallback((checked: boolean) => {
     setFormData((prev) => ({
       ...prev,
       same_as_billing: checked,
@@ -1007,16 +1885,22 @@ export function CustomersPage() {
           }
         : {}),
     }));
-  };
+  }, []);
+
+  /* -------------------- Field change -------------------- */
+  const handleFieldChange = useCallback((field: string, value: string) => {
+    setFormData((prev) => ({ ...prev, [field]: value } as CustomerFormData));
+  }, []);
 
   /* -------------------- Group management -------------------- */
-  const handleAddGroup = async () => {
-    if (!newGroupName.trim()) return;
+  const handleAddGroup = useCallback(async () => {
+    const name = newGroupName.trim();
+    if (!name) return;
     setAddingGroup(true);
     try {
-      await apiClient.createCustomerGroup({ name: newGroupName.trim() });
+      await apiClient.createCustomerGroup({ name });
       refreshGroups();
-      showSuccess('Group added', `${newGroupName.trim()} created.`);
+      showSuccess('Group added', `${name} created.`);
       setNewGroupName('');
       setShowGroupModal(false);
     } catch (err: unknown) {
@@ -1024,10 +1908,10 @@ export function CustomersPage() {
     } finally {
       setAddingGroup(false);
     }
-  };
+  }, [newGroupName, refreshGroups, showSuccess, showError]);
 
   /* -------------------- Bulk actions -------------------- */
-  const handleBulkDelete = async () => {
+  const handleBulkDelete = useCallback(async () => {
     if (selectedIds.length === 0) return;
     if (!window.confirm(`Delete ${selectedIds.length} customer(s)?`)) return;
     try {
@@ -1044,83 +1928,47 @@ export function CustomersPage() {
     } catch (err: unknown) {
       showError('Bulk delete failed', getErrorMessage(err, 'Bulk delete failed.'));
     }
-  };
+  }, [selectedIds, refreshCustomers, showSuccess, showError]);
 
-  const handleBulkTypeChange = async (type: CustomerType) => {
-    if (selectedIds.length === 0) return;
-    if (!window.confirm(`Change type to "${type}" for ${selectedIds.length} record(s)?`)) return;
-    try {
-      await Promise.all(selectedIds.map((id) => apiClient.updateCustomer(id, { type })));
-      showSuccess('Bulk update', `Type changed for ${selectedIds.length} record(s).`);
-      safeLog({
-        module: 'Customers',
-        action: 'Bulk type change',
-        status: 'success',
-        message: `Changed to ${type}`,
-      });
-      setSelectedIds([]);
-      refreshCustomers();
-    } catch (err: unknown) {
-      showError('Bulk update failed', getErrorMessage(err, 'Bulk update failed.'));
-    }
-  };
+  const handleBulkTypeChange = useCallback(
+    async (type: CustomerType) => {
+      if (selectedIds.length === 0) return;
+      if (!window.confirm(`Change type to "${type}" for ${selectedIds.length} record(s)?`)) return;
+      try {
+        await Promise.all(selectedIds.map((id) => apiClient.updateCustomer(id, { type })));
+        showSuccess('Bulk update', `Type changed for ${selectedIds.length} record(s).`);
+        safeLog({
+          module: 'Customers',
+          action: 'Bulk type change',
+          status: 'success',
+          message: `Changed to ${type}`,
+        });
+        setSelectedIds([]);
+        refreshCustomers();
+      } catch (err: unknown) {
+        showError('Bulk update failed', getErrorMessage(err, 'Bulk update failed.'));
+      }
+    },
+    [selectedIds, refreshCustomers, showSuccess, showError]
+  );
 
   /* -------------------- CRUD -------------------- */
-  const resetForm = () => {
-    setFormData({
-      name: '',
-      type: 'customer',
-      company_type: '',
-      email: '',
-      contact_no: '',
-      contact_person: '',
-      gst_number: '',
-      registration_type: '',
-      pan: '',
-      billing_street: '',
-      billing_landmark: '',
-      billing_city: '',
-      billing_state: '',
-      billing_country: 'India',
-      billing_pincode: '',
-      shipping_street: '',
-      shipping_landmark: '',
-      shipping_city: '',
-      shipping_state: '',
-      shipping_country: 'India',
-      shipping_pincode: '',
-      eway_bill_distance: '',
-      group_id: '',
-      opening_balance: '',
-      credit_limit: '',
-      due_days: '',
-      outstanding_amount: '',
-      fax: '',
-      website: '',
-      note: '',
-      license_no: '',
-      custom_field_1: '',
-      custom_field_2: '',
-      is_active: true,
-      company_id: '',
-      branch_id: '',
-      same_as_billing: true,
-    });
-    setFormErrors({});
-  };
-
   const handleCreate = useCallback(() => {
     setEditingId(null);
-    resetForm();
+    setFormData(createEmptyForm());
+    setFormErrors({});
     setIsPanelOpen(true);
   }, []);
 
   const handleEdit = useCallback((customer: Customer) => {
     setEditingId(customer.id);
-    const same =
-      !customer.shipping_street ||
-      (customer.shipping_street === customer.billing_street &&
-        customer.shipping_city === customer.billing_city);
+    const shippingSameAsBilling =
+      (customer.shipping_street ?? '') === (customer.billing_street ?? '') &&
+      (customer.shipping_city ?? '') === (customer.billing_city ?? '') &&
+      (customer.shipping_state ?? '') === (customer.billing_state ?? '') &&
+      (customer.shipping_pincode ?? '') === (customer.billing_pincode ?? '') &&
+      (customer.shipping_country ?? '') === (customer.billing_country ?? '');
+
     setFormData({
       name: customer.name || '',
       type: customer.type || 'customer',
@@ -1158,7 +2006,7 @@ export function CustomersPage() {
       is_active: customer.is_active !== false,
       company_id: customer.company_id ?? '',
       branch_id: customer.branch_id ?? '',
-      same_as_billing: same,
+      same_as_billing: shippingSameAsBilling,
     });
     setFormErrors({});
     setIsPanelOpen(true);
@@ -1169,6 +2017,35 @@ export function CustomersPage() {
       navigate(`/customers/${customer.id}/ledger`);
     },
     [navigate]
+  );
+
+  const handleLedgerA4 = useCallback(
+    async (customer: Customer) => {
+      setLedgerLoadingId(customer.id);
+      try {
+        const entries = await fetchLedgerEntries(customer.id);
+        const html = buildLedgerHtml(customer, entries);
+        printLedgerHtml(html);
+        showSuccess('Ledger ready', `A4 statement prepared for ${customer.name}.`);
+        safeLog({
+          module: 'Customers',
+          action: 'Ledger A4',
+          status: 'success',
+          message: `Generated ledger for ${customer.name}`,
+        });
+      } catch (err: unknown) {
+        showError('Ledger failed', getErrorMessage(err, 'Unable to prepare ledger.'));
+        safeLog({
+          module: 'Customers',
+          action: 'Ledger A4',
+          status: 'error',
+          message: getErrorMessage(err, 'Ledger failed.'),
+        });
+      } finally {
+        setLedgerLoadingId(null);
+      }
+    },
+    [showSuccess, showError]
   );
 
   const handleDelete = useCallback(
@@ -1192,7 +2069,7 @@ export function CustomersPage() {
   );
 
   /* -------------------- Validation -------------------- */
-  const validateForm = (): boolean => {
+  const validateForm = useCallback((): boolean => {
     const errors: Record<string, boolean> = {};
     let valid = true;
     if (!formData.name.trim()) {
@@ -1203,7 +2080,7 @@ export function CustomersPage() {
       errors.billing_city = true;
       valid = false;
     }
-    if (formData.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
+    if (formData.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
       errors.email = true;
       valid = false;
     }
@@ -1214,7 +2091,7 @@ export function CustomersPage() {
     setFormErrors(errors);
     if (!valid) showError('Validation', 'Please fix the highlighted required fields.');
     return valid;
-  };
+  }, [formData, showError]);
 
   const handleSubmit = useCallback(async () => {
     if (!validateForm()) return;
@@ -1222,9 +2099,12 @@ export function CustomersPage() {
     const { same_as_billing: _same, ...rest } = formData;
     const payload = {
       ...rest,
-      company_id: formData.company_id ? parseInt(String(formData.company_id)) : null,
-      branch_id: formData.branch_id ? parseInt(String(formData.branch_id)) : null,
-      group_id: formData.group_id ? parseInt(String(formData.group_id)) : null,
+      name: formData.name.trim(),
+      email: formData.email.trim(),
+      contact_no: formData.contact_no.trim(),
+      company_id: formData.company_id ? Number.parseInt(String(formData.company_id), 10) : null,
+      branch_id: formData.branch_id ? Number.parseInt(String(formData.branch_id), 10) : null,
+      group_id: formData.group_id ? Number.parseInt(String(formData.group_id), 10) : null,
       eway_bill_distance: formData.eway_bill_distance ? Number(formData.eway_bill_distance) : null,
       opening_balance: formData.opening_balance ? Number(formData.opening_balance) : 0,
       credit_limit: formData.credit_limit ? Number(formData.credit_limit) : null,
@@ -1266,7 +2146,7 @@ export function CustomersPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [formData, editingId, refreshCustomers, showSuccess, showError]);
+  }, [formData, editingId, refreshCustomers, showSuccess, showError, validateForm]);
 
   /* -------------------- Export -------------------- */
   const handleExport = useCallback(() => {
@@ -1303,18 +2183,20 @@ export function CustomersPage() {
       ].join(',')
     );
     const csv = [headers.join(','), ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `customers-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     URL.revokeObjectURL(url);
     showSuccess('Export', 'Data exported.');
   }, [filteredCustomers, showSuccess, showError]);
 
   /* -------------------- Import handlers -------------------- */
-  const handleImportOpen = () => {
+  const handleImportOpen = useCallback(() => {
     setIsImportOpen(true);
     setImportStep('select');
     setImportFile(null);
@@ -1325,80 +2207,93 @@ export function CustomersPage() {
     setImportSuccess(false);
     setDragOver(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
-  };
+  }, []);
 
-  const handleFileChange = (file: File | null) => {
-    if (!file) return;
-    const validTypes = ['text/csv', 'application/vnd.ms-excel'];
-    const ext = file.name.split('.').pop()?.toLowerCase();
-    if (!validTypes.includes(file.type) && ext !== 'csv') {
-      showError('Invalid file', 'Please select a CSV file.');
-      return;
-    }
-    if (file.size > 10 * 1024 * 1024) {
-      showError('File too large', 'Maximum size is 10MB.');
-      return;
-    }
-    setImportFile(file);
-    void handlePreview(file);
-  };
+  const handlePreview = useCallback(
+    async (file: File) => {
+      setImportLoading(true);
+      try {
+        const response = await apiClient.importCustomers(file, duplicateAction, true);
+        setImportPreview(response.preview || []);
+        setImportSummary({
+          total: response.total ?? 0,
+          valid: response.valid ?? 0,
+          invalid: response.invalid ?? 0,
+        });
+        setImportErrors(response.errors || []);
+        setImportStep('preview');
+      } catch (err: unknown) {
+        showError('Preview failed', getErrorMessage(err, 'Preview failed.'));
+        setImportStep('select');
+      } finally {
+        setImportLoading(false);
+      }
+    },
+    [duplicateAction, showError]
+  );
 
-  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    setDragOver(false);
-    const files = e.dataTransfer.files;
-    if (files.length) handleFileChange(files[0]);
-  };
+  const handleFileChange = useCallback(
+    (file: File | null) => {
+      if (!file) return;
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      const validTypes = ['text/csv', 'application/vnd.ms-excel', 'application/octet-stream'];
+      if (!validTypes.includes(file.type) && ext !== 'csv') {
+        showError('Invalid file', 'Please select a CSV file.');
+        return;
+      }
+      if (file.size > MAX_IMPORT_FILE_BYTES) {
+        showError('File too large', 'Maximum size is 10MB.');
+        return;
+      }
+      setImportFile(file);
+      void handlePreview(file);
+    },
+    [handlePreview, showError]
+  );
 
-  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+  const handleDrop = useCallback(
+    (e: DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      setDragOver(false);
+      const files = e.dataTransfer.files;
+      if (files.length) handleFileChange(files[0]);
+    },
+    [handleFileChange]
+  );
+
+  const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragOver(true);
-  };
+  }, []);
 
-  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+  const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragOver(false);
-  };
+  }, []);
 
-  const handlePreview = async (file: File = importFile as File) => {
-    if (!file) return;
-    setImportLoading(true);
-    try {
-      const response = await apiClient.importCustomers(file, duplicateAction, true);
-      setImportPreview(response.preview || []);
-      setImportSummary({
-        total: response.total,
-        valid: response.valid,
-        invalid: response.invalid,
-      });
-      setImportErrors(response.errors || []);
-      setImportStep('preview');
-    } catch (err: unknown) {
-      showError('Preview failed', getErrorMessage(err, 'Preview failed.'));
-      setImportStep('select');
-    } finally {
-      setImportLoading(false);
-    }
-  };
-
-  const handleImport = async () => {
+  const handleImport = useCallback(async () => {
     if (!importFile) return;
     setImportLoading(true);
     try {
       const response = await apiClient.importCustomers(importFile, duplicateAction, false);
-      setImportSummary(response.summary);
+      const summary: ImportSummary = response.summary ?? {
+        total: 0,
+        valid: 0,
+        invalid: 0,
+      };
+      setImportSummary(summary);
       setImportErrors(response.errors || []);
-      setImportResultMessage(response.message);
-      setImportSuccess(response.success);
+      setImportResultMessage(response.message || '');
+      setImportSuccess(Boolean(response.success));
       setImportStep('result');
       if (response.success) {
-        showSuccess('Import completed', response.message);
+        showSuccess('Import completed', response.message || 'Import completed.');
         refreshCustomers();
         safeLog({
           module: 'Customers',
           action: 'Import',
           status: 'success',
-          message: `Imported ${response.summary.created} customers`,
+          message: `Imported ${summary.created ?? 0} customers`,
         });
       } else {
         showError('Import failed', response.message || 'Please check errors.');
@@ -1406,7 +2301,7 @@ export function CustomersPage() {
           module: 'Customers',
           action: 'Import',
           status: 'error',
-          message: response.message,
+          message: response.message || 'Import failed.',
         });
       }
     } catch (err: unknown) {
@@ -1421,9 +2316,9 @@ export function CustomersPage() {
     } finally {
       setImportLoading(false);
     }
-  };
+  }, [importFile, duplicateAction, refreshCustomers, showSuccess, showError]);
 
-  const handleDownloadTemplate = async () => {
+  const handleDownloadTemplate = useCallback(async () => {
     try {
       const blob = await apiClient.downloadCustomerTemplate();
       const url = URL.createObjectURL(blob);
@@ -1438,16 +2333,16 @@ export function CustomersPage() {
     } catch (err: unknown) {
       showError('Template download failed', getErrorMessage(err, 'Download failed.'));
     }
-  };
+  }, [showSuccess, showError]);
 
-  const handleDownloadErrorReport = () => {
+  const handleDownloadErrorReport = useCallback(() => {
     if (importErrors.length === 0) return;
     const headers = ['Row', 'Field', 'Error'];
     const rows = importErrors.map((e) =>
       [e.row, escapeCsvField(e.field), escapeCsvField(e.message)].join(',')
     );
     const csv = [headers.join(','), ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -1456,7 +2351,7 @@ export function CustomersPage() {
     link.click();
     link.remove();
     URL.revokeObjectURL(url);
-  };
+  }, [importErrors]);
 
   /* -------------------- Outstanding visibility -------------------- */
   const toggleOutstandingVisibility = useCallback((id: number) => {
@@ -1467,42 +2362,6 @@ export function CustomersPage() {
       return next;
     });
   }, []);
-
-  /* -------------------- Render field helper -------------------- */
-  const renderField = (
-    label: string,
-    field: keyof CustomerFormData,
-    type: 'text' | 'number' | 'email' | 'tel' = 'text',
-    required = false
-  ) => {
-    const value = formData[field] ?? '';
-    const id = `field-${field}`;
-    const hasError = formErrors[field];
-    const base = 'h-10 w-full min-w-0 rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition';
-    const stateClass = hasError
-      ? 'border-rose-300 ring-2 ring-rose-200'
-      : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10';
-
-    return (
-      <div className="min-w-0">
-        <label
-          htmlFor={id}
-          className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500"
-        >
-          {label} {required && <span className="text-rose-500">*</span>}
-        </label>
-        <input
-          id={id}
-          type={type}
-          value={value as string | number}
-          onChange={(e) => setFormData((prev) => ({ ...prev, [field]: e.target.value }))}
-          className={`${base} ${stateClass}`}
-          placeholder={`Enter ${label}`}
-          step={type === 'number' ? '0.01' : undefined}
-        />
-      </div>
-    );
-  };
 
   /* -------------------- Error state -------------------- */
   if (custError) {
@@ -1515,7 +2374,7 @@ export function CustomersPage() {
           <h2 className="mt-4 text-lg font-bold text-slate-900">Failed to load customers</h2>
           <p className="mt-1.5 text-sm text-slate-500">{custError}</p>
           <Button
-            onClick={refreshCustomers}
+            onClick={() => refreshCustomers()}
             className="mt-5 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800"
           >
             Try again
@@ -1592,6 +2451,7 @@ export function CustomersPage() {
 
               <div className="flex flex-wrap items-center gap-2">
                 <Button
+                  type="button"
                   variant="outline"
                   onClick={handleImportOpen}
                   className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
@@ -1600,6 +2460,7 @@ export function CustomersPage() {
                   Import
                 </Button>
                 <Button
+                  type="button"
                   variant="outline"
                   onClick={handleExport}
                   disabled={custLoading || filteredCustomers.length === 0}
@@ -1609,6 +2470,7 @@ export function CustomersPage() {
                   Export
                 </Button>
                 <Button
+                  type="button"
                   onClick={handleCreate}
                   className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
                 >
@@ -1652,6 +2514,7 @@ export function CustomersPage() {
               <div className="flex items-center gap-2">
                 {activeFilterCount > 0 && (
                   <Button
+                    type="button"
                     variant="ghost"
                     size="sm"
                     className="h-9 rounded-lg text-slate-500 hover:text-slate-800"
@@ -1746,6 +2609,7 @@ export function CustomersPage() {
                   <span className="text-xs font-medium">selected</span>
                 </div>
                 <Button
+                  type="button"
                   size="sm"
                   variant="outline"
                   className="h-9 rounded-lg"
@@ -1754,6 +2618,7 @@ export function CustomersPage() {
                   <FiShoppingBag className="mr-1.5 text-emerald-600" size={14} /> Set customer
                 </Button>
                 <Button
+                  type="button"
                   size="sm"
                   variant="outline"
                   className="h-9 rounded-lg"
@@ -1762,6 +2627,7 @@ export function CustomersPage() {
                   <FiTruck className="mr-1.5 text-violet-600" size={14} /> Set dealer
                 </Button>
                 <Button
+                  type="button"
                   size="sm"
                   variant="outline"
                   className="h-9 rounded-lg"
@@ -1770,6 +2636,7 @@ export function CustomersPage() {
                   <FiPackage className="mr-1.5 text-teal-600" size={14} /> Set distributor
                 </Button>
                 <Button
+                  type="button"
                   size="sm"
                   className="h-9 rounded-lg border border-red-600 bg-red-600 font-semibold text-white shadow-none hover:border-red-700 hover:bg-red-700"
                   onClick={handleBulkDelete}
@@ -1777,6 +2644,7 @@ export function CustomersPage() {
                   <FiTrash2 className="mr-1.5" size={14} /> Delete
                 </Button>
                 <Button
+                  type="button"
                   size="sm"
                   variant="ghost"
                   className="ml-auto h-9 rounded-lg text-slate-500 hover:text-slate-800"
@@ -1874,6 +2742,7 @@ export function CustomersPage() {
                       };
                       const isVisible = outstandingVisibleIds.has(customer.id);
                       const amount = safeNum(customer.outstanding_amount);
+                      const isLedgerLoading = ledgerLoadingId === customer.id;
 
                       return (
                         <TableRow
@@ -1993,7 +2862,9 @@ export function CustomersPage() {
                               customer={customer}
                               onEdit={handleEdit}
                               onLedger={handleLedger}
+                              onLedgerA4={handleLedgerA4}
                               onDelete={handleDelete}
+                              ledgerLoading={isLedgerLoading}
                             />
                           </TableCell>
                         </TableRow>
@@ -2014,6 +2885,7 @@ export function CustomersPage() {
                             Try adjusting the type, company, or branch filter.
                           </p>
                           <Button
+                            type="button"
                             className="mt-5 rounded-lg"
                             variant="outline"
                             onClick={clearFilters}
@@ -2033,7 +2905,7 @@ export function CustomersPage() {
       </div>
 
       {/* ══════════════════════════════════════════════════════════ */}
-      {/* Customer detail view (opens on row click)                 */}
+      {/* Customer detail view                                       */}
       {/* ══════════════════════════════════════════════════════════ */}
       {viewingCustomer && (
         <Suspense
@@ -2048,19 +2920,21 @@ export function CustomersPage() {
           <Offcanvas
             isOpen={!!viewingCustomer}
             title={viewingCustomer.name}
-            onClose={() => setViewingCustomer(null)}
+            onClose={closeDetailView}
             className="customers-detail-offcanvas"
             footer={
-              <div className="flex w-full justify-between gap-2">
+              <div className="flex w-full flex-wrap justify-between gap-2">
                 <Button
+                  type="button"
                   variant="outline"
-                  onClick={() => setViewingCustomer(null)}
+                  onClick={closeDetailView}
                   className="rounded-xl"
                 >
                   <FiX className="mr-2" size={14} /> Close
                 </Button>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <Button
+                    type="button"
                     variant="outline"
                     onClick={() => handleLedger(viewingCustomer)}
                     className="rounded-xl text-emerald-600"
@@ -2068,9 +2942,21 @@ export function CustomersPage() {
                     <FiBookOpen className="mr-2" size={14} /> Ledger
                   </Button>
                   <Button
+                    type="button"
+                    variant="outline"
+                    disabled={ledgerLoadingId === viewingCustomer.id}
+                    onClick={() => handleLedgerA4(viewingCustomer)}
+                    className="rounded-xl text-sky-600"
+                  >
+                    <FiPrinter className="mr-2" size={14} />
+                    {ledgerLoadingId === viewingCustomer.id ? 'Preparing…' : 'Download A4'}
+                  </Button>
+                  <Button
+                    type="button"
                     onClick={() => {
-                      setViewingCustomer(null);
-                      handleEdit(viewingCustomer);
+                      const target = viewingCustomer;
+                      closeDetailView();
+                      handleEdit(target);
                     }}
                     className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
                   >
@@ -2268,7 +3154,6 @@ export function CustomersPage() {
                     </div>
                   )}
 
-                  {/* Quick stat snapshot for this customer */}
                   <div className="grid grid-cols-3 gap-2">
                     <div className="rounded-xl border border-indigo-200/70 bg-indigo-50/60 p-3">
                       <p className="text-[10px] font-semibold uppercase tracking-wide text-indigo-700/80">
@@ -2487,7 +3372,6 @@ export function CustomersPage() {
                     />
                   ) : (
                     <div className="relative pl-6">
-                      {/* Timeline spine */}
                       <div className="absolute bottom-2 left-2.5 top-2 w-px bg-slate-200" />
 
                       {activityEntries.map((entry) => {
@@ -2564,6 +3448,7 @@ export function CustomersPage() {
             footer={
               <div className="flex w-full justify-between">
                 <Button
+                  type="button"
                   variant="outline"
                   onClick={() => setIsPanelOpen(false)}
                   disabled={submitting}
@@ -2572,6 +3457,7 @@ export function CustomersPage() {
                   <FiX className="mr-2" size={14} /> Cancel
                 </Button>
                 <Button
+                  type="button"
                   onClick={handleSubmit}
                   disabled={submitting}
                   className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
@@ -2687,6 +3573,7 @@ export function CustomersPage() {
                         onChange={handleGstChange}
                         className="h-10 flex-1 rounded-xl border-slate-200 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
                         placeholder="Enter GSTIN"
+                        maxLength={15}
                       />
                       <Button
                         type="button"
@@ -2699,10 +3586,22 @@ export function CustomersPage() {
                     </div>
                   </div>
 
-                  {renderField('Company name', 'name', 'text', true)}
+                  <FormTextField
+                    label="Company name"
+                    field="name"
+                    required
+                    value={formData.name}
+                    hasError={formErrors.name}
+                    onChange={handleFieldChange}
+                  />
 
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                    {renderField('Contact person', 'contact_person')}
+                    <FormTextField
+                      label="Contact person"
+                      field="contact_person"
+                      value={formData.contact_person}
+                      onChange={handleFieldChange}
+                    />
 
                     <div className="min-w-0">
                       <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -2711,6 +3610,7 @@ export function CustomersPage() {
                       <input
                         id="contact_no"
                         type="tel"
+                        inputMode="numeric"
                         value={formData.contact_no}
                         onChange={(e) => {
                           const val = e.target.value.replace(/\D/g, '');
@@ -2726,7 +3626,14 @@ export function CustomersPage() {
                       />
                     </div>
 
-                    {renderField('Email', 'email', 'email')}
+                    <FormTextField
+                      label="Email"
+                      field="email"
+                      type="email"
+                      value={formData.email}
+                      hasError={formErrors.email}
+                      onChange={handleFieldChange}
+                    />
                   </div>
                 </div>
               </fieldset>
@@ -2761,7 +3668,12 @@ export function CustomersPage() {
                       />
                     </div>
                   </div>
-                  {renderField('PAN', 'pan')}
+                  <FormTextField
+                    label="PAN"
+                    field="pan"
+                    value={formData.pan}
+                    onChange={handleFieldChange}
+                  />
                 </div>
               </fieldset>
 
@@ -2780,19 +3692,38 @@ export function CustomersPage() {
                         setFormData((prev) => ({ ...prev, billing_street: e.target.value }))
                       }
                       rows={2}
-                      className={`min-h-[80px] w-full resize-y rounded-xl border bg-white px-3.5 py-2.5 text-sm outline-none transition ${
-                        formErrors.billing_city
-                          ? 'border-rose-300 ring-2 ring-rose-200'
-                          : 'border-slate-200 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
-                      }`}
+                      className="min-h-[80px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                       placeholder="Enter address"
                     />
                   </div>
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    {renderField('City', 'billing_city', 'text', true)}
-                    {renderField('State', 'billing_state')}
-                    {renderField('Country', 'billing_country')}
-                    {renderField('Pincode', 'billing_pincode')}
+                    <FormTextField
+                      label="City"
+                      field="billing_city"
+                      required
+                      value={formData.billing_city}
+                      hasError={formErrors.billing_city}
+                      onChange={handleFieldChange}
+                    />
+                    <FormTextField
+                      label="State"
+                      field="billing_state"
+                      value={formData.billing_state}
+                      onChange={handleFieldChange}
+                    />
+                    <FormTextField
+                      label="Country"
+                      field="billing_country"
+                      value={formData.billing_country}
+                      onChange={handleFieldChange}
+                    />
+                    <FormTextField
+                      label="Pincode"
+                      field="billing_pincode"
+                      value={formData.billing_pincode}
+                      onChange={handleFieldChange}
+                      maxLength={10}
+                    />
                   </div>
                 </div>
               </fieldset>
@@ -2831,69 +3762,31 @@ export function CustomersPage() {
                         />
                       </div>
                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            City
-                          </label>
-                          <Input
-                            type="text"
-                            value={formData.shipping_city}
-                            onChange={(e) =>
-                              setFormData((prev) => ({ ...prev, shipping_city: e.target.value }))
-                            }
-                            className="h-10 rounded-xl border-slate-200"
-                            placeholder="City"
-                          />
-                        </div>
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            State
-                          </label>
-                          <Input
-                            type="text"
-                            value={formData.shipping_state}
-                            onChange={(e) =>
-                              setFormData((prev) => ({ ...prev, shipping_state: e.target.value }))
-                            }
-                            className="h-10 rounded-xl border-slate-200"
-                            placeholder="State"
-                          />
-                        </div>
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Country
-                          </label>
-                          <Input
-                            type="text"
-                            value={formData.shipping_country}
-                            onChange={(e) =>
-                              setFormData((prev) => ({
-                                ...prev,
-                                shipping_country: e.target.value,
-                              }))
-                            }
-                            className="h-10 rounded-xl border-slate-200"
-                            placeholder="Country"
-                          />
-                        </div>
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Pincode
-                          </label>
-                          <Input
-                            type="text"
-                            value={formData.shipping_pincode}
-                            onChange={(e) =>
-                              setFormData((prev) => ({
-                                ...prev,
-                                shipping_pincode: e.target.value,
-                              }))
-                            }
-                            className="h-10 rounded-xl border-slate-200"
-                            placeholder="Pincode"
-                            maxLength={6}
-                          />
-                        </div>
+                        <FormTextField
+                          label="City"
+                          field="shipping_city"
+                          value={formData.shipping_city}
+                          onChange={handleFieldChange}
+                        />
+                        <FormTextField
+                          label="State"
+                          field="shipping_state"
+                          value={formData.shipping_state}
+                          onChange={handleFieldChange}
+                        />
+                        <FormTextField
+                          label="Country"
+                          field="shipping_country"
+                          value={formData.shipping_country}
+                          onChange={handleFieldChange}
+                        />
+                        <FormTextField
+                          label="Pincode"
+                          field="shipping_pincode"
+                          value={formData.shipping_pincode}
+                          onChange={handleFieldChange}
+                          maxLength={10}
+                        />
                       </div>
                     </div>
                   )}
@@ -2941,7 +3834,13 @@ export function CustomersPage() {
                     </Button>
                   </div>
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    {renderField('Opening balance', 'opening_balance', 'number')}
+                    <FormTextField
+                      label="Opening balance"
+                      field="opening_balance"
+                      type="number"
+                      value={formData.opening_balance}
+                      onChange={handleFieldChange}
+                    />
 
                     <div className="min-w-0">
                       <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -2988,7 +3887,13 @@ export function CustomersPage() {
                       </div>
                     </div>
 
-                    {renderField('Due days', 'due_days', 'number')}
+                    <FormTextField
+                      label="Due days"
+                      field="due_days"
+                      type="number"
+                      value={formData.due_days}
+                      onChange={handleFieldChange}
+                    />
                   </div>
                 </div>
               </fieldset>
@@ -2998,9 +3903,24 @@ export function CustomersPage() {
                   <span className="h-2 w-2 rounded-full bg-rose-500" /> Custom fields
                 </legend>
                 <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {renderField('License no.', 'license_no')}
-                  {renderField('Custom field 1', 'custom_field_1')}
-                  {renderField('Custom field 2', 'custom_field_2')}
+                  <FormTextField
+                    label="License no."
+                    field="license_no"
+                    value={formData.license_no}
+                    onChange={handleFieldChange}
+                  />
+                  <FormTextField
+                    label="Custom field 1"
+                    field="custom_field_1"
+                    value={formData.custom_field_1}
+                    onChange={handleFieldChange}
+                  />
+                  <FormTextField
+                    label="Custom field 2"
+                    field="custom_field_2"
+                    value={formData.custom_field_2}
+                    onChange={handleFieldChange}
+                  />
                 </div>
               </fieldset>
 
@@ -3010,9 +3930,25 @@ export function CustomersPage() {
                 </legend>
                 <div className="mt-3 space-y-4">
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                    {renderField('Fax no', 'fax')}
-                    {renderField('Website', 'website')}
-                    {renderField('E-way distance (km)', 'eway_bill_distance', 'number')}
+                    <FormTextField
+                      label="Fax no"
+                      field="fax"
+                      value={formData.fax}
+                      onChange={handleFieldChange}
+                    />
+                    <FormTextField
+                      label="Website"
+                      field="website"
+                      value={formData.website}
+                      onChange={handleFieldChange}
+                    />
+                    <FormTextField
+                      label="E-way distance (km)"
+                      field="eway_bill_distance"
+                      type="number"
+                      value={formData.eway_bill_distance}
+                      onChange={handleFieldChange}
+                    />
                   </div>
                   <div className="min-w-0">
                     <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -3072,9 +4008,16 @@ export function CustomersPage() {
               onChange={(e) => setNewGroupName(e.target.value)}
               className="h-10 rounded-xl border-slate-200"
               placeholder="Group name"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && newGroupName.trim() && !addingGroup) {
+                  e.preventDefault();
+                  void handleAddGroup();
+                }
+              }}
             />
             <div className="mt-5 flex justify-end gap-2">
               <Button
+                type="button"
                 variant="outline"
                 onClick={() => {
                   setShowGroupModal(false);
@@ -3086,6 +4029,7 @@ export function CustomersPage() {
                 Cancel
               </Button>
               <Button
+                type="button"
                 onClick={handleAddGroup}
                 disabled={addingGroup || !newGroupName.trim()}
                 className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
@@ -3115,6 +4059,7 @@ export function CustomersPage() {
             footer={
               <div className="flex w-full justify-between">
                 <Button
+                  type="button"
                   variant="outline"
                   onClick={() => setIsImportOpen(false)}
                   disabled={importLoading}
@@ -3124,6 +4069,7 @@ export function CustomersPage() {
                 </Button>
                 {importStep === 'select' && (
                   <Button
+                    type="button"
                     onClick={() => fileInputRef.current?.click()}
                     className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
                   >
@@ -3132,6 +4078,7 @@ export function CustomersPage() {
                 )}
                 {importStep === 'preview' && !importLoading && (
                   <Button
+                    type="button"
                     onClick={handleImport}
                     disabled={!importSummary || importSummary.valid === 0}
                     className="rounded-xl bg-emerald-600 font-semibold hover:bg-emerald-700"
@@ -3141,6 +4088,7 @@ export function CustomersPage() {
                 )}
                 {importStep === 'result' && (
                   <Button
+                    type="button"
                     onClick={() => {
                       setIsImportOpen(false);
                       refreshCustomers();
@@ -3179,10 +4127,11 @@ export function CustomersPage() {
                         const file = e.target.files?.[0];
                         if (file) handleFileChange(file);
                       }}
-                      accept=".csv"
+                      accept=".csv,text/csv"
                       className="hidden"
                     />
                     <Button
+                      type="button"
                       onClick={() => fileInputRef.current?.click()}
                       variant="outline"
                       className="mt-3 rounded-xl"
@@ -3200,6 +4149,7 @@ export function CustomersPage() {
                         </span>
                       </div>
                       <button
+                        type="button"
                         onClick={() => {
                           setImportFile(null);
                           if (fileInputRef.current) fileInputRef.current.value = '';
@@ -3214,6 +4164,7 @@ export function CustomersPage() {
                   )}
                   <div className="mt-2 flex items-center justify-between">
                     <button
+                      type="button"
                       onClick={handleDownloadTemplate}
                       className="flex items-center gap-1 text-sm font-medium text-indigo-600 underline-offset-2 hover:underline"
                     >
@@ -3221,6 +4172,7 @@ export function CustomersPage() {
                     </button>
                     {importFile && (
                       <Button
+                        type="button"
                         onClick={() => handlePreview(importFile)}
                         disabled={importLoading}
                         className="rounded-xl bg-slate-900 font-semibold hover:bg-slate-800"
@@ -3431,6 +4383,7 @@ export function CustomersPage() {
                           Errors ({importErrors.length})
                         </p>
                         <button
+                          type="button"
                           onClick={handleDownloadErrorReport}
                           className="flex items-center gap-1 text-xs font-medium text-indigo-600 underline-offset-2 hover:underline"
                         >
@@ -3482,30 +4435,6 @@ export function CustomersPage() {
         </Suspense>
       )}
     </>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Empty tab helper                                                    */
-/* ------------------------------------------------------------------ */
-
-function EmptyTab({
-  icon: Icon,
-  title,
-  subtitle,
-}: {
-  icon: React.ElementType;
-  title: string;
-  subtitle: string;
-}) {
-  return (
-    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 py-10 text-center">
-      <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-white ring-1 ring-slate-200/70">
-        <Icon className="h-5 w-5 text-slate-400" />
-      </div>
-      <p className="mt-3 text-sm font-semibold text-slate-800">{title}</p>
-      <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>
-    </div>
   );
 }
 

@@ -475,7 +475,7 @@ export function Sidebar({ isOpen = true, onClose }: SidebarProps) {
                   </span>
                   System online
                 </p>
-                <p className="mt-0.5 truncate text-[10px] text-slate-500">v1.1.1 · Business OS</p>
+                <p className="mt-0.5 truncate text-[10px] text-slate-500">v1.1.5 · Business OS</p>
               </div>
               <Link
                 to="/ai-assistant"

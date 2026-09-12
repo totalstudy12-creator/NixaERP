@@ -44,14 +44,6 @@ function clamp(n: number, min: number, max: number): number {
   return Math.min(Math.max(n, min), max);
 }
 
-/**
- * ✅ FIX: `maxLen` is explicitly annotated as `number`.
- *
- * Without the annotation TypeScript infers the parameter type from the
- * default value (`LIMITS.TEXT` → literal `500`), which made every call that
- * passed a different literal (`LIMITS.NAME` → 200, `16`, `32`, …) fail with
- * TS2345. Annotating as `number` accepts every literal in `LIMITS`.
- */
 function sanitizeText(s: string, maxLen: number = LIMITS.TEXT): string {
   if (typeof s !== 'string') return '';
   // eslint-disable-next-line no-control-regex
@@ -84,12 +76,8 @@ function isNotFoundError(err: unknown): boolean {
 }
 
 /**
- * Distinguishes "no stock row for this warehouse" (a legitimate 404 from the
- * stock-out endpoint) from "product does not exist".
- *
- * The stock-out endpoint returns 404 when the product exists but has never had
- * a stock record created for the chosen warehouse. That must NOT be reported
- * as a stale product cache.
+ * Stock-row 404 only. Matches "stock record" / "no stock record" — never
+ * matches the word "warehouse" alone so validation 422s aren't misrouted.
  */
 function isStockRecordNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
@@ -102,11 +90,7 @@ function isStockRecordNotFoundError(err: unknown): boolean {
   const status = e.status ?? e.response?.status;
   if (status !== 404) return false;
   const msg = (e.backendMessage ?? e.message ?? '').toLowerCase();
-  return (
-    msg.includes('stock record') ||
-    msg.includes('no stock') ||
-    msg.includes('warehouse')
-  );
+  return msg.includes('stock record') || msg.includes('no stock record');
 }
 
 function getUserFriendlyError(error: unknown, fallback = 'Something went wrong. Please try again.'): string {
@@ -150,6 +134,7 @@ interface Product {
   tax_rate?: number | string; igst_rate?: number | string;
   stock_quantity?: number | string; unit?: string; sku?: string; barcode?: string;
   active?: boolean | number | string;
+  purchase_price?: number | string;
 }
 interface BankAccount { id: number; bank_name: string; account_no: string }
 
@@ -612,9 +597,8 @@ export function CreateInvoicePage() {
     | null
   >(null);
 
-  /* ── Automation toggles (STOCK ONLY) ── */
+  /* ── Automation toggles ── */
   const [autoDeductStock, setAutoDeductStock] = useState(true);
-  const [verifyBeforeAutomation, setVerifyBeforeAutomation] = useState(true);
   const [postTasks, setPostTasks] = useState<PostSaveTask[]>([]);
   const [has404Warning, setHas404Warning] = useState(false);
 
@@ -779,7 +763,6 @@ export function CreateInvoicePage() {
     ? summary.totalPaid - summary.grandTotal
     : 0;
 
-  /** Warehouse to be used for stock-out — prefers the branch-matched one. */
   const defaultWarehouseId = useMemo<number | null>(() => {
     if (!warehouses || warehouses.length === 0) return null;
     if (form.branch_id) {
@@ -789,7 +772,6 @@ export function CreateInvoicePage() {
     return warehouses[0].id;
   }, [warehouses, form.branch_id]);
 
-  /** Live lookup of a cached product by ID (used to skip automation for stale refs). */
   const productIndex = useMemo(() => {
     const map = new Map<number, Product>();
     products?.forEach((p) => map.set(p.id, p));
@@ -999,141 +981,103 @@ export function CreateInvoicePage() {
   };
 
   /* ────────────────────────────────────────────────────────────────────────
-   * Post-save automation — STOCK DEDUCTION ONLY
+   * Post-save automation — STOCK DEDUCTION
+   *
+   * Backend now:
+   *   • auto-creates a missing warehouse stock row (quantity 0)
+   *   • allows stock to go negative (no insufficient-stock rejection)
+   *
+   * So we simply call /stock-out per line item and report the result.
    * ──────────────────────────────────────────────────────────────────────── */
 
-  /** Ensures the product actually exists on the server before automating. */
-  const verifyProductExists = useCallback(async (productId: number): Promise<boolean> => {
-    try {
-      await apiClient.request('GET', `/products/${productId}`);
-      return true;
-    } catch (err) {
-      if (isNotFoundError(err)) return false;
-      // Any other error — be optimistic, let the actual call decide.
-      return true;
-    }
-  }, []);
-
   const runPostSaveAutomation = useCallback(async (
-    newInvoiceId: number,
+    _newInvoiceId: number | undefined,
     invoiceNo: string,
-  ): Promise<{
-    stockErrors: string[];
-    notFoundIds: number[];
-  }> => {
+  ): Promise<{ stockErrors: string[]; notFoundIds: number[] }> => {
     const stockErrors: string[] = [];
     const notFoundIds: number[] = [];
 
-    /* Build the task list — stock tasks only */
-    const initialTasks: PostSaveTask[] = [];
-    if (autoDeductStock && items.length > 0) {
-      items.forEach((i) => {
-        initialTasks.push({
-          id: `stock-${i.product_id}`,
-          label: `Deduct stock · ${i.product_name} (−${i.qty} ${i.uom})`,
-          status: 'pending',
-        });
-      });
-    }
-    setPostTasks(initialTasks);
-    setHas404Warning(false);
-
-    if (initialTasks.length === 0) {
+    if (!autoDeductStock || items.length === 0) {
+      setPostTasks([]);
+      setHas404Warning(false);
       return { stockErrors, notFoundIds };
     }
+
+    const initialTasks: PostSaveTask[] = items.map((i) => ({
+      id: `stock-${i.product_id}`,
+      label: `Deduct stock · ${i.product_name} (−${i.qty} ${i.uom})`,
+      status: 'pending',
+    }));
+    setPostTasks(initialTasks);
+    setHas404Warning(false);
 
     const setTask = (id: string, patch: Partial<PostSaveTask>) => {
       setPostTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
     };
 
-    /* Cache of "does this product exist?" so we only preflight once per product */
-    const existenceCache = new Map<number, boolean>();
-
-    const checkExists = async (productId: number): Promise<boolean> => {
-      if (!verifyBeforeAutomation) return true;
-      if (existenceCache.has(productId)) return existenceCache.get(productId)!;
-      const ok = await verifyProductExists(productId);
-      existenceCache.set(productId, ok);
-      return ok;
-    };
-
-    /* ── Stock OUT per line item ── */
     if (!defaultWarehouseId) {
       items.forEach((i) => {
         const id = `stock-${i.product_id}`;
         setTask(id, { status: 'skipped', message: 'No warehouse available' });
         stockErrors.push(`${i.product_name}: no warehouse available`);
       });
-    } else {
-      for (const item of items) {
-        const taskId = `stock-${item.product_id}`;
-        setTask(taskId, { status: 'running' });
+      return { stockErrors, notFoundIds };
+    }
 
-        const exists = await checkExists(item.product_id);
-        if (!exists) {
+    for (const item of items) {
+      const taskId = `stock-${item.product_id}`;
+      setTask(taskId, { status: 'running' });
+
+      try {
+        const res = await apiClient.request('POST', `/products/${item.product_id}/stock-out`, {
+          warehouse_id: defaultWarehouseId,
+          quantity: item.qty,
+          unit_price: item.price,
+          reference_type: 'sale',
+          reference_id: invoiceNo,
+          transaction_date: form.invoice_date,
+          remark: `Auto stock-out for invoice ${invoiceNo}`,
+        });
+
+        // Surface negative-stock warning if backend reports it
+        const after = (res as any)?.data?.stock_after;
+        if (typeof after === 'number' && after < 0) {
+          setTask(taskId, { status: 'success', message: `Deducted (balance ${after})` });
+        } else {
+          setTask(taskId, { status: 'success', message: 'Deducted' });
+        }
+      } catch (err) {
+        if (isStockRecordNotFoundError(err)) {
+          const msg = getUserFriendlyError(err, 'No stock record found for this warehouse');
+          setTask(taskId, {
+            status: 'error',
+            message: `${msg} — backend auto-create did not run. Check ProductController::stockOut.`,
+          });
+          stockErrors.push(`${item.product_name}: ${msg}`);
+        } else if (isNotFoundError(err)) {
           notFoundIds.push(item.product_id);
           setTask(taskId, {
             status: 'skipped',
             message: 'Product not found (404) — cache may be stale',
           });
           stockErrors.push(`${item.product_name}: product not found on server`);
-          continue;
-        }
-
-        try {
-          await apiClient.request('POST', `/products/${item.product_id}/stock-out`, {
-            warehouse_id: defaultWarehouseId,
-            quantity: item.qty,
-            unit_price: item.price,
-            reference_type: 'sale',
-            reference_id: invoiceNo,
-            transaction_date: form.invoice_date,
-            remark: `Auto stock-out for invoice ${invoiceNo}`,
-            idempotency_key: `inv-${newInvoiceId}-${item.product_id}`,
-          });
-          setTask(taskId, { status: 'success', message: 'Deducted' });
-        } catch (err) {
-          // ✅ Check the stock-record-specific 404 FIRST, so a missing warehouse
-          // stock row is not reported as a stale product cache.
-          if (isStockRecordNotFoundError(err)) {
-            const msg = getUserFriendlyError(err, 'No stock record found for this warehouse');
-            setTask(taskId, {
-              status: 'error',
-              message: `${msg} — create a stock row first (Inventory → Stock IN).`,
-            });
-            stockErrors.push(`${item.product_name}: ${msg}`);
-          } else if (isNotFoundError(err)) {
-            notFoundIds.push(item.product_id);
-            setTask(taskId, {
-              status: 'skipped',
-              message: 'Product not found (404) — cache may be stale',
-            });
-            stockErrors.push(`${item.product_name}: product not found on server`);
-          } else {
-            const msg = getUserFriendlyError(err, 'Stock-out failed');
-            setTask(taskId, { status: 'error', message: msg });
-            stockErrors.push(`${item.product_name}: ${msg}`);
-          }
+        } else {
+          const msg = getUserFriendlyError(err, 'Stock-out failed');
+          setTask(taskId, { status: 'error', message: msg });
+          stockErrors.push(`${item.product_name}: ${msg}`);
         }
       }
     }
 
-    /* Invalidate caches so the next render pulls fresh data */
-    if (stockErrors.length === 0) {
+    if (stockErrors.length === 0 || notFoundIds.length > 0) {
       apiCache.delete('products');
       apiCache.delete('inventory');
     }
-    if (notFoundIds.length > 0) {
-      // Definitely stale — force invalidation
-      apiCache.delete('products');
-      apiCache.delete('inventory');
-      setHas404Warning(true);
-    }
+    if (notFoundIds.length > 0) setHas404Warning(true);
 
     return { stockErrors, notFoundIds };
   }, [
-    autoDeductStock, verifyBeforeAutomation,
-    items, defaultWarehouseId, form.invoice_date, verifyProductExists,
+    autoDeductStock, items, defaultWarehouseId, form.invoice_date,
   ]);
 
   /* ────────────────────────────────────────────────────────────────────────
@@ -1218,11 +1162,27 @@ export function CreateInvoicePage() {
     setSubmitting(true);
     try {
       const res = await apiClient.createInvoice(payload);
-      const newInvoice = (res as any).data ?? res;
 
-      /* Payments */
-      let remaining = summary.grandTotal;
+      const newInvoice =
+        (res as any)?.data?.invoice ??
+        (res as any)?.invoice ??
+        (res as any)?.data ??
+        res;
+      const invoiceId: number | undefined = newInvoice?.id;
+
+      if (!invoiceId) {
+        addAppLog({
+          module: 'Invoices',
+          action: 'Create',
+          status: 'error',
+          message: 'Invoice created but server did not return an id',
+        });
+      }
+
+      /* ── Payments ── */
+      let paymentsRecorded = 0;
       const validPayments: PaymentEntry[] = [];
+      let remaining = summary.grandTotal;
       for (const p of form.payments) {
         if (p.amount <= 0 || remaining <= 0) continue;
         const amt = Math.min(p.amount, remaining);
@@ -1231,65 +1191,96 @@ export function CreateInvoicePage() {
           remaining -= amt;
         }
       }
-      if (validPayments.length > 0) {
-        await Promise.all(validPayments.map((p, idx) =>
-          apiClient.request('POST', '/payments', {
-            company_id: Number(form.company_id),
-            invoice_id: newInvoice.id,
-            reference_no: p.reference_no || `PAY-${newInvoice.id}-${idx + 1}`,
-            amount: p.amount,
-            payment_method: p.payment_method,
-            status: 'completed',
-            payment_direction: 'inward',
-            transaction_date: p.transaction_date,
-            bank_name: p.bank_name,
-            account_number: p.account_number,
-            ledger_reference: p.reference_no || `PAY-${newInvoice.id}-${idx + 1}`,
-            remarks: sanitizeText(p.remarks, LIMITS.TEXT),
-          }),
-        ));
+
+      if (validPayments.length > 0 && invoiceId) {
+        try {
+          await Promise.all(validPayments.map((p, idx) =>
+            apiClient.request('POST', '/payments', {
+              company_id: Number(form.company_id),
+              invoice_id: invoiceId,
+              reference_no: p.reference_no || `PAY-${invoiceId}-${idx + 1}`,
+              amount: p.amount,
+              payment_method: p.payment_method,
+              status: 'completed',
+              payment_direction: 'inward',
+              transaction_date: p.transaction_date,
+              bank_name: p.bank_name,
+              account_number: p.account_number,
+              ledger_reference: p.reference_no || `PAY-${invoiceId}-${idx + 1}`,
+              remarks: sanitizeText(p.remarks, LIMITS.TEXT),
+            }),
+          ));
+          paymentsRecorded = validPayments.length;
+        } catch (payErr) {
+          const payMsg = getUserFriendlyError(payErr, 'Payment recording failed');
+          addAppLog({
+            module: 'Invoices',
+            action: 'RecordPayments',
+            status: 'error',
+            message: payMsg,
+          });
+          showInfo?.(
+            'Payment not recorded',
+            `${payMsg} — the invoice was saved. Add the payment from the invoice page.`,
+          );
+        }
       }
 
-      /* Automation — STOCK DEDUCTION ONLY */
-      const shouldAutomate = action !== 'save_draft' && autoDeductStock && items.length > 0;
-
+      /* ── Stock automation ── */
+      const shouldAutomate =
+        action !== 'save_draft' && autoDeductStock && items.length > 0;
       let automationSummary = '';
-      if (shouldAutomate) {
-        const { stockErrors, notFoundIds } = await runPostSaveAutomation(
-          newInvoice.id,
-          form.invoice_no,
-        );
-        automationSummary =
-          ' · ' + `${items.length - stockErrors.length}/${items.length} stock OUT`;
 
-        if (notFoundIds.length > 0) {
-          const unique = Array.from(new Set(notFoundIds));
-          const msg =
-            `${unique.length} product${unique.length > 1 ? 's' : ''} could not be found on the server ` +
-            `(IDs: ${unique.join(', ')}). The invoice was saved. Refresh the products list and re-check.`;
-          showInfo?.('Automation skipped — product not found', msg);
+      if (shouldAutomate) {
+        try {
+          const { stockErrors, notFoundIds } = await runPostSaveAutomation(
+            invoiceId,
+            form.invoice_no,
+          );
+          automationSummary =
+            ' · ' + `${items.length - stockErrors.length}/${items.length} stock OUT`;
+
+          if (notFoundIds.length > 0) {
+            const unique = Array.from(new Set(notFoundIds));
+            showInfo?.(
+              'Automation skipped — product not found',
+              `${unique.length} product${unique.length > 1 ? 's' : ''} could not be found on the server ` +
+              `(IDs: ${unique.join(', ')}). The invoice was saved. Refresh the products list and re-check.`,
+            );
+            addAppLog({
+              module: 'Invoices',
+              action: 'PostSaveAutomation',
+              status: 'error',
+              message: `404 on product IDs: ${unique.join(', ')}`,
+            });
+          } else if (stockErrors.length > 0) {
+            showInfo?.(
+              'Stock deduction warnings',
+              `${stockErrors.length} task(s) failed. See log for details.`,
+            );
+            addAppLog({
+              module: 'Invoices',
+              action: 'PostSaveAutomation',
+              status: 'error',
+              message: stockErrors.join(' | ').slice(0, 500),
+            });
+          }
+        } catch (autoErr) {
           addAppLog({
             module: 'Invoices',
             action: 'PostSaveAutomation',
             status: 'error',
-            message: `404 on product IDs: ${unique.join(', ')}`,
-          });
-        } else if (stockErrors.length > 0) {
-          showInfo?.('Stock deduction warnings', `${stockErrors.length} task(s) failed. See log for details.`);
-          addAppLog({
-            module: 'Invoices',
-            action: 'PostSaveAutomation',
-            status: 'error',
-            message: stockErrors.join(' | ').slice(0, 500),
+            message: getUserFriendlyError(autoErr, 'Automation crashed'),
           });
         }
       }
 
       try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
       addAppLog({ module: 'Invoices', action: 'Create', status: 'success', message: form.invoice_no });
+
       showSuccess(
         'Invoice saved',
-        `Invoice ${form.invoice_no} created.${validPayments.length ? ' Payments recorded.' : ''}${automationSummary}` +
+        `Invoice ${form.invoice_no} created.${paymentsRecorded ? ' Payments recorded.' : ''}${automationSummary}` +
         (changeToReturn > 0 ? ` Change to return: ₹${formatCurrency(changeToReturn)}` : ''),
       );
 
@@ -1297,7 +1288,11 @@ export function CreateInvoicePage() {
 
       if (shouldAutomate) await new Promise((r) => setTimeout(r, 700));
 
-      navigate(action === 'save_print' ? `/invoices/${newInvoice.id}?print=1` : `/invoices/${newInvoice.id}`);
+      navigate(
+        action === 'save_print'
+          ? `/invoices/${invoiceId ?? ''}?print=1`
+          : `/invoices/${invoiceId ?? ''}`,
+      );
     } catch (err) {
       const msg = getUserFriendlyError(err, 'Invoice could not be saved.');
       setErrorMsg(msg);
@@ -1395,9 +1390,12 @@ export function CreateInvoicePage() {
     }
 
     const sku = newProduct.sku.trim() || generateProductSKU();
+
+    // ✅ warehouse_id included so an initial stock row is created
     const payload = {
       company_id: Number(newProduct.company_id),
       branch_id: newProduct.branch_id ? Number(newProduct.branch_id) : null,
+      warehouse_id: defaultWarehouseId ?? null,
       name: sanitizeText(newProduct.name, LIMITS.NAME).trim(),
       sku: sanitizeText(sku, LIMITS.SKU),
       hsn_sac_code: sanitizeText(newProduct.hsn_sac_code, LIMITS.SHORT),
@@ -1416,6 +1414,7 @@ export function CreateInvoicePage() {
       const created = await apiClient.createProduct(payload);
       showSuccess('Product created', `${created.name} added to catalog.`);
       await refreshProducts();
+      await refreshWarehouses();
       setShowProductOffcanvas(false);
       setNewProduct({
         company_id: '', branch_id: '', name: '', sku: '', hsn_sac_code: '',
@@ -1484,7 +1483,6 @@ export function CreateInvoicePage() {
   const hasErroredTask = postTasks.some((t) => t.status === 'error');
   const hasSkippedTask = postTasks.some((t) => t.status === 'skipped');
 
-  /** Manual refresh of product + warehouse caches after a 404 warning. */
   const handleRefreshAfterWarning = useCallback(async () => {
     apiCache.delete('products');
     apiCache.delete('inventory');
@@ -1878,15 +1876,9 @@ export function CreateInvoicePage() {
                   label="Auto deduct stock"
                   description={
                     defaultWarehouseId
-                      ? `Each line item is posted to /stock-out on warehouse #${defaultWarehouseId}.`
+                      ? `Each line item is posted to /stock-out on warehouse #${defaultWarehouseId}. Negative stock allowed.`
                       : 'No warehouse available — deduction will be skipped.'
                   }
-                />
-                <Toggle
-                  checked={verifyBeforeAutomation}
-                  onChange={setVerifyBeforeAutomation}
-                  label="Verify product exists first"
-                  description="Adds a GET /products/:id preflight — helps diagnose stale caches."
                 />
               </div>
             </div>
@@ -1953,7 +1945,11 @@ export function CreateInvoicePage() {
                             <div className="font-medium text-slate-800 truncate">{p.name}</div>
                             <div className="text-xs text-slate-500 truncate">
                               {p.sku && <span className="mr-2">SKU: {p.sku}</span>}
-                              {p.stock_quantity != null && <span className="mr-2">Stock: {p.stock_quantity}</span>}
+                              {p.stock_quantity != null && (
+                                <span className={`mr-2 ${safeNumber(p.stock_quantity) <= 0 ? 'text-rose-500' : ''}`}>
+                                  Stock: {p.stock_quantity}
+                                </span>
+                              )}
                               {p.uom && <span className="mr-2">UOM: {p.uom}</span>}
                               <span className="text-slate-400">ID #{p.id}</span>
                             </div>
@@ -2004,6 +2000,8 @@ export function CreateInvoicePage() {
                   </tr>
                 ) : items.map((item, idx) => {
                   const stale = !productIndex.has(item.product_id);
+                  const cachedStock = safeNumber(productIndex.get(item.product_id)?.stock_quantity, 0);
+                  const goingNegative = cachedStock - item.qty < 0;
                   return (
                     <tr key={idx} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/60 transition">
                       <td className="py-2 px-4 max-w-[240px]">
@@ -2020,6 +2018,11 @@ export function CreateInvoicePage() {
                           {stale && (
                             <span className="text-amber-600 inline-flex items-center gap-0.5" title="Not in current product cache">
                               <FiSlash size={9} /> stale
+                            </span>
+                          )}
+                          {goingNegative && !stale && (
+                            <span className="text-rose-600 inline-flex items-center gap-0.5" title="Stock will go negative">
+                              <FiAlertCircle size={9} /> below 0
                             </span>
                           )}
                         </div>
@@ -2982,9 +2985,18 @@ export function CreateInvoicePage() {
                       className={`${inputBase} text-right tabular-nums`}
                     />
                   </Field>
-                  <Field label="Stock Quantity">
+                  <Field
+                    label="Stock Quantity"
+                    hint={
+                      defaultWarehouseId
+                        ? `Allocated to warehouse #${defaultWarehouseId} (can be 0)`
+                        : 'No warehouse selected — stock row will be created on first stock-out'
+                    }
+                  >
                     <input
-                      type="number" min={0} value={newProduct.stock_quantity}
+                      type="number"
+                      min={0}
+                      value={newProduct.stock_quantity}
                       onChange={(e) => setNewProduct((p) => ({ ...p, stock_quantity: e.target.value }))}
                       className={`${inputBase} text-right tabular-nums`}
                     />

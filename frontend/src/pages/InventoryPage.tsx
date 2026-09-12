@@ -36,6 +36,7 @@ import {
   FiUser,
   FiMapPin,
 } from 'react-icons/fi';
+import { MdWarehouse } from 'react-icons/md';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
@@ -76,6 +77,13 @@ interface Branch {
   id: number;
   name: string;
   company_id: number;
+}
+interface Warehouse {
+  id: number;
+  name: string;
+  branch_id?: number | null;
+  company_id?: number | null;
+  code?: string | null;
 }
 interface InventoryItem {
   id: number;
@@ -138,6 +146,7 @@ interface ImportError {
   message: string;
 }
 interface WarehouseStock {
+  id?: number;
   warehouse_id: number;
   warehouse_name: string;
   quantity: number;
@@ -202,6 +211,7 @@ interface ApiErrorLike {
 
 const CACHE_TTL_MS = 300_000;
 const TABLE_COLUMN_COUNT = 8;
+const WAREHOUSE_STOCK_CONCURRENCY = 6;
 
 const UNIT_OPTIONS = [
   'Piece',
@@ -325,6 +335,38 @@ function csvEscape(value: unknown): string {
   const text = String(value ?? '');
   const sanitized = /^[=+\-@]/.test(text) ? `'${text}` : text;
   return `"${sanitized.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Runs `fn` over `items` with a bounded concurrency limit.
+ * Preserves input order in the returned array.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const workerCount = Math.max(1, Math.min(concurrency, items.length));
+  const workers: Promise<void>[] = [];
+  for (let w = 0; w < workerCount; w++) {
+    workers.push(
+      (async () => {
+        while (true) {
+          const index = cursor++;
+          if (index >= items.length) return;
+          try {
+            results[index] = await fn(items[index], index);
+          } catch {
+            results[index] = undefined as unknown as R;
+          }
+        }
+      })()
+    );
+  }
+  await Promise.all(workers);
+  return results;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1943,6 +1985,15 @@ export function InventoryPage() {
   } = useApiCache<Branch[]>('branches', () => apiClient.getBranches());
 
   const {
+    data: warehouses,
+    loading: warehousesLoading,
+    refresh: refreshWarehouses,
+  } = useApiCache<Warehouse[]>(
+    'warehouses',
+    async () => extractArray<Warehouse>((await apiClient.get('/warehouses?per_page=all')).data)
+  );
+
+  const {
     data: items,
     loading: itemsLoading,
     error: itemsError,
@@ -1954,7 +2005,15 @@ export function InventoryPage() {
   const [filterBranch, setFilterBranch] = useState('all');
   const [filterBrand, setFilterBrand] = useState('all');
   const [filterStatus, setFilterStatus] = useState('all');
+  const [filterWarehouse, setFilterWarehouse] = useState('all');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+
+  /* ------ Warehouse stock map (per-product, fetched lazily) ------ */
+  const [warehouseStockMap, setWarehouseStockMap] = useState<Map<number, WarehouseStock[]>>(
+    new Map()
+  );
+  const [warehouseStockLoading, setWarehouseStockLoading] = useState(false);
+  const loadedWarehouseStockRef = useRef<Set<number>>(new Set());
 
   const [isViewPanelOpen, setIsViewPanelOpen] = useState(false);
   const [viewingItem, setViewingItem] = useState<InventoryItem | null>(null);
@@ -2007,6 +2066,68 @@ export function InventoryPage() {
     return Array.from(br).sort();
   }, [items]);
 
+  /**
+   * Eager load warehouse stock rows for every product the first time a
+   * specific warehouse filter is chosen. Bounded concurrency keeps the
+   * server happy even with big inventories.
+   */
+  useEffect(() => {
+    if (filterWarehouse === 'all' || !items || items.length === 0) return;
+
+    const pending = items.filter((item) => !loadedWarehouseStockRef.current.has(item.id));
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+    setWarehouseStockLoading(true);
+
+    (async () => {
+      const fetched: Array<[number, WarehouseStock[]]> = [];
+
+      await mapWithConcurrency(
+        pending,
+        WAREHOUSE_STOCK_CONCURRENCY,
+        async (item) => {
+          if (cancelled) return;
+          try {
+            const res = await apiClient.get(`/products/${item.id}/warehouse-stock`);
+            fetched.push([item.id, extractArray<WarehouseStock>(res.data)]);
+          } catch {
+            // Swallow per-product failure — mark it as fetched-with-nothing so
+            // we don't retry on every render.
+            fetched.push([item.id, []]);
+          }
+        }
+      );
+
+      if (cancelled) return;
+
+      fetched.forEach(([id]) => loadedWarehouseStockRef.current.add(id));
+
+      setWarehouseStockMap((prev) => {
+        const next = new Map(prev);
+        fetched.forEach(([id, stocks]) => next.set(id, stocks));
+        return next;
+      });
+      setWarehouseStockLoading(false);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [filterWarehouse, items]);
+
+  /** Look up the stock row for a product in the currently-selected warehouse. */
+  const getWarehouseStockRow = useCallback(
+    (productId: number, warehouseId: string): WarehouseStock | null => {
+      if (warehouseId === 'all') return null;
+      const rows = warehouseStockMap.get(productId);
+      if (!rows) return null;
+      const wid = Number(warehouseId);
+      return rows.find((r) => r.warehouse_id === wid) ?? null;
+    },
+    [warehouseStockMap]
+  );
+
   const filteredItems = useMemo(() => {
     if (!items) return [];
     let filtered = [...items];
@@ -2047,9 +2168,32 @@ export function InventoryPage() {
         }
       });
     }
+    // Warehouse scope: keep only products that have a row in that warehouse.
+    if (filterWarehouse !== 'all') {
+      filtered = filtered.filter((item) => {
+        const rows = warehouseStockMap.get(item.id);
+        if (!rows) return false; // still loading or missing → hide from this view
+        const wid = Number(filterWarehouse);
+        return rows.some((r) => r.warehouse_id === wid);
+      });
+    }
     return filtered;
-  }, [items, searchTerm, filterCompany, filterBranch, filterBrand, filterStatus]);
+  }, [
+    items,
+    searchTerm,
+    filterCompany,
+    filterBranch,
+    filterBrand,
+    filterStatus,
+    filterWarehouse,
+    warehouseStockMap,
+  ]);
 
+  /**
+   * Summary. When a warehouse filter is active, aggregate quantities come
+   * from `product_warehouse_stocks` rather than the denormalized
+   * `products.stock_quantity` column.
+   */
   const summary = useMemo(() => {
     if (!items)
       return {
@@ -2058,30 +2202,57 @@ export function InventoryPage() {
         inactive: 0,
         lowStock: 0,
         outOfStock: 0,
+        totalUnits: 0,
         totalValue: 0,
       };
+
+    const scopedItems: Array<{ qty: number; reorder: number; salePrice: number; active: boolean }> =
+      [];
+
+    if (filterWarehouse === 'all') {
+      items.forEach((i) =>
+        scopedItems.push({
+          qty: safeNumber(i.stock_quantity),
+          reorder: safeNumber(i.reorder_level),
+          salePrice: safeNumber(i.sale_price),
+          active: toBoolean(i.active),
+        })
+      );
+    } else {
+      const wid = Number(filterWarehouse);
+      items.forEach((i) => {
+        const rows = warehouseStockMap.get(i.id);
+        if (!rows) return;
+        const row = rows.find((r) => r.warehouse_id === wid);
+        if (!row) return;
+        scopedItems.push({
+          qty: safeNumber(row.quantity),
+          reorder: safeNumber(i.reorder_level),
+          salePrice: safeNumber(i.sale_price),
+          active: toBoolean(i.active),
+        });
+      });
+    }
+
     return {
-      total: items.length,
-      active: items.filter((i) => toBoolean(i.active)).length,
-      inactive: items.filter((i) => !toBoolean(i.active)).length,
-      lowStock: items.filter(
-        (i) =>
-          safeNumber(i.stock_quantity) > 0 &&
-          safeNumber(i.stock_quantity) <= safeNumber(i.reorder_level)
-      ).length,
-      outOfStock: items.filter((i) => safeNumber(i.stock_quantity) <= 0).length,
-      totalValue: items.reduce(
-        (sum, i) => sum + safeNumber(i.sale_price) * safeNumber(i.stock_quantity),
-        0
-      ),
+      total: filterWarehouse === 'all' ? items.length : scopedItems.length,
+      active: (filterWarehouse === 'all' ? items.map((i) => toBoolean(i.active)) : scopedItems.map((s) => s.active))
+        .filter(Boolean).length,
+      inactive: (filterWarehouse === 'all' ? items.map((i) => toBoolean(i.active)) : scopedItems.map((s) => s.active))
+        .filter((v) => !v).length,
+      lowStock: scopedItems.filter((s) => s.qty > 0 && s.qty <= s.reorder).length,
+      outOfStock: scopedItems.filter((s) => s.qty <= 0).length,
+      totalUnits: scopedItems.reduce((sum, s) => sum + s.qty, 0),
+      totalValue: scopedItems.reduce((sum, s) => sum + s.salePrice * s.qty, 0),
     };
-  }, [items]);
+  }, [items, filterWarehouse, warehouseStockMap]);
 
   const activeFilterCount = [
     filterCompany !== 'all' ? filterCompany : undefined,
     filterBranch !== 'all' ? filterBranch : undefined,
     filterBrand !== 'all' ? filterBrand : undefined,
     filterStatus !== 'all' ? filterStatus : undefined,
+    filterWarehouse !== 'all' ? filterWarehouse : undefined,
   ].filter(Boolean).length;
 
   const clearFilters = useCallback(() => {
@@ -2090,6 +2261,7 @@ export function InventoryPage() {
     setFilterBranch('all');
     setFilterBrand('all');
     setFilterStatus('all');
+    setFilterWarehouse('all');
   }, []);
 
   /* -------------------- Branch filtering -------------------- */
@@ -2108,6 +2280,23 @@ export function InventoryPage() {
     }
     return branches || [];
   }, [filterCompany, branches]);
+
+  /** Warehouses filtered by the currently selected company/branch (when set). */
+  const filteredWarehousesFilter = useMemo(() => {
+    if (!warehouses) return [];
+    let list = warehouses;
+    if (filterCompany !== 'all') {
+      list = list.filter(
+        (w) => w.company_id == null || String(w.company_id) === filterCompany
+      );
+    }
+    if (filterBranch !== 'all') {
+      list = list.filter(
+        (w) => w.branch_id == null || String(w.branch_id) === filterBranch
+      );
+    }
+    return list;
+  }, [warehouses, filterCompany, filterBranch]);
 
   /* -------------------- Selection -------------------- */
 
@@ -2413,6 +2602,7 @@ export function InventoryPage() {
             branch_id: filterBranch !== 'all' ? filterBranch : undefined,
             brand: filterBrand !== 'all' ? filterBrand : undefined,
             status: filterStatus !== 'all' ? filterStatus : undefined,
+            warehouse_id: filterWarehouse !== 'all' ? filterWarehouse : undefined,
           };
         } else if (mode === 'selected') {
           if (selectedIds.length === 0) {
@@ -2450,6 +2640,7 @@ export function InventoryPage() {
       filterBranch,
       filterBrand,
       filterStatus,
+      filterWarehouse,
       selectedIds,
       showSuccess,
       showError,
@@ -2613,8 +2804,6 @@ export function InventoryPage() {
     options?: Array<{ id: string | number; name: string }>,
     required = false
   ) => {
-    // ✅ FIX: cast through `unknown` first, otherwise TS complains that
-    // `InventoryFormData` has no index signature.
     const value = (formData as unknown as Record<string, unknown>)[field] ?? '';
     const id = `field-${field}`;
     const errorMsg = formErrors[field];
@@ -2682,6 +2871,8 @@ export function InventoryPage() {
   };
 
   const isLoading = itemsLoading;
+  const isWarehouseScoped = filterWarehouse !== 'all';
+  const stockColumnLabel = isWarehouseScoped ? 'Warehouse Stock' : 'Total Stock';
 
   /* -------------------- Error state -------------------- */
 
@@ -2796,7 +2987,7 @@ export function InventoryPage() {
         @keyframes paper05 {
           5% { transform: translateY(46px); }
           20%, 30% { transform: translateY(34px); }
-          40%, 55% { transform: translateY(22px); }
+          22%, 55% { transform: translateY(22px); }
           65%, 70% { transform: translateY(10px); }
           80%, 85% { transform: translateY(0); }
           92%, 100% { transform: translateY(46px); }
@@ -2893,7 +3084,11 @@ export function InventoryPage() {
                 <StatCard icon={FiTruck} label="Out of stock" value={summary.outOfStock} accent="violet" />
                 <StatCard
                   icon={FiDollarSign}
-                  label="Total value (est.)"
+                  label={
+                    isWarehouseScoped
+                      ? 'Warehouse value (est.)'
+                      : 'Total value (est.)'
+                  }
                   value={`₹${summary.totalValue.toFixed(2)}`}
                   accent="teal"
                 />
@@ -2915,7 +3110,7 @@ export function InventoryPage() {
                   <CardDescription className="text-[11px] text-slate-500">
                     {activeFilterCount > 0
                       ? `${activeFilterCount} active filter${activeFilterCount > 1 ? 's' : ''}`
-                      : 'Refine inventory by company, branch, brand or status'}
+                      : 'Refine inventory by company, branch, brand, warehouse or status'}
                   </CardDescription>
                 </div>
               </div>
@@ -2936,7 +3131,7 @@ export function InventoryPage() {
 
             <CardContent className="bg-white p-4 sm:p-5">
               <div className="grid gap-3 lg:grid-cols-12">
-                <div className="relative lg:col-span-4">
+                <div className="relative lg:col-span-3">
                   <Input
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
@@ -2955,6 +3150,7 @@ export function InventoryPage() {
                       onChange={(e) => {
                         setFilterCompany(e.target.value);
                         setFilterBranch('all');
+                        setFilterWarehouse('all');
                       }}
                       className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                     >
@@ -2977,7 +3173,10 @@ export function InventoryPage() {
                     <select
                       aria-label="Branch"
                       value={filterBranch}
-                      onChange={(e) => setFilterBranch(e.target.value)}
+                      onChange={(e) => {
+                        setFilterBranch(e.target.value);
+                        setFilterWarehouse('all');
+                      }}
                       className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                     >
                       <option value="all">All branches</option>
@@ -2995,6 +3194,35 @@ export function InventoryPage() {
                 </div>
 
                 <div className="lg:col-span-2">
+                  <div className="relative">
+                    <select
+                      aria-label="Warehouse"
+                      value={filterWarehouse}
+                      onChange={(e) => setFilterWarehouse(e.target.value)}
+                      className={`h-10 w-full appearance-none rounded-xl border bg-white px-3.5 pr-9 text-sm font-medium shadow-sm outline-none transition ${
+                        filterWarehouse !== 'all'
+                          ? 'border-indigo-400 text-indigo-700 ring-4 ring-indigo-500/10'
+                          : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
+                      }`}
+                    >
+                      <option value="all">All warehouses</option>
+                      {warehousesLoading && <option value="" disabled>Loading warehouses…</option>}
+                      {filteredWarehousesFilter.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.name}
+                        </option>
+                      ))}
+                    </select>
+                    <MdWarehouse
+                      className={`pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 ${
+                        filterWarehouse !== 'all' ? 'text-indigo-500' : 'text-slate-400'
+                      }`}
+                      size={14}
+                    />
+                  </div>
+                </div>
+
+                <div className="lg:col-span-1">
                   <div className="relative">
                     <select
                       aria-label="Brand"
@@ -3037,6 +3265,37 @@ export function InventoryPage() {
                   </div>
                 </div>
               </div>
+
+              {/* Active warehouse chip */}
+              {isWarehouseScoped && (
+                <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-800">
+                  <MdWarehouse size={14} />
+                  <span className="font-semibold">Warehouse view:</span>
+                  <span>
+                    {filteredWarehousesFilter.find((w) => String(w.id) === filterWarehouse)?.name ||
+                      `#${filterWarehouse}`}
+                  </span>
+                  <span className="text-indigo-500/80">
+                    · Stock numbers now come from{' '}
+                    <code className="rounded bg-white/60 px-1 py-0.5 font-mono">
+                      product_warehouse_stocks
+                    </code>
+                  </span>
+                  {warehouseStockLoading && (
+                    <span className="ml-1 inline-flex items-center gap-1 text-indigo-600">
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
+                      loading stock rows…
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setFilterWarehouse('all')}
+                    className="ml-auto inline-flex items-center gap-1 rounded-lg bg-white px-2 py-1 text-[11px] font-semibold text-indigo-700 ring-1 ring-indigo-200 hover:bg-indigo-100"
+                  >
+                    <FiX size={11} /> Clear
+                  </button>
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -3100,18 +3359,22 @@ export function InventoryPage() {
             <CardHeader className="flex flex-col gap-3 border-b border-slate-100 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
               <div className="flex items-center gap-2.5">
                 <div className="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-slate-600">
-                  <FiPackage size={14} />
+                  {isWarehouseScoped ? <MdWarehouse size={14} /> : <FiPackage size={14} />}
                 </div>
                 <div>
                   <CardTitle className="text-sm font-semibold text-slate-800">
-                    Inventory items
+                    {isWarehouseScoped ? 'Warehouse inventory' : 'Inventory items'}
                   </CardTitle>
                   <CardDescription className="text-[11px] text-slate-500">
                     {isLoading
                       ? 'Loading inventory…'
                       : `${filteredItems.length.toLocaleString('en-IN')} record${
                           filteredItems.length === 1 ? '' : 's'
-                        } · Click a row to view details`}
+                        }${
+                          isWarehouseScoped
+                            ? ' · scoped to selected warehouse'
+                            : ' · Click a row to view details'
+                        }`}
                   </CardDescription>
                 </div>
               </div>
@@ -3144,7 +3407,7 @@ export function InventoryPage() {
                       <TableHeadLabel>Brand</TableHeadLabel>
                     </TableHead>
                     <TableHead className="text-right">
-                      <TableHeadLabel align="right">Stock</TableHeadLabel>
+                      <TableHeadLabel align="right">{stockColumnLabel}</TableHeadLabel>
                     </TableHead>
                     <TableHead className="text-right">
                       <TableHeadLabel align="right">Sale price</TableHeadLabel>
@@ -3171,14 +3434,35 @@ export function InventoryPage() {
                   {!isLoading &&
                     filteredItems.map((item) => {
                       const selected = selectedIds.includes(item.id);
-                      const stock = safeNumber(item.stock_quantity);
+                      const unitLabel = (item.unit || 'pcs').toString();
                       const reorder = safeNumber(item.reorder_level);
+
+                      let displayQty: number;
+                      let isPending = false;
+                      let subLabel: string | null = null;
+
+                      if (isWarehouseScoped) {
+                        const rows = warehouseStockMap.get(item.id);
+                        if (!rows) {
+                          isPending = warehouseStockLoading;
+                          displayQty = 0;
+                        } else {
+                          const row = getWarehouseStockRow(item.id, filterWarehouse);
+                          displayQty = row ? safeNumber(row.quantity) : 0;
+                          if (row && safeNumber(row.reserved_quantity) > 0) {
+                            subLabel = `${safeNumber(row.reserved_quantity)} reserved`;
+                          }
+                        }
+                      } else {
+                        displayQty = safeNumber(item.stock_quantity);
+                      }
+
                       const stockClass =
-                        stock <= 0
-                          ? 'bg-rose-50 text-rose-600'
-                          : stock <= reorder
-                            ? 'bg-amber-50 text-amber-700'
-                            : 'bg-emerald-50 text-emerald-700';
+                        displayQty <= 0
+                          ? 'bg-rose-50 text-rose-600 ring-1 ring-rose-200/60'
+                          : displayQty <= reorder
+                            ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200/60'
+                            : 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200/60';
 
                       return (
                         <TableRow
@@ -3232,11 +3516,39 @@ export function InventoryPage() {
                           </TableCell>
 
                           <TableCell className="whitespace-nowrap text-right">
-                            <span
-                              className={`inline-flex items-center rounded-lg px-2 py-1 text-sm font-semibold tabular-nums ${stockClass}`}
-                            >
-                              {stock}
-                            </span>
+                            <div className="inline-flex flex-col items-end gap-0.5">
+                              {isPending ? (
+                                <span className="inline-flex h-7 w-20 animate-pulse items-center justify-end rounded-lg bg-slate-100 px-2 text-[11px] text-slate-400">
+                                  …
+                                </span>
+                              ) : (
+                                <span
+                                  className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-sm font-semibold tabular-nums ${stockClass}`}
+                                  title={
+                                    displayQty <= 0
+                                      ? 'Out of stock'
+                                      : displayQty <= reorder
+                                        ? `Low stock (reorder at ${reorder})`
+                                        : `In stock (reorder at ${reorder})`
+                                  }
+                                >
+                                  <span>{displayQty.toLocaleString('en-IN')}</span>
+                                  <span className="text-[10px] font-medium uppercase opacity-70">
+                                    {unitLabel}
+                                  </span>
+                                </span>
+                              )}
+                              {subLabel ? (
+                                <span className="text-[10px] text-slate-500">{subLabel}</span>
+                              ) : (
+                                !isPending &&
+                                reorder > 0 && (
+                                  <span className="text-[10px] text-slate-400">
+                                    reorder @ {reorder.toLocaleString('en-IN')}
+                                  </span>
+                                )
+                              )}
+                            </div>
                           </TableCell>
 
                           <TableCell className="whitespace-nowrap text-right text-sm font-semibold tabular-nums text-slate-900">
@@ -3273,13 +3585,21 @@ export function InventoryPage() {
                       <TableCell colSpan={TABLE_COLUMN_COUNT} className="py-20 text-center">
                         <div className="mx-auto max-w-md px-4">
                           <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 ring-1 ring-slate-200/70">
-                            <FiFilter className="h-6 w-6 text-slate-400" />
+                            {isWarehouseScoped ? (
+                              <MdWarehouse className="h-6 w-6 text-slate-400" />
+                            ) : (
+                              <FiFilter className="h-6 w-6 text-slate-400" />
+                            )}
                           </div>
                           <p className="mt-4 text-base font-semibold text-slate-800">
-                            No items found
+                            {isWarehouseScoped
+                              ? 'No products in this warehouse'
+                              : 'No items found'}
                           </p>
                           <p className="mt-1 text-sm text-slate-500">
-                            Try adjusting the company, branch, brand, status, or search term.
+                            {isWarehouseScoped
+                              ? 'No products have a stock row in this warehouse yet. Use Stock IN to add some.'
+                              : 'Try adjusting the company, branch, brand, status, or search term.'}
                           </p>
                           <Button
                             className="mt-5 rounded-lg"
@@ -3327,14 +3647,24 @@ export function InventoryPage() {
         <StockInModal
           product={viewingItem}
           onClose={() => setShowStockIn(false)}
-          onSuccess={() => refreshItems()}
+          onSuccess={() => {
+            refreshItems();
+            // Invalidate the warehouse-stock cache so the next warehouse view
+            // reflects the newly received stock.
+            loadedWarehouseStockRef.current.clear();
+            setWarehouseStockMap(new Map());
+          }}
         />
       )}
       {showStockOut && viewingItem && (
         <StockOutModal
           product={viewingItem}
           onClose={() => setShowStockOut(false)}
-          onSuccess={() => refreshItems()}
+          onSuccess={() => {
+            refreshItems();
+            loadedWarehouseStockRef.current.clear();
+            setWarehouseStockMap(new Map());
+          }}
         />
       )}
 

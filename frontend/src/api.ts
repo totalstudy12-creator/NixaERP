@@ -1405,6 +1405,17 @@ export const apiClient = {
     );
   },
 
+  async getSalesInvoiceReturn(id: number) {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error('Invalid sales return ID.');
+    }
+
+    return this.request(
+      'GET',
+      `/sales-returns/${id}`
+    );
+  },
+
   async createSalesInvoiceReturn(
     data: any
   ) {
@@ -1505,6 +1516,8 @@ export const apiClient = {
             customerId > 0
               ? customerId
               : undefined,
+
+          per_page: 20,
         }
       )}`
     );
@@ -3471,17 +3484,17 @@ export const apiClient = {
     );
   },
 
-  async getCustomerLedger(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
+  // async getCustomerLedger(
+  //   params: any = {}
+  // ) {
+  //   const query =
+  //     buildQuery(params);
 
-    return this.request(
-      'GET',
-      `/reports/customer-ledger${query}`
-    );
-  },
+  //   return this.request(
+  //     'GET',
+  //     `/reports/customer-ledger${query}`
+  //   );
+  // },
 
   async getOutstandingPurchases(
     params: any = {}
@@ -3765,6 +3778,14 @@ async getAutomationStats() {
   return this.request(
     'GET',
     '/automation/stats',
+  );
+},
+async getCustomerLedger(params: any = {}) {
+  const query = buildQuery(params);
+
+  return this.request(
+    'GET',
+    `/reports/customer-ledger${query}`
   );
 },
 };

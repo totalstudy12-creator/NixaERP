@@ -1,5 +1,5 @@
 <?php
-use App\Http\Controllers\Api\AutomationController;
+
 use App\Http\Controllers\Api\AccountingController;
 use App\Http\Controllers\Api\AttendanceController;
 use App\Http\Controllers\Api\AuthController;
@@ -157,18 +157,18 @@ Route::post(
 Route::middleware('auth:sanctum')->group(function () {
 
     /*
-|--------------------------------------------------------------------------
-| MCP
-|--------------------------------------------------------------------------
-|
-| MCP uses dedicated Laravel Sanctum Personal Access Tokens.
-|
-| IMPORTANT:
-| - No "abilities" middleware alias is required.
-| - MCP authorization is checked by McpController.
-| - MCP tokens are read-only in this phase.
-|
-*/
+    |--------------------------------------------------------------------------
+    | MCP
+    |--------------------------------------------------------------------------
+    |
+    | MCP uses dedicated Laravel Sanctum Personal Access Tokens.
+    |
+    | IMPORTANT:
+    | - No "abilities" middleware alias is required.
+    | - MCP authorization is checked by McpController.
+    | - MCP tokens are read-only in this phase.
+    |
+    */
 
     Route::prefix('mcp')->group(function () {
 
@@ -528,6 +528,70 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get(
         'admin/login-activity',
         [DashboardController::class, 'loginActivity']
+    );
+
+    /*
+    |--------------------------------------------------------------------------
+    | Customer Custom Routes
+    |--------------------------------------------------------------------------
+    |
+    | These MUST be declared BEFORE `Route::apiResource('customers', ...)`
+    | so that static segments like "template", "import", "top" are matched
+    | by their dedicated handlers instead of being captured by the resource
+    | route's `{customer}` wildcard parameter.
+    |
+    | Customer Ledger (A4 Statement) endpoints power the "Ledger (A4)" action
+    | on the Customers page. Each returns a chronological list of debit/credit
+    | entries that the frontend renders into an A4 print-ready statement.
+    |
+    | Response shape (any of these works, the frontend auto-detects):
+    |
+    |   [
+    |     {
+    |       "id": 123,
+    |       "date": "2026-09-12",
+    |       "type": "invoice" | "payment" | "credit_note" | "debit_note",
+    |       "reference_no": "INV-0001",
+    |       "particulars": "Sales Invoice INV-0001",
+    |       "debit": 12500.00,
+    |       "credit": 0,
+    |       "status": "paid"
+    |     },
+    |     ...
+    |   ]
+    |
+    | OR wrapped as { "data": [ ... ] }.
+    |
+    | The frontend will fall back to deriving entries from /invoices and
+    | /payments if all three endpoints below return an empty list.
+    |
+    */
+
+    /* Customer Import / Template */
+    Route::get(
+        'customers/template',
+        [CustomerController::class, 'template']
+    );
+
+    Route::post(
+        'customers/import',
+        [CustomerController::class, 'import']
+    );
+
+    /* Customer Ledger (A4 Statement) */
+    Route::get(
+        'customers/{customer}/ledger',
+        [CustomerController::class, 'ledger']
+    );
+
+    Route::get(
+        'customers/{customer}/ledger-entries',
+        [CustomerController::class, 'ledgerEntries']
+    );
+
+    Route::get(
+        'ledger',
+        [CustomerController::class, 'ledgerByCustomer']
     );
 
     /*
@@ -1500,22 +1564,6 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /*
     |--------------------------------------------------------------------------
-    | Customer Import / Template
-    |--------------------------------------------------------------------------
-    */
-
-    Route::get(
-        'customers/template',
-        [CustomerController::class, 'template']
-    );
-
-    Route::post(
-        'customers/import',
-        [CustomerController::class, 'import']
-    );
-
-    /*
-    |--------------------------------------------------------------------------
     | Product Details / Stock
     |--------------------------------------------------------------------------
     */
@@ -1614,6 +1662,11 @@ Route::middleware('auth:sanctum')->group(function () {
         );
 
         Route::get(
+            '/invoice/{invoiceId}/details',
+            [SalesReturnController::class, 'getInvoiceDetails']
+        );
+
+        Route::get(
             '/{id}',
             [SalesReturnController::class, 'show']
         );
@@ -1667,6 +1720,7 @@ Route::get(
     'marketing/gbp-locations',
     [MarketingController::class, 'gbpLocations']
 );
+
 Route::get(
     'invoices/summary',
     [InvoiceController::class, 'summary']
@@ -1681,50 +1735,3 @@ Route::post(
     'invoices/bulk-delete',
     [InvoiceController::class, 'bulkDelete']
 );
-/*
-|--------------------------------------------------------------------------
-| Automation
-|--------------------------------------------------------------------------
-*/
-
-Route::prefix('automation')->group(function () {
-    Route::get(
-        'workflows',
-        [AutomationController::class, 'workflows']
-    );
-
-    Route::post(
-        'workflows',
-        [AutomationController::class, 'store']
-    );
-
-    Route::put(
-        'workflows/{workflow}',
-        [AutomationController::class, 'update']
-    );
-
-    Route::delete(
-        'workflows/{workflow}',
-        [AutomationController::class, 'destroy']
-    );
-
-    Route::post(
-        'workflows/{workflow}/run',
-        [AutomationController::class, 'run']
-    );
-
-    Route::post(
-        'workflows/{workflow}/duplicate',
-        [AutomationController::class, 'duplicate']
-    );
-
-    Route::get(
-        'runs',
-        [AutomationController::class, 'runs']
-    );
-
-    Route::get(
-        'stats',
-        [AutomationController::class, 'stats']
-    );
-});

@@ -2,13 +2,12 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Customer extends Model
 {
-    use HasFactory, SoftDeletes;
+    use SoftDeletes;
 
     protected $fillable = [
         'company_id',
@@ -40,6 +39,7 @@ class Customer extends Model
         'opening_balance',
         'credit_limit',
         'due_days',
+        'outstanding_amount',
         'fax',
         'website',
         'note',
@@ -51,22 +51,21 @@ class Customer extends Model
         'parent_id',
         'territory',
         'zone',
-        'outstanding_amount',
         'wallet_balance',
         'commission_rate',
         'kyc_status',
         'approved_at',
     ];
 
-    public function parent()
-    {
-        return $this->belongsTo(Customer::class, 'parent_id');
-    }
-
-    public function children()
-    {
-        return $this->hasMany(Customer::class, 'parent_id');
-    }
+    protected $casts = [
+        'is_active' => 'boolean',
+        'opening_balance' => 'decimal:2',
+        'credit_limit' => 'decimal:2',
+        'outstanding_amount' => 'decimal:2',
+        'wallet_balance' => 'decimal:2',
+        'commission_rate' => 'decimal:2',
+        'approved_at' => 'datetime',
+    ];
 
     public function company()
     {
@@ -77,9 +76,9 @@ class Customer extends Model
     {
         return $this->belongsTo(Branch::class);
     }
-    // Add this relationship inside the Customer model
+
     public function group()
     {
-        return $this->belongsTo(CustomerGroup::class);
+        return $this->belongsTo(CustomerGroup::class, 'group_id');
     }
 }
