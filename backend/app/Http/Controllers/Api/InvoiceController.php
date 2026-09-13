@@ -5,9 +5,15 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
+use App\Models\Product;
+use App\Models\ProductWarehouseStock;
+use App\Models\StockMovement;
+use App\Models\Warehouse;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
 
 class InvoiceController extends Controller
@@ -15,22 +21,6 @@ class InvoiceController extends Controller
     /**
      * Display a listing of invoices with production-grade server-side
      * filtering, searching, sorting and pagination.
-     *
-     * Supported query parameters:
-     *
-     * search
-     * company_id
-     * branch_id
-     * customer_id
-     * status
-     * payment_state = paid|partial|unpaid|overdue
-     * date_from
-     * date_to
-     * due_from
-     * due_to
-     * sort_by
-     * sort_dir = asc|desc
-     * per_page = 15|25|50|100
      */
     public function index(Request $request)
     {
@@ -71,10 +61,6 @@ class InvoiceController extends Controller
 
         $query->orderBy($sortBy, $sortDir);
 
-        /*
-         * Stable secondary ordering prevents rows from jumping between
-         * pages when multiple invoices have the same primary sort value.
-         */
         if ($sortBy !== 'id') {
             $query->orderBy('id', 'desc');
         }
@@ -86,9 +72,6 @@ class InvoiceController extends Controller
             max((int) $request->input('page', 1), 1)
         );
 
-        /*
-         * Preserve query string while paginating.
-         */
         $paginator->appends(
             $request->except('page')
         );
@@ -98,9 +81,6 @@ class InvoiceController extends Controller
 
     /**
      * Return real invoice statistics for the current filter scope.
-     *
-     * Payment received is calculated from actual inward payments instead
-     * of trusting a potentially stale invoice.payment_received value.
      */
     public function summary(Request $request)
     {
@@ -112,14 +92,6 @@ class InvoiceController extends Controller
             ->where('payments.payment_direction', 'inward')
             ->whereNull('payments.deleted_at');
 
-        /*
-         * Build one row per invoice so outstanding is calculated per invoice:
-         *
-         * outstanding = max(total_amount - received_amount, 0)
-         *
-         * This avoids incorrectly offsetting an overpaid invoice against
-         * another outstanding invoice.
-         */
         $invoiceRows = (clone $query)
             ->select([
                 'invoices.id',
@@ -199,10 +171,6 @@ class InvoiceController extends Controller
             ')
             ->first();
 
-        /*
-         * Today metrics use the same company/branch/customer/status/search
-         * scope but deliberately ignore the user's date range.
-         */
         $todayRequest = clone $request;
 
         $todayRequest->request->remove('date_from');
@@ -288,11 +256,6 @@ class InvoiceController extends Controller
     {
         $query = Invoice::query();
 
-        /*
-         * ---------------------------------------------------------------
-         * Company
-         * ---------------------------------------------------------------
-         */
         if ($request->filled('company_id')) {
             $query->where(
                 'invoices.company_id',
@@ -300,11 +263,6 @@ class InvoiceController extends Controller
             );
         }
 
-        /*
-         * ---------------------------------------------------------------
-         * Branch
-         * ---------------------------------------------------------------
-         */
         if ($request->filled('branch_id')) {
             $query->where(
                 'invoices.branch_id',
@@ -312,11 +270,6 @@ class InvoiceController extends Controller
             );
         }
 
-        /*
-         * ---------------------------------------------------------------
-         * Customer
-         * ---------------------------------------------------------------
-         */
         if ($request->filled('customer_id')) {
             $query->where(
                 'invoices.customer_id',
@@ -324,23 +277,6 @@ class InvoiceController extends Controller
             );
         }
 
-        /*
-         * ---------------------------------------------------------------
-         * Status
-         *
-         * Supports:
-         *   paid
-         *   partial
-         *   unpaid
-         *   issued
-         *   pending
-         *   overdue
-         *   draft
-         *
-         * Overdue is handled separately because it is a derived state
-         * based on due_date + actual received amount.
-         * ---------------------------------------------------------------
-         */
         if ($request->filled('status')) {
             $status = trim((string) $request->input('status'));
 
@@ -369,14 +305,6 @@ class InvoiceController extends Controller
             }
         }
 
-        /*
-         * ---------------------------------------------------------------
-         * Payment state
-         *
-         * This is independent of stored invoice.status and is based on
-         * actual payment records.
-         * ---------------------------------------------------------------
-         */
         if ($request->filled('payment_state')) {
             $paymentState = trim(
                 strtolower((string) $request->input('payment_state'))
@@ -430,11 +358,6 @@ class InvoiceController extends Controller
             }
         }
 
-        /*
-         * ---------------------------------------------------------------
-         * Invoice date range
-         * ---------------------------------------------------------------
-         */
         if ($request->filled('date_from')) {
             $query->whereDate(
                 DB::raw('COALESCE(invoices.invoice_date, invoices.created_at)'),
@@ -451,11 +374,6 @@ class InvoiceController extends Controller
             );
         }
 
-        /*
-         * ---------------------------------------------------------------
-         * Due date range
-         * ---------------------------------------------------------------
-         */
         if ($request->filled('due_from')) {
             $query->whereDate(
                 'invoices.due_date',
@@ -472,23 +390,6 @@ class InvoiceController extends Controller
             );
         }
 
-        /*
-         * ---------------------------------------------------------------
-         * Global search
-         *
-         * Search fields use actual NixaERP relations/columns:
-         * invoice_no
-         * GSTIN
-         * PAN
-         * PO
-         * challan
-         * LR
-         * E-way
-         * customer name/email/phone/GST
-         * company name/GST
-         * branch name/code
-         * ---------------------------------------------------------------
-         */
         if ($request->filled('search')) {
             $search = trim((string) $request->input('search'));
 
@@ -558,6 +459,12 @@ class InvoiceController extends Controller
 
     /**
      * Store a newly created invoice with items.
+     *
+     * Runs in a single transaction:
+     *   1. Create invoice header
+     *   2. Create line items
+     *   3. Recalculate totals and persist
+     *   4. Deduct stock (OUT) for every line item, dated to invoice_date
      */
     public function store(Request $request)
     {
@@ -648,9 +555,6 @@ class InvoiceController extends Controller
 
             'status' => 'nullable|string|max:50',
 
-            /*
-             * Items
-             */
             'items' => 'required|array|min:1',
 
             'items.*.product_id' => 'required|exists:products,id',
@@ -697,9 +601,6 @@ class InvoiceController extends Controller
         }
 
         return DB::transaction(function () use ($data) {
-            /*
-             * Create invoice header.
-             */
             $invoice = Invoice::create($data);
 
             $subtotal = 0;
@@ -720,9 +621,6 @@ class InvoiceController extends Controller
                     : $itemSubtotal
                         * ((float) ($item['discount_percent'] ?? 0) / 100);
 
-                /*
-                 * Never allow discount to exceed line subtotal.
-                 */
                 $discountAmount = min(
                     max($discountAmount, 0),
                     $itemSubtotal
@@ -833,9 +731,6 @@ class InvoiceController extends Controller
                 ]);
             }
 
-            /*
-             * General discount.
-             */
             $generalDiscount = 0;
 
             if (
@@ -898,13 +793,6 @@ class InvoiceController extends Controller
                 $grandTotal
                 - $rawGrandTotal;
 
-            /*
-             * Store calculated totals.
-             *
-             * Note:
-             * payment_received is not touched here because actual
-             * received amounts are maintained by PaymentController.
-             */
             $invoice->update([
                 'subtotal' => round(
                     $subtotal,
@@ -937,7 +825,18 @@ class InvoiceController extends Controller
                 ),
             ]);
 
-            \Log::info(
+            /*
+             * ----------------------------------------------------------
+             * STOCK OUT (dated to invoice_date)
+             * ----------------------------------------------------------
+             * Skipped for draft/cancelled invoices — they haven't shipped.
+             */
+            if (! in_array($invoice->status, ['draft', 'cancelled'], true)) {
+                $invoice->load('items');
+                $this->deductInvoiceStock($invoice);
+            }
+
+            Log::info(
                 'Invoice created via API',
                 [
                     'invoice_id' => $invoice->id,
@@ -976,6 +875,9 @@ class InvoiceController extends Controller
 
     /**
      * Update the invoice header.
+     *
+     * NOTE: This endpoint only updates the invoice header — no item changes,
+     * so no stock impact.
      */
     public function update(
         Request $request,
@@ -1042,11 +944,33 @@ class InvoiceController extends Controller
     }
 
     /**
-     * Soft delete the specified invoice.
+     * Soft delete the specified invoice AND restore stock for every line item.
+     *
+     * Timeline rule:
+     *   - The OUT movement used the invoice's business date.
+     *   - The IN (reversal) movement is stamped with TODAY — the reversal is
+     *     a real event happening now, not a backdated correction.
+     *
+     * Wrapped in a single DB transaction so partial failures roll back.
      */
     public function destroy(Invoice $invoice)
     {
-        $invoice->delete();
+        Log::debug('Invoice delete request', [
+            'user_id'    => Auth::id(),
+            'invoice_id' => $invoice->id,
+            'invoice_no' => $invoice->invoice_no,
+        ]);
+
+        DB::transaction(function () use ($invoice) {
+            $this->restoreInvoiceStock($invoice);
+
+            $invoice->delete();
+
+            Log::info('Invoice deleted with stock restoration', [
+                'invoice_id' => $invoice->id,
+                'invoice_no' => $invoice->invoice_no,
+            ]);
+        });
 
         return response()->noContent();
     }
@@ -1091,7 +1015,7 @@ class InvoiceController extends Controller
     }
 
     /**
-     * Bulk soft-delete invoices.
+     * Bulk soft-delete invoices AND restore stock for each invoice's items.
      *
      * POST /api/invoices/bulk-delete
      */
@@ -1109,23 +1033,29 @@ class InvoiceController extends Controller
             $data,
             &$deleted
         ) {
-            $deleted = Invoice::query()
-                ->whereIn(
-                    'id',
-                    $data['ids']
-                )
-                ->delete();
+            $invoices = Invoice::with('items')
+                ->whereIn('id', $data['ids'])
+                ->get();
+
+            foreach ($invoices as $invoice) {
+                $this->restoreInvoiceStock($invoice);
+                $invoice->delete();
+                $deleted++;
+            }
         });
 
         return response()->json([
             'success' => true,
             'deleted_count' => $deleted,
-            'message' => "{$deleted} invoice(s) deleted successfully.",
+            'message' => "{$deleted} invoice(s) deleted successfully and stock restored.",
         ]);
     }
 
     /**
      * Create an invoice from an existing order.
+     *
+     * Runs in a transaction and deducts stock (OUT) dated to the new
+     * invoice's business date.
      */
     public function fromOrder(Request $request)
     {
@@ -1139,93 +1069,335 @@ class InvoiceController extends Controller
             'notes' => 'nullable|string',
         ]);
 
-        $order = \App\Models\Order::with(
-            'items.product'
-        )->findOrFail(
-            $data['order_id']
-        );
+        return DB::transaction(function () use ($data) {
+            $order = \App\Models\Order::with(
+                'items.product'
+            )->findOrFail(
+                $data['order_id']
+            );
 
-        $invoice = Invoice::create([
-            'company_id' => $order->company_id,
+            $invoice = Invoice::create([
+                'company_id' => $order->company_id,
 
-            'branch_id' => $order->branch_id ?? null,
+                'branch_id' => $order->branch_id ?? null,
 
-            'customer_id' => $order->customer_id,
+                'customer_id' => $order->customer_id,
 
-            'order_id' => $order->id,
+                'order_id' => $order->id,
 
-            'invoice_no' => $data['invoice_no'],
+                'invoice_no' => $data['invoice_no'],
 
-            'total_amount' => $order->total_amount,
+                'total_amount' => $order->total_amount,
 
-            'tax_amount' => $order->tax_amount ?? 0,
+                'tax_amount' => $order->tax_amount ?? 0,
 
-            'status' => 'unpaid',
+                'status' => 'unpaid',
 
-            'due_date' => $data['due_date'] ?? null,
+                'due_date' => $data['due_date'] ?? null,
 
-            'notes' => $data['notes'] ?? null,
+                'notes' => $data['notes'] ?? null,
 
-            'invoice_date' => now()->toDateString(),
-        ]);
-
-        foreach ($order->items as $item) {
-            $quantity = $item->quantity ?? 1;
-
-            $unitPrice =
-                $item->unit_price
-                ?? ($item->product->price ?? 0);
-
-            $subtotal =
-                $quantity
-                * $unitPrice;
-
-            $taxRate =
-                $item->tax_rate ?? 0;
-
-            $invoice->items()->create([
-                'product_id' => $item->product_id,
-
-                'quantity' => $quantity,
-
-                'unit_price' => $unitPrice,
-
-                'tax_rate' => $taxRate,
-
-                'subtotal' => $subtotal,
-
-                'total' => $subtotal,
-
-                'discount_type' => 'percent',
-
-                'discount_percent' => 0,
-
-                'discount_amount' => 0,
-
-                'gst_slab' => $taxRate,
+                'invoice_date' => now()->toDateString(),
             ]);
+
+            foreach ($order->items as $item) {
+                $quantity = $item->quantity ?? 1;
+
+                $unitPrice =
+                    $item->unit_price
+                    ?? ($item->product->price ?? 0);
+
+                $subtotal =
+                    $quantity
+                    * $unitPrice;
+
+                $taxRate =
+                    $item->tax_rate ?? 0;
+
+                $invoice->items()->create([
+                    'product_id' => $item->product_id,
+
+                    'quantity' => $quantity,
+
+                    'unit_price' => $unitPrice,
+
+                    'tax_rate' => $taxRate,
+
+                    'subtotal' => $subtotal,
+
+                    'total' => $subtotal,
+
+                    'discount_type' => 'percent',
+
+                    'discount_percent' => 0,
+
+                    'discount_amount' => 0,
+
+                    'gst_slab' => $taxRate,
+                ]);
+            }
+
+            /* STOCK OUT dated to the new invoice's business date. */
+            $invoice->load('items');
+            $this->deductInvoiceStock($invoice);
+
+            Log::info('Invoice created from order', [
+                'invoice_id' => $invoice->id,
+                'invoice_no' => $invoice->invoice_no,
+                'order_id'   => $order->id,
+            ]);
+
+            return response()->json(
+                $invoice->load([
+                    'company',
+                    'branch',
+                    'customer',
+                    'items.product',
+                ]),
+                201
+            );
+        });
+    }
+
+    /**
+     * Resolve the warehouse to use for a given invoice.
+     *
+     * Priority:
+     *   1. invoices.warehouse_id (if the column exists and is populated)
+     *   2. First warehouse for the invoice's branch + company
+     *   3. First warehouse for the invoice's company
+     *   4. null
+     */
+    private function resolveWarehouseId(Invoice $invoice): ?int
+    {
+        $companyId = (int) $invoice->company_id;
+        $branchId  = $invoice->branch_id
+            ? (int) $invoice->branch_id
+            : null;
+
+        if (! empty($invoice->warehouse_id)) {
+            return (int) $invoice->warehouse_id;
         }
 
-        return response()->json(
-            $invoice->load([
-                'company',
-                'branch',
-                'customer',
-                'items.product',
-            ]),
-            201
-        );
+        $whQuery = Warehouse::query()
+            ->where('company_id', $companyId);
+
+        if ($branchId) {
+            $whQuery->where('branch_id', $branchId);
+        }
+
+        $wh = $whQuery->orderBy('id')->first();
+
+        return $wh ? (int) $wh->id : null;
+    }
+
+    /**
+     * Resolve the business date to stamp on a stock movement.
+     *
+     * For the ORIGINAL event (invoice creation), the movement should appear
+     * on the invoice's business date so the ledger matches reality. Falls
+     * back to today if the invoice date is missing.
+     */
+    private function invoiceBusinessDate(Invoice $invoice): string
+    {
+        $date = $invoice->invoice_date
+            ?? $invoice->created_at
+            ?? null;
+
+        if (! $date) {
+            return now()->toDateString();
+        }
+
+        try {
+            return \Illuminate\Support\Carbon::parse($date)->toDateString();
+        } catch (\Throwable $e) {
+            return now()->toDateString();
+        }
+    }
+
+    /**
+     * Deduct stock (OUT) for every line item of an invoice.
+     *
+     * IMPORTANT — Timeline:
+     *   `transaction_date` is stamped with the invoice's **business date**
+     *   (invoice_date), NOT `now()`, so a backdated invoice creates a
+     *   backdated OUT movement. This keeps the stock ledger in sync with
+     *   the sales timeline.
+     *
+     * NOTE: The caller MUST wrap this in a DB::transaction().
+     */
+    private function deductInvoiceStock(Invoice $invoice): void
+    {
+        $invoice->loadMissing('items');
+
+        if ($invoice->items->isEmpty()) {
+            return;
+        }
+
+        $companyId     = (int) $invoice->company_id;
+        $branchId      = $invoice->branch_id
+            ? (int) $invoice->branch_id
+            : null;
+        $warehouseId   = $this->resolveWarehouseId($invoice);
+        $businessDate  = $this->invoiceBusinessDate($invoice);
+
+        foreach ($invoice->items as $item) {
+            if (empty($item->product_id)) {
+                continue;
+            }
+
+            $product = Product::lockForUpdate()
+                ->find($item->product_id);
+
+            if (! $product) {
+                continue;
+            }
+
+            $qty = (float) $item->quantity;
+
+            if ($qty <= 0) {
+                continue;
+            }
+
+            $stockBefore = (float) ($product->stock_quantity ?? 0);
+            $stockAfter  = $stockBefore - $qty;
+
+            $product->stock_quantity = $stockAfter;
+            $product->save();
+
+            StockMovement::create([
+                'product_id'       => $product->id,
+                'warehouse_id'     => $warehouseId,
+                'company_id'       => $companyId,
+                'branch_id'        => $branchId,
+                'transaction_type' => 'OUT',
+                'reference_type'   => 'sale',
+                'reference_id'     => $invoice->id,
+                'quantity'         => $qty,
+                'unit_price'       => (float) $item->unit_price,
+                'stock_before'     => $stockBefore,
+                'stock_after'      => $stockAfter,
+                'remark'           => 'Invoice #' . $invoice->invoice_no,
+                // ── Timeline fix: use the invoice's business date ──
+                'transaction_date' => $businessDate,
+                'created_by'       => Auth::id(),
+            ]);
+
+            if ($warehouseId) {
+                $whStock = ProductWarehouseStock::where([
+                    'product_id'   => $product->id,
+                    'warehouse_id' => $warehouseId,
+                    'company_id'   => $companyId,
+                ])
+                    ->when(
+                        $branchId,
+                        fn ($q) => $q->where('branch_id', $branchId)
+                    )
+                    ->first();
+
+                if ($whStock) {
+                    $whStock->quantity = max(
+                        0,
+                        (float) $whStock->quantity - $qty
+                    );
+                    $whStock->available_quantity = max(
+                        0,
+                        (float) $whStock->available_quantity - $qty
+                    );
+                    $whStock->save();
+                }
+            }
+        }
+    }
+
+    /**
+     * Reverse the stock impact of an invoice.
+     *
+     * IMPORTANT — Timeline:
+     *   `transaction_date` is stamped with **today**, because the reversal
+     *   is a real event happening now (not a backdated correction). This is
+     *   the standard accounting treatment: business date for the original
+     *   event, posting date for the correction.
+     *
+     * NOTE: The caller MUST wrap this in a DB::transaction().
+     */
+    private function restoreInvoiceStock(Invoice $invoice): void
+    {
+        $invoice->loadMissing('items');
+
+        if ($invoice->items->isEmpty()) {
+            return;
+        }
+
+        $companyId   = (int) $invoice->company_id;
+        $branchId    = $invoice->branch_id
+            ? (int) $invoice->branch_id
+            : null;
+        $warehouseId = $this->resolveWarehouseId($invoice);
+
+        // ── Timeline: reversal happens NOW, not on the original invoice date ──
+        $reversalDate = now()->toDateString();
+
+        foreach ($invoice->items as $item) {
+            if (empty($item->product_id)) {
+                continue;
+            }
+
+            $product = Product::lockForUpdate()
+                ->find($item->product_id);
+
+            if (! $product) {
+                continue;
+            }
+
+            $qty = (float) $item->quantity;
+
+            if ($qty <= 0) {
+                continue;
+            }
+
+            $stockBefore = (float) ($product->stock_quantity ?? 0);
+            $stockAfter  = $stockBefore + $qty;
+
+            $product->stock_quantity = $stockAfter;
+            $product->save();
+
+            StockMovement::create([
+                'product_id'       => $product->id,
+                'warehouse_id'     => $warehouseId,
+                'company_id'       => $companyId,
+                'branch_id'        => $branchId,
+                'transaction_type' => 'IN',
+                'reference_type'   => 'sale',
+                'reference_id'     => $invoice->id,
+                'quantity'         => $qty,
+                'unit_price'       => (float) $item->unit_price,
+                'stock_before'     => $stockBefore,
+                'stock_after'      => $stockAfter,
+                'remark'           => 'Reversal for deleted invoice #' . $invoice->invoice_no,
+                // ── Timeline fix: reversal is posted on today's date ──
+                'transaction_date' => $reversalDate,
+                'created_by'       => Auth::id(),
+            ]);
+
+            if ($warehouseId) {
+                $whStock = ProductWarehouseStock::firstOrNew([
+                    'product_id'   => $product->id,
+                    'warehouse_id' => $warehouseId,
+                    'company_id'   => $companyId,
+                    'branch_id'    => $branchId,
+                ]);
+
+                $whStock->quantity = (float) ($whStock->quantity ?? 0) + $qty;
+                $whStock->available_quantity = (float) ($whStock->available_quantity ?? 0) + $qty;
+                $whStock->save();
+            }
+        }
     }
 
     /**
      * Resolve an invoice number, auto-generating one when missing
      * or already taken.
-     *
-     * Format:
-     * INV-YYYY-XXXXXX
-     *
-     * Example:
-     * INV-2026-000001
      */
     private function resolveInvoiceNumber(
         ?string $invoiceNo = null

@@ -1,6 +1,6 @@
 // src/pages/CreateInvoicePage.tsx
 import {
-  useEffect, useState, useCallback, useMemo, useRef, lazy, Suspense,
+  useEffect, useState, useCallback, useMemo, useRef, lazy, Suspense, memo,
   type ChangeEvent, type KeyboardEvent, type ReactNode,
 } from 'react';
 import {
@@ -110,6 +110,114 @@ function formatCurrency(value: number | string | undefined | null): string {
   const n = safeNumber(value);
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Quantity input — safe decimal-aware number field
+ *
+ * Why this exists:
+ *   `<input type="number">` combined with an onChange that immediately coerces
+ *   (e.g. Math.floor) causes the displayed text to drift from React state —
+ *   typing "1.100" shows "1.100" while state is `1`, and decimals get eaten.
+ *
+ * Design:
+ *   • type="text" + inputMode="decimal" so mobile shows the decimal keyboard.
+ *   • `text` state holds the raw string while focused.
+ *   • Only digits and a single dot are accepted; max 3 decimals.
+ *   • On blur, the string is parsed, clamped, and normalised back to a plain
+ *     number string ("1.100" → "1.1", "2.000" → "2"). Invalid/empty reverts.
+ *   • Only valid, in-range values are propagated upstream via onChange.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** Round to `maxDecimals` places and drop trailing zeros ("1.100" → "1.1"). */
+function formatQty(v: number, maxDecimals = 3): string {
+  if (!Number.isFinite(v)) return '';
+  const factor = Math.pow(10, maxDecimals);
+  const rounded = Math.round(v * factor) / factor;
+  return String(rounded);
+}
+
+interface QuantityInputProps {
+  value: number;
+  onChange: (v: number) => void;
+  min?: number;
+  max?: number;
+  maxDecimals?: number;
+  className?: string;
+  'aria-label'?: string;
+}
+
+const QuantityInput = memo(function QuantityInput({
+  value,
+  onChange,
+  min = 0.001,
+  max = 1_000_000,
+  maxDecimals = 3,
+  className,
+  'aria-label': ariaLabel,
+}: QuantityInputProps) {
+  const [text, setText] = useState<string>(() => formatQty(value, maxDecimals));
+  const [focused, setFocused] = useState(false);
+
+  // Sync display from external `value` changes whenever not actively editing.
+  useEffect(() => {
+    if (!focused) setText(formatQty(value, maxDecimals));
+  }, [value, focused, maxDecimals]);
+
+  const handleChange = (raw: string) => {
+    // Only digits and at most one dot.
+    if (raw !== '' && !/^\d*\.?\d*$/.test(raw)) return;
+
+    // Enforce max decimals after the dot.
+    const dot = raw.indexOf('.');
+    if (dot >= 0 && raw.length - dot - 1 > maxDecimals) return;
+
+    setText(raw);
+
+    // Don't propagate incomplete states upstream.
+    if (raw === '' || raw === '.') return;
+
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return;
+    if (n < min || n > max) return;
+    onChange(n);
+  };
+
+  const handleBlur = () => {
+    setFocused(false);
+    const n = Number(text);
+    const invalid = text === '' || text === '.' || !Number.isFinite(n) || n < min;
+
+    if (invalid) {
+      const fallback = value >= min ? value : min;
+      setText(formatQty(fallback, maxDecimals));
+      if (fallback !== value) onChange(fallback);
+    } else {
+      const clamped = Math.min(n, max);
+      setText(formatQty(clamped, maxDecimals));
+      if (clamped !== value) onChange(clamped);
+    }
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      autoComplete="off"
+      spellCheck={false}
+      value={focused ? text : formatQty(value, maxDecimals)}
+      onChange={(e) => handleChange(e.target.value)}
+      onFocus={(e) => {
+        setFocused(true);
+        setText(formatQty(value, maxDecimals));
+        requestAnimationFrame(() => e.target.select());
+      }}
+      onBlur={handleBlur}
+      className={className}
+      aria-label={ariaLabel}
+    />
+  );
+});
+QuantityInput.displayName = 'QuantityInput';
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Types
@@ -227,7 +335,13 @@ type PostSaveTask = {
 function calculateItem(
   raw: Omit<InvoiceItem, 'cgst_percent' | 'sgst_percent' | 'igst_percent' | 'cgst_amount' | 'sgst_amount' | 'igst_amount' | 'total'>,
 ): InvoiceItem {
-  const qty = Math.max(0, safeNumber(raw.qty));
+  // Quantity: accept decimals (up to 3 places), reject <= 0, cap to avoid
+  // precision blowups / obviously-invalid input.
+  const qtyRaw = safeNumber(raw.qty);
+  const qty = Number.isFinite(qtyRaw) && qtyRaw > 0
+    ? Math.min(1_000_000, Math.round(qtyRaw * 1000) / 1000)
+    : 0;
+
   const price = Math.max(0, safeNumber(raw.price));
   const base = qty * price;
 
@@ -972,7 +1086,15 @@ export function CreateInvoicePage() {
     if (!form.branch_id) errors.branch_id = 'Select a branch.';
     if (!form.customer_id) errors.customer_id = 'Select a customer.';
     if (!form.invoice_no.trim()) errors.invoice_no = 'Invoice number is required.';
-    if (items.length === 0) errors.items = 'Add at least one product.';
+
+    if (items.length === 0) {
+      errors.items = 'Add at least one product.';
+    } else if (items.some((i) => !(i.qty > 0))) {
+      errors.items = 'Every line item must have a quantity greater than 0.';
+    } else if (items.some((i) => !Number.isFinite(i.qty) || i.qty > 1_000_000)) {
+      errors.items = 'One or more line items have an invalid quantity.';
+    }
+
     if (form.gstin_pan && !REGEX.GSTIN.test(form.gstin_pan) && !REGEX.PAN.test(form.gstin_pan)) {
       errors.gstin_pan = 'Enter a valid GSTIN or PAN.';
     }
@@ -1391,7 +1513,7 @@ export function CreateInvoicePage() {
 
     const sku = newProduct.sku.trim() || generateProductSKU();
 
-    // ✅ warehouse_id included so an initial stock row is created
+    // warehouse_id included so an initial stock row is created
     const payload = {
       company_id: Number(newProduct.company_id),
       branch_id: newProduct.branch_id ? Number(newProduct.branch_id) : null,
@@ -1995,7 +2117,7 @@ export function CreateInvoicePage() {
                     <td colSpan={9} className="text-center py-16 text-slate-400">
                       <FiBox size={36} className="mx-auto mb-2 opacity-40" />
                       <p className="text-sm">No products added yet.</p>
-                      <p className="text-xs mt-1">Search above or click “Add Product”.</p>
+                      <p className="text-xs mt-1">Search above or click "Add Product".</p>
                     </td>
                   </tr>
                 ) : items.map((item, idx) => {
@@ -2028,10 +2150,12 @@ export function CreateInvoicePage() {
                         </div>
                       </td>
                       <td className="py-2 px-3">
-                        <input
-                          type="number" min={1} step={1} inputMode="numeric"
+                        <QuantityInput
                           value={item.qty}
-                          onChange={(e) => updateItem(idx, 'qty', Math.max(1, Math.floor(safeNumber(e.target.value, 1))))}
+                          onChange={(v) => updateItem(idx, 'qty', v)}
+                          min={0.001}
+                          maxDecimals={3}
+                          aria-label={`Quantity for ${item.product_name}`}
                           className="w-16 bg-transparent text-center text-sm outline-none tabular-nums"
                         />
                       </td>
@@ -2159,10 +2283,13 @@ export function CreateInvoicePage() {
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="text-[10px] uppercase text-slate-500">Qty</label>
-                    <input
-                      type="number" min={1} value={item.qty}
-                      onChange={(e) => updateItem(idx, 'qty', Math.max(1, Math.floor(safeNumber(e.target.value, 1))))}
-                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-sm"
+                    <QuantityInput
+                      value={item.qty}
+                      onChange={(v) => updateItem(idx, 'qty', v)}
+                      min={0.001}
+                      maxDecimals={3}
+                      aria-label={`Quantity for ${item.product_name}`}
+                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-sm text-right tabular-nums"
                     />
                   </div>
                   <div>

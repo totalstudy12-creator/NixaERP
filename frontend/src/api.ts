@@ -123,32 +123,23 @@ export interface InvoiceSummaryResponse {
 // HELPERS
 // -----------------------------------------------------------------------------
 
-const normalizeApiPayload = <T>(
-  payload: unknown,
-  fallback: T
-): T => {
+const normalizeApiPayload = <T>(payload: unknown, fallback: T): T => {
   if (payload === null || payload === undefined) {
     return fallback;
   }
-
   return payload as T;
 };
 
-const unwrapApiData = <T>(
-  payload: unknown,
-  fallback: T
-): T => {
+const unwrapApiData = <T>(payload: unknown, fallback: T): T => {
   let current: any = payload;
 
   for (let depth = 0; depth < 3; depth += 1) {
     if (current === null || current === undefined) {
       return fallback;
     }
-
     if (Array.isArray(current)) {
       return current as T;
     }
-
     if (typeof current !== 'object') {
       return fallback;
     }
@@ -169,25 +160,17 @@ const unwrapApiData = <T>(
   return current as T;
 };
 
-const buildQuery = (
-  params: Record<string, unknown> = {}
-): string => {
+const buildQuery = (params: Record<string, unknown> = {}): string => {
   const search = new URLSearchParams();
 
   Object.entries(params).forEach(([key, value]) => {
-    if (
-      value === undefined ||
-      value === null ||
-      value === ''
-    ) {
+    if (value === undefined || value === null || value === '') {
       return;
     }
-
     search.set(key, String(value));
   });
 
   const query = search.toString();
-
   return query ? `?${query}` : '';
 };
 
@@ -199,25 +182,18 @@ const buildApiError = (options: {
   payload?: unknown;
 }): ApiError => {
   const payloadObject =
-    options.payload &&
-    typeof options.payload === 'object'
+    options.payload && typeof options.payload === 'object'
       ? (options.payload as Record<string, unknown>)
       : {};
 
   const backendMessage =
-    (typeof payloadObject.message === 'string' &&
-      payloadObject.message) ||
-    (typeof payloadObject.error === 'string' &&
-      payloadObject.error) ||
+    (typeof payloadObject.message === 'string' && payloadObject.message) ||
+    (typeof payloadObject.error === 'string' && payloadObject.error) ||
     options.fallbackMessage;
 
   const validationErrors =
-    payloadObject.errors &&
-    typeof payloadObject.errors === 'object'
-      ? (payloadObject.errors as Record<
-          string,
-          string[] | string
-        >)
+    payloadObject.errors && typeof payloadObject.errors === 'object'
+      ? (payloadObject.errors as Record<string, string[] | string>)
       : undefined;
 
   const requestId =
@@ -225,9 +201,7 @@ const buildApiError = (options: {
       ? payloadObject.request_id
       : undefined;
 
-  const error = new Error(
-    backendMessage
-  ) as ApiError;
+  const error = new Error(backendMessage) as ApiError;
 
   error.name = 'ApiRequestError';
   error.status = options.status;
@@ -266,8 +240,7 @@ export const apiClient = {
     data?: any,
     options?: any
   ): Promise<T> {
-    const token =
-      useAuthStore.getState().token;
+    const token = useAuthStore.getState().token;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -283,28 +256,18 @@ export const apiClient = {
       headers,
     };
 
-    if (
-      data !== undefined &&
-      data !== null
-    ) {
-      requestOptions.body =
-        JSON.stringify(data);
+    if (data !== undefined && data !== null) {
+      requestOptions.body = JSON.stringify(data);
     }
 
-    const requestUrl =
-      `${API_BASE}${normalizeEndpoint(endpoint)}`;
+    const requestUrl = `${API_BASE}${normalizeEndpoint(endpoint)}`;
 
-    let timeoutId:
-      ReturnType<typeof setTimeout> | undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
     try {
-      const controller =
-        new AbortController();
+      const controller = new AbortController();
 
-      timeoutId = setTimeout(
-        () => controller.abort(),
-        30000
-      );
+      timeoutId = setTimeout(() => controller.abort(), 30000);
 
       const requestOptionsWithRedirect: RequestInit = {
         ...requestOptions,
@@ -315,29 +278,19 @@ export const apiClient = {
       console.debug(
         `API Request: ${method.toUpperCase()} ${requestUrl}`,
         {
-          'Content-Length': getBodyByteLength(
-            requestOptions.body
-          ),
-          'Has Auth':
-            !!headers.Authorization,
+          'Content-Length': getBodyByteLength(requestOptions.body),
+          'Has Auth': !!headers.Authorization,
         }
       );
 
-      const response = await fetch(
-        requestUrl,
-        requestOptionsWithRedirect
-      );
+      const response = await fetch(requestUrl, requestOptionsWithRedirect);
 
       // -----------------------------------------------------------------------
       // REDIRECT
       // -----------------------------------------------------------------------
 
-      if (
-        response.status >= 300 &&
-        response.status < 400
-      ) {
-        const location =
-          response.headers.get('location');
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location');
 
         console.warn(
           `API redirect (${response.status}): ${method} ${endpoint}\n` +
@@ -350,12 +303,8 @@ export const apiClient = {
           endpoint,
           method,
           fallbackMessage:
-            `Redirect to ${
-              location || 'unknown'
-            } - check authentication and permissions`,
-          payload: {
-            location,
-          },
+            `Redirect to ${location || 'unknown'} - check authentication and permissions`,
+          payload: { location },
         });
       }
 
@@ -364,19 +313,14 @@ export const apiClient = {
       // -----------------------------------------------------------------------
 
       if (response.status === 401) {
-        useAuthStore
-          .getState()
-          .logout();
-
-        window.location.href =
-          '/login';
+        useAuthStore.getState().logout();
+        window.location.href = '/login';
 
         throw buildApiError({
           status: 401,
           endpoint,
           method,
-          fallbackMessage:
-            'Unauthorized - please login again',
+          fallbackMessage: 'Unauthorized - please login again',
         });
       }
 
@@ -384,21 +328,12 @@ export const apiClient = {
       // RESPONSE PARSING
       // -----------------------------------------------------------------------
 
-      const contentType =
-        response.headers.get(
-          'content-type'
-        ) || '';
+      const contentType = response.headers.get('content-type') || '';
 
       const isJson =
-        contentType.includes(
-          'application/json'
-        ) ||
-        contentType.includes(
-          'text/json'
-        ) ||
-        contentType.includes(
-          '+json'
-        );
+        contentType.includes('application/json') ||
+        contentType.includes('text/json') ||
+        contentType.includes('+json');
 
       let body: any = null;
 
@@ -406,14 +341,8 @@ export const apiClient = {
         if (response.status === 204) {
           body = null;
         } else {
-          const raw =
-            await response.text();
-
-          body = raw
-            ? isJson
-              ? JSON.parse(raw)
-              : raw
-            : null;
+          const raw = await response.text();
+          body = raw ? (isJson ? JSON.parse(raw) : raw) : null;
         }
       } catch (parseError: any) {
         console.error(
@@ -422,7 +351,6 @@ export const apiClient = {
             `Content-Type: ${contentType}\n` +
             `Parse Error: ${parseError.message}`
         );
-
         throw parseError;
       }
 
@@ -433,20 +361,13 @@ export const apiClient = {
       if (!response.ok) {
         const fallbackEndpoints =
           method === 'GET'
-            ? DASHBOARD_ENDPOINT_FALLBACKS[
-                endpoint
-              ] || []
+            ? DASHBOARD_ENDPOINT_FALLBACKS[endpoint] || []
             : [];
 
-        if (
-          response.status === 404 &&
-          fallbackEndpoints.length > 0
-        ) {
+        if (response.status === 404 && fallbackEndpoints.length > 0) {
           let lastError: unknown;
 
-          for (
-            const fallbackEndpoint of fallbackEndpoints
-          ) {
+          for (const fallbackEndpoint of fallbackEndpoints) {
             try {
               return await this.request<T>(
                 method,
@@ -468,34 +389,22 @@ export const apiClient = {
           status: response.status,
           endpoint,
           method,
-          fallbackMessage:
-            response.statusText ||
-            'Request failed',
+          fallbackMessage: response.statusText || 'Request failed',
           payload: body,
         });
       }
 
-      return normalizeApiPayload<T>(
-        body,
-        (body ?? null) as T
-      );
+      return normalizeApiPayload<T>(body, (body ?? null) as T);
     } catch (error: any) {
-      const apiError =
-        error as ApiError;
+      const apiError = error as ApiError;
 
-      if (
-        apiError?.name ===
-        'ApiRequestError'
-      ) {
+      if (apiError?.name === 'ApiRequestError') {
         console.error(
           `API request failed: ${method.toUpperCase()} ${endpoint}`,
           {
-            status:
-              apiError.status,
-            backendMessage:
-              apiError.backendMessage,
-            validationErrors:
-              apiError.validationErrors,
+            status: apiError.status,
+            backendMessage: apiError.backendMessage,
+            validationErrors: apiError.validationErrors,
           }
         );
 
@@ -506,99 +415,56 @@ export const apiClient = {
       // NETWORK / TIMEOUT ERRORS
       // -----------------------------------------------------------------------
 
-      let networkMessage =
-        'Network request failed';
+      let networkMessage = 'Network request failed';
 
-      const diagnostics: Record<
-        string,
-        unknown
-      > = {
-        'Attempted URL':
-          requestUrl,
-        Method:
-          method.toUpperCase(),
-        Endpoint:
-          endpoint,
+      const diagnostics: Record<string, unknown> = {
+        'Attempted URL': requestUrl,
+        Method: method.toUpperCase(),
+        Endpoint: endpoint,
       };
 
-      if (
-        error instanceof
-        DOMException &&
-        error.name === 'AbortError'
-      ) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
         networkMessage =
           'Request timeout (30s). The backend server is not responding in time.';
-
-        diagnostics[
-          'Possible Causes'
-        ] = [
+        diagnostics['Possible Causes'] = [
           '1. Backend server is slow or hanging',
           '2. Database query is slow',
           '3. Large request or response',
         ];
-      } else if (
-        error instanceof TypeError
-      ) {
-        if (
-          error.message.includes(
-            'Failed to fetch'
-          )
-        ) {
+      } else if (error instanceof TypeError) {
+        if (error.message.includes('Failed to fetch')) {
           networkMessage =
             'Failed to connect to server. The backend may be offline, or there might be a CORS issue.';
-
-          diagnostics[
-            'Possible Causes'
-          ] = [
+          diagnostics['Possible Causes'] = [
             '1. Backend server is not running',
-            '2. API server is not accessible at ' +
-              API_BASE,
+            '2. API server is not accessible at ' + API_BASE,
             '3. Network connectivity issue',
             '4. CORS policy blocking the request',
           ];
         } else {
-          networkMessage =
-            `Network error: ${error.message}`;
+          networkMessage = `Network error: ${error.message}`;
         }
-      } else if (
-        error instanceof Error
-      ) {
-        networkMessage =
-          error.message;
+      } else if (error instanceof Error) {
+        networkMessage = error.message;
       }
 
-      diagnostics[
-        'Error Message'
-      ] = networkMessage;
-
-      diagnostics[
-        'Has Authorization'
-      ] =
-        !!useAuthStore
-          .getState()
-          .token;
+      diagnostics['Error Message'] = networkMessage;
+      diagnostics['Has Authorization'] = !!useAuthStore.getState().token;
 
       console.error(
         `API request failed: ${method.toUpperCase()} ${endpoint}`,
         diagnostics
       );
-
-      console.error(
-        'Full error object:',
-        error
-      );
+      console.error('Full error object:', error);
 
       throw buildApiError({
         status: 0,
         endpoint,
         method,
-        fallbackMessage:
-          networkMessage ||
-          'Network request failed',
+        fallbackMessage: networkMessage || 'Network request failed',
         payload: {
           diagnostics,
-          error:
-            error?.message,
+          error: error?.message,
         },
       });
     } finally {
@@ -612,283 +478,132 @@ export const apiClient = {
   // GENERIC HTTP HELPERS
   // ---------------------------------------------------------------------------
 
-  async get<T = any>(
-    endpoint: string,
-    options?: any
-  ): Promise<T> {
-    return this.request<T>(
-      'GET',
-      endpoint,
-      undefined,
-      options
-    );
+  async get<T = any>(endpoint: string, options?: any): Promise<T> {
+    return this.request<T>('GET', endpoint, undefined, options);
   },
 
-  async post<T = any>(
-    endpoint: string,
-    data?: any
-  ): Promise<T> {
-    return this.request<T>(
-      'POST',
-      endpoint,
-      data
-    );
+  async post<T = any>(endpoint: string, data?: any): Promise<T> {
+    return this.request<T>('POST', endpoint, data);
   },
 
-  async put<T = any>(
-    endpoint: string,
-    data?: any
-  ): Promise<T> {
-    return this.request<T>(
-      'PUT',
-      endpoint,
-      data
-    );
+  async put<T = any>(endpoint: string, data?: any): Promise<T> {
+    return this.request<T>('PUT', endpoint, data);
   },
 
-  async delete<T = any>(
-    endpoint: string
-  ): Promise<T> {
-    return this.request<T>(
-      'DELETE',
-      endpoint
-    );
+  async delete<T = any>(endpoint: string): Promise<T> {
+    return this.request<T>('DELETE', endpoint);
   },
 
   // ---------------------------------------------------------------------------
   // AUTH
   // ---------------------------------------------------------------------------
 
-  async login(
-    email: string,
-    password: string
-  ) {
-    return this.request(
-      'POST',
-      '/login',
-      {
-        email,
-        password,
-      }
-    );
+  async login(email: string, password: string) {
+    return this.request('POST', '/login', { email, password });
   },
 
   async logout() {
-    return this.request(
-      'POST',
-      '/logout'
-    );
+    return this.request('POST', '/logout');
   },
 
   async getMe() {
-    return this.request(
-      'GET',
-      '/me'
-    );
+    return this.request('GET', '/me');
   },
 
   async getProfile() {
-    return this.request(
-      'GET',
-      '/profile'
-    );
+    return this.request('GET', '/profile');
   },
 
-  async updateProfile(
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      '/profile',
-      data
-    );
+  async updateProfile(data: any) {
+    return this.request('PUT', '/profile', data);
   },
 
   // ---------------------------------------------------------------------------
   // COMPANIES
   // ---------------------------------------------------------------------------
 
-  async getCompanies(
-    page = 1
-  ) {
-    return this.request(
-      'GET',
-      `/companies?page=${page}`
-    );
+  async getCompanies(page = 1) {
+    return this.request('GET', `/companies?page=${page}`);
   },
 
-  async createCompany(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/companies',
-      data
-    );
+  async createCompany(data: any) {
+    return this.request('POST', '/companies', data);
   },
 
-  async updateCompany(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/companies/${id}`,
-      data
-    );
+  async updateCompany(id: number, data: any) {
+    return this.request('PUT', `/companies/${id}`, data);
   },
 
-  async deleteCompany(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/companies/${id}`
-    );
+  async deleteCompany(id: number) {
+    return this.request('DELETE', `/companies/${id}`);
   },
 
   // ---------------------------------------------------------------------------
   // CUSTOMERS
   // ---------------------------------------------------------------------------
 
-  async getCustomers(
-    page = 1
-  ) {
-    return this.request(
-      'GET',
-      `/customers?page=${page}`
-    );
+  async getCustomers(page = 1) {
+    return this.request('GET', `/customers?page=${page}`);
   },
 
   async getAllCustomers() {
-    return this.request(
-      'GET',
-      '/customers?per_page=1000'
-    );
+    return this.request('GET', '/customers?per_page=1000');
   },
 
-  async createCustomer(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/customers',
-      data
-    );
+  async createCustomer(data: any) {
+    return this.request('POST', '/customers', data);
   },
 
-  async updateCustomer(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/customers/${id}`,
-      data
-    );
+  async updateCustomer(id: number, data: any) {
+    return this.request('PUT', `/customers/${id}`, data);
   },
 
-  async deleteCustomer(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/customers/${id}`
-    );
+  async deleteCustomer(id: number) {
+    return this.request('DELETE', `/customers/${id}`);
   },
 
   async getCustomerGroups() {
-    return this.request(
-      'GET',
-      '/customer-groups'
-    );
+    return this.request('GET', '/customer-groups');
   },
 
-  async createCustomerGroup(
-    data: { name: string }
-  ) {
-    return this.request(
-      'POST',
-      '/customer-groups',
-      data
-    );
+  async createCustomerGroup(data: { name: string }) {
+    return this.request('POST', '/customer-groups', data);
   },
 
   async importCustomers(
     file: File,
-    duplicateAction:
-      | 'skip'
-      | 'update'
-      | 'stop',
+    duplicateAction: 'skip' | 'update' | 'stop',
     dryRun: boolean
   ) {
-    const formData =
-      new FormData();
+    const formData = new FormData();
 
-    formData.append(
-      'file',
-      file
-    );
+    formData.append('file', file);
+    formData.append('duplicate_action', duplicateAction);
+    formData.append('dry_run', dryRun ? '1' : '0');
 
-    formData.append(
-      'duplicate_action',
-      duplicateAction
-    );
-
-    formData.append(
-      'dry_run',
-      dryRun ? '1' : '0'
-    );
-
-    const token =
-      useAuthStore
-        .getState()
-        .token;
-
-    const headers: Record<
-      string,
-      string
-    > = {};
+    const token = useAuthStore.getState().token;
+    const headers: Record<string, string> = {};
 
     if (token) {
-      headers.Authorization =
-        `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
-    const response =
-      await fetch(
-        `${API_BASE}/customers/import`,
-        {
-          method: 'POST',
-          headers,
-          body: formData,
-        }
-      );
+    const response = await fetch(`${API_BASE}/customers/import`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
 
-    const contentType =
-      response.headers.get(
-        'content-type'
-      ) || '';
-
+    const contentType = response.headers.get('content-type') || '';
     const isJson =
-      contentType.includes(
-        'application/json'
-      ) ||
-      contentType.includes(
-        'text/json'
-      );
+      contentType.includes('application/json') ||
+      contentType.includes('text/json');
 
-    const body =
-      isJson
-        ? await response.json()
-        : await response.text();
+    const body = isJson ? await response.json() : await response.text();
 
     if (!response.ok) {
       throw new Error(
-        isJson
-          ? body.message ||
-              response.statusText
-          : response.statusText
+        isJson ? body.message || response.statusText : response.statusText
       );
     }
 
@@ -896,271 +611,133 @@ export const apiClient = {
   },
 
   async downloadCustomerTemplate(): Promise<Blob> {
-    const token =
-      useAuthStore
-        .getState()
-        .token;
-
-    const headers: Record<
-      string,
-      string
-    > = {};
+    const token = useAuthStore.getState().token;
+    const headers: Record<string, string> = {};
 
     if (token) {
-      headers.Authorization =
-        `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
-    const response =
-      await fetch(
-        `${API_BASE}/customers/template`,
-        {
-          method: 'GET',
-          headers,
-        }
-      );
+    const response = await fetch(`${API_BASE}/customers/template`, {
+      method: 'GET',
+      headers,
+    });
 
     if (!response.ok) {
-      const body =
-        await response
-          .json()
-          .catch(
-            () => ({})
-          );
-
-      throw new Error(
-        body.message ||
-          response.statusText
-      );
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.message || response.statusText);
     }
 
     return response.blob();
   },
 
-  async lookupGst(
-    gstin: string
-  ) {
-    return this.request(
-      'GET',
-      `/gstin/${gstin}`
-    );
+  async lookupGst(gstin: string) {
+    return this.request('GET', `/gstin/${gstin}`);
   },
 
   // ---------------------------------------------------------------------------
   // PRODUCTS
   // ---------------------------------------------------------------------------
 
-  async getProducts(
-    page = 1
-  ) {
-    return this.request(
-      'GET',
-      `/products?page=${page}`
-    );
+  async getProducts(page = 1) {
+    return this.request('GET', `/products?page=${page}`);
   },
 
   async getAllProducts() {
-    return this.request(
-      'GET',
-      '/products?per_page=all'
-    );
+    return this.request('GET', '/products?per_page=all');
   },
 
-  async createProduct(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/products',
-      data
-    );
+  async createProduct(data: any) {
+    return this.request('POST', '/products', data);
   },
 
-  async updateProduct(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/products/${id}`,
-      data
-    );
+  async updateProduct(id: number, data: any) {
+    return this.request('PUT', `/products/${id}`, data);
   },
 
-  async deleteProduct(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/products/${id}`
-    );
+  async deleteProduct(id: number) {
+    return this.request('DELETE', `/products/${id}`);
   },
 
   async importInventory(
     file: File,
-    duplicateAction:
-      | 'skip'
-      | 'update'
-      | 'stop',
+    duplicateAction: 'skip' | 'update' | 'stop',
     dryRun: boolean
   ) {
-    const formData =
-      new FormData();
+    const formData = new FormData();
 
-    formData.append(
-      'file',
-      file
-    );
+    formData.append('file', file);
+    formData.append('duplicate_action', duplicateAction);
+    formData.append('dry_run', dryRun ? '1' : '0');
 
-    formData.append(
-      'duplicate_action',
-      duplicateAction
-    );
-
-    formData.append(
-      'dry_run',
-      dryRun ? '1' : '0'
-    );
-
-    const token =
-      useAuthStore
-        .getState()
-        .token;
-
-    const headers: Record<
-      string,
-      string
-    > = {};
+    const token = useAuthStore.getState().token;
+    const headers: Record<string, string> = {};
 
     if (token) {
-      headers.Authorization =
-        `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
-    const response =
-      await fetch(
-        `${API_BASE}/inventory/import`,
-        {
-          method: 'POST',
-          headers,
-          body: formData,
-        }
-      );
+    const response = await fetch(`${API_BASE}/inventory/import`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
 
-    const contentType =
-      response.headers.get(
-        'content-type'
-      ) || '';
-
+    const contentType = response.headers.get('content-type') || '';
     const isJson =
-      contentType.includes(
-        'application/json'
-      ) ||
-      contentType.includes(
-        'text/json'
-      );
+      contentType.includes('application/json') ||
+      contentType.includes('text/json');
 
-    const body =
-      isJson
-        ? await response.json()
-        : await response.text();
+    const body = isJson ? await response.json() : await response.text();
 
     if (!response.ok) {
       throw new Error(
-        isJson
-          ? body.message ||
-              response.statusText
-          : response.statusText
+        isJson ? body.message || response.statusText : response.statusText
       );
     }
 
     return body;
   },
 
-  async exportInventory(
-    params: any = {}
-  ): Promise<Blob> {
-    const token =
-      useAuthStore
-        .getState()
-        .token;
-
-    const headers: Record<
-      string,
-      string
-    > = {};
+  async exportInventory(params: any = {}): Promise<Blob> {
+    const token = useAuthStore.getState().token;
+    const headers: Record<string, string> = {};
 
     if (token) {
-      headers.Authorization =
-        `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
-    const query =
-      buildQuery(params);
+    const query = buildQuery(params);
 
-    const response =
-      await fetch(
-        `${API_BASE}/inventory/export${query}`,
-        {
-          method: 'GET',
-          headers,
-        }
-      );
+    const response = await fetch(`${API_BASE}/inventory/export${query}`, {
+      method: 'GET',
+      headers,
+    });
 
     if (!response.ok) {
-      const body =
-        await response
-          .json()
-          .catch(
-            () => ({})
-          );
-
-      throw new Error(
-        body.message ||
-          response.statusText
-      );
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.message || response.statusText);
     }
 
     return response.blob();
   },
 
   async downloadTemplate(): Promise<Blob> {
-    const token =
-      useAuthStore
-        .getState()
-        .token;
-
-    const headers: Record<
-      string,
-      string
-    > = {};
+    const token = useAuthStore.getState().token;
+    const headers: Record<string, string> = {};
 
     if (token) {
-      headers.Authorization =
-        `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
-    const response =
-      await fetch(
-        `${API_BASE}/inventory/template`,
-        {
-          method: 'GET',
-          headers,
-        }
-      );
+    const response = await fetch(`${API_BASE}/inventory/template`, {
+      method: 'GET',
+      headers,
+    });
 
     if (!response.ok) {
-      const body =
-        await response
-          .json()
-          .catch(
-            () => ({})
-          );
-
-      throw new Error(
-        body.message ||
-          response.statusText
-      );
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.message || response.statusText);
     }
 
     return response.blob();
@@ -1170,129 +747,60 @@ export const apiClient = {
   // ORDERS
   // ---------------------------------------------------------------------------
 
-  async getOrders(
-    page = 1
-  ) {
-    return this.request(
-      'GET',
-      `/orders?page=${page}`
-    );
+  async getOrders(page = 1) {
+    return this.request('GET', `/orders?page=${page}`);
   },
 
-  async createOrder(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/orders',
-      data
-    );
+  async createOrder(data: any) {
+    return this.request('POST', '/orders', data);
   },
 
-  async updateOrder(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/orders/${id}`,
-      data
-    );
+  async updateOrder(id: number, data: any) {
+    return this.request('PUT', `/orders/${id}`, data);
   },
 
-  async deleteOrder(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/orders/${id}`
-    );
+  async deleteOrder(id: number) {
+    return this.request('DELETE', `/orders/${id}`);
   },
 
   // ---------------------------------------------------------------------------
   // DEALERS
   // ---------------------------------------------------------------------------
 
-  async getDealers(
-    page = 1
-  ) {
-    return this.request(
-      'GET',
-      `/dealers?page=${page}`
-    );
+  async getDealers(page = 1) {
+    return this.request('GET', `/dealers?page=${page}`);
   },
 
-  async createDealer(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/dealers',
-      data
-    );
+  async createDealer(data: any) {
+    return this.request('POST', '/dealers', data);
   },
 
-  async updateDealer(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/dealers/${id}`,
-      data
-    );
+  async updateDealer(id: number, data: any) {
+    return this.request('PUT', `/dealers/${id}`, data);
   },
 
-  async deleteDealer(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/dealers/${id}`
-    );
+  async deleteDealer(id: number) {
+    return this.request('DELETE', `/dealers/${id}`);
   },
 
   // ---------------------------------------------------------------------------
   // PAYMENTS
   // ---------------------------------------------------------------------------
 
-  async getPayments(
-    page = 1
-  ) {
-    return this.request(
-      'GET',
-      `/payments?page=${page}`
-    );
+  async getPayments(page = 1) {
+    return this.request('GET', `/payments?page=${page}`);
   },
 
-  async createPayment(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/payments',
-      data
-    );
+  async createPayment(data: any) {
+    return this.request('POST', '/payments', data);
   },
 
-  async updatePayment(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/payments/${id}`,
-      data
-    );
+  async updatePayment(id: number, data: any) {
+    return this.request('PUT', `/payments/${id}`, data);
   },
 
-  async deletePayment(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/payments/${id}`
-    );
+  async deletePayment(id: number) {
+    return this.request('DELETE', `/payments/${id}`);
   },
 
   // ---------------------------------------------------------------------------
@@ -1300,108 +808,53 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getSalesOrders() {
-    return this.request(
-      'GET',
-      '/sales/orders'
-    );
+    return this.request('GET', '/sales/orders');
   },
 
-  async createSalesOrder(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/sales/orders',
-      data
-    );
+  async createSalesOrder(data: any) {
+    return this.request('POST', '/sales/orders', data);
   },
 
   async getSalesQuotations() {
-    return this.request(
-      'GET',
-      '/sales/quotations'
-    );
+    return this.request('GET', '/sales/quotations');
   },
 
-  async createSalesQuotation(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/sales/quotations',
-      data
-    );
+  async createSalesQuotation(data: any) {
+    return this.request('POST', '/sales/quotations', data);
   },
 
   async getSalesProformas() {
-    return this.request(
-      'GET',
-      '/sales/proformas'
-    );
+    return this.request('GET', '/sales/proformas');
   },
 
-  async createSalesProforma(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/sales/proformas',
-      data
-    );
+  async createSalesProforma(data: any) {
+    return this.request('POST', '/sales/proformas', data);
   },
 
   async getSalesDeliveryChallans() {
-    return this.request(
-      'GET',
-      '/sales/delivery-challans'
-    );
+    return this.request('GET', '/sales/delivery-challans');
   },
 
-  async createSalesDeliveryChallan(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/sales/delivery-challans',
-      data
-    );
+  async createSalesDeliveryChallan(data: any) {
+    return this.request('POST', '/sales/delivery-challans', data);
   },
 
   async getSalesReturns() {
-    return this.request(
-      'GET',
-      '/sales/returns'
-    );
+    return this.request('GET', '/sales/returns');
   },
 
-  async createSalesReturn(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/sales/returns',
-      data
-    );
+  async createSalesReturn(data: any) {
+    return this.request('POST', '/sales/returns', data);
   },
 
   // ---------------------------------------------------------------------------
   // SALES INVOICE RETURNS
   // ---------------------------------------------------------------------------
 
-  async getSalesInvoiceReturns(
-    params: Record<
-      string,
-      unknown
-    > = {}
-  ) {
+  async getSalesInvoiceReturns(params: Record<string, unknown> = {}) {
     return this.request(
       'GET',
-      `/sales-returns${buildQuery(
-        {
-          per_page: 1000,
-          ...params,
-        }
-      )}`
+      `/sales-returns${buildQuery({ per_page: 1000, ...params })}`
     );
   },
 
@@ -1409,157 +862,74 @@ export const apiClient = {
     if (!Number.isInteger(id) || id <= 0) {
       throw new Error('Invalid sales return ID.');
     }
-
-    return this.request(
-      'GET',
-      `/sales-returns/${id}`
-    );
+    return this.request('GET', `/sales-returns/${id}`);
   },
 
-  async createSalesInvoiceReturn(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/sales-returns',
-      data
-    );
+  async createSalesInvoiceReturn(data: any) {
+    return this.request('POST', '/sales-returns', data);
   },
 
-  async updateSalesInvoiceReturn(
-    id: number,
-    data: any
-  ) {
-    if (
-      !Number.isInteger(id) ||
-      id <= 0
-    ) {
-      throw new Error(
-        'Invalid sales return ID.'
-      );
+  async updateSalesInvoiceReturn(id: number, data: any) {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error('Invalid sales return ID.');
     }
-
-    return this.request(
-      'PUT',
-      `/sales-returns/${id}`,
-      data
-    );
+    return this.request('PUT', `/sales-returns/${id}`, data);
   },
 
-  async deleteSalesInvoiceReturn(
-    id: number
-  ) {
-    if (
-      !Number.isInteger(id) ||
-      id <= 0
-    ) {
-      throw new Error(
-        'Invalid sales return ID.'
-      );
+  async deleteSalesInvoiceReturn(id: number) {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error('Invalid sales return ID.');
     }
-
-    return this.request(
-      'DELETE',
-      `/sales-returns/${id}`
-    );
+    return this.request('DELETE', `/sales-returns/${id}`);
   },
 
-  async searchReturnCustomers(
-    query: string
-  ) {
-    const trimmedQuery =
-      String(
-        query ?? ''
-      ).trim();
+  async searchReturnCustomers(query: string) {
+    const trimmedQuery = String(query ?? '').trim();
 
     if (!trimmedQuery) {
-      return {
-        data: [],
-      };
+      return { data: [] };
     }
 
     return this.request(
       'GET',
-      `/sales-returns/search/customers${buildQuery(
-        {
-          query:
-            trimmedQuery,
-        }
-      )}`
+      `/sales-returns/search/customers${buildQuery({ query: trimmedQuery })}`
     );
   },
 
-  async searchReturnInvoices(
-    query: string,
-    customerId?: number
-  ) {
-    const trimmedQuery =
-      String(
-        query ?? ''
-      ).trim();
+  async searchReturnInvoices(query: string, customerId?: number) {
+    const trimmedQuery = String(query ?? '').trim();
 
     if (!trimmedQuery) {
-      return {
-        data: [],
-      };
+      return { data: [] };
     }
 
     return this.request(
       'GET',
-      `/sales-returns/search/invoices${buildQuery(
-        {
-          query:
-            trimmedQuery,
-
-          customer_id:
-            customerId &&
-            customerId > 0
-              ? customerId
-              : undefined,
-
-          per_page: 20,
-        }
-      )}`
+      `/sales-returns/search/invoices${buildQuery({
+        query: trimmedQuery,
+        customer_id:
+          customerId && customerId > 0 ? customerId : undefined,
+        per_page: 20,
+      })}`
     );
   },
 
-  async searchReturnProducts(
-    query: string
-  ) {
-    const trimmedQuery =
-      String(
-        query ?? ''
-      ).trim();
+  async searchReturnProducts(query: string) {
+    const trimmedQuery = String(query ?? '').trim();
 
     if (!trimmedQuery) {
-      return {
-        data: [],
-      };
+      return { data: [] };
     }
 
     return this.request(
       'GET',
-      `/sales-returns/search/products${buildQuery(
-        {
-          query:
-            trimmedQuery,
-        }
-      )}`
+      `/sales-returns/search/products${buildQuery({ query: trimmedQuery })}`
     );
   },
 
-  async getCustomerInvoicesForReturn(
-    customerId: number
-  ) {
-    if (
-      !Number.isInteger(
-        customerId
-      ) ||
-      customerId <= 0
-    ) {
-      throw new Error(
-        'Invalid customer ID.'
-      );
+  async getCustomerInvoicesForReturn(customerId: number) {
+    if (!Number.isInteger(customerId) || customerId <= 0) {
+      throw new Error('Invalid customer ID.');
     }
 
     return this.request(
@@ -1568,73 +938,35 @@ export const apiClient = {
     );
   },
 
-  async getInvoiceItemsForReturn(
-    invoiceId: number
-  ) {
-    if (
-      !Number.isInteger(
-        invoiceId
-      ) ||
-      invoiceId <= 0
-    ) {
-      throw new Error(
-        'Invalid invoice ID.'
-      );
+  async getInvoiceItemsForReturn(invoiceId: number) {
+    if (!Number.isInteger(invoiceId) || invoiceId <= 0) {
+      throw new Error('Invalid invoice ID.');
     }
 
-    return this.request(
-      'GET',
-      `/sales-returns/invoice/${invoiceId}/items`
-    );
+    return this.request('GET', `/sales-returns/invoice/${invoiceId}/items`);
   },
 
-  async getInvoiceDetailsForReturn(
-    invoiceId: number
-  ) {
-    if (
-      !Number.isInteger(
-        invoiceId
-      ) ||
-      invoiceId <= 0
-    ) {
-      throw new Error(
-        'Invalid invoice ID.'
-      );
+  async getInvoiceDetailsForReturn(invoiceId: number) {
+    if (!Number.isInteger(invoiceId) || invoiceId <= 0) {
+      throw new Error('Invalid invoice ID.');
     }
 
-    const response =
-      await this.request<any>(
-        'GET',
-        `/sales-returns/invoice/${invoiceId}/details`
-      );
+    const response = await this.request<any>(
+      'GET',
+      `/sales-returns/invoice/${invoiceId}/details`
+    );
 
-    const invoice =
-      unwrapApiData<any>(
-        response,
-        null
-      );
+    const invoice = unwrapApiData<any>(response, null);
 
-    if (
-      !invoice ||
-      typeof invoice !==
-        'object' ||
-      !invoice.id
-    ) {
-      throw new Error(
-        'Invoice details were not returned by the server.'
-      );
+    if (!invoice || typeof invoice !== 'object' || !invoice.id) {
+      throw new Error('Invoice details were not returned by the server.');
     }
 
-    return {
-      data: invoice,
-    };
+    return { data: invoice };
   },
 
   async getSalesReports() {
-    return this.request(
-      'GET',
-      '/sales/reports'
-    );
+    return this.request('GET', '/sales/reports');
   },
 
   // ---------------------------------------------------------------------------
@@ -1642,58 +974,31 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getPurchaseOrders() {
-    return this.request(
-      'GET',
-      '/purchases/orders'
-    );
+    return this.request('GET', '/purchases/orders');
   },
 
-  async createPurchaseOrder(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/purchases/orders',
-      data
-    );
+  async createPurchaseOrder(data: any) {
+    return this.request('POST', '/purchases/orders', data);
   },
 
   async getPurchaseBills() {
-    return this.request(
-      'GET',
-      '/purchases/bills'
-    );
+    return this.request('GET', '/purchases/bills');
   },
 
-  async createPurchaseBill(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/purchases/bills',
-      data
-    );
+  async createPurchaseBill(data: any) {
+    return this.request('POST', '/purchases/bills', data);
   },
 
   async getPurchaseGRN() {
-    return this.request(
-      'GET',
-      '/purchases/grn'
-    );
+    return this.request('GET', '/purchases/grn');
   },
 
   async getPurchaseReturns() {
-    return this.request(
-      'GET',
-      '/purchases/returns'
-    );
+    return this.request('GET', '/purchases/returns');
   },
 
   async getPurchaseReports() {
-    return this.request(
-      'GET',
-      '/purchases/reports'
-    );
+    return this.request('GET', '/purchases/reports');
   },
 
   // ---------------------------------------------------------------------------
@@ -1701,114 +1006,61 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getAccountingSummary() {
-    return this.request(
-      'GET',
-      '/accounting/summary'
-    );
+    return this.request('GET', '/accounting/summary');
   },
 
   async getAccountingAccounts() {
-    return this.request(
-      'GET',
-      '/accounting/accounts'
-    );
+    return this.request('GET', '/accounting/accounts');
   },
 
-  async createAccountingAccount(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/accounting/accounts',
-      data
-    );
+  async createAccountingAccount(data: any) {
+    return this.request('POST', '/accounting/accounts', data);
   },
 
   async getAccountingJournals() {
-    return this.request(
-      'GET',
-      '/accounting/journals'
-    );
+    return this.request('GET', '/accounting/journals');
   },
 
-  async createAccountingJournal(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/accounting/journals',
-      data
-    );
+  async createAccountingJournal(data: any) {
+    return this.request('POST', '/accounting/journals', data);
   },
 
   async getAccountingStatements() {
-    return this.request(
-      'GET',
-      '/accounting/statements'
-    );
+    return this.request('GET', '/accounting/statements');
   },
 
   // ---------------------------------------------------------------------------
   // ATTENDANCE
   // ---------------------------------------------------------------------------
 
-  async getAttendance(
-    query?: string | number
-  ) {
+  async getAttendance(query?: string | number) {
     const q = query
       ? typeof query === 'number'
         ? `?page=${query}`
         : `?${query}`
       : '';
 
-    return this.request(
-      'GET',
-      `/attendance${q}`
-    );
+    return this.request('GET', `/attendance${q}`);
   },
 
-  async createAttendance(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/attendance',
-      data
-    );
+  async createAttendance(data: any) {
+    return this.request('POST', '/attendance', data);
   },
 
-  async updateAttendance(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/attendance/${id}`,
-      data
-    );
+  async updateAttendance(id: number, data: any) {
+    return this.request('PUT', `/attendance/${id}`, data);
   },
 
-  async deleteAttendance(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/attendance/${id}`
-    );
+  async deleteAttendance(id: number) {
+    return this.request('DELETE', `/attendance/${id}`);
   },
 
   async getTodayAttendanceSummary() {
-    return this.request(
-      'GET',
-      '/attendance/today-summary'
-    );
+    return this.request('GET', '/attendance/today-summary');
   },
 
   async getTodayEmployeeAttendance() {
-    return this.request(
-      'GET',
-      '/attendance/today-employees'
-    );
+    return this.request('GET', '/attendance/today-employees');
   },
 
   // ---------------------------------------------------------------------------
@@ -1816,62 +1068,33 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getBiometricDevices() {
-    return this.request(
-      'GET',
-      '/biometric/devices'
-    );
+    return this.request('GET', '/biometric/devices');
   },
 
   async getScanEvents() {
-    return this.request(
-      'GET',
-      '/biometric/scans'
-    );
+    return this.request('GET', '/biometric/scans');
   },
 
   async getPendingRecords() {
-    return this.request(
-      'GET',
-      '/biometric/offline/pending'
-    );
+    return this.request('GET', '/biometric/offline/pending');
   },
 
   async getUnknownFingers() {
-    return this.request(
-      'GET',
-      '/biometric/unknown-fingers'
-    );
+    return this.request('GET', '/biometric/unknown-fingers');
   },
 
-  async syncDevice(
-    deviceId: number
-  ) {
-    return this.request(
-      'POST',
-      `/biometric/device/${deviceId}/sync`
-    );
+  async syncDevice(deviceId: number) {
+    return this.request('POST', `/biometric/device/${deviceId}/sync`);
   },
 
-  async updateDeviceSettings(
-    deviceId: number,
-    settings: object
-  ) {
-    return this.request(
-      'POST',
-      `/biometric/device/${deviceId}/settings`,
-      {
-        settings,
-      }
-    );
+  async updateDeviceSettings(deviceId: number, settings: object) {
+    return this.request('POST', `/biometric/device/${deviceId}/settings`, {
+      settings,
+    });
   },
 
-  async restartDevice(
-    deviceId: number
-  ) {
-    return this.request(
-      'POST',
-      `/biometric/device/${deviceId}/restart`
-    );
+  async restartDevice(deviceId: number) {
+    return this.request('POST', `/biometric/device/${deviceId}/restart`);
   },
 
   async registerDevice(data: {
@@ -1882,50 +1105,24 @@ export const apiClient = {
     firmware_version: string;
     ip_address?: string;
   }) {
-    return this.request(
-      'POST',
-      '/biometric/device/register',
-      data
-    );
+    return this.request('POST', '/biometric/device/register', data);
   },
 
-  async startDeviceEnrollment(
-    deviceId: number,
-    employeeId: number
-  ) {
-    return this.request(
-      'POST',
-      `/biometric/device/${deviceId}/enroll`,
-      {
-        employee_id:
-          employeeId,
-      }
-    );
+  async startDeviceEnrollment(deviceId: number, employeeId: number) {
+    return this.request('POST', `/biometric/device/${deviceId}/enroll`, {
+      employee_id: employeeId,
+    });
   },
 
-  async updateDevice(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/biometric/device/${id}`,
-      data
-    );
+  async updateDevice(id: number, data: any) {
+    return this.request('PUT', `/biometric/device/${id}`, data);
   },
 
-  async deleteDevice(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/biometric/device/${id}`
-    );
+  async deleteDevice(id: number) {
+    return this.request('DELETE', `/biometric/device/${id}`);
   },
 
-  async getEnrolledFingers(
-    employeeId: number
-  ) {
+  async getEnrolledFingers(employeeId: number) {
     return this.request(
       'GET',
       `/biometric/employees/${employeeId}/fingers`
@@ -1936,274 +1133,120 @@ export const apiClient = {
   // PAYROLL
   // ---------------------------------------------------------------------------
 
-  async getPayrolls(
-    page = 1
-  ) {
-    return this.request(
-      'GET',
-      `/payroll?page=${page}`
-    );
+  async getPayrolls(page = 1) {
+    return this.request('GET', `/payroll?page=${page}`);
   },
 
-  async createPayroll(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/payroll',
-      data
-    );
+  async createPayroll(data: any) {
+    return this.request('POST', '/payroll', data);
   },
 
-  async updatePayroll(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/payroll/${id}`,
-      data
-    );
+  async updatePayroll(id: number, data: any) {
+    return this.request('PUT', `/payroll/${id}`, data);
   },
 
-  async deletePayroll(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/payroll/${id}`
-    );
+  async deletePayroll(id: number) {
+    return this.request('DELETE', `/payroll/${id}`);
   },
 
-  async runPayroll(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/payroll/run',
-      data
-    );
+  async runPayroll(data: any) {
+    return this.request('POST', '/payroll/run', data);
   },
 
   async getPayrollAdvances() {
-    return this.request(
-      'GET',
-      '/payroll/advances'
-    );
+    return this.request('GET', '/payroll/advances');
   },
 
-  async createPayrollAdvance(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/payroll/advances',
-      data
-    );
+  async createPayrollAdvance(data: any) {
+    return this.request('POST', '/payroll/advances', data);
   },
 
-  async updatePayrollAdvance(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/payroll/advances/${id}`,
-      data
-    );
+  async updatePayrollAdvance(id: number, data: any) {
+    return this.request('PUT', `/payroll/advances/${id}`, data);
   },
 
-  async deletePayrollAdvance(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/payroll/advances/${id}`
-    );
+  async deletePayrollAdvance(id: number) {
+    return this.request('DELETE', `/payroll/advances/${id}`);
   },
 
   async getPayrollLeaves() {
-    return this.request(
-      'GET',
-      '/payroll/leaves'
-    );
+    return this.request('GET', '/payroll/leaves');
   },
 
-  async createPayrollLeave(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/payroll/leaves',
-      data
-    );
+  async createPayrollLeave(data: any) {
+    return this.request('POST', '/payroll/leaves', data);
   },
 
-  async getPayrollLeave(
-    id: number
-  ) {
-    return this.request(
-      'GET',
-      `/payroll/leaves/${id}`
-    );
+  async getPayrollLeave(id: number) {
+    return this.request('GET', `/payroll/leaves/${id}`);
   },
 
-  async updatePayrollLeave(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/payroll/leaves/${id}`,
-      data
-    );
+  async updatePayrollLeave(id: number, data: any) {
+    return this.request('PUT', `/payroll/leaves/${id}`, data);
   },
 
-  async deletePayrollLeave(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/payroll/leaves/${id}`
-    );
+  async deletePayrollLeave(id: number) {
+    return this.request('DELETE', `/payroll/leaves/${id}`);
   },
 
   async getPayrollShifts() {
-    return this.request(
-      'GET',
-      '/payroll/shifts'
-    );
+    return this.request('GET', '/payroll/shifts');
   },
 
-  async createPayrollShift(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/payroll/shifts',
-      data
-    );
+  async createPayrollShift(data: any) {
+    return this.request('POST', '/payroll/shifts', data);
   },
 
-  async getPayrollShift(
-    id: number
-  ) {
-    return this.request(
-      'GET',
-      `/payroll/shifts/${id}`
-    );
+  async getPayrollShift(id: number) {
+    return this.request('GET', `/payroll/shifts/${id}`);
   },
 
-  async updatePayrollShift(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/payroll/shifts/${id}`,
-      data
-    );
+  async updatePayrollShift(id: number, data: any) {
+    return this.request('PUT', `/payroll/shifts/${id}`, data);
   },
 
-  async deletePayrollShift(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/payroll/shifts/${id}`
-    );
+  async deletePayrollShift(id: number) {
+    return this.request('DELETE', `/payroll/shifts/${id}`);
   },
 
   async getPayrollLoans() {
-    return this.request(
-      'GET',
-      '/payroll/loans'
-    );
+    return this.request('GET', '/payroll/loans');
   },
 
-  async createPayrollLoan(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/payroll/loans',
-      data
-    );
+  async createPayrollLoan(data: any) {
+    return this.request('POST', '/payroll/loans', data);
   },
 
-  async getPayrollLoan(
-    id: number
-  ) {
-    return this.request(
-      'GET',
-      `/payroll/loans/${id}`
-    );
+  async getPayrollLoan(id: number) {
+    return this.request('GET', `/payroll/loans/${id}`);
   },
 
-  async updatePayrollLoan(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/payroll/loans/${id}`,
-      data
-    );
+  async updatePayrollLoan(id: number, data: any) {
+    return this.request('PUT', `/payroll/loans/${id}`, data);
   },
 
-  async deletePayrollLoan(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/payroll/loans/${id}`
-    );
+  async deletePayrollLoan(id: number) {
+    return this.request('DELETE', `/payroll/loans/${id}`);
   },
 
   async getPayrollPayslips() {
-    return this.request(
-      'GET',
-      '/payroll/payslips'
-    );
+    return this.request('GET', '/payroll/payslips');
   },
 
-  async createPayrollPayslip(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/payroll/payslips',
-      data
-    );
+  async createPayrollPayslip(data: any) {
+    return this.request('POST', '/payroll/payslips', data);
   },
 
-  async getPayrollPayslip(
-    id: number
-  ) {
-    return this.request(
-      'GET',
-      `/payroll/payslips/${id}`
-    );
+  async getPayrollPayslip(id: number) {
+    return this.request('GET', `/payroll/payslips/${id}`);
   },
 
-  async updatePayrollPayslip(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/payroll/payslips/${id}`,
-      data
-    );
+  async updatePayrollPayslip(id: number, data: any) {
+    return this.request('PUT', `/payroll/payslips/${id}`, data);
   },
 
-  async deletePayrollPayslip(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/payroll/payslips/${id}`
-    );
+  async deletePayrollPayslip(id: number) {
+    return this.request('DELETE', `/payroll/payslips/${id}`);
   },
 
   // ---------------------------------------------------------------------------
@@ -2211,117 +1254,73 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getNextInvoiceNumber() {
-    return this.request(
-      'GET',
-      '/invoices/next-number'
-    );
+    return this.request('GET', '/invoices/next-number');
   },
 
   /**
    * Get invoices with production-grade server-side filtering.
    *
    * Backward compatible:
-   *
-   * getInvoices()
-   * getInvoices(1)
+   *   getInvoices()
+   *   getInvoices(1)
    *
    * New:
-   *
-   * getInvoices({
-   *   page: 1,
-   *   per_page: 25,
-   *   search: 'INV-2026',
-   *   company_id: 1,
-   *   branch_id: 2,
-   *   status: 'issued',
-   *   payment_state: 'partial',
-   *   date_from: '2026-09-01',
-   *   date_to: '2026-09-10',
-   *   sort_by: 'invoice_date',
-   *   sort_dir: 'desc'
-   * })
+   *   getInvoices({
+   *     page: 1,
+   *     per_page: 25,
+   *     search: 'INV-2026',
+   *     company_id: 1,
+   *     branch_id: 2,
+   *     status: 'issued',
+   *     payment_state: 'partial',
+   *     date_from: '2026-09-01',
+   *     date_to: '2026-09-10',
+   *     sort_by: 'invoice_date',
+   *     sort_dir: 'desc'
+   *   })
    */
   async getInvoices(
-    queryOrPage:
-      | number
-      | InvoiceListQuery = 1
-  ): Promise<
-    PaginatedResponse<any>
-  > {
+    queryOrPage: number | InvoiceListQuery = 1
+  ): Promise<PaginatedResponse<any>> {
     const params =
       typeof queryOrPage === 'number'
-        ? {
-            page:
-              queryOrPage,
-          }
+        ? { page: queryOrPage }
         : queryOrPage;
 
-    return this.request<
-      PaginatedResponse<any>
-    >(
+    return this.request<PaginatedResponse<any>>(
       'GET',
-      `/invoices${buildQuery(
-        params as Record<
-          string,
-          unknown
-        >
-      )}`
+      `/invoices${buildQuery(params as Record<string, unknown>)}`
     );
   },
 
   /**
-   * Get invoice KPI summary using the same
-   * filter scope as the invoice listing.
+   * Get invoice KPI summary using the same filter scope as the listing.
    */
   async getInvoiceSummary(
     params: InvoiceListQuery = {}
   ): Promise<InvoiceSummaryResponse> {
-    return this.request<
-      InvoiceSummaryResponse
-    >(
+    return this.request<InvoiceSummaryResponse>(
       'GET',
-      `/invoices/summary${buildQuery(
-        {
-          ...params,
-          // Pagination does not affect summary.
-          page: undefined,
-          per_page:
-            undefined,
-          sort_by:
-            undefined,
-          sort_dir:
-            undefined,
-        }
-      )}`
+      `/invoices/summary${buildQuery({
+        ...params,
+        // Pagination does not affect summary.
+        page: undefined,
+        per_page: undefined,
+        sort_by: undefined,
+        sort_dir: undefined,
+      })}`
     );
   },
 
-  async getInvoice(
-    id: number
-  ) {
-    if (
-      !Number.isInteger(id) ||
-      id <= 0
-    ) {
-      throw new Error(
-        'Invalid invoice ID.'
-      );
+  async getInvoice(id: number) {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error('Invalid invoice ID.');
     }
-
-    return this.request(
-      'GET',
-      `/invoices/${id}`
-    );
+    return this.request('GET', `/invoices/${id}`);
   },
 
-  async createInvoice(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/invoices',
-      data
-    );
+  async createInvoice(data: any) {
+    return this.request('POST', '/invoices', data);
   },
 
   async createInvoiceFromOrder(
@@ -2329,66 +1328,29 @@ export const apiClient = {
     invoiceNo: string,
     opts?: any
   ) {
-    if (
-      !Number.isInteger(
-        orderId
-      ) ||
-      orderId <= 0
-    ) {
-      throw new Error(
-        'Invalid order ID.'
-      );
+    if (!Number.isInteger(orderId) || orderId <= 0) {
+      throw new Error('Invalid order ID.');
     }
 
-    return this.request(
-      'POST',
-      '/invoices/from-order',
-      {
-        order_id:
-          orderId,
-        invoice_no:
-          invoiceNo,
-        ...(opts || {}),
-      }
-    );
+    return this.request('POST', '/invoices/from-order', {
+      order_id: orderId,
+      invoice_no: invoiceNo,
+      ...(opts || {}),
+    });
   },
 
-  async updateInvoice(
-    id: number,
-    data: any
-  ) {
-    if (
-      !Number.isInteger(id) ||
-      id <= 0
-    ) {
-      throw new Error(
-        'Invalid invoice ID.'
-      );
+  async updateInvoice(id: number, data: any) {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error('Invalid invoice ID.');
     }
-
-    return this.request(
-      'PUT',
-      `/invoices/${id}`,
-      data
-    );
+    return this.request('PUT', `/invoices/${id}`, data);
   },
 
-  async deleteInvoice(
-    id: number
-  ) {
-    if (
-      !Number.isInteger(id) ||
-      id <= 0
-    ) {
-      throw new Error(
-        'Invalid invoice ID.'
-      );
+  async deleteInvoice(id: number) {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error('Invalid invoice ID.');
     }
-
-    return this.request(
-      'DELETE',
-      `/invoices/${id}`
-    );
+    return this.request('DELETE', `/invoices/${id}`);
   },
 
   /**
@@ -2396,40 +1358,23 @@ export const apiClient = {
    *
    * POST /api/invoices/bulk-status
    */
-  async bulkUpdateInvoiceStatus(
-    ids: number[],
-    status: string
-  ) {
-    const validIds =
-      ids.filter(
-        id =>
-          Number.isInteger(
-            id
-          ) && id > 0
-      );
+  async bulkUpdateInvoiceStatus(ids: number[], status: string) {
+    const validIds = ids.filter(
+      (id) => Number.isInteger(id) && id > 0
+    );
 
-    if (
-      validIds.length === 0
-    ) {
-      throw new Error(
-        'At least one valid invoice ID is required.'
-      );
+    if (validIds.length === 0) {
+      throw new Error('At least one valid invoice ID is required.');
     }
 
     if (!status.trim()) {
-      throw new Error(
-        'Invoice status is required.'
-      );
+      throw new Error('Invoice status is required.');
     }
 
-    return this.request(
-      'POST',
-      '/invoices/bulk-status',
-      {
-        ids: validIds,
-        status,
-      }
-    );
+    return this.request('POST', '/invoices/bulk-status', {
+      ids: validIds,
+      status,
+    });
   },
 
   /**
@@ -2437,136 +1382,66 @@ export const apiClient = {
    *
    * POST /api/invoices/bulk-delete
    */
-  async bulkDeleteInvoices(
-    ids: number[]
-  ) {
-    const validIds =
-      ids.filter(
-        id =>
-          Number.isInteger(
-            id
-          ) && id > 0
-      );
+  async bulkDeleteInvoices(ids: number[]) {
+    const validIds = ids.filter(
+      (id) => Number.isInteger(id) && id > 0
+    );
 
-    if (
-      validIds.length === 0
-    ) {
-      throw new Error(
-        'At least one valid invoice ID is required.'
-      );
+    if (validIds.length === 0) {
+      throw new Error('At least one valid invoice ID is required.');
     }
 
-    return this.request(
-      'POST',
-      '/invoices/bulk-delete',
-      {
-        ids: validIds,
-      }
-    );
+    return this.request('POST', '/invoices/bulk-delete', {
+      ids: validIds,
+    });
   },
 
   /**
    * Backward/alternative naming aliases.
    */
-  async updateInvoiceStatusBulk(
-    ids: number[],
-    status: string
-  ) {
-    return this.bulkUpdateInvoiceStatus(
-      ids,
-      status
-    );
+  async updateInvoiceStatusBulk(ids: number[], status: string) {
+    return this.bulkUpdateInvoiceStatus(ids, status);
   },
 
-  async deleteInvoicesBulk(
-    ids: number[]
-  ) {
-    return this.bulkDeleteInvoices(
-      ids
-    );
+  async deleteInvoicesBulk(ids: number[]) {
+    return this.bulkDeleteInvoices(ids);
   },
 
   /**
    * Duplicate invoice.
-   *
-   * NOTE:
-   * This method is kept because the existing frontend
-   * already references it. The backend route must exist.
    */
-  async duplicateInvoice(
-    id: number
-  ) {
-    if (
-      !Number.isInteger(id) ||
-      id <= 0
-    ) {
-      throw new Error(
-        'Invalid invoice ID.'
-      );
+  async duplicateInvoice(id: number) {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error('Invalid invoice ID.');
     }
-
-    return this.request(
-      'POST',
-      `/invoices/${id}/duplicate`
-    );
+    return this.request('POST', `/invoices/${id}/duplicate`);
   },
 
   // ---------------------------------------------------------------------------
   // PURCHASE INVOICES
   // ---------------------------------------------------------------------------
 
-  async getPurchaseInvoices(
-    page = 1
-  ) {
-    return this.request(
-      'GET',
-      `/purchase-invoices?page=${page}`
-    );
+  async getPurchaseInvoices(page = 1) {
+    return this.request('GET', `/purchase-invoices?page=${page}`);
   },
 
-  async getPurchaseInvoice(
-    id: number
-  ) {
-    return this.request(
-      'GET',
-      `/purchase-invoices/${id}`
-    );
+  async getPurchaseInvoice(id: number) {
+    return this.request('GET', `/purchase-invoices/${id}`);
   },
 
-  async createPurchaseInvoice(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/purchase-invoices',
-      data
-    );
+  async createPurchaseInvoice(data: any) {
+    return this.request('POST', '/purchase-invoices', data);
   },
 
-  async updatePurchaseInvoice(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/purchase-invoices/${id}`,
-      data
-    );
+  async updatePurchaseInvoice(id: number, data: any) {
+    return this.request('PUT', `/purchase-invoices/${id}`, data);
   },
 
-  async deletePurchaseInvoice(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/purchase-invoices/${id}`
-    );
+  async deletePurchaseInvoice(id: number) {
+    return this.request('DELETE', `/purchase-invoices/${id}`);
   },
 
-  async addPurchaseInvoicePayment(
-    id: number,
-    data: any
-  ) {
+  async addPurchaseInvoicePayment(id: number, data: any) {
     return this.request(
       'POST',
       `/purchase-invoices/${id}/payments`,
@@ -2575,195 +1450,89 @@ export const apiClient = {
   },
 
   // Aliases
-  async getPurchase(
-    id: number
-  ) {
-    const response =
-      await this.getPurchaseInvoice(
-        id
-      );
-
-    return response?.data
-      ? response
-      : {
-          data: response,
-        };
+  async getPurchase(id: number) {
+    const response = await this.getPurchaseInvoice(id);
+    return response?.data ? response : { data: response };
   },
 
-  async updatePurchase(
-    id: number,
-    data: any
-  ) {
-    const response =
-      await this.updatePurchaseInvoice(
-        id,
-        data
-      );
-
-    return response?.data
-      ? response
-      : {
-          data: response,
-        };
+  async updatePurchase(id: number, data: any) {
+    const response = await this.updatePurchaseInvoice(id, data);
+    return response?.data ? response : { data: response };
   },
 
   // ---------------------------------------------------------------------------
   // BRANCHES
   // ---------------------------------------------------------------------------
 
-  async getBranches(
-    page = 1
-  ) {
-    return this.request(
-      'GET',
-      `/branches?page=${page}`
-    );
+  async getBranches(page = 1) {
+    return this.request('GET', `/branches?page=${page}`);
   },
 
-  async getBranchesByCompany(
-    companyId: number
-  ) {
+  async getBranchesByCompany(companyId: number) {
     if (
-      !Number.isInteger(
-        Number(companyId)
-      ) ||
+      !Number.isInteger(Number(companyId)) ||
       Number(companyId) <= 0
     ) {
-      throw new Error(
-        'Invalid company ID.'
-      );
+      throw new Error('Invalid company ID.');
     }
 
     return this.request(
       'GET',
-      `/branches${buildQuery(
-        {
-          company_id:
-            companyId,
-        }
-      )}`
+      `/branches${buildQuery({ company_id: companyId })}`
     );
   },
 
-  async createBranch(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/branches',
-      data
-    );
+  async createBranch(data: any) {
+    return this.request('POST', '/branches', data);
   },
 
-  async updateBranch(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/branches/${id}`,
-      data
-    );
+  async updateBranch(id: number, data: any) {
+    return this.request('PUT', `/branches/${id}`, data);
   },
 
-  async deleteBranch(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/branches/${id}`
-    );
+  async deleteBranch(id: number) {
+    return this.request('DELETE', `/branches/${id}`);
   },
 
   // ---------------------------------------------------------------------------
   // EMPLOYEES
   // ---------------------------------------------------------------------------
 
-  async getEmployees(
-    query?: string
-  ) {
-    const q =
-      query
-        ? `?${query}`
-        : '';
-
-    return this.request(
-      'GET',
-      `/employees${q}`
-    );
+  async getEmployees(query?: string) {
+    const q = query ? `?${query}` : '';
+    return this.request('GET', `/employees${q}`);
   },
 
-  async createEmployee(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/employees',
-      data
-    );
+  async createEmployee(data: any) {
+    return this.request('POST', '/employees', data);
   },
 
-  async updateEmployee(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/employees/${id}`,
-      data
-    );
+  async updateEmployee(id: number, data: any) {
+    return this.request('PUT', `/employees/${id}`, data);
   },
 
-  async deleteEmployee(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/employees/${id}`
-    );
+  async deleteEmployee(id: number) {
+    return this.request('DELETE', `/employees/${id}`);
   },
 
   // ---------------------------------------------------------------------------
   // WAREHOUSES
   // ---------------------------------------------------------------------------
 
-  async getWarehouses(
-    page = 1
-  ) {
-    return this.request(
-      'GET',
-      `/warehouses?page=${page}`
-    );
+  async getWarehouses(page = 1) {
+    return this.request('GET', `/warehouses?page=${page}`);
   },
 
-  async createWarehouse(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/warehouses',
-      data
-    );
+  async createWarehouse(data: any) {
+    return this.request('POST', '/warehouses', data);
   },
 
-  async updateWarehouse(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/warehouses/${id}`,
-      data
-    );
+  async updateWarehouse(id: number, data: any) {
+    return this.request('PUT', `/warehouses/${id}`, data);
   },
 
-  async deleteWarehouse(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/warehouses/${id}`
-    );
+  async deleteWarehouse(id: number) {
+    return this.request('DELETE', `/warehouses/${id}`);
   },
 
   // ---------------------------------------------------------------------------
@@ -2771,92 +1540,45 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getUploads() {
-    return this.request(
-      'GET',
-      '/uploads'
-    );
+    return this.request('GET', '/uploads');
   },
 
-  async uploadFile(
-    formData: FormData
-  ) {
-    const token =
-      useAuthStore
-        .getState()
-        .token;
-
-    const headers: Record<
-      string,
-      string
-    > = {};
+  async uploadFile(formData: FormData) {
+    const token = useAuthStore.getState().token;
+    const headers: Record<string, string> = {};
 
     if (token) {
-      headers.Authorization =
-        `Bearer ${token}`;
+      headers.Authorization = `Bearer ${token}`;
     }
 
-    const response =
-      await fetch(
-        `${API_BASE}/uploads`,
-        {
-          method: 'POST',
-          headers,
-          body: formData,
-        }
-      );
+    const response = await fetch(`${API_BASE}/uploads`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
 
-    const contentType =
-      response.headers.get(
-        'content-type'
-      ) || '';
-
+    const contentType = response.headers.get('content-type') || '';
     const isJson =
-      contentType.includes(
-        'application/json'
-      ) ||
-      contentType.includes(
-        'text/json'
-      );
+      contentType.includes('application/json') ||
+      contentType.includes('text/json');
 
-    const body =
-      isJson
-        ? await response.json()
-        : await response.text();
+    const body = isJson ? await response.json() : await response.text();
 
     if (!response.ok) {
       throw new Error(
-        isJson
-          ? body.message ||
-              response.statusText
-          : response.statusText
+        isJson ? body.message || response.statusText : response.statusText
       );
     }
 
     return body;
   },
 
-  async createUploadFolder(
-    folder: string
-  ) {
-    return this.request(
-      'POST',
-      '/uploads/folders',
-      {
-        folder,
-      }
-    );
+  async createUploadFolder(folder: string) {
+    return this.request('POST', '/uploads/folders', { folder });
   },
 
-  async deleteUpload(
-    path: string
-  ) {
-    return this.request(
-      'POST',
-      '/uploads/delete',
-      {
-        path,
-      }
-    );
+  async deleteUpload(path: string) {
+    return this.request('POST', '/uploads/delete', { path });
   },
 
   // ---------------------------------------------------------------------------
@@ -2864,77 +1586,37 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getUsers() {
-    return this.request(
-      'GET',
-      '/users'
-    );
+    return this.request('GET', '/users');
   },
 
   async getRoles() {
-    return this.request(
-      'GET',
-      '/roles'
-    );
+    return this.request('GET', '/roles');
   },
 
   async getPermissions() {
-    return this.request(
-      'GET',
-      '/permissions'
-    );
+    return this.request('GET', '/permissions');
   },
 
-  async deleteUser(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/users/${id}`
-    );
+  async deleteUser(id: number) {
+    return this.request('DELETE', `/users/${id}`);
   },
 
-  async assignRolesToUser(
-    userId: number,
-    roleIds: number[]
-  ) {
-    return this.request(
-      'POST',
-      `/users/${userId}/roles`,
-      {
-        role_ids:
-          roleIds,
-      }
-    );
+  async assignRolesToUser(userId: number, roleIds: number[]) {
+    return this.request('POST', `/users/${userId}/roles`, {
+      role_ids: roleIds,
+    });
   },
 
-  async createRole(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/roles',
-      data
-    );
+  async createRole(data: any) {
+    return this.request('POST', '/roles', data);
   },
 
-  async updateRole(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/roles/${id}`,
-      data
-    );
+  async updateRole(id: number, data: any) {
+    return this.request('PUT', `/roles/${id}`, data);
   },
 
-  async deleteRole(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/roles/${id}`
-    );
+  async deleteRole(id: number) {
+    return this.request('DELETE', `/roles/${id}`);
   },
 
   // ---------------------------------------------------------------------------
@@ -2942,153 +1624,84 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getAIAssistantInsights() {
-    return this.request(
-      'GET',
-      '/ai/assistant/insights'
-    );
+    return this.request('GET', '/ai/assistant/insights');
   },
 
   async getAIAssistantWorkflows() {
-    return this.request(
-      'GET',
-      '/ai/assistant/workflows'
-    );
+    return this.request('GET', '/ai/assistant/workflows');
   },
 
   async getAiProviders() {
-    return this.request(
-      'GET',
-      '/ai/providers'
-    );
+    return this.request('GET', '/ai/providers');
   },
 
-  async createAiProvider(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/ai/providers',
-      data
-    );
+  async createAiProvider(data: any) {
+    return this.request('POST', '/ai/providers', data);
   },
 
-  async updateAiProvider(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/ai/providers/${id}`,
-      data
-    );
+  async updateAiProvider(id: number, data: any) {
+    return this.request('PUT', `/ai/providers/${id}`, data);
   },
 
-  async sendAIAssistantChat(
-    message: string,
-    providerId?: number
-  ) {
-    const payload: any = {
-      message,
-    };
+  async sendAIAssistantChat(message: string, providerId?: number) {
+    const payload: any = { message };
 
     if (providerId) {
-      payload.provider_id =
-        providerId;
+      payload.provider_id = providerId;
     }
 
-    return this.request(
-      'POST',
-      '/ai/assistant/chat',
-      payload
-    );
+    return this.request('POST', '/ai/assistant/chat', payload);
   },
 
   async generateAiSpeech(
     text: string,
-    provider:
-      | 'browser'
-      | 'cloud'
-      | 'auto' = 'auto',
+    provider: 'browser' | 'cloud' | 'auto' = 'auto',
     language = 'en-US'
   ) {
-    return this.request(
-      'POST',
-      '/ai/assistant/voice',
-      {
-        text,
-        provider,
-        language,
-      }
-    );
+    return this.request('POST', '/ai/assistant/voice', {
+      text,
+      provider,
+      language,
+    });
   },
 
   // ---------------------------------------------------------------------------
   // DASHBOARD
   // ---------------------------------------------------------------------------
 
-  async getDashboardAnalytics(
-    params?: any
-  ) {
-    const query =
-      params
-        ? buildQuery(
-            params
-          )
-        : '';
-
-    return this.request(
-      'GET',
-      `/dashboard/analytics${query}`
-    );
+  async getDashboardAnalytics(params?: any) {
+    const query = params ? buildQuery(params) : '';
+    return this.request('GET', `/dashboard/analytics${query}`);
   },
 
   async getPaymentSummary() {
-    return this.request(
-      'GET',
-      '/dashboard/payments-summary'
-    );
+    return this.request('GET', '/dashboard/payments-summary');
   },
 
   async getInventorySummary() {
-    return this.request(
-      'GET',
-      '/dashboard/inventory-summary'
-    );
+    return this.request('GET', '/dashboard/inventory-summary');
   },
 
   async getInvoiceCountSummary() {
-    return this.request(
-      'GET',
-      '/dashboard/invoices-count-summary'
-    );
+    return this.request('GET', '/dashboard/invoices-count-summary');
   },
 
   async getInvoiceAmountSummary() {
-    return this.request(
-      'GET',
-      '/dashboard/invoices-amount-summary'
-    );
+    return this.request('GET', '/dashboard/invoices-amount-summary');
   },
 
   async getProfitSummary() {
-    return this.request(
-      'GET',
-      '/dashboard/profit'
-    );
+    return this.request('GET', '/dashboard/profit');
   },
 
-  async getTopSellingProducts(
-    limit = 5
-  ) {
+  async getTopSellingProducts(limit = 5) {
     return this.request(
       'GET',
       `/reports/top-selling-products?limit=${limit}`
     );
   },
 
-  async getLeastSellingProducts(
-    limit = 5
-  ) {
+  async getLeastSellingProducts(limit = 5) {
     return this.request(
       'GET',
       `/reports/least-selling-products?limit=${limit}`
@@ -3096,141 +1709,75 @@ export const apiClient = {
   },
 
   async getLowStockProducts() {
-    return this.request(
-      'GET',
-      '/products/low-stock'
-    );
+    return this.request('GET', '/products/low-stock');
   },
 
-  async getTopCustomers(
-    limit = 5
-  ) {
-    return this.request(
-      'GET',
-      `/customers/top?limit=${limit}`
-    );
+  async getTopCustomers(limit = 5) {
+    return this.request('GET', `/customers/top?limit=${limit}`);
   },
 
-  async getTopVendors(
-    limit = 5
-  ) {
-    return this.request(
-      'GET',
-      `/vendors/top?limit=${limit}`
-    );
+  async getTopVendors(limit = 5) {
+    return this.request('GET', `/vendors/top?limit=${limit}`);
   },
 
   async getPurchaseDueInvoices() {
-    return this.request(
-      'GET',
-      '/purchases/due'
-    );
+    return this.request('GET', '/purchases/due');
   },
 
   async getLoginActivity() {
-    return this.request(
-      'GET',
-      '/admin/login-activity'
-    );
+    return this.request('GET', '/admin/login-activity');
   },
 
   async getBusinessHealthScore() {
-    return this.request(
-      'GET',
-      '/dashboard/business-health'
-    );
+    return this.request('GET', '/dashboard/business-health');
   },
 
   async getForecastData() {
-    return this.request(
-      'GET',
-      '/dashboard/forecast'
-    );
+    return this.request('GET', '/dashboard/forecast');
   },
 
   async getRiskCenter() {
-    return this.request(
-      'GET',
-      '/dashboard/risks'
-    );
+    return this.request('GET', '/dashboard/risks');
   },
 
   async getAnomalies() {
-    return this.request(
-      'GET',
-      '/dashboard/anomalies'
-    );
+    return this.request('GET', '/dashboard/anomalies');
   },
 
   async getRankings() {
-    return this.request(
-      'GET',
-      '/dashboard/rankings'
-    );
+    return this.request('GET', '/dashboard/rankings');
   },
 
   async getHeroProduct() {
-    return this.request(
-      'GET',
-      '/dashboard/hero-product'
-    );
+    return this.request('GET', '/dashboard/hero-product');
   },
 
   async getHeroCustomer() {
-    return this.request(
-      'GET',
-      '/dashboard/hero-customer'
-    );
+    return this.request('GET', '/dashboard/hero-customer');
   },
 
-  async getDistrictSales(
-    state?: string
-  ) {
-    const qs =
-      state
-        ? buildQuery({
-            state,
-          })
-        : '';
-
-    return this.request(
-      'GET',
-      `/dashboard/district-sales${qs}`
-    );
+  async getDistrictSales(state?: string) {
+    const qs = state ? buildQuery({ state }) : '';
+    return this.request('GET', `/dashboard/district-sales${qs}`);
   },
 
   async getNewVsExistingCustomerSale(
     companyId?: number | string,
     branchId?: number | string
   ) {
-    const params: Record<
-      string,
-      unknown
-    > = {};
+    const params: Record<string, unknown> = {};
 
-    if (companyId) {
-      params.company_id =
-        companyId;
-    }
-
-    if (branchId) {
-      params.branch_id =
-        branchId;
-    }
+    if (companyId) params.company_id = companyId;
+    if (branchId) params.branch_id = branchId;
 
     return this.request(
       'GET',
-      `/dashboard/new-vs-existing-customers${buildQuery(
-        params
-      )}`
+      `/dashboard/new-vs-existing-customers${buildQuery(params)}`
     );
   },
 
   async getBankAccounts() {
-    return this.request(
-      'GET',
-      '/bank-accounts'
-    );
+    return this.request('GET', '/bank-accounts');
   },
 
   // ---------------------------------------------------------------------------
@@ -3238,40 +1785,23 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getApiTokens() {
-    return this.request(
-      'GET',
-      '/api-tokens'
-    );
+    return this.request('GET', '/api-tokens');
   },
 
-  async generateApiToken(
-    data: {
-      name: string;
-      abilities?: string[];
-      expires_at?: string | null;
-    }
-  ) {
-    return this.request(
-      'POST',
-      '/api-tokens/generate',
-      data
-    );
+  async generateApiToken(data: {
+    name: string;
+    abilities?: string[];
+    expires_at?: string | null;
+  }) {
+    return this.request('POST', '/api-tokens/generate', data);
   },
 
-  async revokeApiToken(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/api-tokens/${id}`
-    );
+  async revokeApiToken(id: number) {
+    return this.request('DELETE', `/api-tokens/${id}`);
   },
 
   async revokeAllApiTokens() {
-    return this.request(
-      'DELETE',
-      '/api-tokens'
-    );
+    return this.request('DELETE', '/api-tokens');
   },
 
   // ---------------------------------------------------------------------------
@@ -3279,337 +1809,143 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getSuppliers() {
-    return this.request(
-      'GET',
-      '/suppliers?per_page=1000'
-    );
+    return this.request('GET', '/suppliers?per_page=1000');
   },
 
-  async createSupplier(
-    data: any
-  ) {
-    return this.request(
-      'POST',
-      '/suppliers',
-      data
-    );
+  async createSupplier(data: any) {
+    return this.request('POST', '/suppliers', data);
   },
 
-  async updateSupplier(
-    id: number,
-    data: any
-  ) {
-    return this.request(
-      'PUT',
-      `/suppliers/${id}`,
-      data
-    );
+  async updateSupplier(id: number, data: any) {
+    return this.request('PUT', `/suppliers/${id}`, data);
   },
 
-  async deleteSupplier(
-    id: number
-  ) {
-    return this.request(
-      'DELETE',
-      `/suppliers/${id}`
-    );
+  async deleteSupplier(id: number) {
+    return this.request('DELETE', `/suppliers/${id}`);
   },
 
   async getSupplierGroups() {
-    return this.request(
-      'GET',
-      '/supplier-groups'
-    );
+    return this.request('GET', '/supplier-groups');
   },
 
-  async createSupplierGroup(
-    data: { name: string }
-  ) {
-    return this.request(
-      'POST',
-      '/supplier-groups',
-      data
-    );
+  async createSupplierGroup(data: { name: string }) {
+    return this.request('POST', '/supplier-groups', data);
   },
 
   // ---------------------------------------------------------------------------
   // REPORTS
   // ---------------------------------------------------------------------------
 
-  async getAllReports(
-    params?: any
-  ) {
-    const query =
-      params
-        ? buildQuery(
-            params
-          )
-        : '';
-
-    return this.request(
-      'GET',
-      `/reports/all${query}`
-    );
+  async getAllReports(params?: any) {
+    const query = params ? buildQuery(params) : '';
+    return this.request('GET', `/reports/all${query}`);
   },
 
-  async getReportSummary(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/summary${query}`
-    );
+  async getReportSummary(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/summary${query}`);
   },
 
-  async getSalesSummary(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/sales-summary${query}`
-    );
+  async getSalesSummary(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/sales-summary${query}`);
   },
 
-  async getSalesRegister(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/sales-register${query}`
-    );
+  async getSalesRegister(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/sales-register${query}`);
   },
 
-  async getSalesByCustomer(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/sales-by-customer${query}`
-    );
+  async getSalesByCustomer(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/sales-by-customer${query}`);
   },
 
-  async getSalesByProduct(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/sales-by-product${query}`
-    );
+  async getSalesByProduct(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/sales-by-product${query}`);
   },
 
-  async getGstSalesReport(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/gst-sales${query}`
-    );
+  async getGstSalesReport(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/gst-sales${query}`);
   },
 
-  async getOutstandingSales(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/outstanding-sales${query}`
-    );
+  async getOutstandingSales(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/outstanding-sales${query}`);
   },
 
-  async getPurchaseSummary(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/purchase-summary${query}`
-    );
+  async getPurchaseSummary(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/purchase-summary${query}`);
   },
 
-  async getPurchaseRegister(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/purchase-register${query}`
-    );
+  async getPurchaseRegister(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/purchase-register${query}`);
   },
 
-  async getPurchaseByVendor(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/purchase-by-vendor${query}`
-    );
+  async getPurchaseByVendor(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/purchase-by-vendor${query}`);
   },
 
-  async getGeneralLedger(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/general-ledger${query}`
-    );
+  async getGeneralLedger(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/general-ledger${query}`);
   },
 
-  // async getCustomerLedger(
-  //   params: any = {}
-  // ) {
-  //   const query =
-  //     buildQuery(params);
-
-  //   return this.request(
-  //     'GET',
-  //     `/reports/customer-ledger${query}`
-  //   );
-  // },
-
-  async getOutstandingPurchases(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/outstanding-purchases${query}`
-    );
+  async getOutstandingPurchases(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/outstanding-purchases${query}`);
   },
 
-  async getProfitLossReport(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/profit-loss${query}`
-    );
+  async getProfitLossReport(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/profit-loss${query}`);
   },
 
-  async getProfitLossSummary(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/profit-loss/summary${query}`
-    );
+  async getProfitLossSummary(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/profit-loss/summary${query}`);
   },
 
-  async getProfitLossProducts(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/profit-loss/products${query}`
-    );
+  async getProfitLossProducts(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/profit-loss/products${query}`);
   },
 
-  async getProfitLossCustomers(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/profit-loss/customers${query}`
-    );
+  async getProfitLossCustomers(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/profit-loss/customers${query}`);
   },
 
-  async getProfitLossBranches(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/profit-loss/branches${query}`
-    );
+  async getProfitLossBranches(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/profit-loss/branches${query}`);
   },
 
-  async getProfitLossMonthly(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/profit-loss/monthly${query}`
-    );
+  async getProfitLossMonthly(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/profit-loss/monthly${query}`);
   },
 
-  async getProfitLossYearly(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
-    return this.request(
-      'GET',
-      `/reports/profit-loss/yearly${query}`
-    );
+  async getProfitLossYearly(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/profit-loss/yearly${query}`);
   },
 
-  async getProfitLossComparison(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
+  async getProfitLossComparison(params: any = {}) {
+    const query = buildQuery(params);
     return this.request(
       'GET',
       `/reports/profit-loss/comparison${query}`
     );
   },
 
-  async getInvoiceProfitabilityReport(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
+  async getInvoiceProfitabilityReport(params: any = {}) {
+    const query = buildQuery(params);
     return this.request(
       'GET',
       `/reports/profit-loss/invoices${query}`
@@ -3617,177 +1953,110 @@ export const apiClient = {
   },
 
   async getInvoiceProfitabilityDetail(
-    invoice:
-      | string
-      | number,
+    invoice: string | number,
     params: any = {}
   ) {
-    const query =
-      buildQuery(params);
-
+    const query = buildQuery(params);
     return this.request(
       'GET',
       `/reports/profit-loss/invoices/${invoice}${query}`
     );
   },
 
-  async getProductProfitabilityReport(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
-
+  async getProductProfitabilityReport(params: any = {}) {
+    const query = buildQuery(params);
     return this.request(
       'GET',
       `/reports/product-profitability${query}`
     );
   },
 
-  async getGstSummary(
-    params: any = {}
-  ) {
-    const query =
-      buildQuery(params);
+  async getGstSummary(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/gst-summary${query}`);
+  },
 
-    return this.request(
-      'GET',
-      `/reports/gst-summary${query}`
-    );
+  async getCustomerLedger(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/customer-ledger${query}`);
   },
 
   // ---------------------------------------------------------------------------
   // GEMINI VOICE AI
   // ---------------------------------------------------------------------------
 
-  async processGeminiVoice(
-    text: string
-  ) {
-    return this.request(
-      'POST',
-      '/gemini/voice',
-      {
-        text,
-      }
-    );
+  async processGeminiVoice(text: string) {
+    return this.request('POST', '/gemini/voice', { text });
   },
 
   async getGeminiInsights() {
-    return this.request(
-      'GET',
-      '/gemini/insights'
-    );
+    return this.request('GET', '/gemini/insights');
   },
 
   async geminiChat(
     message: string,
-    history?: Array<{
-      role: string;
-      text: string;
-    }>
+    history?: Array<{ role: string; text: string }>
   ) {
-    return this.request(
-      'POST',
-      '/gemini/chat',
-      {
-        message,
-        history,
-      }
-    );
+    return this.request('POST', '/gemini/chat', { message, history });
   },
 
-  async geminiVoice(
-    text: string
-  ) {
-    return this.request(
-      'POST',
-      '/gemini/voice',
-      {
-        text,
-      }
-    );
+  async geminiVoice(text: string) {
+    return this.request('POST', '/gemini/voice', { text });
   },
 
   async geminiInsights() {
-    return this.request(
-      'GET',
-      '/gemini/insights'
-    );
+    return this.request('GET', '/gemini/insights');
   },
 
   async geminiTest() {
+    return this.request('GET', '/gemini/test');
+  },
+
+  // ---------------------------------------------------------------------------
+  // AUTOMATION
+  // ---------------------------------------------------------------------------
+
+  async getAutomationWorkflows(params: Record<string, unknown> = {}) {
     return this.request(
       'GET',
-      '/gemini/test'
+      `/automation/workflows${buildQuery(params)}`
     );
   },
 
-  // ── Automation ──
-async getAutomationWorkflows(params: Record<string, unknown> = {}) {
-  return this.request(
-    'GET',
-    `/automation/workflows${buildQuery(params)}`,
-  );
-},
+  async createAutomationWorkflow(data: any) {
+    return this.request('POST', '/automation/workflows', data);
+  },
 
-async createAutomationWorkflow(data: any) {
-  return this.request(
-    'POST',
-    '/automation/workflows',
-    data,
-  );
-},
+  async updateAutomationWorkflow(id: number, data: any) {
+    return this.request('PUT', `/automation/workflows/${id}`, data);
+  },
 
-async updateAutomationWorkflow(id: number, data: any) {
-  return this.request(
-    'PUT',
-    `/automation/workflows/${id}`,
-    data,
-  );
-},
+  async deleteAutomationWorkflow(id: number) {
+    return this.request('DELETE', `/automation/workflows/${id}`);
+  },
 
-async deleteAutomationWorkflow(id: number) {
-  return this.request(
-    'DELETE',
-    `/automation/workflows/${id}`,
-  );
-},
+  async runAutomationWorkflow(id: number, data: any = {}) {
+    return this.request(
+      'POST',
+      `/automation/workflows/${id}/run`,
+      data
+    );
+  },
 
-async runAutomationWorkflow(id: number, data: any = {}) {
-  return this.request(
-    'POST',
-    `/automation/workflows/${id}/run`,
-    data,
-  );
-},
+  async duplicateAutomationWorkflow(id: number) {
+    return this.request(
+      'POST',
+      `/automation/workflows/${id}/duplicate`
+    );
+  },
 
-async duplicateAutomationWorkflow(id: number) {
-  return this.request(
-    'POST',
-    `/automation/workflows/${id}/duplicate`,
-  );
-},
+  async getAutomationRuns(params: Record<string, unknown> = {}) {
+    return this.request('GET', `/automation/runs${buildQuery(params)}`);
+  },
 
-async getAutomationRuns(params: Record<string, unknown> = {}) {
-  return this.request(
-    'GET',
-    `/automation/runs${buildQuery(params)}`,
-  );
-},
-
-async getAutomationStats() {
-  return this.request(
-    'GET',
-    '/automation/stats',
-  );
-},
-async getCustomerLedger(params: any = {}) {
-  const query = buildQuery(params);
-
-  return this.request(
-    'GET',
-    `/reports/customer-ledger${query}`
-  );
-},
+  async getAutomationStats() {
+    return this.request('GET', '/automation/stats');
+  },
 };
 
 export default apiClient;

@@ -82,6 +82,11 @@ interface ReceiptBusinessInfo {
   customerAddress: string;
 }
 
+interface ReceiptHeaderOptions {
+  showCompanyName?: boolean;
+  showBranchName?: boolean;
+}
+
 /* ============================================================================
  * CONSTANTS
  * ========================================================================== */
@@ -367,6 +372,17 @@ export function InvoiceDetailPage() {
     isThermalPrinting,
     setIsThermalPrinting,
   ] = useState(false);
+
+  /* Receipt header visibility toggles (thermal print only) */
+  const [
+    showCompanyName,
+    setShowCompanyName,
+  ] = useState(true);
+
+  const [
+    showBranchName,
+    setShowBranchName,
+  ] = useState(true);
 
   const [
     serialPort,
@@ -1283,7 +1299,16 @@ export function InvoiceDetailPage() {
       (
         format: ThermalFormat,
         inv: Invoice,
+        options?: ReceiptHeaderOptions,
       ): string => {
+        const showComp =
+          options?.showCompanyName !==
+          false;
+
+        const showBranch =
+          options?.showBranchName !==
+          false;
+
         const width =
           THERMAL_TEXT_WIDTH[
             format
@@ -1313,14 +1338,19 @@ export function InvoiceDetailPage() {
         /*
          * BUSINESS
          */
-        lines.push(
-          clampText(
-            companyName,
-            width,
-          ),
-        );
+        if (showComp) {
+          lines.push(
+            clampText(
+              companyName,
+              width,
+            ),
+          );
+        }
 
-        if (branchName) {
+        if (
+          showBranch &&
+          branchName
+        ) {
           lines.push(
             clampText(
               `Branch: ${branchName}`,
@@ -2324,8 +2354,7 @@ export function InvoiceDetailPage() {
           0xff;
 
         const yL =
-          destinationHeight &
-          0xff;
+          destinationHeight & 0xff;
 
         const yH =
           (destinationHeight >>
@@ -2654,7 +2683,16 @@ export function InvoiceDetailPage() {
       (
         format: ThermalFormat,
         inv: Invoice,
+        options?: ReceiptHeaderOptions,
       ): Uint8Array => {
+        const showComp =
+          options?.showCompanyName !==
+          false;
+
+        const showBranch =
+          options?.showBranchName !==
+          false;
+
         const output: number[] =
           [];
 
@@ -2744,17 +2782,19 @@ export function InvoiceDetailPage() {
           0x01,
         ]);
 
-        raw(
-          renderTextRaster(
-            companyName,
-            format,
-            {
-              bold: true,
-              top: 1,
-              bottom: 1,
-            },
-          ),
-        );
+        if (showComp) {
+          raw(
+            renderTextRaster(
+              companyName,
+              format,
+              {
+                bold: true,
+                top: 1,
+                bottom: 1,
+              },
+            ),
+          );
+        }
 
         raw([
           ESC,
@@ -2762,7 +2802,10 @@ export function InvoiceDetailPage() {
           0x00,
         ]);
 
-        if (branchName) {
+        if (
+          showBranch &&
+          branchName
+        ) {
           raw(
             renderTextRaster(
               `Branch: ${branchName}`,
@@ -3740,6 +3783,10 @@ export function InvoiceDetailPage() {
               generateTextReceipt(
                 format,
                 invoice,
+                {
+                  showCompanyName,
+                  showBranchName,
+                },
               );
 
             window.location.href =
@@ -3785,6 +3832,10 @@ export function InvoiceDetailPage() {
                 buildEscPosPayload(
                   format,
                   invoice,
+                  {
+                    showCompanyName,
+                    showBranchName,
+                  },
                 );
 
               try {
@@ -3921,6 +3972,8 @@ export function InvoiceDetailPage() {
         invoice,
         isMobile,
         isThermalPrinting,
+        showCompanyName,
+        showBranchName,
         showError,
         showSuccess,
         withSerialLock,
@@ -5041,6 +5094,93 @@ export function InvoiceDetailPage() {
                 )}
               </div>
 
+              {/* RECEIPT HEADER CONTENT TOGGLES */}
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <div>
+                    <p className="font-semibold text-slate-800 text-sm">
+                      Receipt header content
+                    </p>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Applies to thermal prints (58mm / 80mm).
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setShowCompanyName(
+                        (v) => !v,
+                      )
+                    }
+                    aria-pressed={
+                      showCompanyName
+                    }
+                    className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm font-medium transition ${
+                      showCompanyName
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                        : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <FiFileText
+                        size={15}
+                      />
+                      Company name
+                    </span>
+
+                    <span
+                      className={`text-[11px] font-bold tracking-wide px-2 py-0.5 rounded-full ${
+                        showCompanyName
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-300 text-white'
+                      }`}
+                    >
+                      {showCompanyName
+                        ? 'ON'
+                        : 'OFF'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setShowBranchName(
+                        (v) => !v,
+                      )
+                    }
+                    aria-pressed={
+                      showBranchName
+                    }
+                    className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm font-medium transition ${
+                      showBranchName
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                        : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <FiHash size={15} />
+                      Branch name
+                    </span>
+
+                    <span
+                      className={`text-[11px] font-bold tracking-wide px-2 py-0.5 rounded-full ${
+                        showBranchName
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-300 text-white'
+                      }`}
+                    >
+                      {showBranchName
+                        ? 'ON'
+                        : 'OFF'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
               {/* FORMAT OPTIONS */}
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -5136,6 +5276,10 @@ export function InvoiceDetailPage() {
 {generateTextReceipt(
   defaultPrinterFormat,
   invoice,
+  {
+    showCompanyName,
+    showBranchName,
+  },
 )}
                   </pre>
                 </div>

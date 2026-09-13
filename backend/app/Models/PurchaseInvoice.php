@@ -11,6 +11,8 @@ class PurchaseInvoice extends Model
 
     protected $fillable = [
         'company_id',
+        'branch_id',
+        'warehouse_id',
         'supplier_id',
 
         'purchase_number',
@@ -21,11 +23,11 @@ class PurchaseInvoice extends Model
         'expected_delivery_date',
 
         'reference_number',
-
         'invoice_number',
         'invoice_date',
 
         'warehouse',
+        'branch',
         'currency',
 
         'notes',
@@ -36,9 +38,17 @@ class PurchaseInvoice extends Model
         'tax_amount',
         'shipping_charges',
         'packing_charges',
+        'packing_apply_type',
         'other_charges',
         'round_off',
         'grand_total',
+
+        'general_discount_type',
+        'general_discount_percent',
+        'general_discount_amount',
+        'general_discount_apply_type',
+
+        'tcs_percent',
 
         'status',
 
@@ -51,29 +61,44 @@ class PurchaseInvoice extends Model
     ];
 
     protected $casts = [
-        'company_id' => 'integer',
-        'supplier_id' => 'integer',
+        'company_id'   => 'integer',
+        'branch_id'    => 'integer',
+        'warehouse_id' => 'integer',
+        'supplier_id'  => 'integer',
 
-        'purchase_date' => 'date',
-        'due_date' => 'date',
+        'purchase_date'          => 'date',
+        'due_date'               => 'date',
         'expected_delivery_date' => 'date',
-        'invoice_date' => 'date',
-        'payment_date' => 'date',
+        'invoice_date'           => 'date',
+        'payment_date'           => 'date',
 
-        'subtotal' => 'decimal:2',
-        'order_discount' => 'decimal:2',
-        'tax_amount' => 'decimal:2',
-        'shipping_charges' => 'decimal:2',
-        'packing_charges' => 'decimal:2',
-        'other_charges' => 'decimal:2',
-        'round_off' => 'decimal:2',
-        'grand_total' => 'decimal:2',
-        'paid_amount' => 'decimal:2',
+        'subtotal'                 => 'decimal:2',
+        'order_discount'           => 'decimal:2',
+        'tax_amount'               => 'decimal:2',
+        'shipping_charges'         => 'decimal:2',
+        'packing_charges'          => 'decimal:2',
+        'other_charges'            => 'decimal:2',
+        'round_off'                => 'decimal:2',
+        'grand_total'              => 'decimal:2',
+        'paid_amount'              => 'decimal:2',
+        'general_discount_percent' => 'decimal:2',
+        'general_discount_amount'  => 'decimal:2',
+        'tcs_percent'              => 'decimal:2',
     ];
 
     public function company()
     {
         return $this->belongsTo(Company::class);
+    }
+
+    public function branch()
+    {
+        return $this->belongsTo(Branch::class);
+    }
+
+    public function warehouseRelation()
+    {
+        return $this->belongsTo(Warehouse::class, 'warehouse_id');
     }
 
     public function supplier()
@@ -91,10 +116,6 @@ class PurchaseInvoice extends Model
 
     /**
      * Payments belonging to this purchase invoice.
-     *
-     * Payment table must contain:
-     * payable_id
-     * payable_type
      */
     public function payments()
     {

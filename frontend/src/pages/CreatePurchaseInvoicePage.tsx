@@ -148,6 +148,27 @@ const nonNegative = (value: unknown) => Math.max(0, normalizeNumber(value));
 const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 const formatCurrency = (value: unknown) => nonNegative(value).toFixed(2);
 
+/**
+ * Integer-paise-safe auto round-off.
+ * Returns the delta needed to reach the nearest whole rupee.
+ */
+function computeAutoRoundOff(total: number): number {
+  // Work in paise (integers) to avoid IEEE-754 drift.
+  const totalPaise = Math.round(nonNegative(total) * 100);
+  const roundedRupee = Math.round(totalPaise / 100);
+  const roundedPaise = roundedRupee * 100;
+  return (roundedPaise - totalPaise) / 100;
+}
+
+/**
+ * Snaps a value to the nearest whole rupee when it is within `epsilon`
+ * of that whole number. Used to kill residual ₹0.01 drift.
+ */
+function snapToWholeRupee(value: number, epsilon = 0.02): number {
+  const rounded = Math.round(value);
+  return Math.abs(value - rounded) <= epsilon ? rounded : value;
+}
+
 function unwrapApi<T = any>(response: any, fallback: T): T {
   if (response == null) return fallback;
   if (Array.isArray(response)) return response as T;
@@ -410,6 +431,7 @@ export function CreatePurchaseInvoicePage() {
     setSupplierSearch(selectedSupplier.name || '');
   }, [selectedSupplier]);
 
+  /* ---------- Summary ---------- */
   const itemSubtotal = useMemo(() => round2(items.reduce((sum, i) => sum + nonNegative(i.qty) * nonNegative(i.price), 0)), [items]);
   const itemDiscountTotal = useMemo(() => round2(items.reduce((sum, i) => sum + nonNegative(i.discount_amount), 0)), [items]);
   const taxableBeforeBillDiscount = useMemo(() => round2(Math.max(0, itemSubtotal - itemDiscountTotal)), [itemSubtotal, itemDiscountTotal]);
@@ -437,7 +459,7 @@ export function CreatePurchaseInvoicePage() {
       const allocated = round2(base > 0 ? generalDiscountAmount * base / taxableBeforeBillDiscount : 0);
       const adjustedBase = Math.max(0, base - allocated);
       const slab = getEffectiveGst(item);
-      tax += item.is_inter_state ? adjustedBase * slab / 100 : adjustedBase * slab / 100;
+      tax += adjustedBase * slab / 100;
       remainingDiscount -= allocated;
     });
     tax += remainingDiscount > 0 && discountedTaxable > 0 ? remainingDiscount * effectiveTaxRate : 0;
@@ -456,18 +478,45 @@ export function CreatePurchaseInvoicePage() {
   const tcsAmount = round2(totalBeforeTcs * Math.min(100, nonNegative(form.tcs_percent)) / 100);
   const totalBeforeRoundOff = round2(totalBeforeTcs + tcsAmount);
 
+  /**
+   * Auto round-off effect.
+   *
+   * Uses integer-paise arithmetic to avoid floating-point drift.
+   * Compares to `form.round_off` with a 0.001 tolerance so we don't
+   * cause infinite re-renders or split-second regressions.
+   */
   useEffect(() => {
     if (!autoRoundOff) return;
-    const next = round2(Math.round(totalBeforeRoundOff) - totalBeforeRoundOff);
-    setForm((prev) => Math.abs(prev.round_off - next) < 0.005 ? prev : { ...prev, round_off: next });
+    const next = computeAutoRoundOff(totalBeforeRoundOff);
+    setForm((prev) => {
+      if (Math.abs(prev.round_off - next) < 0.001) return prev;
+      return { ...prev, round_off: next };
+    });
   }, [autoRoundOff, totalBeforeRoundOff]);
 
-  const grandTotal = round2(Math.max(0, totalBeforeRoundOff + normalizeNumber(form.round_off)));
+  /**
+   * Final grand total.
+   * When auto-round-off is ON, snap the result to the nearest whole
+   * rupee (defends against any residual drift in the round-off value).
+   */
+  const grandTotal = useMemo(() => {
+    const raw = Math.max(0, totalBeforeRoundOff + normalizeNumber(form.round_off));
+    const rounded = round2(raw);
+    return autoRoundOff ? snapToWholeRupee(rounded, 0.02) : rounded;
+  }, [totalBeforeRoundOff, form.round_off, autoRoundOff]);
+
   const totalInWords = useMemo(() => numberToWordsINR(grandTotal), [grandTotal]);
   const totalOutward = useMemo(() => round2(form.payments.reduce((sum, p) => sum + (p.payment_direction === 'outward' ? nonNegative(p.amount) : 0), 0)), [form.payments]);
   const totalInward = useMemo(() => round2(form.payments.reduce((sum, p) => sum + (p.payment_direction === 'inward' ? nonNegative(p.amount) : 0), 0)), [form.payments]);
   const netPaid = round2(totalOutward - totalInward);
-  const balanceDue = round2(grandTotal - netPaid);
+
+  /**
+   * Balance due — snap to 0.00 when within 0.02 so we never display "₹0.01".
+   */
+  const balanceDue = useMemo(() => {
+    const diff = round2(grandTotal - netPaid);
+    return Math.abs(diff) <= 0.02 ? 0 : diff;
+  }, [grandTotal, netPaid]);
 
   const updateItem = useCallback((index: number, patch: Partial<PurchaseItem>) => {
     setItems((prev) => prev.map((item, i) => i === index ? computeItem({ ...item, ...patch }) : item));
@@ -569,32 +618,116 @@ export function CreatePurchaseInvoicePage() {
     } finally { setProductSubmitting(false); }
   };
 
-  const createPurchasePayload = (status: 'draft' | 'ordered') => ({
-    company_id: Number(form.company_id),
-    branch: localStorage.getItem('nixaerp_branch_name') || 'Main Branch',
-    supplier_id: Number(form.supplier_id), supplier_name: form.supplier_name.trim(), supplier_address: form.supplier_address.trim(),
-    contact_person: form.contact_person.trim(), phone_no: form.phone_no.trim(), gstin: form.gstin_pan.trim(), pan: form.gstin_pan.trim(),
-    reverse_charge: Boolean(form.reverse_charge), ship_to: form.ship_to.trim(), place_of_supply: form.place_of_supply.trim(),
-    invoice_type: form.invoice_type, purchase_number: form.invoice_no.trim(), purchase_date: form.invoice_date, due_date: form.due_date || null,
-    challan_no: form.challan_no.trim() || null, challan_date: form.challan_date || null, po_no: form.po_no.trim() || null, po_date: form.po_date || null,
-    lr_no: form.lr_no.trim() || null, eway_no: form.eway_no.trim() || null, delivery_mode: form.delivery_mode.trim() || null,
-    payment_type: form.payment_type, payment_term: form.payment_term.trim() || null, bank_id: form.bank_id ? Number(form.bank_id) : null,
-    packing_charges: packingAmount, packing_apply_type: packingApplyType,
-    general_discount_type: generalDiscountType,
-    general_discount_apply_type: generalDiscountApplyType,
-    general_discount_percent: generalDiscountType === 'percent' ? nonNegative(form.general_discount_percent) : 0,
-    general_discount_amount: generalDiscountType === 'amount' ? generalDiscountAmount : 0,
-    tcs_percent: nonNegative(form.tcs_percent), round_off: normalizeNumber(form.round_off),
-    terms_title: form.terms_title || null, terms_detail: form.terms_detail || null, document_note: form.document_note || null, internal_note: form.internal_note || null,
-    additional_charges: form.additional_charges.filter((c) => c.label.trim() || nonNegative(c.amount) > 0).map((c) => ({ label: c.label.trim(), amount: nonNegative(c.amount) })),
-    total_amount: grandTotal, tax_amount: totalTaxWithPacking, discount_amount: round2(itemDiscountTotal + generalDiscountAmount), status,
-    items: items.map((i) => ({
-      product_id: Number(i.product_id), product_name: i.product_name.trim(), hsn_sac_code: i.hsn_sac_code || '', unit: i.uom || 'NOS', quantity: nonNegative(i.qty),
-      purchase_price: nonNegative(i.price), discount_type: i.discount_type, discount_percent: i.discount_type === 'percent' ? nonNegative(i.discount_percent) : 0,
-      discount_amount: i.discount_type === 'amount' ? nonNegative(i.discount_amount) : 0, gst_slab: getEffectiveGst(i), is_inter_state: Boolean(i.is_inter_state),
-      cgst_percent: i.cgst_percent, sgst_percent: i.sgst_percent, igst_percent: i.igst_percent
-    }))
-  });
+  /**
+   * Builds the create payload.
+   * - `round_off` is recomputed with integer-paise arithmetic.
+   * - `grand_total` and every payment amount are snapped to 2 decimals.
+   * - Payments are sent inline; the backend records them atomically.
+   * - `auto_round_off` flag tells the backend to snap the grand total too.
+   */
+  const createPurchasePayload = (status: 'draft' | 'ordered') => {
+    const safeRoundOff = autoRoundOff
+      ? computeAutoRoundOff(totalBeforeRoundOff)
+      : round2(normalizeNumber(form.round_off));
+
+    // Recompose grand total from scratch here so we are guaranteed the
+    // payload matches the display exactly.
+    const computedGrandTotal = (() => {
+      const raw = Math.max(0, totalBeforeRoundOff + safeRoundOff);
+      const rounded = round2(raw);
+      return autoRoundOff ? snapToWholeRupee(rounded, 0.02) : rounded;
+    })();
+
+    const validPayments = form.payments
+      .filter((p) => nonNegative(p.amount) > 0)
+      .map((p, idx) => {
+        const ref = (p.reference_no || '').trim() || `PAY-NEW-${idx + 1}`;
+        return {
+          amount: round2(nonNegative(p.amount)),
+          payment_method: p.payment_method,
+          transaction_date: p.transaction_date || form.invoice_date,
+          reference_no: ref,
+          payment_direction: p.payment_direction || 'outward',
+          bank_name: (p.bank_name || '').trim(),
+          account_number: (p.account_number || '').trim(),
+          remarks: (p.remarks || '').trim(),
+        };
+      });
+
+    return {
+      company_id: Number(form.company_id),
+      branch: localStorage.getItem('nixaerp_branch_name') || 'Main Branch',
+      supplier_id: Number(form.supplier_id),
+      supplier_name: form.supplier_name.trim(),
+      supplier_address: form.supplier_address.trim(),
+      contact_person: form.contact_person.trim(),
+      phone_no: form.phone_no.trim(),
+      gstin: form.gstin_pan.trim(),
+      pan: form.gstin_pan.trim(),
+      reverse_charge: Boolean(form.reverse_charge),
+      ship_to: form.ship_to.trim(),
+      place_of_supply: form.place_of_supply.trim(),
+      invoice_type: form.invoice_type,
+      purchase_number: form.invoice_no.trim(),
+      purchase_date: form.invoice_date,
+      due_date: form.due_date || null,
+      challan_no: form.challan_no.trim() || null,
+      challan_date: form.challan_date || null,
+      po_no: form.po_no.trim() || null,
+      po_date: form.po_date || null,
+      lr_no: form.lr_no.trim() || null,
+      eway_no: form.eway_no.trim() || null,
+      delivery_mode: form.delivery_mode.trim() || null,
+      payment_type: form.payment_type,
+      payment_term: form.payment_term.trim() || null,
+      bank_id: form.bank_id ? Number(form.bank_id) : null,
+
+      packing_charges: round2(packingAmount),
+      packing_apply_type: packingApplyType,
+      general_discount_type: generalDiscountType,
+      general_discount_apply_type: generalDiscountApplyType,
+      general_discount_percent: generalDiscountType === 'percent' ? nonNegative(form.general_discount_percent) : 0,
+      general_discount_amount: generalDiscountType === 'amount' ? nonNegative(form.general_discount_amount) : 0,
+      tcs_percent: nonNegative(form.tcs_percent),
+
+      /* ✅ Send the exact round-off value AND the auto flag */
+      round_off: safeRoundOff,
+      auto_round_off: autoRoundOff,
+
+      terms_title: form.terms_title || null,
+      terms_detail: form.terms_detail || null,
+      document_note: form.document_note || null,
+      internal_note: form.internal_note || null,
+
+      additional_charges: form.additional_charges
+        .filter((c) => c.label.trim() || nonNegative(c.amount) > 0)
+        .map((c) => ({ label: c.label.trim(), amount: round2(nonNegative(c.amount)) })),
+
+      total_amount: computedGrandTotal,
+      tax_amount: round2(totalTaxWithPacking),
+      discount_amount: round2(itemDiscountTotal + generalDiscountAmount),
+      status,
+
+      items: items.map((i) => ({
+        product_id: Number(i.product_id),
+        product_name: i.product_name.trim(),
+        hsn_sac_code: i.hsn_sac_code || '',
+        unit: i.uom || 'NOS',
+        quantity: nonNegative(i.qty),
+        purchase_price: nonNegative(i.price),
+        discount_type: i.discount_type,
+        discount_percent: i.discount_type === 'percent' ? nonNegative(i.discount_percent) : 0,
+        discount_amount: i.discount_type === 'amount' ? nonNegative(i.discount_amount) : 0,
+        gst_slab: getEffectiveGst(i),
+        is_inter_state: Boolean(i.is_inter_state),
+        cgst_percent: i.cgst_percent,
+        sgst_percent: i.sgst_percent,
+        igst_percent: i.igst_percent,
+      })),
+
+      payments: validPayments,
+    };
+  };
 
   const printSavedPurchase = useCallback((purchaseId: string | number) => {
     const win = window.open('', '_blank', 'noopener,noreferrer,width=900,height=800');
@@ -619,34 +752,25 @@ export function CreatePurchaseInvoicePage() {
       const payload = createPurchasePayload(isDraft ? 'draft' : 'ordered');
       const response = await apiClient.createPurchaseInvoice(payload);
       const purchase = unwrapApi<any>(response, null);
-      const purchaseId = purchase?.id ?? purchase?.purchase?.id ?? purchase?.data?.id;
+      const purchaseId = purchase?.id ?? purchase?.purchase?.id ?? purchase?.data?.id ?? (response as any)?.purchase_id;
       if (!purchaseId) throw new Error('Purchase invoice was not returned with a valid ID. The server may not have saved it safely.');
       submittedIdRef.current = purchaseId;
       debug('submit.purchase.created', { requestId, purchaseId, response });
 
-      const validPayments = form.payments.filter((p) => nonNegative(p.amount) > 0);
-      const paymentFailures: string[] = [];
-      for (let index = 0; index < validPayments.length; index += 1) {
-        const payment = validPayments[index];
-        try {
-          await apiClient.request('POST', '/payments', {
-            company_id: Number(form.company_id), invoice_id: purchaseId, reference_no: payment.reference_no.trim() || `PAY-${purchaseId}-${index + 1}`,
-            amount: nonNegative(payment.amount), payment_method: payment.payment_method, status: 'completed', payment_direction: payment.payment_direction,
-            transaction_date: payment.transaction_date || form.invoice_date, bank_name: payment.bank_name.trim(), account_number: payment.account_number.trim(),
-            ledger_reference: payment.reference_no.trim() || `PAY-${purchaseId}-${index + 1}`, remarks: payment.remarks.trim()
-          });
-        } catch (paymentError) {
-          const message = getUserFriendlyError(paymentError, `Payment #${index + 1} failed.`);
-          paymentFailures.push(message); debug('submit.payment.failed', { index, error: paymentError });
-        }
-      }
+      const paymentsCount = payload.payments.length;
 
-      await addAppLog({ module: 'Purchases', action: isDraft ? 'Create Draft' : 'Create', status: paymentFailures.length ? 'warning' : 'success', message: `${form.invoice_no || `Purchase #${purchaseId}`} | ID ${purchaseId}${paymentFailures.length ? ` | Payment failures: ${paymentFailures.join('; ')}` : ''}` });
-      if (paymentFailures.length) {
-        showError('Purchase saved with payment warning', `Invoice ${form.invoice_no || purchaseId} was saved, but ${paymentFailures.length} payment(s) failed. Review payments before treating the invoice as fully paid.`);
-      } else {
-        showSuccess(isDraft ? 'Draft saved' : 'Purchase created', isDraft ? `Draft ${form.invoice_no || purchaseId} saved.` : `Invoice ${form.invoice_no} created successfully.`);
-      }
+      await addAppLog({
+        module: 'Purchases',
+        action: isDraft ? 'Create Draft' : 'Create',
+        status: 'success',
+        message: `${form.invoice_no || `Purchase #${purchaseId}`} | ID ${purchaseId}${paymentsCount ? ` | ${paymentsCount} payment(s)` : ''}`,
+      });
+      showSuccess(
+        isDraft ? 'Draft saved' : 'Purchase created',
+        isDraft
+          ? `Draft ${form.invoice_no || purchaseId} saved.`
+          : `Invoice ${form.invoice_no} created${paymentsCount ? ` with ${paymentsCount} payment(s)` : ''}.`,
+      );
 
       if (action === 'save_print') {
         try { printSavedPurchase(purchaseId); } catch (printError) { showError('Print failed', getUserFriendlyError(printError, 'Invoice saved, but the print window could not be opened.')); }
@@ -673,6 +797,35 @@ export function CreatePurchaseInvoicePage() {
   const updatePayment = (id: string, patch: Partial<PaymentEntry>) => setForm((p) => ({ ...p, payments: p.payments.map((x) => x.id === id ? { ...x, ...patch } : x) }));
   const removePayment = (id: string) => setForm((p) => ({ ...p, payments: p.payments.filter((x) => x.id !== id) }));
 
+  /** "Pay Full Amount" helper — uses the exact grand total so paid === grand. */
+  const payFullAmount = () => {
+    setForm((p) => {
+      const alreadyPaid = p.payments.reduce(
+        (sum, x) => sum + (x.payment_direction === 'inward' ? -nonNegative(x.amount) : nonNegative(x.amount)),
+        0
+      );
+      const remaining = Math.max(0, round2(grandTotal - alreadyPaid));
+      if (remaining <= 0) return p;
+      return {
+        ...p,
+        payments: [
+          ...p.payments,
+          {
+            id: `${Date.now()}-${Math.random()}`,
+            amount: remaining,
+            payment_method: 'bank_transfer',
+            reference_no: '',
+            transaction_date: today(),
+            bank_name: '',
+            account_number: '',
+            remarks: 'Full payment',
+            payment_direction: 'outward',
+          },
+        ],
+      };
+    });
+  };
+
   const supplierKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (!filteredSuppliers.length) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); setSupplierHighlight((v) => (v + 1) % filteredSuppliers.length); }
@@ -692,6 +845,8 @@ export function CreatePurchaseInvoicePage() {
   const labelClass = 'block text-xs font-medium text-slate-600 mb-1.5';
   const cardClass = 'bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg shadow-slate-200/50 border border-slate-100 p-6';
   const sectionTitleClass = 'text-lg font-semibold mb-5 flex items-center gap-2 text-slate-800';
+
+  const balanceIsZero = Math.abs(balanceDue) < 0.005;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 text-slate-800 pb-24">
@@ -767,7 +922,15 @@ export function CreatePurchaseInvoicePage() {
 
               <div className="border-t pt-4 mt-5"><div className="flex justify-between items-center mb-3"><h3 className="font-semibold">Additional Charges Detail</h3><button type="button" onClick={addCharge} className="text-blue-600 text-xs flex gap-1 items-center"><FiPlus />Add</button></div>{form.additional_charges.map((charge) => <div key={charge.id} className="flex gap-2 mb-2"><input value={charge.label} onChange={(e) => updateCharge(charge.id, { label: e.target.value })} placeholder="Charge name" className="flex-1 border rounded-lg px-2 py-1.5 text-xs" /><input type="number" min="0" step="0.01" value={charge.amount} onChange={(e) => updateCharge(charge.id, { amount: nonNegative(e.target.value) })} className="w-28 border rounded-lg px-2 py-1.5 text-xs text-right" /><button type="button" onClick={() => removeCharge(charge.id)} className="text-red-400"><FiTrash2 /></button></div>)}</div>
 
-              <div className="border-t pt-4 mt-5"><div className="flex justify-between items-center mb-3"><h3 className="font-semibold">Payments</h3><button type="button" onClick={addPayment} className="text-blue-600 text-xs flex items-center gap-1"><FiPlus />Add Payment</button></div>{form.payments.length === 0 ? <p className="text-xs text-slate-400">No payments recorded.</p> : form.payments.map((pay, idx) => <div key={pay.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200 mb-3"><div className="flex justify-between mb-2"><span className="text-xs font-semibold text-slate-500">Payment #{idx + 1}</span><button type="button" onClick={() => removePayment(pay.id)} className="text-red-400"><FiTrash2 /></button></div><div className="grid grid-cols-2 gap-2"><div><label className="block text-xs text-slate-500">Amount</label><input type="number" min="0" step="0.01" value={pay.amount} onChange={(e) => updatePayment(pay.id, { amount: nonNegative(e.target.value) })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Method</label><select value={pay.payment_method} onChange={(e) => updatePayment(pay.id, { payment_method: e.target.value as PaymentMethod })} className="w-full border rounded-lg px-2 py-1.5 text-xs"><option value="UPI">UPI</option><option value="cash">Cash</option><option value="cheque">Cheque</option><option value="bank_transfer">Bank Transfer</option><option value="other">Other</option></select></div><div><label className="block text-xs text-slate-500">Reference No</label><input value={pay.reference_no} onChange={(e) => updatePayment(pay.id, { reference_no: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Date</label><input type="date" value={pay.transaction_date} onChange={(e) => updatePayment(pay.id, { transaction_date: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Direction</label><select value={pay.payment_direction} onChange={(e) => updatePayment(pay.id, { payment_direction: e.target.value as PaymentDirection })} className="w-full border rounded-lg px-2 py-1.5 text-xs"><option value="outward">Outward</option><option value="inward">Inward / Refund</option></select></div><div><label className="block text-xs text-slate-500">Bank Name</label><input value={pay.bank_name} onChange={(e) => updatePayment(pay.id, { bank_name: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div className="col-span-2"><label className="block text-xs text-slate-500">Remarks</label><input value={pay.remarks} onChange={(e) => updatePayment(pay.id, { remarks: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div></div></div>)}<div className="flex justify-between text-sm"><span>Total Outward</span><span>₹{formatCurrency(totalOutward)}</span></div><div className="flex justify-between text-sm"><span>Total Inward</span><span>₹{formatCurrency(totalInward)}</span></div><div className="flex justify-between mt-1 font-semibold"><span>Balance Due</span><span className={balanceDue > 0.01 ? 'text-red-600' : 'text-emerald-600'}>₹{formatCurrency(balanceDue)}</span></div></div>
+              <div className="border-t pt-4 mt-5">
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="font-semibold">Payments</h3>
+                  <div className="flex items-center gap-3">
+                    <button type="button" onClick={payFullAmount} disabled={balanceIsZero} className="text-emerald-600 text-xs font-semibold hover:underline disabled:text-slate-300 disabled:cursor-not-allowed">Pay Full</button>
+                    <button type="button" onClick={addPayment} className="text-blue-600 text-xs flex items-center gap-1"><FiPlus />Add Payment</button>
+                  </div>
+                </div>
+                {form.payments.length === 0 ? <p className="text-xs text-slate-400">No payments recorded.</p> : form.payments.map((pay, idx) => <div key={pay.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200 mb-3"><div className="flex justify-between mb-2"><span className="text-xs font-semibold text-slate-500">Payment #{idx + 1}</span><button type="button" onClick={() => removePayment(pay.id)} className="text-red-400"><FiTrash2 /></button></div><div className="grid grid-cols-2 gap-2"><div><label className="block text-xs text-slate-500">Amount</label><input type="number" min="0" step="0.01" value={pay.amount} onChange={(e) => updatePayment(pay.id, { amount: nonNegative(e.target.value) })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Method</label><select value={pay.payment_method} onChange={(e) => updatePayment(pay.id, { payment_method: e.target.value as PaymentMethod })} className="w-full border rounded-lg px-2 py-1.5 text-xs"><option value="UPI">UPI</option><option value="cash">Cash</option><option value="cheque">Cheque</option><option value="bank_transfer">Bank Transfer</option><option value="other">Other</option></select></div><div><label className="block text-xs text-slate-500">Reference No</label><input value={pay.reference_no} onChange={(e) => updatePayment(pay.id, { reference_no: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Date</label><input type="date" value={pay.transaction_date} onChange={(e) => updatePayment(pay.id, { transaction_date: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Direction</label><select value={pay.payment_direction} onChange={(e) => updatePayment(pay.id, { payment_direction: e.target.value as PaymentDirection })} className="w-full border rounded-lg px-2 py-1.5 text-xs"><option value="outward">Outward</option><option value="inward">Inward / Refund</option></select></div><div><label className="block text-xs text-slate-500">Bank Name</label><input value={pay.bank_name} onChange={(e) => updatePayment(pay.id, { bank_name: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div className="col-span-2"><label className="block text-xs text-slate-500">Remarks</label><input value={pay.remarks} onChange={(e) => updatePayment(pay.id, { remarks: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div></div></div>)}<div className="flex justify-between text-sm"><span>Total Outward</span><span>₹{formatCurrency(totalOutward)}</span></div><div className="flex justify-between text-sm"><span>Total Inward</span><span>₹{formatCurrency(totalInward)}</span></div><div className="flex justify-between mt-1 font-semibold"><span>Balance Due</span><span className={balanceDue > 0.01 ? 'text-red-600' : 'text-emerald-600'}>₹{formatCurrency(balanceDue)}</span></div></div>
             </div>
           </div>
         </div>

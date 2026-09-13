@@ -5,8 +5,8 @@ import {
 } from 'react';
 import {
   FiPlus, FiTrash2, FiSearch, FiFileText, FiUser, FiBox,
-  FiX, FiSave, FiLoader, FiRefreshCw, FiChevronDown, FiChevronUp,
-  FiChevronRight, FiCheckCircle, FiAlertCircle, FiArrowLeft, FiPackage, FiSlash,
+  FiX, FiSave, FiLoader, FiChevronDown, FiChevronRight,
+  FiCheckCircle, FiAlertCircle, FiArrowLeft,
 } from 'react-icons/fi';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { apiClient } from '../api';
@@ -16,10 +16,6 @@ import { addAppLog } from '../services/appLogger';
 const Offcanvas = lazy(() =>
   import('../components/Offcanvas').then((m) => ({ default: m.Offcanvas })),
 );
-
-/* ────────────────────────────────────────────────────────────────────────────
- * Constants & primitives
- * ──────────────────────────────────────────────────────────────────────── */
 
 const LIMITS = {
   NAME: 200, TEXT: 500, LONG_TEXT: 2000, SHORT: 100,
@@ -41,13 +37,16 @@ function safeNumber(v: unknown, fallback = 0): number {
 function clamp(n: number, min: number, max: number): number {
   return Math.min(Math.max(n, min), max);
 }
+function round2(v: number): number {
+  return Math.round((v + Number.EPSILON) * 100) / 100;
+}
+function nonNegative(v: unknown): number {
+  return Math.max(0, safeNumber(v));
+}
 function sanitizeText(s: string, maxLen: number = LIMITS.TEXT): string {
   if (typeof s !== 'string') return '';
   // eslint-disable-next-line no-control-regex
   return s.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').slice(0, maxLen);
-}
-function sanitizeDigits(s: string, maxLen: number): string {
-  return s.replace(/\D+/g, '').slice(0, maxLen);
 }
 function makeTxnId(): string {
   const d = new Date();
@@ -57,34 +56,6 @@ function makeTxnId(): string {
   const rnd = Math.random().toString(36).slice(2, 6).toUpperCase();
   return `TXN-${y}${m}${day}-${rnd}`;
 }
-
-function isNotFoundError(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const e = err as {
-    status?: number;
-    response?: { status?: number };
-    backendMessage?: string;
-    message?: string;
-  };
-  if (e.status === 404 || e.response?.status === 404) return true;
-  const msg = (e.backendMessage ?? e.message ?? '').toLowerCase();
-  return msg.includes('not found') || msg.includes('no query results');
-}
-
-function isStockRecordNotFoundError(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const e = err as {
-    status?: number;
-    response?: { status?: number };
-    backendMessage?: string;
-    message?: string;
-  };
-  const status = e.status ?? e.response?.status;
-  if (status !== 404) return false;
-  const msg = (e.backendMessage ?? e.message ?? '').toLowerCase();
-  return msg.includes('stock record') || msg.includes('no stock record');
-}
-
 function getUserFriendlyError(error: unknown, fallback = 'Something went wrong. Please try again.'): string {
   if (!error) return fallback;
   if (typeof error === 'string') return error;
@@ -103,24 +74,17 @@ function formatCurrency(value: number | string | undefined | null): string {
   return n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/* ────────────────────────────────────────────────────────────────────────────
- * Types
- * ──────────────────────────────────────────────────────────────────────── */
-
 interface Company { id: number; name: string }
 interface Branch { id: number; name: string; company_id?: number }
 interface Warehouse { id: number; name: string; branch_id?: number | null }
 interface Supplier {
   id: number; name: string; code?: string; email?: string; phone?: string;
-  gstin?: string; pan?: string;
+  gstin?: string; gst_number?: string; pan?: string;
   billing_street?: string; billing_city?: string; billing_state?: string;
-  billing_country?: string; billing_pincode?: string;
-  billing_address?: string;
+  billing_country?: string; billing_pincode?: string; billing_address?: string;
   shipping_street?: string; shipping_city?: string; shipping_state?: string;
-  shipping_country?: string; shipping_pincode?: string;
-  shipping_address?: string;
-  contact_person?: string; contact_no?: string;
-  state?: string; company_id?: number;
+  shipping_country?: string; shipping_pincode?: string; shipping_address?: string;
+  contact_person?: string; contact_no?: string; state?: string; company_id?: number;
 }
 interface Product {
   id: number; name: string; hsn_sac_code?: string; uom?: string;
@@ -131,6 +95,11 @@ interface Product {
 }
 interface BankAccount { id: number; bank_name: string; account_no: string }
 
+type DiscountType = 'percent' | 'amount';
+type ApplyType = 'before_tax' | 'after_tax';
+type PaymentDirection = 'inward' | 'outward';
+type PaymentMethod = 'UPI' | 'cash' | 'cheque' | 'bank_transfer' | 'other';
+
 interface PurchaseItem {
   product_id: number;
   product_name: string;
@@ -138,10 +107,11 @@ interface PurchaseItem {
   qty: number;
   uom: string;
   price: number;
-  discount_type: 'percent' | 'amount';
+  discount_type: DiscountType;
   discount_percent: number;
   discount_amount: number;
   gst_slab: number;
+  custom_gst_rate: number;
   is_inter_state: boolean;
   cgst_percent: number; sgst_percent: number; igst_percent: number;
   cgst_amount: number; sgst_amount: number; igst_amount: number;
@@ -151,13 +121,13 @@ interface AdditionalCharge { id: string; label: string; amount: number }
 interface PaymentEntry {
   id: string;
   amount: number;
-  payment_method: 'UPI' | 'cash' | 'cheque' | 'bank_transfer' | 'other';
+  payment_method: PaymentMethod;
   reference_no: string;
   transaction_date: string;
   bank_name: string;
   account_number: string;
   remarks: string;
-  payment_direction: 'inward' | 'outward';
+  payment_direction: PaymentDirection;
   persisted?: boolean;
 }
 interface PurchaseFormData {
@@ -178,7 +148,6 @@ interface PurchaseFormData {
   challan_no: string; challan_date: string;
   po_no: string; po_date: string;
   lr_no: string; eway_no: string; delivery_mode: string;
-  payment_type: 'credit' | 'cash' | 'cheque' | 'online' | 'bank_transfer';
   payment_term: string;
   due_date: string;
   bank_id: number | '';
@@ -186,6 +155,7 @@ interface PurchaseFormData {
   general_discount_percent: number;
   general_discount_amount: number;
   tcs_percent: number;
+  round_off: number;
   terms_title: string;
   terms_detail: string;
   document_note: string;
@@ -201,16 +171,10 @@ interface SupplierFormData {
   email: string;
   gst_number: string;
   pan: string;
-  billing_street: string;
-  billing_city: string;
-  billing_state: string;
-  billing_country: string;
-  billing_pincode: string;
-  shipping_street: string;
-  shipping_city: string;
-  shipping_state: string;
-  shipping_country: string;
-  shipping_pincode: string;
+  billing_street: string; billing_city: string; billing_state: string;
+  billing_country: string; billing_pincode: string;
+  shipping_street: string; shipping_city: string; shipping_state: string;
+  shipping_country: string; shipping_pincode: string;
   same_as_billing: boolean;
   opening_balance: number | string;
   credit_limit: number | string;
@@ -219,89 +183,46 @@ interface SupplierFormData {
   is_active: boolean;
 }
 
-type PostSaveTask = {
-  id: string;
-  label: string;
-  status: 'pending' | 'running' | 'success' | 'error' | 'skipped';
-  message?: string;
-};
-
-/* ────────────────────────────────────────────────────────────────────────────
- * Pure calculations
- * ──────────────────────────────────────────────────────────────────────── */
+function getEffectiveGst(item: PurchaseItem): number {
+  return item.gst_slab === -1 ? nonNegative(item.custom_gst_rate) : nonNegative(item.gst_slab);
+}
 
 function calculateItem(
   raw: Omit<PurchaseItem, 'cgst_percent' | 'sgst_percent' | 'igst_percent' | 'cgst_amount' | 'sgst_amount' | 'igst_amount' | 'total'>,
 ): PurchaseItem {
-  const qty = Math.max(0, safeNumber(raw.qty));
-  const price = Math.max(0, safeNumber(raw.price));
-  const base = qty * price;
+  const qty = nonNegative(raw.qty);
+  const price = nonNegative(raw.price);
+  const base = round2(qty * price);
 
-  const discPct = clamp(safeNumber(raw.discount_percent), 0, 100);
-  const discAmt = Math.max(0, safeNumber(raw.discount_amount));
+  const discPct = clamp(nonNegative(raw.discount_percent), 0, 100);
+  const discAmt = nonNegative(raw.discount_amount);
 
   const computedDiscount = raw.discount_type === 'percent'
-    ? (base * discPct) / 100
-    : Math.min(discAmt, base);
+    ? round2(Math.min(base, (base * discPct) / 100))
+    : round2(Math.min(discAmt, base));
 
-  const afterDiscount = Math.max(0, base - computedDiscount);
-  const slab = clamp(safeNumber(raw.gst_slab), 0, 100);
+  const taxable = round2(Math.max(0, base - computedDiscount));
+  const slab = clamp(nonNegative(raw.gst_slab), 0, 100);
+  const cgstPercent = raw.is_inter_state ? 0 : slab / 2;
+  const sgstPercent = raw.is_inter_state ? 0 : slab / 2;
+  const igstPercent = raw.is_inter_state ? slab : 0;
 
-  let cgst_amount = 0, sgst_amount = 0, igst_amount = 0;
-  if (raw.is_inter_state) {
-    igst_amount = (afterDiscount * slab) / 100;
-  } else {
-    cgst_amount = (afterDiscount * (slab / 2)) / 100;
-    sgst_amount = (afterDiscount * (slab / 2)) / 100;
-  }
+  const cgst_amount = round2((taxable * cgstPercent) / 100);
+  const sgst_amount = round2((taxable * sgstPercent) / 100);
+  const igst_amount = round2((taxable * igstPercent) / 100);
+  const total = round2(taxable + cgst_amount + sgst_amount + igst_amount);
 
   return {
-    ...raw,
-    qty, price,
+    ...raw, qty, price,
+    discount_type: raw.discount_type,
     discount_percent: discPct,
     discount_amount: computedDiscount,
     gst_slab: slab,
-    cgst_percent: raw.is_inter_state ? 0 : slab / 2,
-    sgst_percent: raw.is_inter_state ? 0 : slab / 2,
-    igst_percent: raw.is_inter_state ? slab : 0,
-    cgst_amount, sgst_amount, igst_amount,
-    total: afterDiscount + cgst_amount + sgst_amount + igst_amount,
-  };
-}
-
-function calculateSummary(items: PurchaseItem[], form: PurchaseFormData) {
-  const itemSubtotal = items.reduce((s, i) => s + i.qty * i.price, 0);
-  const itemDiscountTotal = items.reduce((s, i) => s + i.discount_amount, 0);
-  const cgstTotal = items.reduce((s, i) => s + i.cgst_amount, 0);
-  const sgstTotal = items.reduce((s, i) => s + i.sgst_amount, 0);
-  const igstTotal = items.reduce((s, i) => s + i.igst_amount, 0);
-  const totalTax = cgstTotal + sgstTotal + igstTotal;
-  const itemTaxableTotal = itemSubtotal - itemDiscountTotal;
-
-  const genDiscPct = clamp(safeNumber(form.general_discount_percent), 0, 100);
-  const generalDiscountAmount = genDiscPct
-    ? (itemTaxableTotal * genDiscPct) / 100
-    : Math.max(0, safeNumber(form.general_discount_amount));
-
-  const additionalChargesTotal = form.additional_charges
-    .reduce((s, c) => s + Math.max(0, safeNumber(c.amount)), 0);
-
-  const packing = Math.max(0, safeNumber(form.packing_charges));
-  const tcsPct = clamp(safeNumber(form.tcs_percent), 0, 100);
-
-  const totalBeforeTcs = itemTaxableTotal - generalDiscountAmount + totalTax + additionalChargesTotal + packing;
-  const tcsAmount = (totalBeforeTcs * tcsPct) / 100;
-  const totalBeforeRoundOff = totalBeforeTcs + tcsAmount;
-  const grandTotal = Math.round(totalBeforeRoundOff);
-  const roundOff = grandTotal - totalBeforeRoundOff;
-
-  const totalPaid = form.payments.reduce((s, p) => s + Math.max(0, safeNumber(p.amount)), 0);
-
-  return {
-    itemSubtotal, itemDiscountTotal, totalTax, cgstTotal, sgstTotal, igstTotal,
-    itemTaxableTotal, generalDiscountAmount, additionalChargesTotal,
-    totalBeforeTcs, tcsAmount, totalBeforeRoundOff, roundOff, grandTotal, totalPaid,
-    balanceDue: Math.max(0, grandTotal - totalPaid),
+    custom_gst_rate: nonNegative(raw.custom_gst_rate),
+    cgst_percent: cgstPercent,
+    sgst_percent: sgstPercent,
+    igst_percent: igstPercent,
+    cgst_amount, sgst_amount, igst_amount, total,
   };
 }
 
@@ -346,10 +267,6 @@ function numberToWordsINR(amount: number): string {
   return words + ' Only';
 }
 
-/* ────────────────────────────────────────────────────────────────────────────
- * API cache hook
- * ──────────────────────────────────────────────────────────────────────── */
-
 const apiCache = new Map<string, { data: unknown; timestamp: number }>();
 
 function extractArray<T>(res: unknown): T[] {
@@ -392,13 +309,8 @@ function useApiCache<T>(key: string, fetcher: () => Promise<unknown>, ttlMs = 30
   }, [key, fetcher, ttlMs]);
 
   useEffect(() => { void fetchData(); }, [fetchData]);
-
   return { data, loading, error, refresh: () => fetchData(true) };
 }
-
-/* ────────────────────────────────────────────────────────────────────────────
- * UI primitives
- * ──────────────────────────────────────────────────────────────────────── */
 
 const inputBase =
   'w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-sm text-slate-800 ' +
@@ -475,10 +387,8 @@ function ConfirmDialog({
 
   if (!open) return null;
   return (
-    <div
-      role="dialog" aria-modal="true" aria-labelledby="confirm-title"
-      className="fixed inset-0 z-[70] bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4"
-    >
+    <div role="dialog" aria-modal="true" aria-labelledby="confirm-title"
+      className="fixed inset-0 z-[70] bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-2xl border border-slate-100 w-full max-w-md p-6">
         <div className="flex items-start gap-3">
           <div className={`shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${
@@ -492,18 +402,14 @@ function ConfirmDialog({
           </div>
         </div>
         <div className="mt-6 flex justify-end gap-2">
-          <button
-            onClick={onCancel}
-            className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 transition"
-          >
+          <button onClick={onCancel}
+            className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 transition">
             Cancel
           </button>
-          <button
-            onClick={onConfirm}
+          <button onClick={onConfirm}
             className={`px-4 py-2 rounded-xl text-sm font-medium text-white transition ${
               destructive ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'
-            }`}
-          >
+            }`}>
             {confirmLabel}
           </button>
         </div>
@@ -511,10 +417,6 @@ function ConfirmDialog({
     </div>
   );
 }
-
-/* ────────────────────────────────────────────────────────────────────────────
- * Initial state
- * ──────────────────────────────────────────────────────────────────────── */
 
 const DEFAULT_TERMS =
   '1. Subject to our home Jurisdiction.\n' +
@@ -532,9 +434,10 @@ const createInitialForm = (): PurchaseFormData => ({
   invoice_date: new Date().toISOString().slice(0, 10),
   challan_no: '', challan_date: '', po_no: '', po_date: '',
   lr_no: '', eway_no: '', delivery_mode: '',
-  payment_type: 'credit', payment_term: '', due_date: '',
+  payment_term: '', due_date: '',
   bank_id: '', packing_charges: 0,
   general_discount_percent: 0, general_discount_amount: 0, tcs_percent: 0,
+  round_off: 0,
   terms_title: 'Terms and Conditions', terms_detail: DEFAULT_TERMS,
   document_note: '', additional_charges: [], internal_note: '', payments: [],
 });
@@ -550,20 +453,14 @@ const createInitialSupplier = (): SupplierFormData => ({
   notes: '', is_active: true,
 });
 
-/* ────────────────────────────────────────────────────────────────────────────
- * Main component
- * ──────────────────────────────────────────────────────────────────────── */
-
 export function EditPurchaseInvoicePage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { showSuccess, showError, showInfo } = useNotification() as {
+  const { showSuccess, showError } = useNotification() as {
     showSuccess: (a: string, b?: string) => void;
     showError: (a: string, b?: string) => void;
-    showInfo?: (a: string, b?: string) => void;
   };
 
-  /* ── API fetchers ── */
   const getCompanies = useCallback(() => apiClient.getCompanies(), []);
   const getSuppliers = useCallback(() => apiClient.getSuppliers(), []);
   const getProducts = useCallback(() => apiClient.getAllProducts(), []);
@@ -583,12 +480,10 @@ export function EditPurchaseInvoicePage() {
     data: products, loading: productsLoading, error: productsError, refresh: refreshProducts,
   } = useApiCache<Product>('products', getProducts);
   const { data: banks } = useApiCache<BankAccount>('banks', getBanks);
-  const { data: warehouses, refresh: refreshWarehouses } = useApiCache<Warehouse>('warehouses', getWarehouses);
+  const { data: warehouses } = useApiCache<Warehouse>('warehouses', getWarehouses);
 
-  /* ── Form / item state ── */
   const [form, setForm] = useState<PurchaseFormData>(createInitialForm);
   const [items, setItems] = useState<PurchaseItem[]>([]);
-  const [originalItems, setOriginalItems] = useState<PurchaseItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
@@ -598,16 +493,14 @@ export function EditPurchaseInvoicePage() {
     | null
   >(null);
 
-  /* ── Load state ── */
+  const [autoRoundOff, setAutoRoundOff] = useState(true);
+  const [generalDiscountType, setGeneralDiscountType] = useState<DiscountType>('percent');
+  const [generalDiscountApplyType, setGeneralDiscountApplyType] = useState<ApplyType>('before_tax');
+  const [packingApplyType, setPackingApplyType] = useState<ApplyType>('after_tax');
+
   const [loadingInvoice, setLoadingInvoice] = useState(true);
   const [invoiceNotFound, setInvoiceNotFound] = useState(false);
 
-  /* ── Automation toggles ── */
-  const [autoAdjustStock, setAutoAdjustStock] = useState(true);
-  const [postTasks, setPostTasks] = useState<PostSaveTask[]>([]);
-  const [has404Warning, setHas404Warning] = useState(false);
-
-  /* ── Dirty tracking ── */
   const initialFormRef = useRef<string>('');
   const initialItemsRef = useRef<string>('');
   const [hydrated, setHydrated] = useState(false);
@@ -625,7 +518,6 @@ export function EditPurchaseInvoicePage() {
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [isDirty]);
 
-  /* ── Branches (name-based for purchase flow) ── */
   const [availableBranches, setAvailableBranches] = useState<string[]>(['Main Branch']);
   const [branchLoading, setBranchLoading] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
@@ -660,7 +552,6 @@ export function EditPurchaseInvoicePage() {
     return () => { cancelled = true; };
   }, [form.company_id, branchTouched]);
 
-  /* ── Search state ── */
   const [productSearch, setProductSearch] = useState('');
   const [supplierSearch, setSupplierSearch] = useState('');
   const [showProductDropdown, setShowProductDropdown] = useState(false);
@@ -668,13 +559,11 @@ export function EditPurchaseInvoicePage() {
   const [productHighlight, setProductHighlight] = useState(-1);
   const [supplierHighlight, setSupplierHighlight] = useState(-1);
 
-  /* ── Supplier creation state ── */
   const [showSupplierOffcanvas, setShowSupplierOffcanvas] = useState(false);
   const [newSupplier, setNewSupplier] = useState<SupplierFormData>(createInitialSupplier);
   const [supplierFormErrors, setSupplierFormErrors] = useState<Record<string, boolean>>({});
   const [supplierSubmitting, setSupplierSubmitting] = useState(false);
 
-  /* ── Product creation state ── */
   const [showProductOffcanvas, setShowProductOffcanvas] = useState(false);
   const [productSubmitting, setProductSubmitting] = useState(false);
   const [newProduct, setNewProduct] = useState({
@@ -684,9 +573,11 @@ export function EditPurchaseInvoicePage() {
   });
   const [productFormErrors, setProductFormErrors] = useState<Record<string, boolean>>({});
 
-  /* ── Dropdown refs ── */
   const productDropdownRef = useRef<HTMLDivElement>(null);
   const supplierDropdownRef = useRef<HTMLDivElement>(null);
+
+  /** Tracks the supplier_id we last hydrated from, so we can detect a user change vs. the initial load. */
+  const lastHydratedSupplierIdRef = useRef<number | '' | null>(null);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -701,7 +592,6 @@ export function EditPurchaseInvoicePage() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  /* ── Load existing purchase invoice ── */
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
@@ -716,7 +606,7 @@ export function EditPurchaseInvoicePage() {
           company_id: inv.company_id || '',
           branch: inv.branch || 'Main Branch',
           supplier_id: inv.supplier_id || '',
-          supplier_name: inv.supplier_name || '',
+          supplier_name: inv.supplier_name || inv.supplier?.name || '',
           supplier_address: inv.supplier_address || '',
           contact_person: inv.contact_person || '',
           phone_no: inv.phone_no || '',
@@ -734,14 +624,14 @@ export function EditPurchaseInvoicePage() {
           lr_no: inv.lr_no || '',
           eway_no: inv.eway_no || '',
           delivery_mode: inv.delivery_mode || '',
-          payment_type: inv.payment_type || 'credit',
           payment_term: inv.payment_term || '',
           due_date: inv.due_date?.split('T')[0] || '',
           bank_id: inv.bank_id || '',
-          packing_charges: safeNumber(inv.packing_charges),
-          general_discount_percent: safeNumber(inv.general_discount_percent),
-          general_discount_amount: safeNumber(inv.general_discount_amount),
-          tcs_percent: safeNumber(inv.tcs_percent),
+          packing_charges: nonNegative(inv.packing_charges),
+          general_discount_percent: nonNegative(inv.general_discount_percent),
+          general_discount_amount: nonNegative(inv.general_discount_amount),
+          tcs_percent: nonNegative(inv.tcs_percent),
+          round_off: safeNumber(inv.round_off),
           terms_title: inv.terms_title || 'Terms and Conditions',
           terms_detail: inv.terms_detail || DEFAULT_TERMS,
           document_note: inv.document_note || '',
@@ -753,42 +643,85 @@ export function EditPurchaseInvoicePage() {
               }))
             : [],
           internal_note: inv.internal_note || '',
-          payments: Array.isArray(inv.payments)
-            ? inv.payments.map((p: any) => ({
-                id: `existing_${p.id ?? Date.now()}`,
-                amount: safeNumber(p.amount),
-                payment_method: (p.payment_method as PaymentEntry['payment_method']) || 'bank_transfer',
-                reference_no: p.reference_no || '',
-                transaction_date: p.transaction_date?.split('T')[0] || '',
-                bank_name: p.bank_name || '',
-                account_number: p.account_number || '',
-                remarks: p.remarks || '',
-                payment_direction: (p.payment_direction as 'inward' | 'outward') || 'outward',
-                persisted: true,
-              }))
-            : [],
+          payments: [],
         };
 
+        const loadedPayments: PaymentEntry[] = [];
+        if (Array.isArray(inv.payments) && inv.payments.length > 0) {
+          inv.payments.forEach((p: any, idx: number) => {
+            loadedPayments.push({
+              id: `existing_${p.id ?? idx}`,
+              amount: safeNumber(p.amount),
+              payment_method: (p.payment_method as PaymentMethod) || 'bank_transfer',
+              reference_no: p.reference_no || '',
+              transaction_date: p.transaction_date?.split('T')[0] || '',
+              bank_name: p.bank_name || '',
+              account_number: p.account_number || '',
+              remarks: p.remarks || '',
+              payment_direction: (p.payment_direction as PaymentDirection) || 'outward',
+              persisted: true,
+            });
+          });
+        } else if (safeNumber(inv.paid_amount) > 0) {
+          loadedPayments.push({
+            id: 'paid_amount_fallback',
+            amount: safeNumber(inv.paid_amount),
+            payment_method: 'bank_transfer',
+            reference_no: `PAID-${inv.id ?? id}`,
+            transaction_date: inv.purchase_date?.split('T')[0] || new Date().toISOString().slice(0, 10),
+            bank_name: '',
+            account_number: '',
+            remarks: 'Paid amount recorded on purchase invoice',
+            payment_direction: 'outward',
+            persisted: true,
+          });
+        }
+        loadedForm.payments = loadedPayments;
+
+        if (typeof inv.packing_apply_type === 'string') {
+          setPackingApplyType(inv.packing_apply_type === 'before_tax' ? 'before_tax' : 'after_tax');
+        }
+        if (typeof inv.general_discount_type === 'string') {
+          setGeneralDiscountType(inv.general_discount_type === 'amount' ? 'amount' : 'percent');
+        }
+        if (typeof inv.general_discount_apply_type === 'string') {
+          setGeneralDiscountApplyType(inv.general_discount_apply_type === 'after_tax' ? 'after_tax' : 'before_tax');
+        }
+        setAutoRoundOff(true);
+
         const loadedItems: PurchaseItem[] = (Array.isArray(inv.items) ? inv.items : []).map((it: any) => {
+          const price = nonNegative(it.unit_price ?? it.purchase_price ?? it.price ?? it.rate);
+          const qty = safeNumber(it.quantity ?? it.qty, 1);
+          const gstFromServer = safeNumber(it.gst_slab ?? it.gst_rate ?? it.igst_percent);
+          const gstFallback = safeNumber(it.product?.igst_rate ?? it.product?.tax_rate);
+          const gst = gstFromServer || gstFallback;
+          const isInter = typeof it.is_inter_state === 'boolean'
+            ? it.is_inter_state
+            : safeNumber(it.igst_percent ?? it.igst_amount) > 0;
+
           const base = {
-            product_id: it.product_id,
+            product_id: Number(it.product_id),
             product_name: it.product?.name || it.product_name || `Product #${it.product_id}`,
             hsn_sac_code: it.product?.hsn_sac_code || it.hsn_sac_code || '',
-            qty: safeNumber(it.quantity ?? it.qty, 1),
-            uom: it.product?.uom || it.uom || 'NOS',
-            price: safeNumber(it.unit_price ?? it.price),
-            discount_type: (it.discount_type as 'percent' | 'amount') || 'percent',
-            discount_percent: safeNumber(it.discount_percent),
-            discount_amount: safeNumber(it.discount_amount),
-            gst_slab: safeNumber(it.gst_slab ?? it.igst_percent ?? it.product?.igst_rate ?? it.product?.tax_rate),
-            is_inter_state: it.is_inter_state ?? (safeNumber(it.gst_slab ?? it.igst_percent) > 0),
+            qty,
+            uom: it.product?.uom || it.product?.unit || it.uom || it.unit || 'NOS',
+            price,
+            discount_type: (it.discount_type as DiscountType) || 'percent',
+            discount_percent: nonNegative(it.discount_percent),
+            discount_amount: nonNegative(it.discount_amount),
+            gst_slab: [0, 5, 12, 18, 28].includes(gst) ? gst : -1,
+            custom_gst_rate: gst,
+            is_inter_state: isInter,
           };
           return calculateItem(base);
         });
 
         setForm(loadedForm);
         setItems(loadedItems);
-        setOriginalItems(loadedItems.map((x) => ({ ...x })));
+
+        // Remember which supplier was hydrated from the server so the
+        // supplier effect knows this is the "initial load" (not a user change).
+        lastHydratedSupplierIdRef.current = loadedForm.supplier_id || null;
 
         queueMicrotask(() => {
           initialFormRef.current = JSON.stringify(loadedForm);
@@ -809,7 +742,6 @@ export function EditPurchaseInvoicePage() {
     return () => { cancelled = true; };
   }, [id, showError]);
 
-  /* ── Derived lists ── */
   const filteredSuppliers = useMemo(() => {
     if (!suppliers) return [];
     let list = suppliers;
@@ -821,7 +753,7 @@ export function EditPurchaseInvoicePage() {
     return list.filter((s) =>
       s.name?.toLowerCase().includes(term) ||
       s.code?.toLowerCase().includes(term) ||
-      s.gstin?.toLowerCase().includes(term) ||
+      (s.gstin || s.gst_number)?.toLowerCase().includes(term) ||
       s.contact_no?.includes(term),
     );
   }, [suppliers, supplierSearch, form.company_id]);
@@ -838,17 +770,106 @@ export function EditPurchaseInvoicePage() {
     );
   }, [products, productSearch]);
 
-  const summary = useMemo(() => calculateSummary(items, form), [items, form]);
-  const totalInWords = useMemo(() => numberToWordsINR(summary.grandTotal), [summary.grandTotal]);
+  const itemSubtotal = useMemo(
+    () => round2(items.reduce((s, i) => s + nonNegative(i.qty) * nonNegative(i.price), 0)),
+    [items]
+  );
+  const itemDiscountTotal = useMemo(
+    () => round2(items.reduce((s, i) => s + nonNegative(i.discount_amount), 0)),
+    [items]
+  );
+  const taxableBeforeBillDiscount = useMemo(
+    () => round2(Math.max(0, itemSubtotal - itemDiscountTotal)),
+    [itemSubtotal, itemDiscountTotal]
+  );
+  const itemCgstTotal = useMemo(
+    () => round2(items.reduce((s, i) => s + nonNegative(i.cgst_amount), 0)),
+    [items]
+  );
+  const itemSgstTotal = useMemo(
+    () => round2(items.reduce((s, i) => s + nonNegative(i.sgst_amount), 0)),
+    [items]
+  );
+  const itemIgstTotal = useMemo(
+    () => round2(items.reduce((s, i) => s + nonNegative(i.igst_amount), 0)),
+    [items]
+  );
+  const itemTaxTotal = round2(itemCgstTotal + itemSgstTotal + itemIgstTotal);
 
-  const defaultWarehouseId = useMemo<number | null>(() => {
-    if (!warehouses || warehouses.length === 0) return null;
-    if (form.branch) {
-      const match = warehouses.find((w) => w.name === form.branch);
-      if (match) return match.id;
-    }
-    return warehouses[0].id;
-  }, [warehouses, form.branch]);
+  const effectiveTaxRate = taxableBeforeBillDiscount > 0 ? itemTaxTotal / taxableBeforeBillDiscount : 0;
+
+  const generalDiscountAmount = useMemo(() => {
+    const raw = generalDiscountType === 'percent'
+      ? taxableBeforeBillDiscount * Math.min(100, nonNegative(form.general_discount_percent)) / 100
+      : nonNegative(form.general_discount_amount);
+    return round2(Math.min(taxableBeforeBillDiscount, raw));
+  }, [generalDiscountType, form.general_discount_percent, form.general_discount_amount, taxableBeforeBillDiscount]);
+
+  const discountedTaxable = generalDiscountApplyType === 'before_tax'
+    ? round2(Math.max(0, taxableBeforeBillDiscount - generalDiscountAmount))
+    : taxableBeforeBillDiscount;
+
+  const taxAfterBillDiscount = useMemo(() => {
+    if (generalDiscountApplyType === 'after_tax') return itemTaxTotal;
+    if (taxableBeforeBillDiscount <= 0) return 0;
+    let remainingDiscount = generalDiscountAmount;
+    let tax = 0;
+    items.forEach((item) => {
+      const base = round2(Math.max(0, nonNegative(item.qty) * nonNegative(item.price) - nonNegative(item.discount_amount)));
+      const allocated = round2(base > 0 ? generalDiscountAmount * base / taxableBeforeBillDiscount : 0);
+      const adjustedBase = Math.max(0, base - allocated);
+      const slab = getEffectiveGst(item);
+      tax += adjustedBase * slab / 100;
+      remainingDiscount -= allocated;
+    });
+    tax += remainingDiscount > 0 && discountedTaxable > 0 ? remainingDiscount * effectiveTaxRate : 0;
+    return round2(tax);
+  }, [generalDiscountApplyType, generalDiscountAmount, itemTaxTotal, taxableBeforeBillDiscount, items, discountedTaxable, effectiveTaxRate]);
+
+  const packingAmount = nonNegative(form.packing_charges);
+  const packingTax = packingApplyType === 'before_tax'
+    ? round2(packingAmount * effectiveTaxRate)
+    : 0;
+
+  const additionalChargesTotal = useMemo(
+    () => round2(form.additional_charges.reduce((s, c) => s + nonNegative(c.amount), 0)),
+    [form.additional_charges]
+  );
+
+  const totalTaxWithPacking = round2(taxAfterBillDiscount + packingTax);
+  const afterTaxGeneralDiscount = generalDiscountApplyType === 'after_tax' ? generalDiscountAmount : 0;
+
+  const totalBeforeTcs = useMemo(() => round2(Math.max(0,
+    discountedTaxable
+    + (packingApplyType === 'before_tax' ? packingAmount : 0)
+    + totalTaxWithPacking
+    + additionalChargesTotal
+    - afterTaxGeneralDiscount
+    + (packingApplyType === 'after_tax' ? packingAmount : 0)
+  )), [discountedTaxable, packingApplyType, packingAmount, totalTaxWithPacking, additionalChargesTotal, afterTaxGeneralDiscount]);
+
+  const tcsAmount = round2(totalBeforeTcs * Math.min(100, nonNegative(form.tcs_percent)) / 100);
+  const totalBeforeRoundOff = round2(totalBeforeTcs + tcsAmount);
+
+  useEffect(() => {
+    if (!autoRoundOff) return;
+    const next = round2(Math.round(totalBeforeRoundOff) - totalBeforeRoundOff);
+    setForm((prev) => Math.abs(prev.round_off - next) < 0.005 ? prev : { ...prev, round_off: next });
+  }, [autoRoundOff, totalBeforeRoundOff]);
+
+  const grandTotal = round2(Math.max(0, totalBeforeRoundOff + safeNumber(form.round_off)));
+  const totalInWords = useMemo(() => numberToWordsINR(grandTotal), [grandTotal]);
+
+  const totalOutward = useMemo(
+    () => round2(form.payments.reduce((s, p) => s + (p.payment_direction === 'outward' ? nonNegative(p.amount) : 0), 0)),
+    [form.payments]
+  );
+  const totalInward = useMemo(
+    () => round2(form.payments.reduce((s, p) => s + (p.payment_direction === 'inward' ? nonNegative(p.amount) : 0), 0)),
+    [form.payments]
+  );
+  const netPaid = round2(totalOutward - totalInward);
+  const balanceDue = round2(grandTotal - netPaid);
 
   const productIndex = useMemo(() => {
     const map = new Map<number, Product>();
@@ -856,27 +877,57 @@ export function EditPurchaseInvoicePage() {
     return map;
   }, [products]);
 
-  /* ── Auto-fill supplier info on selection change ── */
+  /**
+   * ────────────────────────────────────────────────────────────────────
+   * Supplier hydration  →  also auto-fills `place_of_supply`.
+   *
+   * Rules for `place_of_supply`:
+   *   1. On the very first sync after loading an invoice, keep the value
+   *      stored on the invoice (if any).
+   *   2. If the invoice has no stored value → fill from supplier's state.
+   *   3. When the user changes the supplier → always fill from the new
+   *      supplier's state (this is what the user expects).
+   *   4. The user can still edit the field manually; that edit will be
+   *      kept until they change the supplier again.
+   * ────────────────────────────────────────────────────────────────────
+   */
   useEffect(() => {
     if (!form.supplier_id || !suppliers) return;
     const sup = suppliers.find((s) => s.id === Number(form.supplier_id));
     if (!sup) return;
+
     const billingAddr = sup.billing_address
       || [sup.billing_street, sup.billing_city, sup.billing_state, sup.billing_pincode]
-          .filter(Boolean).join(', ');
-    setForm((p) => ({
-      ...p,
-      supplier_name: sup.name || '',
-      supplier_address: billingAddr || p.supplier_address,
-      contact_person: sup.contact_person || '',
-      phone_no: sup.contact_no || sup.phone || '',
-      gstin_pan: sup.gstin || sup.pan || '',
-      ship_to: sup.shipping_address || sup.shipping_street ? 'shipping' : 'billing',
-    }));
+        .filter(Boolean).join(', ');
+
+    const supplierState = (sup.billing_state || sup.state || '').trim();
+
+    // Was this the initial invoice load, or a user-initiated supplier change?
+    const isInitialHydration = lastHydratedSupplierIdRef.current === form.supplier_id;
+    const supplierChangedByUser = !isInitialHydration;
+
+    // Update the ref so subsequent runs treat this as "already hydrated".
+    lastHydratedSupplierIdRef.current = form.supplier_id;
+
+    setForm((p) => {
+      const shouldAutoFillPlace =
+        !!supplierState &&
+        (supplierChangedByUser || !p.place_of_supply);
+
+      return {
+        ...p,
+        supplier_name: sup.name || '',
+        supplier_address: billingAddr || p.supplier_address,
+        contact_person: sup.contact_person || '',
+        phone_no: sup.contact_no || sup.phone || '',
+        gstin_pan: sup.gstin || sup.gst_number || sup.pan || '',
+        ship_to: sup.shipping_address || sup.shipping_street ? 'shipping' : 'billing',
+        place_of_supply: shouldAutoFillPlace ? supplierState : p.place_of_supply,
+      };
+    });
     setSupplierSearch(sup.name || '');
   }, [form.supplier_id, suppliers]);
 
-  /* ── Form helpers ── */
   const updateForm = useCallback(<K extends keyof PurchaseFormData>(key: K, value: PurchaseFormData[K]) => {
     setForm((p) => ({ ...p, [key]: value }));
     setFormErrors((prev) => {
@@ -899,24 +950,26 @@ export function EditPurchaseInvoicePage() {
     setSupplierSearch('');
   };
 
-  /* ── Item handlers ── */
   const addItem = useCallback((product: Product) => {
     setItems((prev) => {
       if (prev.some((i) => i.product_id === product.id)) {
         showError('Duplicate', 'Product already added.');
         return prev;
       }
+      const price = Math.max(0, safeNumber(product.purchase_price ?? product.price ?? product.sale_price));
+      const tax = nonNegative(product.igst_rate ?? product.tax_rate);
       const base = {
         product_id: product.id,
         product_name: sanitizeText(product.name, LIMITS.NAME),
         hsn_sac_code: sanitizeText(product.hsn_sac_code || '', LIMITS.SHORT),
         qty: 1,
         uom: sanitizeText(product.uom || product.unit || 'NOS', 16),
-        price: Math.max(0, safeNumber(product.purchase_price ?? product.price ?? product.sale_price)),
+        price,
         discount_type: 'percent' as const,
         discount_percent: 0,
         discount_amount: 0,
-        gst_slab: clamp(safeNumber(product.igst_rate ?? product.tax_rate), 0, 100),
+        gst_slab: [0, 5, 12, 18, 28].includes(tax) ? tax : -1,
+        custom_gst_rate: tax,
         is_inter_state: true,
       };
       return [...prev, calculateItem(base)];
@@ -937,7 +990,6 @@ export function EditPurchaseInvoicePage() {
     });
   }, []);
 
-  /* ── Additional charges ── */
   const addAdditionalCharge = () => {
     setForm((p) => ({
       ...p,
@@ -957,7 +1009,6 @@ export function EditPurchaseInvoicePage() {
     setForm((p) => ({ ...p, additional_charges: p.additional_charges.filter((c) => c.id !== id) }));
   };
 
-  /* ── Payments ── */
   const addPayment = () => {
     setForm((p) => ({
       ...p,
@@ -988,7 +1039,6 @@ export function EditPurchaseInvoicePage() {
     setForm((p) => ({ ...p, payments: p.payments.filter((x) => x.id !== id) }));
   };
 
-  /* ── Combobox keyboard nav ── */
   const onProductKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (!filteredProducts.length) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); setProductHighlight((i) => (i + 1) % filteredProducts.length); }
@@ -1025,7 +1075,6 @@ export function EditPurchaseInvoicePage() {
     }
   };
 
-  /* ── Validation ── */
   const validateMainForm = (): boolean => {
     const errors: Record<string, string> = {};
     if (!form.company_id) errors.company_id = 'Select a company.';
@@ -1033,6 +1082,12 @@ export function EditPurchaseInvoicePage() {
     if (!form.invoice_no.trim()) errors.invoice_no = 'Invoice number is required.';
     if (!form.place_of_supply.trim()) errors.place_of_supply = 'Place of supply is required.';
     if (items.length === 0) errors.items = 'Add at least one product.';
+    if (items.some((i) => i.qty <= 0)) errors.items = 'Item quantity must be greater than 0.';
+    if (items.some((i) => i.price < 0)) errors.items = 'Item price cannot be negative.';
+    if (items.some((i) => getEffectiveGst(i) > 100)) errors.items = 'GST rate cannot exceed 100%.';
+    if (totalOutward > grandTotal + 0.01) {
+      errors.payments = `Outward payments (₹${formatCurrency(totalOutward)}) cannot exceed the invoice total (₹${formatCurrency(grandTotal)}).`;
+    }
     if (form.gstin_pan && !REGEX.GSTIN.test(form.gstin_pan) && !REGEX.PAN.test(form.gstin_pan)) {
       errors.gstin_pan = 'Enter a valid GSTIN or PAN.';
     }
@@ -1040,140 +1095,8 @@ export function EditPurchaseInvoicePage() {
     return Object.keys(errors).length === 0;
   };
 
-  /* ── Post-save automation — stock delta for purchase ── */
-  const runPostSaveAutomation = useCallback(async (
-    invoiceNo: string,
-  ): Promise<{ stockErrors: string[]; notFoundIds: number[] }> => {
-    const stockErrors: string[] = [];
-    const notFoundIds: number[] = [];
-
-    if (!autoAdjustStock) {
-      setPostTasks([]);
-      setHas404Warning(false);
-      return { stockErrors, notFoundIds };
-    }
-
-    const originalMap = new Map<number, PurchaseItem>();
-    originalItems.forEach((i) => originalMap.set(i.product_id, i));
-    const newMap = new Map<number, PurchaseItem>();
-    items.forEach((i) => newMap.set(i.product_id, i));
-
-    type DeltaRow = { item: PurchaseItem; delta: number; kind: 'in' | 'out' };
-    const deltas: DeltaRow[] = [];
-
-    for (const it of items) {
-      const orig = originalMap.get(it.product_id);
-      if (!orig) {
-        deltas.push({ item: it, delta: it.qty, kind: 'in' });
-      } else {
-        const d = it.qty - orig.qty;
-        if (Math.abs(d) > 1e-9) {
-          deltas.push({ item: it, delta: Math.abs(d), kind: d > 0 ? 'in' : 'out' });
-        }
-      }
-    }
-    for (const orig of originalItems) {
-      if (!newMap.has(orig.product_id)) {
-        deltas.push({ item: orig, delta: orig.qty, kind: 'out' });
-      }
-    }
-
-    if (deltas.length === 0) {
-      setPostTasks([]);
-      setHas404Warning(false);
-      return { stockErrors, notFoundIds };
-    }
-
-    const initialTasks: PostSaveTask[] = deltas.map((d, idx) => ({
-      id: `stock-${d.item.product_id}-${idx}`,
-      label: d.kind === 'in'
-        ? `Stock IN · ${d.item.product_name} (+${d.delta} ${d.item.uom})`
-        : `Stock OUT · ${d.item.product_name} (−${d.delta} ${d.item.uom})`,
-      status: 'pending',
-    }));
-    setPostTasks(initialTasks);
-    setHas404Warning(false);
-
-    const setTask = (id: string, patch: Partial<PostSaveTask>) => {
-      setPostTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
-    };
-
-    if (!defaultWarehouseId) {
-      deltas.forEach((d, idx) => {
-        const id = `stock-${d.item.product_id}-${idx}`;
-        setTask(id, { status: 'skipped', message: 'No warehouse available' });
-        stockErrors.push(`${d.item.product_name}: no warehouse available`);
-      });
-      return { stockErrors, notFoundIds };
-    }
-
-    for (let i = 0; i < deltas.length; i++) {
-      const d = deltas[i];
-      const taskId = `stock-${d.item.product_id}-${i}`;
-      setTask(taskId, { status: 'running' });
-
-      const endpoint = d.kind === 'in'
-        ? `/products/${d.item.product_id}/stock-in`
-        : `/products/${d.item.product_id}/stock-out`;
-
-      try {
-        const res = await apiClient.request('POST', endpoint, {
-          warehouse_id: defaultWarehouseId,
-          quantity: d.delta,
-          unit_price: d.item.price,
-          reference_type: 'purchase',
-          reference_id: invoiceNo,
-          transaction_date: form.invoice_date,
-          remark: `${d.kind === 'in' ? 'Auto stock-in' : 'Auto stock-out'} for purchase invoice ${invoiceNo} (edit)`,
-        });
-
-        const after = (res as any)?.data?.stock_after;
-        if (typeof after === 'number' && after < 0) {
-          setTask(taskId, {
-            status: 'success',
-            message: d.kind === 'in' ? `Added (balance ${after})` : `Removed (balance ${after})`,
-          });
-        } else {
-          setTask(taskId, { status: 'success', message: d.kind === 'in' ? 'Added' : 'Removed' });
-        }
-      } catch (err) {
-        if (isStockRecordNotFoundError(err)) {
-          const msg = getUserFriendlyError(err, 'No stock record found for this warehouse');
-          setTask(taskId, {
-            status: 'error',
-            message: `${msg} — backend auto-create did not run. Check ProductController::stockIn/stockOut.`,
-          });
-          stockErrors.push(`${d.item.product_name}: ${msg}`);
-        } else if (isNotFoundError(err)) {
-          notFoundIds.push(d.item.product_id);
-          setTask(taskId, {
-            status: 'skipped',
-            message: 'Product not found (404) — cache may be stale',
-          });
-          stockErrors.push(`${d.item.product_name}: product not found on server`);
-        } else {
-          const msg = getUserFriendlyError(err, 'Stock adjustment failed');
-          setTask(taskId, { status: 'error', message: msg });
-          stockErrors.push(`${d.item.product_name}: ${msg}`);
-        }
-      }
-    }
-
-    if (stockErrors.length === 0 || notFoundIds.length > 0) {
-      apiCache.delete('products');
-      apiCache.delete('inventory');
-    }
-    if (notFoundIds.length > 0) setHas404Warning(true);
-
-    return { stockErrors, notFoundIds };
-  }, [
-    autoAdjustStock, items, originalItems, defaultWarehouseId, form.invoice_date,
-  ]);
-
-  /* ── Submit — UPDATE ── */
   const handleUpdate = useCallback(async () => {
     setErrorMsg(null);
-
     if (!validateMainForm()) {
       showError('Validation', 'Please fix the highlighted fields.');
       requestAnimationFrame(() => {
@@ -1182,6 +1105,8 @@ export function EditPurchaseInvoicePage() {
       });
       return;
     }
+
+    const newPayments = form.payments.filter((p) => !p.persisted && p.amount > 0);
 
     const payload = {
       company_id: Number(form.company_id),
@@ -1198,154 +1123,72 @@ export function EditPurchaseInvoicePage() {
       place_of_supply: sanitizeText(form.place_of_supply, LIMITS.SHORT),
       purchase_number: form.invoice_no.trim(),
       purchase_date: form.invoice_date,
-      due_date: form.due_date,
+      due_date: form.due_date || null,
       challan_no: sanitizeText(form.challan_no, LIMITS.SHORT),
-      challan_date: form.challan_date,
+      challan_date: form.challan_date || null,
       po_no: sanitizeText(form.po_no, LIMITS.SHORT),
-      po_date: form.po_date,
+      po_date: form.po_date || null,
       lr_no: sanitizeText(form.lr_no, LIMITS.SHORT),
       eway_no: sanitizeText(form.eway_no, LIMITS.SHORT),
       delivery_mode: sanitizeText(form.delivery_mode, LIMITS.SHORT),
-      payment_type: form.payment_type,
       payment_term: sanitizeText(form.payment_term, LIMITS.SHORT),
       bank_id: form.bank_id || null,
-      packing_charges: safeNumber(form.packing_charges),
-      general_discount_percent: clamp(safeNumber(form.general_discount_percent), 0, 100),
-      general_discount_amount: Math.max(0, safeNumber(form.general_discount_amount)),
-      tcs_percent: clamp(safeNumber(form.tcs_percent), 0, 100),
-      round_off: summary.roundOff,
+
+      packing_charges: packingAmount,
+      packing_apply_type: packingApplyType,
+      general_discount_type: generalDiscountType,
+      general_discount_apply_type: generalDiscountApplyType,
+      general_discount_percent: generalDiscountType === 'percent' ? nonNegative(form.general_discount_percent) : 0,
+      general_discount_amount: generalDiscountType === 'amount' ? nonNegative(form.general_discount_amount) : 0,
+      tcs_percent: nonNegative(form.tcs_percent),
+      round_off: round2(safeNumber(form.round_off)),
+
       terms_title: sanitizeText(form.terms_title, LIMITS.SHORT),
       terms_detail: sanitizeText(form.terms_detail, LIMITS.LONG_TEXT),
       document_note: sanitizeText(form.document_note, LIMITS.LONG_TEXT),
       internal_note: sanitizeText(form.internal_note, LIMITS.LONG_TEXT),
       additional_charges: form.additional_charges.map((c) => ({
         label: sanitizeText(c.label, LIMITS.SHORT),
-        amount: Math.max(0, safeNumber(c.amount)),
+        amount: round2(nonNegative(c.amount)),
       })),
-      total_amount: summary.grandTotal,
-      tax_amount: summary.totalTax,
-      discount_amount: summary.itemDiscountTotal + summary.generalDiscountAmount,
+
       items: items.map((i) => ({
         product_id: i.product_id,
         product_name: sanitizeText(i.product_name, LIMITS.NAME),
         hsn_sac_code: sanitizeText(i.hsn_sac_code, LIMITS.SHORT),
-        quantity: i.qty,
-        unit_price: i.price,
+        unit: sanitizeText(i.uom || 'NOS', 16),
+        quantity: nonNegative(i.qty),
+        purchase_price: nonNegative(i.price),
         discount_type: i.discount_type,
-        discount_percent: i.discount_percent,
-        discount_amount: i.discount_amount,
-        gst_slab: i.gst_slab,
-        is_inter_state: i.is_inter_state,
-        cgst_percent: i.cgst_percent,
-        sgst_percent: i.sgst_percent,
-        igst_percent: i.igst_percent,
-        cgst_amount: i.cgst_amount,
-        sgst_amount: i.sgst_amount,
-        igst_amount: i.igst_amount,
-        total: i.total,
+        discount_percent: i.discount_type === 'percent' ? nonNegative(i.discount_percent) : 0,
+        discount_amount: i.discount_type === 'amount' ? nonNegative(i.discount_amount) : 0,
+        gst_slab: getEffectiveGst(i),
+        is_inter_state: Boolean(i.is_inter_state),
       })),
+
+      payments: newPayments.map((p) => {
+        const ref = p.reference_no || `PAY-${id}-${Date.now()}`;
+        return {
+          amount: round2(p.amount),
+          payment_method: p.payment_method,
+          transaction_date: p.transaction_date || form.invoice_date,
+          reference_no: ref,
+          payment_direction: p.payment_direction || 'outward',
+          bank_name: p.bank_name || '',
+          account_number: p.account_number || '',
+          remarks: p.remarks || '',
+        };
+      }),
     };
 
     setSubmitting(true);
     try {
       await (apiClient as any).updatePurchase(Number(id), payload);
 
-      const validNewPayments: PaymentEntry[] = [];
-      let remaining = summary.grandTotal - summary.totalPaid;
-      for (const p of form.payments) {
-        if (p.persisted) continue;
-        if (p.amount <= 0 || remaining <= 0) continue;
-        const amt = Math.min(p.amount, remaining);
-        if (amt > 0) {
-          validNewPayments.push({ ...p, amount: amt });
-          remaining -= amt;
-        }
-      }
-
-      let paymentsRecorded = 0;
-      if (validNewPayments.length > 0) {
-        try {
-          await Promise.all(validNewPayments.map((p, idx) =>
-            apiClient.request('POST', '/payments', {
-              company_id: Number(form.company_id),
-              invoice_id: Number(id),
-              reference_no: p.reference_no || `PAY-${id}-${idx + 1}`,
-              amount: p.amount,
-              payment_method: p.payment_method,
-              status: 'completed',
-              payment_direction: p.payment_direction || 'outward',
-              transaction_date: p.transaction_date,
-              bank_name: p.bank_name,
-              account_number: p.account_number,
-              ledger_reference: p.reference_no || `PAY-${id}-${idx + 1}`,
-              remarks: sanitizeText(p.remarks, LIMITS.TEXT),
-            }),
-          ));
-          paymentsRecorded = validNewPayments.length;
-        } catch (payErr) {
-          const payMsg = getUserFriendlyError(payErr, 'Payment recording failed');
-          addAppLog({
-            module: 'Purchases', action: 'RecordPayments', status: 'error', message: payMsg,
-          });
-          showInfo?.(
-            'Payment not recorded',
-            `${payMsg} — the purchase invoice was updated. Add the payment from the invoice page.`,
-          );
-        }
-      }
-
-      let automationSummary = '';
-      if (autoAdjustStock) {
-        try {
-          const { stockErrors, notFoundIds } = await runPostSaveAutomation(form.invoice_no);
-          const deltaCount = postTasks.length;
-          if (deltaCount > 0) {
-            automationSummary = ' · ' + `${deltaCount - stockErrors.length}/${deltaCount} stock adj`;
-          }
-
-          if (notFoundIds.length > 0) {
-            const unique = Array.from(new Set(notFoundIds));
-            showInfo?.(
-              'Automation skipped — product not found',
-              `${unique.length} product${unique.length > 1 ? 's' : ''} could not be found on the server ` +
-              `(IDs: ${unique.join(', ')}). The purchase was updated. Refresh the products list and re-check.`,
-            );
-            addAppLog({
-              module: 'Purchases', action: 'PostSaveAutomation', status: 'error',
-              message: `404 on product IDs: ${unique.join(', ')}`,
-            });
-          } else if (stockErrors.length > 0) {
-            showInfo?.(
-              'Stock adjustment warnings',
-              `${stockErrors.length} task(s) failed. See log for details.`,
-            );
-            addAppLog({
-              module: 'Purchases', action: 'PostSaveAutomation', status: 'error',
-              message: stockErrors.join(' | ').slice(0, 500),
-            });
-          }
-        } catch (autoErr) {
-          addAppLog({
-            module: 'Purchases', action: 'PostSaveAutomation', status: 'error',
-            message: getUserFriendlyError(autoErr, 'Automation crashed'),
-          });
-        }
-      }
-
       addAppLog({ module: 'Purchases', action: 'Update', status: 'success', message: form.invoice_no });
+      showSuccess('Purchase updated', `Purchase ${form.invoice_no} updated.`);
 
-      showSuccess(
-        'Purchase updated',
-        `Purchase ${form.invoice_no} updated.${paymentsRecorded ? ' Payments recorded.' : ''}${automationSummary}`,
-      );
-
-      initialFormRef.current = JSON.stringify(form);
-      initialItemsRef.current = JSON.stringify(items);
-      setHydrated(false);
-
-      if (autoAdjustStock) void refreshProducts();
-      if (autoAdjustStock) await new Promise((r) => setTimeout(r, 500));
-
+      void refreshProducts();
       navigate('/purchases');
     } catch (err) {
       const msg = getUserFriendlyError(err, 'Purchase invoice could not be updated.');
@@ -1355,15 +1198,14 @@ export function EditPurchaseInvoicePage() {
       setSubmitting(false);
     }
   }, [
-    form, items, id, navigate, showSuccess, showError, showInfo, summary,
-    autoAdjustStock, runPostSaveAutomation, refreshProducts, postTasks.length,
+    form, items, id, navigate, showSuccess, showError,
+    packingAmount, packingApplyType, generalDiscountType, generalDiscountApplyType,
+    refreshProducts,
   ]);
 
-  /* ── Supplier create ── */
   const createSupplier = async () => {
     const errs: Record<string, boolean> = {};
     const name = sanitizeText(newSupplier.name, LIMITS.NAME).trim();
-    const city = sanitizeText(newSupplier.billing_city, LIMITS.SHORT).trim();
     if (!name) errs.name = true;
     if (!newSupplier.company_id) errs.company_id = true;
     if (newSupplier.email && !REGEX.EMAIL.test(newSupplier.email)) errs.email = true;
@@ -1371,17 +1213,11 @@ export function EditPurchaseInvoicePage() {
     if (newSupplier.gst_number && !REGEX.GSTIN.test(newSupplier.gst_number)) errs.gst_number = true;
     if (newSupplier.pan && !REGEX.PAN.test(newSupplier.pan)) errs.pan = true;
     setSupplierFormErrors(errs);
-    if (Object.keys(errs).length) {
-      showError('Validation', 'Please fix the highlighted fields.');
-      return;
-    }
+    if (Object.keys(errs).length) { showError('Validation', 'Please fix the highlighted fields.'); return; }
 
-    const { same_as_billing: _ignored, ...rest } = newSupplier;
+    const { same_as_billing: _i, ...rest } = newSupplier;
     const payload = {
-      ...rest,
-      name,
-      billing_city: city || rest.billing_city,
-      type: 'supplier',
+      ...rest, name, type: 'supplier',
       company_id: Number(newSupplier.company_id),
       opening_balance: safeNumber(newSupplier.opening_balance),
       credit_limit: newSupplier.credit_limit ? safeNumber(newSupplier.credit_limit) : null,
@@ -1393,17 +1229,17 @@ export function EditPurchaseInvoicePage() {
       const created = await apiClient.createSupplier(payload as any);
       showSuccess('Supplier created', `${created.name} added.`);
       await refreshSuppliers();
+      // Force supplier-change detection so place_of_supply auto-fills
+      // from the freshly created supplier.
+      lastHydratedSupplierIdRef.current = null;
       setForm((p) => ({ ...p, supplier_id: created.id }));
       setShowSupplierOffcanvas(false);
       setNewSupplier(createInitialSupplier());
     } catch (err) {
       showError('Create failed', getUserFriendlyError(err, 'Supplier creation failed.'));
-    } finally {
-      setSupplierSubmitting(false);
-    }
+    } finally { setSupplierSubmitting(false); }
   };
 
-  /* ── Product create ── */
   const generateProductSKU = useCallback(() => {
     if (!products) return 'FU-001';
     const prefix = 'FU-';
@@ -1418,20 +1254,13 @@ export function EditPurchaseInvoicePage() {
   }, [products]);
 
   const openProductOffcanvas = () => {
-    setNewProduct((p) => ({
-      ...p,
-      company_id: form.company_id ? String(form.company_id) : '',
-      branch_id: '',
-    }));
+    setNewProduct((p) => ({ ...p, company_id: form.company_id ? String(form.company_id) : '', branch_id: '' }));
     setProductFormErrors({});
     setShowProductOffcanvas(true);
   };
 
   const openSupplierOffcanvas = () => {
-    setNewSupplier((p) => ({
-      ...p,
-      company_id: form.company_id ? String(form.company_id) : '',
-    }));
+    setNewSupplier((p) => ({ ...p, company_id: form.company_id ? String(form.company_id) : '' }));
     setSupplierFormErrors({});
     setShowSupplierOffcanvas(true);
   };
@@ -1443,12 +1272,12 @@ export function EditPurchaseInvoicePage() {
     if (!newProduct.purchase_price || safeNumber(newProduct.purchase_price) < 0) errs.purchase_price = true;
     if (!newProduct.unit.trim()) errs.unit = true;
     setProductFormErrors(errs);
-    if (Object.keys(errs).length) {
-      showError('Validation', 'Please fill in required fields.');
-      return;
-    }
+    if (Object.keys(errs).length) { showError('Validation', 'Please fill in required fields.'); return; }
 
     const sku = newProduct.sku.trim() || generateProductSKU();
+    const defaultWarehouseId = warehouses && warehouses.length > 0
+      ? warehouses.find((w) => w.name === form.branch)?.id ?? warehouses[0].id
+      : null;
 
     const payload = {
       company_id: Number(newProduct.company_id),
@@ -1472,7 +1301,6 @@ export function EditPurchaseInvoicePage() {
       const created = await apiClient.createProduct(payload);
       showSuccess('Product created', `${created.name} added to catalog.`);
       await refreshProducts();
-      await refreshWarehouses();
       setShowProductOffcanvas(false);
       setNewProduct({
         company_id: '', branch_id: '', name: '', sku: '', hsn_sac_code: '',
@@ -1481,45 +1309,23 @@ export function EditPurchaseInvoicePage() {
       });
       if (created?.id) {
         addItem({
-          id: created.id,
-          name: created.name,
+          id: created.id, name: created.name,
           hsn_sac_code: created.hsn_sac_code || '',
           uom: created.unit || 'NOS',
           price: created.purchase_price || 0,
           purchase_price: created.purchase_price,
           sale_price: created.sale_price,
-          tax_rate: created.tax_rate,
-          igst_rate: created.tax_rate,
+          tax_rate: created.tax_rate, igst_rate: created.tax_rate,
           stock_quantity: created.stock_quantity,
-          unit: created.unit,
-          sku: created.sku,
-          active: true,
+          unit: created.unit, sku: created.sku, active: true,
         });
       }
     } catch (err) {
       const msg = getUserFriendlyError(err, 'Product creation failed.');
       showError('Product creation failed', msg);
-      addAppLog({ module: 'Inventory', action: 'Create', status: 'error', message: msg });
-    } finally {
-      setProductSubmitting(false);
-    }
+    } finally { setProductSubmitting(false); }
   };
 
-  /* ── Derived UI flags ── */
-  const hasRunningTask = postTasks.some((t) => t.status === 'running');
-  const hasErroredTask = postTasks.some((t) => t.status === 'error');
-  const hasSkippedTask = postTasks.some((t) => t.status === 'skipped');
-
-  const handleRefreshAfterWarning = useCallback(async () => {
-    apiCache.delete('products');
-    apiCache.delete('inventory');
-    apiCache.delete('warehouses');
-    await Promise.all([refreshProducts(), refreshWarehouses()]);
-    setHas404Warning(false);
-    showSuccess('Refreshed', 'Products and warehouses re-loaded from server.');
-  }, [refreshProducts, refreshWarehouses, showSuccess]);
-
-  /* ── Render guards ── */
   if (loadingInvoice) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -1537,10 +1343,7 @@ export function EditPurchaseInvoicePage() {
           <FiAlertCircle className="mx-auto text-rose-500 mb-3" size={32} />
           <h2 className="text-lg font-semibold text-slate-800">Purchase invoice not found</h2>
           <p className="text-sm text-slate-500 mt-1">The purchase invoice you are trying to edit does not exist.</p>
-          <Link
-            to="/purchases"
-            className="inline-block mt-5 px-4 py-2 rounded-xl bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 transition"
-          >
+          <Link to="/purchases" className="inline-block mt-5 px-4 py-2 rounded-xl bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 transition">
             Back to purchases
           </Link>
         </div>
@@ -1548,7 +1351,6 @@ export function EditPurchaseInvoicePage() {
     );
   }
 
-  /* ── Render ── */
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 pb-24">
       <header className="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200">
@@ -1595,12 +1397,9 @@ export function EditPurchaseInvoicePage() {
             </h2>
             <div className="space-y-4">
               <Field label="Company" required error={formErrors.company_id}>
-                <select
-                  value={form.company_id}
-                  onChange={handleCompanyChange}
+                <select value={form.company_id} onChange={handleCompanyChange}
                   data-error={!!formErrors.company_id}
-                  className={`${inputBase} ${formErrors.company_id ? inputError : ''}`}
-                >
+                  className={`${inputBase} ${formErrors.company_id ? inputError : ''}`}>
                   <option value="">Select Company</option>
                   {companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                 </select>
@@ -1608,12 +1407,10 @@ export function EditPurchaseInvoicePage() {
 
               <Field label="Branch" error={branchError}>
                 <div className="relative">
-                  <select
-                    value={form.branch}
+                  <select value={form.branch}
                     onChange={(e) => { setBranchTouched(true); updateForm('branch', e.target.value); }}
                     disabled={branchLoading || !form.company_id}
-                    className={inputBase}
-                  >
+                    className={inputBase}>
                     {availableBranches.map((b) => <option key={b} value={b}>{b}</option>)}
                   </select>
                   {branchLoading && (
@@ -1627,30 +1424,15 @@ export function EditPurchaseInvoicePage() {
               <Field label="Supplier" required error={formErrors.supplier_id}>
                 <div ref={supplierDropdownRef} className="flex gap-2">
                   <div className="relative flex-1">
-                    <input
-                      type="text"
-                      value={supplierSearch}
-                      onChange={(e) => {
-                        setSupplierSearch(sanitizeText(e.target.value, LIMITS.NAME));
-                        setShowSupplierDropdown(true);
-                        setSupplierHighlight(-1);
-                      }}
+                    <input type="text" value={supplierSearch}
+                      onChange={(e) => { setSupplierSearch(sanitizeText(e.target.value, LIMITS.NAME)); setShowSupplierDropdown(true); setSupplierHighlight(-1); }}
                       onFocus={() => setShowSupplierDropdown(true)}
                       onKeyDown={onSupplierKeyDown}
                       placeholder="Search by name, code, GSTIN…"
-                      aria-label="Search supplier"
-                      aria-autocomplete="list"
-                      aria-expanded={showSupplierDropdown}
-                      className={inputBase}
-                      maxLength={LIMITS.NAME}
-                    />
+                      className={inputBase} maxLength={LIMITS.NAME} />
                     {supplierSearch && (
-                      <button
-                        type="button"
-                        onClick={() => { setSupplierSearch(''); setShowSupplierDropdown(false); }}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                        aria-label="Clear"
-                      >
+                      <button type="button" onClick={() => { setSupplierSearch(''); setShowSupplierDropdown(false); }}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
                         <FiX size={16} />
                       </button>
                     )}
@@ -1666,26 +1448,15 @@ export function EditPurchaseInvoicePage() {
                           <div className="p-4 text-sm text-slate-500">No suppliers found.</div>
                         ) : (
                           filteredSuppliers.map((s, idx) => (
-                            <button
-                              key={s.id}
-                              type="button"
-                              role="option"
-                              aria-selected={idx === supplierHighlight}
-                              className={`w-full text-left px-4 py-2.5 text-sm flex items-center justify-between ${
-                                idx === supplierHighlight ? 'bg-indigo-50' : 'hover:bg-slate-50'
-                              }`}
+                            <button key={s.id} type="button" role="option" aria-selected={idx === supplierHighlight}
+                              className={`w-full text-left px-4 py-2.5 text-sm flex items-center justify-between ${idx === supplierHighlight ? 'bg-indigo-50' : 'hover:bg-slate-50'}`}
                               onMouseEnter={() => setSupplierHighlight(idx)}
-                              onClick={() => {
-                                setForm((p) => ({ ...p, supplier_id: s.id }));
-                                setSupplierSearch('');
-                                setShowSupplierDropdown(false);
-                              }}
-                            >
+                              onClick={() => { setForm((p) => ({ ...p, supplier_id: s.id })); setSupplierSearch(''); setShowSupplierDropdown(false); }}>
                               <div className="min-w-0 flex-1">
                                 <div className="font-medium text-slate-800 truncate">{s.name}</div>
                                 <div className="text-xs text-slate-500 truncate">
-                                  {s.gstin && <span className="mr-2">GST: {s.gstin}</span>}
-                                  {s.contact_no && <span className="mr-2">📞 {s.contact_no}</span>}
+                                  {(s.gstin || s.gst_number) && <span className="mr-2">GST: {s.gstin || s.gst_number}</span>}
+                                  {(s.contact_no || s.phone) && <span className="mr-2">📞 {s.contact_no || s.phone}</span>}
                                   {s.code && <span className="uppercase">{s.code}</span>}
                                 </div>
                               </div>
@@ -1696,11 +1467,8 @@ export function EditPurchaseInvoicePage() {
                       </div>
                     )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={openSupplierOffcanvas}
-                    className="px-4 rounded-xl border border-slate-200 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:border-indigo-300 transition"
-                  >
+                  <button type="button" onClick={openSupplierOffcanvas}
+                    className="px-4 rounded-xl border border-slate-200 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:border-indigo-300 transition">
                     Add
                   </button>
                 </div>
@@ -1713,69 +1481,47 @@ export function EditPurchaseInvoicePage() {
               </Field>
 
               <Field label="M/S.">
-                <input
-                  type="text"
-                  value={form.supplier_name}
+                <input type="text" value={form.supplier_name}
                   onChange={(e) => updateForm('supplier_name', sanitizeText(e.target.value, LIMITS.NAME))}
-                  maxLength={LIMITS.NAME}
-                  className={inputBase}
-                />
+                  maxLength={LIMITS.NAME} className={inputBase} />
               </Field>
 
               <Field label="Address">
-                <textarea
-                  rows={2}
-                  value={form.supplier_address}
+                <textarea rows={2} value={form.supplier_address}
                   onChange={(e) => updateForm('supplier_address', sanitizeText(e.target.value))}
-                  maxLength={LIMITS.TEXT}
-                  className={inputBase}
-                />
+                  maxLength={LIMITS.TEXT} className={inputBase} />
               </Field>
 
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Contact Person">
-                  <input
-                    type="text" value={form.contact_person}
+                  <input type="text" value={form.contact_person}
                     onChange={(e) => updateForm('contact_person', sanitizeText(e.target.value, LIMITS.NAME))}
-                    maxLength={LIMITS.NAME} className={inputBase}
-                  />
+                    maxLength={LIMITS.NAME} className={inputBase} />
                 </Field>
                 <Field label="Phone No">
-                  <input
-                    type="tel" value={form.phone_no}
+                  <input type="tel" value={form.phone_no}
                     onChange={(e) => updateForm('phone_no', sanitizeText(e.target.value, LIMITS.PHONE))}
-                    maxLength={LIMITS.PHONE} className={inputBase}
-                  />
+                    maxLength={LIMITS.PHONE} className={inputBase} />
                 </Field>
               </div>
 
               <Field label="GSTIN / PAN" error={formErrors.gstin_pan}>
-                <input
-                  type="text"
-                  value={form.gstin_pan}
+                <input type="text" value={form.gstin_pan}
                   onChange={(e) => updateForm('gstin_pan', sanitizeText(e.target.value.toUpperCase(), LIMITS.GSTIN))}
                   maxLength={LIMITS.GSTIN}
                   placeholder="27AAAAA0000A1Z5"
-                  className={`${inputBase} font-mono tracking-wide`}
-                />
+                  className={`${inputBase} font-mono tracking-wide`} />
               </Field>
 
               <div className="grid grid-cols-2 gap-3">
                 <label className="flex items-center gap-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={form.reverse_charge}
+                  <input type="checkbox" checked={form.reverse_charge}
                     onChange={(e) => updateForm('reverse_charge', e.target.checked)}
-                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                  />
+                    className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
                   Reverse Charge
                 </label>
                 <Field label="Ship To">
-                  <select
-                    value={form.ship_to}
-                    onChange={(e) => updateForm('ship_to', e.target.value)}
-                    className={inputBase}
-                  >
+                  <select value={form.ship_to} onChange={(e) => updateForm('ship_to', e.target.value)} className={inputBase}>
                     <option value="">-- Select --</option>
                     <option value="billing">Same as Billing</option>
                     <option value="shipping">Shipping Address</option>
@@ -1783,16 +1529,18 @@ export function EditPurchaseInvoicePage() {
                 </Field>
               </div>
 
-              <Field label="Place of Supply" required error={formErrors.place_of_supply}>
-                <input
-                  type="text"
-                  value={form.place_of_supply}
+              <Field
+                label="Place of Supply"
+                required
+                error={formErrors.place_of_supply}
+                hint="Auto-filled from the supplier's billing state — you can edit it."
+              >
+                <input type="text" value={form.place_of_supply}
                   onChange={(e) => updateForm('place_of_supply', sanitizeText(e.target.value, LIMITS.SHORT))}
                   maxLength={LIMITS.SHORT}
                   placeholder="State / UT"
                   data-error={!!formErrors.place_of_supply}
-                  className={`${inputBase} ${formErrors.place_of_supply ? inputError : ''}`}
-                />
+                  className={`${inputBase} ${formErrors.place_of_supply ? inputError : ''}`} />
               </Field>
             </div>
           </section>
@@ -1804,126 +1552,90 @@ export function EditPurchaseInvoicePage() {
             <div className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <Field label="Invoice Type">
-                  <select
-                    value={form.invoice_type}
+                  <select value={form.invoice_type}
                     onChange={(e) => updateForm('invoice_type', e.target.value as PurchaseFormData['invoice_type'])}
-                    className={inputBase}
-                  >
+                    className={inputBase}>
                     <option value="purchase_invoice">Purchase Invoice</option>
                     <option value="purchase_bill">Purchase Bill</option>
                   </select>
                 </Field>
-
                 <Field label="Invoice No." required error={formErrors.invoice_no}>
-                  <input
-                    type="text"
-                    value={form.invoice_no}
+                  <input type="text" value={form.invoice_no}
                     onChange={(e) => updateForm('invoice_no', sanitizeText(e.target.value, LIMITS.SHORT))}
                     maxLength={LIMITS.SHORT}
                     placeholder="Invoice number"
                     data-error={!!formErrors.invoice_no}
-                    className={`${inputBase} font-mono ${formErrors.invoice_no ? inputError : ''}`}
-                  />
+                    className={`${inputBase} font-mono ${formErrors.invoice_no ? inputError : ''}`} />
                 </Field>
-
                 <Field label="Invoice Date">
-                  <input
-                    type="date"
-                    value={form.invoice_date}
+                  <input type="date" value={form.invoice_date}
                     onChange={(e) => updateForm('invoice_date', e.target.value)}
-                    className={inputBase}
-                  />
+                    className={inputBase} />
                 </Field>
               </div>
 
               <Field label="Due Date">
-                <input
-                  type="date"
-                  value={form.due_date}
+                <input type="date" value={form.due_date}
                   onChange={(e) => updateForm('due_date', e.target.value)}
-                  className={inputBase}
-                />
+                  className={inputBase} />
               </Field>
 
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Challan No.">
-                  <input
-                    type="text" value={form.challan_no}
+                  <input type="text" value={form.challan_no}
                     onChange={(e) => updateForm('challan_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                    maxLength={LIMITS.SHORT} className={inputBase}
-                  />
+                    maxLength={LIMITS.SHORT} className={inputBase} />
                 </Field>
                 <Field label="Challan Date">
-                  <input
-                    type="date" value={form.challan_date}
+                  <input type="date" value={form.challan_date}
                     onChange={(e) => updateForm('challan_date', e.target.value)}
-                    className={inputBase}
-                  />
+                    className={inputBase} />
                 </Field>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <Field label="PO Number">
-                  <input
-                    type="text" value={form.po_no}
+                  <input type="text" value={form.po_no}
                     onChange={(e) => updateForm('po_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                    maxLength={LIMITS.SHORT} className={inputBase}
-                  />
+                    maxLength={LIMITS.SHORT} className={inputBase} />
                 </Field>
                 <Field label="PO Date">
-                  <input
-                    type="date" value={form.po_date}
+                  <input type="date" value={form.po_date}
                     onChange={(e) => updateForm('po_date', e.target.value)}
-                    className={inputBase}
-                  />
+                    className={inputBase} />
                 </Field>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <Field label="LR No.">
-                  <input
-                    type="text" value={form.lr_no}
+                  <input type="text" value={form.lr_no}
                     onChange={(e) => updateForm('lr_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                    maxLength={LIMITS.SHORT} className={inputBase}
-                  />
+                    maxLength={LIMITS.SHORT} className={inputBase} />
                 </Field>
                 <Field label="E-Way Bill">
-                  <input
-                    type="text" value={form.eway_no}
+                  <input type="text" value={form.eway_no}
                     onChange={(e) => updateForm('eway_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                    maxLength={LIMITS.SHORT} className={inputBase}
-                  />
+                    maxLength={LIMITS.SHORT} className={inputBase} />
                 </Field>
               </div>
 
               <Field label="Delivery Mode">
-                <input
-                  type="text" value={form.delivery_mode}
+                <input type="text" value={form.delivery_mode}
                   onChange={(e) => updateForm('delivery_mode', sanitizeText(e.target.value, LIMITS.SHORT))}
-                  maxLength={LIMITS.SHORT} className={inputBase}
-                />
+                  maxLength={LIMITS.SHORT} className={inputBase} />
               </Field>
 
               <Field label="Payment Terms">
-                <input
-                  type="text" value={form.payment_term} placeholder="e.g., Net 30"
+                <input type="text" value={form.payment_term} placeholder="e.g., Net 30"
                   onChange={(e) => updateForm('payment_term', sanitizeText(e.target.value, LIMITS.SHORT))}
-                  maxLength={LIMITS.SHORT} className={inputBase}
-                />
+                  maxLength={LIMITS.SHORT} className={inputBase} />
               </Field>
 
               <div className="pt-4 border-t border-slate-100 space-y-2">
-                <h3 className="text-sm font-semibold text-slate-700">Automation on save</h3>
-                <Toggle
-                  checked={autoAdjustStock}
-                  onChange={setAutoAdjustStock}
-                  label="Auto-adjust stock (purchase)"
-                  description={
-                    defaultWarehouseId
-                      ? `Increases → stock-in, decreases → stock-out on warehouse #${defaultWarehouseId}. Negative stock allowed.`
-                      : 'No warehouse available — adjustment will be skipped.'
-                  }
-                />
+                <h3 className="text-sm font-semibold text-slate-700">Stock adjustment</h3>
+                <p className="text-xs text-slate-500">
+                  Stock is adjusted automatically by the server when you update the purchase.
+                </p>
               </div>
             </div>
           </section>
@@ -1934,30 +1646,16 @@ export function EditPurchaseInvoicePage() {
             <div className="flex flex-col sm:flex-row gap-2">
               <div className="relative flex-1">
                 <FiSearch className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                <input
-                  type="text"
-                  placeholder="Search products by name, SKU, barcode or HSN…"
+                <input type="text" placeholder="Search products by name, SKU, barcode or HSN…"
                   value={productSearch}
-                  onChange={(e) => {
-                    setProductSearch(sanitizeText(e.target.value, LIMITS.NAME));
-                    setShowProductDropdown(true);
-                    setProductHighlight(-1);
-                  }}
+                  onChange={(e) => { setProductSearch(sanitizeText(e.target.value, LIMITS.NAME)); setShowProductDropdown(true); setProductHighlight(-1); }}
                   onFocus={() => setShowProductDropdown(true)}
                   onKeyDown={onProductKeyDown}
-                  aria-label="Search products"
-                  aria-autocomplete="list"
-                  aria-expanded={showProductDropdown}
                   maxLength={LIMITS.NAME}
-                  className={`${inputBase} pl-10 pr-10`}
-                />
+                  className={`${inputBase} pl-10 pr-10`} />
                 {productSearch && (
-                  <button
-                    type="button"
-                    onClick={() => { setProductSearch(''); setShowProductDropdown(false); }}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                    aria-label="Clear"
-                  >
+                  <button type="button" onClick={() => { setProductSearch(''); setShowProductDropdown(false); }}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
                     <FiX size={16} />
                   </button>
                 )}
@@ -1973,17 +1671,10 @@ export function EditPurchaseInvoicePage() {
                       <div className="p-4 text-sm text-slate-500">No products found.</div>
                     ) : (
                       filteredProducts.map((p, idx) => (
-                        <button
-                          key={p.id}
-                          type="button"
-                          role="option"
-                          aria-selected={idx === productHighlight}
-                          className={`w-full text-left px-4 py-2.5 text-sm flex justify-between items-center gap-3 border-b border-slate-100 last:border-0 ${
-                            idx === productHighlight ? 'bg-indigo-50' : 'hover:bg-slate-50'
-                          }`}
+                        <button key={p.id} type="button" role="option" aria-selected={idx === productHighlight}
+                          className={`w-full text-left px-4 py-2.5 text-sm flex justify-between items-center gap-3 border-b border-slate-100 last:border-0 ${idx === productHighlight ? 'bg-indigo-50' : 'hover:bg-slate-50'}`}
                           onMouseEnter={() => setProductHighlight(idx)}
-                          onClick={() => { addItem(p); setProductHighlight(-1); }}
-                        >
+                          onClick={() => { addItem(p); setProductHighlight(-1); }}>
                           <div className="min-w-0 flex-1">
                             <div className="font-medium text-slate-800 truncate">{p.name}</div>
                             <div className="text-xs text-slate-500 truncate">
@@ -2006,17 +1697,14 @@ export function EditPurchaseInvoicePage() {
                   </div>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={openProductOffcanvas}
-                className="px-4 py-2.5 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1.5 whitespace-nowrap transition"
-              >
+              <button type="button" onClick={openProductOffcanvas}
+                className="px-4 py-2.5 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1.5 whitespace-nowrap transition">
                 <FiPlus size={16} /> Add Product
               </button>
             </div>
           </div>
 
-          <div className="hidden md:block overflow-x-auto">
+          <div className="overflow-x-auto">
             <table className="w-full text-sm min-w-[900px]">
               <thead className="bg-slate-50/80 text-xs uppercase tracking-wide text-slate-500">
                 <tr>
@@ -2037,101 +1725,62 @@ export function EditPurchaseInvoicePage() {
                     <td colSpan={9} className="text-center py-16 text-slate-400">
                       <FiBox size={36} className="mx-auto mb-2 opacity-40" />
                       <p className="text-sm">No products added yet.</p>
-                      <p className="text-xs mt-1">Search above or click “Add Product”.</p>
                     </td>
                   </tr>
                 ) : items.map((item, idx) => {
                   const stale = !productIndex.has(item.product_id);
-                  const original = originalItems.find((o) => o.product_id === item.product_id);
-                  const delta = original ? item.qty - original.qty : null;
                   return (
                     <tr key={idx} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/60 transition">
                       <td className="py-2 px-4 max-w-[240px]">
-                        <input
-                          type="text" value={item.product_name}
+                        <input type="text" value={item.product_name}
                           onChange={(e) => updateItem(idx, 'product_name', sanitizeText(e.target.value, LIMITS.NAME))}
                           maxLength={LIMITS.NAME}
-                          className="w-full bg-transparent text-sm outline-none truncate"
-                          title={item.product_name}
-                        />
+                          className="w-full bg-transparent text-sm outline-none truncate" />
                         <div className="flex items-center gap-2 text-[10px]">
                           <span className="text-slate-400">ID #{item.product_id}</span>
                           {item.hsn_sac_code && <span className="text-slate-400">HSN: {item.hsn_sac_code}</span>}
-                          {stale && (
-                            <span className="text-amber-600 inline-flex items-center gap-0.5" title="Not in current product cache">
-                              <FiSlash size={9} /> stale
-                            </span>
-                          )}
-                          {delta !== null && Math.abs(delta) > 1e-9 && (
-                            <span
-                              className={`inline-flex items-center gap-0.5 ${delta > 0 ? 'text-indigo-600' : 'text-emerald-600'}`}
-                              title={`Qty changed from ${original?.qty} to ${item.qty}`}
-                            >
-                              {delta > 0 ? '▲' : '▼'} {Math.abs(delta)}
-                            </span>
-                          )}
+                          {stale && <span className="text-amber-600">stale</span>}
                         </div>
                       </td>
                       <td className="py-2 px-3">
-                        <input
-                          type="number" min={1} step={1} inputMode="numeric"
-                          value={item.qty}
-                          onChange={(e) => updateItem(idx, 'qty', Math.max(1, Math.floor(safeNumber(e.target.value, 1))))}
-                          className="w-16 bg-transparent text-center text-sm outline-none tabular-nums"
-                        />
+                        <input type="number" min={0.001} step={0.001} inputMode="decimal" value={item.qty}
+                          onChange={(e) => updateItem(idx, 'qty', Math.max(0.001, safeNumber(e.target.value, 1)))}
+                          className="w-16 bg-transparent text-center text-sm outline-none tabular-nums" />
                       </td>
                       <td className="py-2 px-3">
-                        <input
-                          type="text" value={item.uom}
+                        <input type="text" value={item.uom}
                           onChange={(e) => updateItem(idx, 'uom', sanitizeText(e.target.value, 16))}
                           maxLength={16}
-                          className="w-14 bg-transparent text-center text-sm outline-none"
-                        />
+                          className="w-14 bg-transparent text-center text-sm outline-none" />
                       </td>
                       <td className="py-2 px-3">
-                        <input
-                          type="number" min={0} step={0.01} inputMode="decimal"
-                          value={item.price}
+                        <input type="number" min={0} step={0.01} inputMode="decimal" value={item.price}
                           onChange={(e) => updateItem(idx, 'price', Math.max(0, safeNumber(e.target.value)))}
-                          className="w-20 bg-transparent text-right text-sm outline-none tabular-nums"
-                        />
+                          className="w-20 bg-transparent text-right text-sm outline-none tabular-nums" />
                       </td>
                       <td className="py-2 px-3">
                         <div className="flex items-center justify-center gap-1">
-                          <select
-                            value={item.discount_type}
-                            onChange={(e) => updateItem(idx, 'discount_type', e.target.value as 'percent' | 'amount')}
-                            className="bg-transparent text-xs outline-none"
-                          >
+                          <select value={item.discount_type}
+                            onChange={(e) => updateItem(idx, 'discount_type', e.target.value as DiscountType)}
+                            className="bg-transparent text-xs outline-none">
                             <option value="percent">%</option>
                             <option value="amount">₹</option>
                           </select>
                           {item.discount_type === 'percent' ? (
-                            <input
-                              type="number" min={0} max={100} step={0.01}
-                              value={item.discount_percent}
+                            <input type="number" min={0} max={100} step={0.01} value={item.discount_percent}
                               onChange={(e) => updateItem(idx, 'discount_percent', clamp(safeNumber(e.target.value), 0, 100))}
-                              className="w-14 bg-transparent text-center text-sm outline-none tabular-nums"
-                            />
+                              className="w-14 bg-transparent text-center text-sm outline-none tabular-nums" />
                           ) : (
-                            <input
-                              type="number" min={0} step={0.01}
-                              value={item.discount_amount}
+                            <input type="number" min={0} step={0.01} value={item.discount_amount}
                               onChange={(e) => updateItem(idx, 'discount_amount', Math.max(0, safeNumber(e.target.value)))}
-                              className="w-16 bg-transparent text-center text-sm outline-none tabular-nums"
-                            />
+                              className="w-16 bg-transparent text-center text-sm outline-none tabular-nums" />
                           )}
                         </div>
                       </td>
                       <td className="py-2 px-3">
-                        <select
-                          value={[0, 5, 12, 18, 28].includes(item.gst_slab) ? item.gst_slab : -1}
-                          onChange={(e) => {
-                            const v = Number(e.target.value);
-                            updateItem(idx, 'gst_slab', v === -1 ? 0 : v);
-                          }}
-                          className="bg-transparent text-sm outline-none"
-                        >
+                        <select value={[0, 5, 12, 18, 28].includes(item.gst_slab) ? item.gst_slab : -1}
+                          onChange={(e) => { const v = Number(e.target.value); updateItem(idx, 'gst_slab', v === -1 ? -1 : v); }}
+                          className="bg-transparent text-sm outline-none">
                           <option value={0}>0%</option>
                           <option value={5}>5%</option>
                           <option value={12}>12%</option>
@@ -2139,33 +1788,23 @@ export function EditPurchaseInvoicePage() {
                           <option value={28}>28%</option>
                           <option value={-1}>Custom</option>
                         </select>
-                        {![0, 5, 12, 18, 28].includes(item.gst_slab) && (
-                          <input
-                            type="number" min={0} max={100} step={0.01}
-                            value={item.gst_slab}
-                            onChange={(e) => updateItem(idx, 'gst_slab', clamp(safeNumber(e.target.value), 0, 100))}
-                            className="w-12 ml-1 bg-transparent text-center text-sm outline-none tabular-nums"
-                          />
+                        {item.gst_slab === -1 && (
+                          <input type="number" min={0} max={100} step={0.01} value={item.custom_gst_rate}
+                            onChange={(e) => updateItem(idx, 'custom_gst_rate', clamp(safeNumber(e.target.value), 0, 100))}
+                            className="w-12 ml-1 bg-transparent text-center text-sm outline-none tabular-nums" />
                         )}
                       </td>
                       <td className="py-2 px-3 text-center">
-                        <input
-                          type="checkbox"
-                          checked={item.is_inter_state}
+                        <input type="checkbox" checked={item.is_inter_state}
                           onChange={(e) => updateItem(idx, 'is_inter_state', e.target.checked)}
-                          className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                          aria-label="Inter-state (IGST)"
-                        />
+                          className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
                       </td>
                       <td className="py-2 px-3 text-right font-semibold tabular-nums text-slate-800">
                         ₹{formatCurrency(item.total)}
                       </td>
                       <td className="py-2 px-3">
-                        <button
-                          onClick={() => removeItem(idx)}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
-                          aria-label="Remove item"
-                        >
+                        <button onClick={() => removeItem(idx)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition">
                           <FiTrash2 size={15} />
                         </button>
                       </td>
@@ -2176,123 +1815,6 @@ export function EditPurchaseInvoicePage() {
             </table>
           </div>
 
-          <div className="md:hidden p-4 space-y-3">
-            {items.length === 0 ? (
-              <div className="text-center py-12 text-slate-400">
-                <FiBox size={36} className="mx-auto mb-2 opacity-40" />
-                <p className="text-sm">No products added yet.</p>
-              </div>
-            ) : items.map((item, idx) => (
-              <div key={idx} className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
-                <div className="flex justify-between items-start">
-                  <span className="text-xs font-semibold text-slate-400">#{idx + 1} · ID {item.product_id}</span>
-                  <button
-                    onClick={() => removeItem(idx)}
-                    className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50"
-                    aria-label="Remove item"
-                  >
-                    <FiTrash2 size={15} />
-                  </button>
-                </div>
-                <input
-                  type="text" value={item.product_name}
-                  onChange={(e) => updateItem(idx, 'product_name', sanitizeText(e.target.value, LIMITS.NAME))}
-                  maxLength={LIMITS.NAME}
-                  className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-2 text-sm font-medium"
-                />
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[10px] uppercase text-slate-500">Qty</label>
-                    <input
-                      type="number" min={1} value={item.qty}
-                      onChange={(e) => updateItem(idx, 'qty', Math.max(1, Math.floor(safeNumber(e.target.value, 1))))}
-                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase text-slate-500">Unit</label>
-                    <input
-                      type="text" value={item.uom}
-                      onChange={(e) => updateItem(idx, 'uom', sanitizeText(e.target.value, 16))}
-                      maxLength={16}
-                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-sm"
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[10px] uppercase text-slate-500">Price</label>
-                    <input
-                      type="number" min={0} step={0.01} value={item.price}
-                      onChange={(e) => updateItem(idx, 'price', Math.max(0, safeNumber(e.target.value)))}
-                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] uppercase text-slate-500">Discount</label>
-                    <div className="flex gap-1">
-                      <select
-                        value={item.discount_type}
-                        onChange={(e) => updateItem(idx, 'discount_type', e.target.value as 'percent' | 'amount')}
-                        className="bg-white border border-slate-200 rounded-lg px-1.5 py-1.5 text-sm"
-                      >
-                        <option value="percent">%</option>
-                        <option value="amount">₹</option>
-                      </select>
-                      {item.discount_type === 'percent' ? (
-                        <input
-                          type="number" min={0} max={100} step={0.01} value={item.discount_percent}
-                          onChange={(e) => updateItem(idx, 'discount_percent', clamp(safeNumber(e.target.value), 0, 100))}
-                          className="flex-1 min-w-0 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm"
-                        />
-                      ) : (
-                        <input
-                          type="number" min={0} step={0.01} value={item.discount_amount}
-                          onChange={(e) => updateItem(idx, 'discount_amount', Math.max(0, safeNumber(e.target.value)))}
-                          className="flex-1 min-w-0 bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-sm"
-                        />
-                      )}
-                    </div>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[10px] uppercase text-slate-500">GST Slab</label>
-                    <select
-                      value={[0, 5, 12, 18, 28].includes(item.gst_slab) ? item.gst_slab : -1}
-                      onChange={(e) => {
-                        const v = Number(e.target.value);
-                        updateItem(idx, 'gst_slab', v === -1 ? 0 : v);
-                      }}
-                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-sm"
-                    >
-                      <option value={0}>0%</option>
-                      <option value={5}>5%</option>
-                      <option value={12}>12%</option>
-                      <option value={18}>18%</option>
-                      <option value={28}>28%</option>
-                      <option value={-1}>Custom</option>
-                    </select>
-                  </div>
-                  <div className="flex items-end">
-                    <label className="flex items-center gap-1.5 text-xs text-slate-600">
-                      <input
-                        type="checkbox" checked={item.is_inter_state}
-                        onChange={(e) => updateItem(idx, 'is_inter_state', e.target.checked)}
-                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                      />
-                      Inter-state (IGST)
-                    </label>
-                  </div>
-                </div>
-                <div className="flex justify-between items-center pt-2 border-t border-slate-200">
-                  <span className="text-xs text-slate-500">Line total</span>
-                  <span className="font-semibold tabular-nums">₹{formatCurrency(item.total)}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-
           {formErrors.items && (
             <div className="px-4 pb-3 text-xs text-rose-600 flex items-center gap-1">
               <FiAlertCircle size={12} /> {formErrors.items}
@@ -2300,88 +1822,49 @@ export function EditPurchaseInvoicePage() {
           )}
         </section>
 
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-          <section className="lg:col-span-3 bg-white rounded-2xl shadow-sm border border-slate-200 p-5 md:p-6 space-y-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 md:p-6 space-y-4">
             <h2 className="text-base font-semibold text-slate-800">Invoice Information</h2>
 
             <Field label="Bank Account">
-              <select
-                value={form.bank_id}
+              <select value={form.bank_id}
                 onChange={(e) => updateForm('bank_id', e.target.value ? Number(e.target.value) : '')}
-                className={inputBase}
-              >
+                className={inputBase}>
                 <option value="">Select Bank</option>
-                {banks?.map((b) => (
-                  <option key={b.id} value={b.id}>{b.bank_name} ({b.account_no})</option>
-                ))}
+                {banks?.map((b) => <option key={b.id} value={b.id}>{b.bank_name} ({b.account_no})</option>)}
               </select>
             </Field>
 
-            <Field label="Default Payment Type">
-              <div className="flex flex-wrap gap-2">
-                {([
-                  { key: 'credit', label: 'Credit' },
-                  { key: 'cash', label: 'Cash' },
-                  { key: 'cheque', label: 'Cheque' },
-                  { key: 'online', label: 'Online' },
-                  { key: 'bank_transfer', label: 'Bank Transfer' },
-                ] as const).map(({ key, label }) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => updateForm('payment_type', key)}
-                    className={`px-3 py-1.5 rounded-xl border text-xs font-medium transition ${
-                      form.payment_type === key
-                        ? 'bg-indigo-50 text-indigo-700 border-indigo-300 ring-1 ring-indigo-200'
-                        : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </Field>
-
             <Field label="Terms Title">
-              <input
-                type="text" value={form.terms_title}
+              <input type="text" value={form.terms_title}
                 onChange={(e) => updateForm('terms_title', sanitizeText(e.target.value, LIMITS.SHORT))}
-                maxLength={LIMITS.SHORT} className={inputBase}
-              />
+                maxLength={LIMITS.SHORT} className={inputBase} />
             </Field>
 
             <Field label="Terms & Conditions">
-              <textarea
-                rows={5} value={form.terms_detail}
+              <textarea rows={5} value={form.terms_detail}
                 onChange={(e) => updateForm('terms_detail', sanitizeText(e.target.value, LIMITS.LONG_TEXT))}
-                maxLength={LIMITS.LONG_TEXT} className={`${inputBase} leading-relaxed`}
-              />
+                maxLength={LIMITS.LONG_TEXT} className={`${inputBase} leading-relaxed`} />
             </Field>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <Field label="Document Note">
-                <textarea
-                  rows={3} value={form.document_note}
+                <textarea rows={3} value={form.document_note}
                   onChange={(e) => updateForm('document_note', sanitizeText(e.target.value, LIMITS.LONG_TEXT))}
-                  maxLength={LIMITS.LONG_TEXT} className={inputBase}
-                />
+                  maxLength={LIMITS.LONG_TEXT} className={inputBase} />
               </Field>
               <Field label="Internal Note (private)">
-                <textarea
-                  rows={3} value={form.internal_note}
+                <textarea rows={3} value={form.internal_note}
                   onChange={(e) => updateForm('internal_note', sanitizeText(e.target.value, LIMITS.LONG_TEXT))}
-                  maxLength={LIMITS.LONG_TEXT} className={inputBase}
-                />
+                  maxLength={LIMITS.LONG_TEXT} className={inputBase} />
               </Field>
             </div>
 
             <div className="pt-4 border-t border-slate-100">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold text-slate-700">Additional Charges</h3>
-                <button
-                  onClick={addAdditionalCharge}
-                  className="text-xs text-indigo-600 flex items-center gap-1 hover:underline"
-                >
+                <button onClick={addAdditionalCharge}
+                  className="text-xs text-indigo-600 flex items-center gap-1 hover:underline">
                   <FiPlus size={12} /> Add
                 </button>
               </div>
@@ -2391,22 +1874,15 @@ export function EditPurchaseInvoicePage() {
                 <div className="space-y-2">
                   {form.additional_charges.map((c) => (
                     <div key={c.id} className="flex gap-2">
-                      <input
-                        type="text" value={c.label} placeholder="Label"
+                      <input type="text" value={c.label} placeholder="Label"
                         onChange={(e) => updateAdditionalCharge(c.id, 'label', sanitizeText(e.target.value, LIMITS.SHORT))}
                         maxLength={LIMITS.SHORT}
-                        className={`${inputBase} flex-1`}
-                      />
-                      <input
-                        type="number" min={0} step={0.01} value={c.amount}
+                        className={`${inputBase} flex-1`} />
+                      <input type="number" min={0} step={0.01} value={c.amount}
                         onChange={(e) => updateAdditionalCharge(c.id, 'amount', Math.max(0, safeNumber(e.target.value)))}
-                        className={`${inputBase} w-32 text-right tabular-nums`}
-                      />
-                      <button
-                        onClick={() => removeAdditionalCharge(c.id)}
-                        className="p-2.5 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
-                        aria-label="Remove charge"
-                      >
+                        className={`${inputBase} w-32 text-right tabular-nums`} />
+                      <button onClick={() => removeAdditionalCharge(c.id)}
+                        className="p-2.5 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition">
                         <FiTrash2 size={15} />
                       </button>
                     </div>
@@ -2414,243 +1890,200 @@ export function EditPurchaseInvoicePage() {
                 </div>
               )}
             </div>
-
-            <div className="pt-4 border-t border-slate-100 grid grid-cols-2 md:grid-cols-4 gap-3">
-              <Field label="Packing (₹)">
-                <input
-                  type="number" min={0} step={0.01} value={form.packing_charges}
-                  onChange={(e) => updateForm('packing_charges', Math.max(0, safeNumber(e.target.value)))}
-                  className={`${inputBase} text-right tabular-nums`}
-                />
-              </Field>
-              <Field label="Discount (%)">
-                <input
-                  type="number" min={0} max={100} step={0.01} value={form.general_discount_percent}
-                  onChange={(e) => updateForm('general_discount_percent', clamp(safeNumber(e.target.value), 0, 100))}
-                  className={`${inputBase} text-right tabular-nums`}
-                />
-              </Field>
-              <Field label="Discount (₹)">
-                <input
-                  type="number" min={0} step={0.01} value={form.general_discount_amount}
-                  onChange={(e) => updateForm('general_discount_amount', Math.max(0, safeNumber(e.target.value)))}
-                  disabled={form.general_discount_percent > 0}
-                  className={`${inputBase} text-right tabular-nums`}
-                />
-              </Field>
-              <Field label="TCS (%)">
-                <input
-                  type="number" min={0} max={100} step={0.01} value={form.tcs_percent}
-                  onChange={(e) => updateForm('tcs_percent', clamp(safeNumber(e.target.value), 0, 100))}
-                  className={`${inputBase} text-right tabular-nums`}
-                />
-              </Field>
-            </div>
           </section>
 
-          <section className="lg:col-span-2 bg-white rounded-2xl shadow-sm border border-slate-200 p-5 md:p-6">
-            <h2 className="text-base font-semibold text-slate-800 mb-4">Summary</h2>
+          <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 md:p-6">
+            <h2 className="text-base font-semibold text-slate-800 mb-4">Invoice Summary</h2>
 
-            <dl className="space-y-2 text-sm">
-              <Row label="Subtotal" value={summary.itemSubtotal} />
-              <Row label="Item Discount" value={-summary.itemDiscountTotal} negative />
-              <Row label="Taxable" value={summary.itemTaxableTotal} />
-              {summary.generalDiscountAmount > 0 && (
-                <Row label="General Discount" value={-summary.generalDiscountAmount} negative />
-              )}
-              {summary.cgstTotal > 0 && <Row label="CGST" value={summary.cgstTotal} />}
-              {summary.sgstTotal > 0 && <Row label="SGST" value={summary.sgstTotal} />}
-              {summary.igstTotal > 0 && <Row label="IGST" value={summary.igstTotal} />}
-              {summary.additionalChargesTotal > 0 && <Row label="Additional" value={summary.additionalChargesTotal} />}
-              {form.packing_charges > 0 && <Row label="Packing" value={form.packing_charges} />}
-              {summary.tcsAmount > 0 && <Row label="TCS" value={summary.tcsAmount} />}
-              {Math.abs(summary.roundOff) > 0.001 && <Row label="Round Off" value={summary.roundOff} />}
-
-              <div className="pt-3 mt-3 border-t border-slate-200 flex justify-between items-baseline">
-                <span className="text-sm font-medium text-slate-600">Grand Total</span>
-                <span className="text-xl font-bold text-slate-900 tabular-nums">
-                  ₹{formatCurrency(summary.grandTotal)}
-                </span>
+            <div className="space-y-3 text-sm">
+              <div className="flex justify-between">
+                <span className="text-slate-500">Subtotal</span>
+                <span>₹{formatCurrency(itemSubtotal)}</span>
               </div>
-              <p className="text-xs text-slate-500 italic">{totalInWords}</p>
-            </dl>
-
-            <div className="mt-6 pt-5 border-t border-slate-100">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-slate-700">Payments</h3>
-                <button
-                  onClick={addPayment}
-                  className="text-xs text-indigo-600 flex items-center gap-1 hover:underline"
-                >
-                  <FiPlus size={12} /> Add Payment
-                </button>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Item Discount</span>
+                <span className="text-rose-500">-₹{formatCurrency(itemDiscountTotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500">Taxable Amount</span>
+                <span>₹{formatCurrency(taxableBeforeBillDiscount)}</span>
               </div>
 
-              {form.payments.length === 0 ? (
-                <p className="text-xs text-slate-400">No payments recorded.</p>
-              ) : (
-                <div className="space-y-3">
-                  {form.payments.map((pay, idx) => (
-                    <div key={pay.id} className="bg-slate-50 rounded-xl p-3 border border-slate-200">
-                      <div className="flex justify-between items-center mb-2">
-                        <span className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
-                          Payment #{idx + 1}
-                          {pay.persisted && (
-                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">
-                              saved
-                            </span>
-                          )}
-                        </span>
-                        <button
-                          onClick={() => removePayment(pay.id)}
-                          className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
-                          aria-label="Remove payment"
-                        >
-                          <FiTrash2 size={13} />
-                        </button>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500">Bill Discount</span>
+                <div className="flex items-center gap-1">
+                  <select value={generalDiscountType}
+                    onChange={(e) => {
+                      const type = e.target.value as DiscountType;
+                      setGeneralDiscountType(type);
+                      setForm((p) => ({
+                        ...p,
+                        general_discount_percent: type === 'percent' ? p.general_discount_percent : 0,
+                        general_discount_amount: type === 'amount' ? p.general_discount_amount : 0,
+                      }));
+                    }}
+                    className="border rounded-lg px-2 py-1 text-xs">
+                    <option value="percent">%</option>
+                    <option value="amount">₹</option>
+                  </select>
+                  <input type="number" min={0} step={0.01}
+                    value={generalDiscountType === 'percent' ? form.general_discount_percent : form.general_discount_amount}
+                    onChange={(e) => updateForm(
+                      generalDiscountType === 'percent' ? 'general_discount_percent' : 'general_discount_amount',
+                      Math.max(0, safeNumber(e.target.value)),
+                    )}
+                    className="w-24 text-right border rounded-lg px-2 py-1.5 tabular-nums" />
+                </div>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span>Apply:</span>
+                <select value={generalDiscountApplyType}
+                  onChange={(e) => setGeneralDiscountApplyType(e.target.value as ApplyType)}
+                  className="border rounded-lg px-2 py-1">
+                  <option value="before_tax">Before Tax</option>
+                  <option value="after_tax">After Tax</option>
+                </select>
+                <span className="ml-auto text-rose-500">-₹{formatCurrency(generalDiscountAmount)}</span>
+              </div>
+
+              <div className="flex justify-between"><span className="text-slate-500">CGST</span><span>₹{formatCurrency(itemCgstTotal)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">SGST</span><span>₹{formatCurrency(itemSgstTotal)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">IGST</span><span>₹{formatCurrency(itemIgstTotal)}</span></div>
+              <div className="flex justify-between"><span className="text-slate-500">Additional Charges</span><span>₹{formatCurrency(additionalChargesTotal)}</span></div>
+
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500">Packing Charges</span>
+                <input type="number" min={0} step={0.01} value={form.packing_charges}
+                  onChange={(e) => updateForm('packing_charges', nonNegative(e.target.value))}
+                  className="w-28 text-right border rounded-lg px-2 py-1.5 tabular-nums" />
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span>Apply packing:</span>
+                <select value={packingApplyType}
+                  onChange={(e) => setPackingApplyType(e.target.value as ApplyType)}
+                  className="border rounded-lg px-2 py-1">
+                  <option value="before_tax">Before Tax</option>
+                  <option value="after_tax">After Tax</option>
+                </select>
+                <span className="ml-auto">Tax ₹{formatCurrency(packingTax)}</span>
+              </div>
+
+              <div className="flex justify-between"><span className="text-slate-500">TCS</span><span>₹{formatCurrency(tcsAmount)}</span></div>
+
+              <div className="flex items-center gap-2">
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={autoRoundOff}
+                    onChange={(e) => setAutoRoundOff(e.target.checked)} />
+                  Auto round off
+                </label>
+                <input type="number" step={0.01} value={form.round_off}
+                  disabled={autoRoundOff}
+                  onChange={(e) => updateForm('round_off', safeNumber(e.target.value))}
+                  className="w-24 text-right border rounded-lg px-2 py-1.5 tabular-nums" />
+              </div>
+
+              <hr />
+              <div className="flex justify-between text-base font-bold">
+                <span>Grand Total</span>
+                <span>₹{formatCurrency(grandTotal)}</span>
+              </div>
+              <div className="text-xs text-slate-500">{totalInWords}</div>
+
+              <div className="border-t pt-4 mt-5">
+                <div className="flex justify-between items-center mb-3">
+                  <h3 className="font-semibold">Payments</h3>
+                  <button type="button" onClick={addPayment}
+                    className="text-blue-600 text-xs flex items-center gap-1">
+                    <FiPlus />Add Payment
+                  </button>
+                </div>
+
+                {form.payments.length === 0 ? (
+                  <p className="text-xs text-slate-400">No payments recorded.</p>
+                ) : form.payments.map((pay, idx) => (
+                  <div key={pay.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200 mb-3">
+                    <div className="flex justify-between mb-2">
+                      <span className="text-xs font-semibold text-slate-500 flex items-center gap-1.5">
+                        Payment #{idx + 1}
+                        {pay.persisted && (
+                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">saved</span>
+                        )}
+                      </span>
+                      <button type="button" onClick={() => removePayment(pay.id)} className="text-red-400">
+                        <FiTrash2 size={13} />
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs text-slate-500">Amount</label>
+                        <input type="number" min="0" step="0.01" value={pay.amount}
+                          onChange={(e) => updatePayment(pay.id, 'amount', nonNegative(e.target.value))}
+                          disabled={pay.persisted}
+                          className="w-full border rounded-lg px-2 py-1.5 text-xs text-right tabular-nums" />
                       </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <input
-                          type="number" min={0} step={0.01} placeholder="Amount"
-                          value={pay.amount}
-                          onChange={(e) => updatePayment(pay.id, 'amount', Math.max(0, safeNumber(e.target.value)))}
+                      <div>
+                        <label className="block text-xs text-slate-500">Method</label>
+                        <select value={pay.payment_method}
+                          onChange={(e) => updatePayment(pay.id, 'payment_method', e.target.value as PaymentMethod)}
                           disabled={pay.persisted}
-                          className={`${inputBase} text-right tabular-nums`}
-                        />
-                        <select
-                          value={pay.payment_method}
-                          onChange={(e) => updatePayment(pay.id, 'payment_method', e.target.value as PaymentEntry['payment_method'])}
-                          disabled={pay.persisted}
-                          className={inputBase}
-                        >
+                          className="w-full border rounded-lg px-2 py-1.5 text-xs">
                           <option value="UPI">UPI</option>
                           <option value="cash">Cash</option>
                           <option value="cheque">Cheque</option>
                           <option value="bank_transfer">Bank Transfer</option>
                           <option value="other">Other</option>
                         </select>
-                        <input
-                          type="text" placeholder="Transaction ID"
-                          value={pay.reference_no}
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-500">Reference</label>
+                        <input value={pay.reference_no}
                           onChange={(e) => updatePayment(pay.id, 'reference_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                          maxLength={LIMITS.SHORT}
                           disabled={pay.persisted}
-                          className={`${inputBase} font-mono`}
-                        />
-                        <input
-                          type="date" value={pay.transaction_date}
+                          className="w-full border rounded-lg px-2 py-1.5 text-xs" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-500">Date</label>
+                        <input type="date" value={pay.transaction_date}
                           onChange={(e) => updatePayment(pay.id, 'transaction_date', e.target.value)}
                           disabled={pay.persisted}
-                          className={inputBase}
-                        />
-                        <select
-                          value={pay.payment_direction}
-                          onChange={(e) => updatePayment(pay.id, 'payment_direction', e.target.value as 'inward' | 'outward')}
+                          className="w-full border rounded-lg px-2 py-1.5 text-xs" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-500">Direction</label>
+                        <select value={pay.payment_direction}
+                          onChange={(e) => updatePayment(pay.id, 'payment_direction', e.target.value as PaymentDirection)}
                           disabled={pay.persisted}
-                          className={inputBase}
-                        >
-                          <option value="outward">Outward (Pay Supplier)</option>
-                          <option value="inward">Inward (Refund)</option>
+                          className="w-full border rounded-lg px-2 py-1.5 text-xs">
+                          <option value="outward">Outward</option>
+                          <option value="inward">Inward / Refund</option>
                         </select>
-                        <input
-                          type="text" placeholder="Bank Name"
-                          value={pay.bank_name}
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-500">Bank Name</label>
+                        <input value={pay.bank_name}
                           onChange={(e) => updatePayment(pay.id, 'bank_name', sanitizeText(e.target.value, LIMITS.SHORT))}
-                          maxLength={LIMITS.SHORT}
                           disabled={pay.persisted}
-                          className={inputBase}
-                        />
-                        <input
-                          type="text" placeholder="Remarks"
-                          value={pay.remarks}
+                          className="w-full border rounded-lg px-2 py-1.5 text-xs" />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="block text-xs text-slate-500">Remarks</label>
+                        <input value={pay.remarks}
                           onChange={(e) => updatePayment(pay.id, 'remarks', sanitizeText(e.target.value, LIMITS.TEXT))}
-                          maxLength={LIMITS.TEXT}
                           disabled={pay.persisted}
-                          className={`${inputBase} col-span-2`}
-                        />
+                          className="w-full border rounded-lg px-2 py-1.5 text-xs" />
                       </div>
                     </div>
-                  ))}
-                </div>
-              )}
+                  </div>
+                ))}
 
-              <div className="mt-4 space-y-1.5 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Total Paid</span>
-                  <span className="tabular-nums">₹{formatCurrency(summary.totalPaid)}</span>
-                </div>
-                <div className="flex justify-between font-medium">
-                  <span className="text-slate-700">Balance Due</span>
-                  <span className={`tabular-nums ${summary.balanceDue > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                    ₹{formatCurrency(summary.balanceDue)}
-                  </span>
+                <div className="flex justify-between text-sm"><span>Total Outward</span><span>₹{formatCurrency(totalOutward)}</span></div>
+                <div className="flex justify-between text-sm"><span>Total Inward</span><span>₹{formatCurrency(totalInward)}</span></div>
+                <div className="flex justify-between mt-1 font-semibold">
+                  <span>Balance Due</span>
+                  <span className={balanceDue > 0.01 ? 'text-red-600' : 'text-emerald-600'}>₹{formatCurrency(balanceDue)}</span>
                 </div>
               </div>
             </div>
-
-            {(hasRunningTask || postTasks.length > 0) && (
-              <div className="mt-6 pt-5 border-t border-slate-100">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                    <FiPackage size={14} className="text-indigo-600" />
-                    Post-save automation
-                  </h3>
-                  {hasRunningTask && <FiLoader className="animate-spin text-indigo-500" size={14} />}
-                </div>
-                <ul className="space-y-1 max-h-56 overflow-y-auto pr-1">
-                  {postTasks.map((task) => (
-                    <li key={task.id} className="flex items-start gap-2 text-xs">
-                      {task.status === 'success' && <FiCheckCircle className="text-emerald-500 shrink-0 mt-0.5" size={12} />}
-                      {task.status === 'error' && <FiAlertCircle className="text-rose-500 shrink-0 mt-0.5" size={12} />}
-                      {task.status === 'running' && <FiLoader className="animate-spin text-indigo-500 shrink-0 mt-0.5" size={12} />}
-                      {task.status === 'pending' && <span className="w-3 h-3 rounded-full bg-slate-300 shrink-0 mt-0.5" />}
-                      {task.status === 'skipped' && <FiSlash className="text-amber-500 shrink-0 mt-0.5" size={12} />}
-                      <div className="min-w-0 flex-1">
-                        <p className={`truncate ${
-                          task.status === 'error' ? 'text-rose-700'
-                          : task.status === 'skipped' ? 'text-amber-700'
-                          : 'text-slate-700'
-                        }`}>
-                          {task.label}
-                        </p>
-                        {task.message && task.status !== 'success' && (
-                          <p className="text-[10px] text-slate-500 truncate">{task.message}</p>
-                        )}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-
-                {has404Warning && (
-                  <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 space-y-2">
-                    <p className="flex items-start gap-1.5">
-                      <FiAlertCircle size={12} className="mt-0.5 shrink-0" />
-                      <span>
-                        One or more products returned <strong>404 Not Found</strong> on the server. The purchase was
-                        updated, but stock wasn't adjusted for those items.
-                      </span>
-                    </p>
-                    <button
-                      onClick={handleRefreshAfterWarning}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-2.5 py-1.5 text-[11px] font-semibold text-white hover:bg-amber-700 transition"
-                    >
-                      <FiRefreshCw size={11} /> Refresh products & warehouses
-                    </button>
-                  </div>
-                )}
-
-                {hasErroredTask && !has404Warning && (
-                  <p className="mt-2 text-[11px] text-rose-600 flex items-center gap-1">
-                    <FiAlertCircle size={11} /> Some tasks failed — purchase is updated, but please review.
-                  </p>
-                )}
-                {hasSkippedTask && !has404Warning && !hasErroredTask && (
-                  <p className="mt-2 text-[11px] text-amber-600 flex items-center gap-1">
-                    <FiSlash size={11} /> Some tasks were skipped.
-                  </p>
-                )}
-              </div>
-            )}
           </section>
         </div>
       </main>
@@ -2659,22 +2092,15 @@ export function EditPurchaseInvoicePage() {
         <div className="max-w-[1600px] mx-auto px-4 md:px-8 py-3 flex items-center gap-3">
           <div className="hidden sm:block flex-1 min-w-0">
             <p className="text-xs text-slate-500">Grand total</p>
-            <p className="text-lg font-bold text-slate-900 tabular-nums">
-              ₹{formatCurrency(summary.grandTotal)}
-            </p>
+            <p className="text-lg font-bold text-slate-900 tabular-nums">₹{formatCurrency(grandTotal)}</p>
           </div>
           <div className="flex gap-2 ml-auto">
-            <button
-              onClick={() => isDirty ? setConfirm({ kind: 'cancel' }) : navigate('/purchases')}
-              className="px-4 py-2.5 rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 transition"
-            >
+            <button onClick={() => isDirty ? setConfirm({ kind: 'cancel' }) : navigate('/purchases')}
+              className="px-4 py-2.5 rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 transition">
               Cancel
             </button>
-            <button
-              onClick={handleUpdate}
-              disabled={submitting}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 shadow-sm shadow-indigo-500/30 disabled:opacity-50 transition"
-            >
+            <button onClick={handleUpdate} disabled={submitting}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 shadow-sm shadow-indigo-500/30 disabled:opacity-50 transition">
               {submitting ? <FiLoader className="animate-spin" size={15} /> : <FiSave size={15} />}
               Update Purchase
             </button>
@@ -2711,100 +2137,80 @@ export function EditPurchaseInvoicePage() {
 
       {showSupplierOffcanvas && (
         <Suspense fallback={<OffcanvasFallback />}>
-          <Offcanvas
-            isOpen={showSupplierOffcanvas}
-            title="Add Supplier"
+          <Offcanvas isOpen={showSupplierOffcanvas} title="Add Supplier"
             onClose={() => setShowSupplierOffcanvas(false)}
             footer={
               <div className="flex justify-between w-full gap-3">
-                <button
-                  onClick={() => setShowSupplierOffcanvas(false)}
-                  disabled={supplierSubmitting}
-                  className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition"
-                >
+                <button onClick={() => setShowSupplierOffcanvas(false)} disabled={supplierSubmitting}
+                  className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
                   Cancel
                 </button>
-                <button
-                  onClick={createSupplier}
-                  disabled={supplierSubmitting}
-                  className="px-5 py-2 rounded-xl bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition"
-                >
+                <button onClick={createSupplier} disabled={supplierSubmitting}
+                  className="px-5 py-2 rounded-xl bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50">
                   {supplierSubmitting ? 'Creating…' : 'Create Supplier'}
                 </button>
               </div>
-            }
-          >
+            }>
             <div className="space-y-5 pr-1" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
               <fieldset className="border border-slate-200 rounded-xl p-4">
                 <legend className="text-sm font-semibold text-slate-700 px-2">Supplier Detail</legend>
                 <div className="mt-3 space-y-4">
                   <Field label="Company" required error={supplierFormErrors.company_id ? 'Required' : undefined}>
-                    <select
-                      value={newSupplier.company_id as string}
+                    <select value={newSupplier.company_id as string}
                       onChange={(e) => setNewSupplier((p) => ({ ...p, company_id: e.target.value }))}
-                      className={`${inputBase} ${supplierFormErrors.company_id ? inputError : ''}`}
-                    >
+                      className={`${inputBase} ${supplierFormErrors.company_id ? inputError : ''}`}>
                       <option value="">Select Company</option>
                       {companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                     </select>
                   </Field>
                   <Field label="Supplier Name" required error={supplierFormErrors.name ? 'Required' : undefined}>
-                    <input
-                      type="text" value={newSupplier.name}
+                    <input type="text" value={newSupplier.name}
                       onChange={(e) => setNewSupplier((p) => ({ ...p, name: sanitizeText(e.target.value, LIMITS.NAME) }))}
                       maxLength={LIMITS.NAME}
-                      className={`${inputBase} ${supplierFormErrors.name ? inputError : ''}`}
-                    />
+                      className={`${inputBase} ${supplierFormErrors.name ? inputError : ''}`} />
                   </Field>
                   <div className="grid grid-cols-2 gap-4">
                     <Field label="Contact Person">
-                      <input
-                        type="text" value={newSupplier.contact_person}
+                      <input type="text" value={newSupplier.contact_person}
                         onChange={(e) => setNewSupplier((p) => ({ ...p, contact_person: sanitizeText(e.target.value, LIMITS.NAME) }))}
-                        maxLength={LIMITS.NAME} className={inputBase}
-                      />
+                        maxLength={LIMITS.NAME} className={inputBase} />
                     </Field>
                     <Field label="Contact No" error={supplierFormErrors.contact_no ? 'Invalid' : undefined}>
-                      <input
-                        type="tel" value={newSupplier.contact_no}
+                      <input type="tel" value={newSupplier.contact_no}
                         onChange={(e) => setNewSupplier((p) => ({ ...p, contact_no: sanitizeText(e.target.value, LIMITS.PHONE) }))}
                         maxLength={LIMITS.PHONE}
-                        className={`${inputBase} ${supplierFormErrors.contact_no ? inputError : ''}`}
-                      />
+                        className={`${inputBase} ${supplierFormErrors.contact_no ? inputError : ''}`} />
                     </Field>
                   </div>
                   <Field label="Email" error={supplierFormErrors.email ? 'Invalid email' : undefined}>
-                    <input
-                      type="email" value={newSupplier.email}
+                    <input type="email" value={newSupplier.email}
                       onChange={(e) => setNewSupplier((p) => ({ ...p, email: sanitizeText(e.target.value, LIMITS.NAME) }))}
                       maxLength={LIMITS.NAME}
-                      className={`${inputBase} ${supplierFormErrors.email ? inputError : ''}`}
-                    />
+                      className={`${inputBase} ${supplierFormErrors.email ? inputError : ''}`} />
                   </Field>
                   <div className="grid grid-cols-2 gap-4">
                     <Field label="GSTIN" error={supplierFormErrors.gst_number ? 'Invalid GSTIN' : undefined}>
-                      <input
-                        type="text" value={newSupplier.gst_number}
+                      <input type="text" value={newSupplier.gst_number}
                         onChange={(e) => setNewSupplier((p) => ({ ...p, gst_number: e.target.value.toUpperCase().slice(0, LIMITS.GSTIN) }))}
                         maxLength={LIMITS.GSTIN}
-                        className={`${inputBase} font-mono tracking-wide ${supplierFormErrors.gst_number ? inputError : ''}`}
-                      />
+                        className={`${inputBase} font-mono tracking-wide ${supplierFormErrors.gst_number ? inputError : ''}`} />
                     </Field>
                     <Field label="PAN" error={supplierFormErrors.pan ? 'Invalid PAN' : undefined}>
-                      <input
-                        type="text" value={newSupplier.pan}
+                      <input type="text" value={newSupplier.pan}
                         onChange={(e) => setNewSupplier((p) => ({ ...p, pan: e.target.value.toUpperCase().slice(0, LIMITS.PAN) }))}
                         maxLength={LIMITS.PAN}
-                        className={`${inputBase} font-mono tracking-wide ${supplierFormErrors.pan ? inputError : ''}`}
-                      />
+                        className={`${inputBase} font-mono tracking-wide ${supplierFormErrors.pan ? inputError : ''}`} />
                     </Field>
                   </div>
                   <Field label="Billing City">
-                    <input
-                      type="text" value={newSupplier.billing_city}
+                    <input type="text" value={newSupplier.billing_city}
                       onChange={(e) => setNewSupplier((p) => ({ ...p, billing_city: sanitizeText(e.target.value, LIMITS.SHORT) }))}
-                      maxLength={LIMITS.SHORT} className={inputBase}
-                    />
+                      maxLength={LIMITS.SHORT} className={inputBase} />
+                  </Field>
+                  <Field label="Billing State">
+                    <input type="text" value={newSupplier.billing_state}
+                      onChange={(e) => setNewSupplier((p) => ({ ...p, billing_state: sanitizeText(e.target.value, LIMITS.SHORT) }))}
+                      maxLength={LIMITS.SHORT} className={inputBase} />
                   </Field>
                 </div>
               </fieldset>
@@ -2815,90 +2221,67 @@ export function EditPurchaseInvoicePage() {
 
       {showProductOffcanvas && (
         <Suspense fallback={<OffcanvasFallback />}>
-          <Offcanvas
-            isOpen={showProductOffcanvas}
-            title="Add Product"
+          <Offcanvas isOpen={showProductOffcanvas} title="Add Product"
             onClose={() => setShowProductOffcanvas(false)}
             footer={
               <div className="flex justify-between w-full gap-3">
-                <button
-                  onClick={() => setShowProductOffcanvas(false)}
-                  disabled={productSubmitting}
-                  className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition"
-                >
+                <button onClick={() => setShowProductOffcanvas(false)} disabled={productSubmitting}
+                  className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
                   Cancel
                 </button>
-                <button
-                  onClick={createProduct}
-                  disabled={productSubmitting}
-                  className="px-5 py-2 rounded-xl bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50 transition"
-                >
+                <button onClick={createProduct} disabled={productSubmitting}
+                  className="px-5 py-2 rounded-xl bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 disabled:opacity-50">
                   {productSubmitting ? 'Creating…' : 'Create Product'}
                 </button>
               </div>
-            }
-          >
+            }>
             <div className="space-y-5 pr-1" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
               <fieldset className="border border-slate-200 rounded-xl p-4">
                 <legend className="text-sm font-semibold text-slate-700 px-2">Basic Information</legend>
                 <div className="mt-3 space-y-4">
                   <Field label="Company" required error={productFormErrors.company_id ? 'Required' : undefined}>
-                    <select
-                      value={newProduct.company_id}
+                    <select value={newProduct.company_id}
                       onChange={(e) => setNewProduct((p) => ({ ...p, company_id: e.target.value }))}
-                      className={`${inputBase} ${productFormErrors.company_id ? inputError : ''}`}
-                    >
+                      className={`${inputBase} ${productFormErrors.company_id ? inputError : ''}`}>
                       <option value="">Select Company</option>
                       {companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                     </select>
                   </Field>
                   <Field label="Product Name" required error={productFormErrors.name ? 'Required' : undefined}>
-                    <input
-                      type="text" value={newProduct.name}
+                    <input type="text" value={newProduct.name}
                       onChange={(e) => setNewProduct((p) => ({ ...p, name: sanitizeText(e.target.value, LIMITS.NAME) }))}
                       maxLength={LIMITS.NAME}
-                      className={`${inputBase} ${productFormErrors.name ? inputError : ''}`}
-                    />
+                      className={`${inputBase} ${productFormErrors.name ? inputError : ''}`} />
                   </Field>
                   <div className="grid grid-cols-2 gap-4">
                     <Field label="SKU" hint="Auto-generated if blank">
-                      <input
-                        type="text" value={newProduct.sku}
+                      <input type="text" value={newProduct.sku}
                         onChange={(e) => setNewProduct((p) => ({ ...p, sku: sanitizeText(e.target.value, LIMITS.SKU) }))}
-                        maxLength={LIMITS.SKU} className={inputBase}
-                      />
+                        maxLength={LIMITS.SKU} className={inputBase} />
                     </Field>
                     <Field label="HSN / SAC">
-                      <input
-                        type="text" value={newProduct.hsn_sac_code}
+                      <input type="text" value={newProduct.hsn_sac_code}
                         onChange={(e) => setNewProduct((p) => ({ ...p, hsn_sac_code: sanitizeText(e.target.value, LIMITS.SHORT) }))}
-                        maxLength={LIMITS.SHORT} className={inputBase}
-                      />
+                        maxLength={LIMITS.SHORT} className={inputBase} />
                     </Field>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <Field label="Unit" required error={productFormErrors.unit ? 'Required' : undefined}>
-                      <input
-                        type="text" value={newProduct.unit}
+                      <input type="text" value={newProduct.unit}
                         onChange={(e) => setNewProduct((p) => ({ ...p, unit: sanitizeText(e.target.value, 32) }))}
                         maxLength={32}
-                        className={`${inputBase} ${productFormErrors.unit ? inputError : ''}`}
-                      />
+                        className={`${inputBase} ${productFormErrors.unit ? inputError : ''}`} />
                     </Field>
                     <Field label="Purchase Price (₹)" required error={productFormErrors.purchase_price ? 'Required' : undefined}>
-                      <input
-                        type="number" min={0} step={0.01} value={newProduct.purchase_price}
+                      <input type="number" min={0} step={0.01} value={newProduct.purchase_price}
                         onChange={(e) => setNewProduct((p) => ({ ...p, purchase_price: e.target.value }))}
-                        className={`${inputBase} text-right tabular-nums ${productFormErrors.purchase_price ? inputError : ''}`}
-                      />
+                        className={`${inputBase} text-right tabular-nums ${productFormErrors.purchase_price ? inputError : ''}`} />
                     </Field>
                   </div>
                   <Field label="Sale Price (₹)">
-                    <input
-                      type="number" min={0} step={0.01} value={newProduct.sale_price}
+                    <input type="number" min={0} step={0.01} value={newProduct.sale_price}
                       onChange={(e) => setNewProduct((p) => ({ ...p, sale_price: e.target.value }))}
-                      className={`${inputBase} text-right tabular-nums`}
-                    />
+                      className={`${inputBase} text-right tabular-nums`} />
                   </Field>
                 </div>
               </fieldset>
@@ -2906,53 +2289,26 @@ export function EditPurchaseInvoicePage() {
                 <legend className="text-sm font-semibold text-slate-700 px-2">Tax & Stock</legend>
                 <div className="mt-3 grid grid-cols-2 gap-4">
                   <Field label="Tax Rate (%)">
-                    <input
-                      type="number" min={0} max={100} step={0.01} value={newProduct.tax_rate}
+                    <input type="number" min={0} max={100} step={0.01} value={newProduct.tax_rate}
                       onChange={(e) => setNewProduct((p) => ({ ...p, tax_rate: e.target.value }))}
-                      className={`${inputBase} text-right tabular-nums`}
-                    />
+                      className={`${inputBase} text-right tabular-nums`} />
                   </Field>
-                  <Field
-                    label="Stock Quantity"
-                    hint={
-                      defaultWarehouseId
-                        ? `Allocated to warehouse #${defaultWarehouseId} (can be 0)`
-                        : 'No warehouse — stock row created on first stock-in/out'
-                    }
-                  >
-                    <input
-                      type="number" min={0} value={newProduct.stock_quantity}
+                  <Field label="Stock Quantity">
+                    <input type="number" min={0} value={newProduct.stock_quantity}
                       onChange={(e) => setNewProduct((p) => ({ ...p, stock_quantity: e.target.value }))}
-                      className={`${inputBase} text-right tabular-nums`}
-                    />
+                      className={`${inputBase} text-right tabular-nums`} />
                   </Field>
                 </div>
               </fieldset>
               <Field label="Description">
-                <textarea
-                  rows={2} value={newProduct.description}
+                <textarea rows={2} value={newProduct.description}
                   onChange={(e) => setNewProduct((p) => ({ ...p, description: sanitizeText(e.target.value, LIMITS.LONG_TEXT) }))}
-                  maxLength={LIMITS.LONG_TEXT} className={inputBase}
-                />
+                  maxLength={LIMITS.LONG_TEXT} className={inputBase} />
               </Field>
             </div>
           </Offcanvas>
         </Suspense>
       )}
-    </div>
-  );
-}
-
-/* ────────────────────────────────────────────────────────────────────────────
- * Sub-components
- * ──────────────────────────────────────────────────────────────────────── */
-
-function Row({ label, value, negative }: { label: string; value: number; negative?: boolean }) {
-  const display = negative ? `-₹${formatCurrency(Math.abs(value))}` : `₹${formatCurrency(value)}`;
-  return (
-    <div className="flex justify-between">
-      <dt className="text-slate-500">{label}</dt>
-      <dd className={`tabular-nums ${negative ? 'text-rose-600' : 'text-slate-700'}`}>{display}</dd>
     </div>
   );
 }
