@@ -8,7 +8,7 @@ import {
   FiSearch, FiChevronDown, FiPrinter, FiPackage, FiCreditCard, FiCopy, FiMoreVertical,
   FiUpload, FiX, FiTrendingUp, FiTrendingDown, FiCalendar, FiHome, FiCamera, FiCheck,
   FiArrowRight, FiArrowLeft, FiUserPlus, FiDollarSign, FiImage, FiInfo, FiZap,
-  FiRefreshCw, FiSave, FiTag, FiPercent, FiSliders,
+  FiRefreshCw, FiSave, FiTag, FiPercent, FiSliders, FiPhone, FiMail, FiMapPin, FiHash,
 } from 'react-icons/fi';
 import { Link, useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
@@ -33,20 +33,42 @@ const Offcanvas = lazy(() =>
 /* ------------------------------------------------------------------ */
 
 interface Supplier {
-  id: number; name: string; email?: string | null; phone?: string | null; gstin?: string | null;
+  id: number; name: string; email?: string | null; phone?: string | null;
+  gstin?: string | null; gst_number?: string | null; address?: string | null;
+  billing_street?: string | null; billing_city?: string | null; billing_state?: string | null;
 }
 interface PurchaseItem {
-  id?: number; product_id?: number; product_name?: string | null;
-  quantity?: number | string | null; purchase_price?: number | string | null; total?: number | string | null;
+  id?: number; product_id?: number | null; product_name?: string | null;
+  hsn_sac_code?: string | null; unit?: string | null;
+  quantity?: number | string | null; purchase_price?: number | string | null;
+  discount_amount?: number | string | null; discount_percent?: number | string | null;
+  gst_slab?: number | string | null; cgst_amount?: number | string | null;
+  sgst_amount?: number | string | null; igst_amount?: number | string | null;
+  total?: number | string | null;
+}
+interface PurchasePayment {
+  id?: number; amount?: number | string | null; payment_method?: string | null;
+  payment_direction?: string | null; transaction_date?: string | null;
+  reference_no?: string | null; bank_name?: string | null;
+  account_number?: string | null; remarks?: string | null; status?: string | null;
 }
 interface PurchaseInvoice {
-  id: number; purchase_number: string; bill_number?: string | null; supplier_id: number;
-  supplier?: Supplier | null; grand_total: number | string; paid_amount: number | string;
-  status: string; payment_status: string; purchase_date: string; due_date?: string | null;
-  warehouse?: string | null; created_at?: string | null; updated_at?: string | null;
+  id: number; purchase_number: string; bill_number?: string | null;
+  reference_number?: string | null; supplier_id: number;
+  supplier?: Supplier | null;
+  grand_total: number | string; paid_amount: number | string;
+  subtotal?: number | string | null; tax_amount?: number | string | null;
+  order_discount?: number | string | null; packing_charges?: number | string | null;
+  shipping_charges?: number | string | null; other_charges?: number | string | null;
+  round_off?: number | string | null;
+  status: string; payment_status: string;
+  purchase_date: string; due_date?: string | null;
+  warehouse?: string | null; notes?: string | null; internal_remarks?: string | null;
+  created_at?: string | null; updated_at?: string | null;
   items?: PurchaseItem[];
-  payments?: Array<{ id?: number; amount?: number | string | null; payment_direction?: string | null }>;
-  company_id?: number; company?: { id: number; name: string } | null; branch_id?: number | null;
+  payments?: PurchasePayment[];
+  company_id?: number; company?: { id: number; name: string } | null;
+  branch_id?: number | null;
   [key: string]: unknown;
 }
 interface Company { id: number; name: string }
@@ -78,20 +100,11 @@ interface OCRInvoiceData {
   currency?: string; notes?: string; overall_confidence?: number; is_interstate?: boolean;
 }
 interface LineItemDraft {
-  id: string;
-  description: string;
-  hsn_sac?: string;
-  quantity: number;
-  unit?: string;
-  unit_price: number;
-  tax_rate: number;
-  discount_type: 'percent' | 'amount';
-  discount_percent: number;
-  discount_amount: number;
-  total: number;
-  action: 'existing' | 'new' | 'skip';
-  matched_product_id: number | null;
-  matched_product_name: string | null;
+  id: string; description: string; hsn_sac?: string; quantity: number; unit?: string;
+  unit_price: number; tax_rate: number;
+  discount_type: 'percent' | 'amount'; discount_percent: number; discount_amount: number;
+  total: number; action: 'existing' | 'new' | 'skip';
+  matched_product_id: number | null; matched_product_name: string | null;
 }
 interface PaymentDraft {
   id: string; amount: number; payment_method: string;
@@ -135,6 +148,7 @@ const SEARCH_DEBOUNCE_MS = 350;
 const TABLE_HEAD_CLASS = 'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
 const OCR_MAX_BYTES = 10 * 1024 * 1024;
 const OCR_ACCEPT = '.png,.jpg,.jpeg,.webp,.pdf,image/*,application/pdf';
+const FILTERS_EXPANDED_KEY = 'purchase_filters_expanded_v1';
 
 const PAYMENT_METHOD_OPTIONS = [
   { value: 'cash',          label: 'Cash' },
@@ -213,35 +227,109 @@ function recallProductId(name: string, hsn: string | undefined): number | null {
 }
 
 /* ------------------------------------------------------------------ */
-/* Safe helpers                                                        */
+/* Safe helpers + production-safe error handling                       */
 /* ------------------------------------------------------------------ */
+
+const IS_PROD = (() => {
+  try {
+    return Boolean((import.meta as unknown as { env?: { PROD?: boolean } }).env?.PROD);
+  } catch { return false; }
+})();
+
+/** Strip anything that leaks PHP/Laravel internals into the UI. */
+function sanitizeMessage(raw: unknown): string {
+  const str = typeof raw === 'string' ? raw : raw == null ? '' : String(raw);
+  if (!str) return '';
+
+  let cleaned = str;
+
+  cleaned = cleaned
+    .replace(/\[object \([^)]*\)\]/g, '')
+    .replace(/Stack trace:[\s\S]*/i, '')
+    .replace(/at\s+[^\n]+\([^\n]+\)/g, '')
+    .replace(/[A-Z]:\\\\?[^\s"']+/g, '')
+    .replace(/\/(?:var|usr|home|opt)\/[^\s"']+/g, '')
+    .replace(/SQLSTATE\[[^\]]+\][^\n]*/gi, '')
+    .replace(/Illuminate\\\\[A-Za-z\\\\]+/g, '')
+    .replace(/App\\\\[A-Za-z\\\\]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const looksLikeException =
+    /TypeError|ErrorException|QueryException|ValidationException|Fatal error|Uncaught|Stack trace|SQLSTATE/i.test(cleaned);
+
+  if (IS_PROD || looksLikeException) {
+    if (looksLikeException || cleaned.length > 240) {
+      return 'A server error occurred. Please try again or contact support if the problem persists.';
+    }
+  }
+
+  return cleaned;
+}
 
 function getErrorMessage(error: unknown, fallback: string): string {
   if (typeof error === 'object' && error !== null) {
     const e = error as ApiErrorLike;
-    const candidate = e.backendMessage || (e.response?.data as { message?: string } | undefined)?.message || e.message;
-    if (typeof candidate === 'string' && candidate.trim()) return candidate;
+
+    if (e.validationErrors) {
+      const first = Object.values(e.validationErrors).flat().filter(Boolean)[0];
+      if (first) return sanitizeMessage(first) || fallback;
+    }
+
+    const status = e.status ?? e.response?.status;
+    if (status) {
+      switch (status) {
+        case 401: return 'Your session has expired. Please sign in again.';
+        case 403: return 'You do not have permission to perform this action.';
+        case 404: return 'The requested resource was not found.';
+        case 419: return 'Your session has expired. Please refresh the page.';
+        case 429: return 'Too many requests. Please slow down and try again.';
+        case 500:
+        case 502:
+        case 503:
+        case 504: return 'The server is temporarily unavailable. Please try again shortly.';
+      }
+    }
+
+    const backendMsg = (e.response?.data as { message?: string } | undefined)?.message;
+    const candidate = e.backendMessage || backendMsg || e.message;
+    const sanitized = sanitizeMessage(candidate);
+    if (sanitized) return sanitized;
   }
-  if (error instanceof Error && error.message) return error.message;
+
+  if (error instanceof Error && error.message) {
+    const sanitized = sanitizeMessage(error.message);
+    if (sanitized) return sanitized;
+  }
+
   return fallback;
 }
 
 function getDetailedError(error: unknown): string {
   if (!error) return 'Unknown error';
-  if (typeof error === 'string') return error;
+  if (typeof error === 'string') return sanitizeMessage(error) || 'Unknown error';
+
   const e = error as ApiErrorLike;
   const parts: string[] = [];
-  if (e.backendMessage) parts.push(e.backendMessage);
-  if (e.message && e.message !== e.backendMessage) parts.push(e.message);
-  if (e.status !== undefined) parts.push(`HTTP ${e.status}`);
+
+  const status = e.status ?? e.response?.status;
+  if (status !== undefined) parts.push(`HTTP ${status}`);
   if (e.response?.statusText) parts.push(e.response.statusText);
+
+  const msg = e.backendMessage
+    || (e.response?.data as { message?: string } | undefined)?.message
+    || e.message;
+  const sanitized = sanitizeMessage(msg);
+  if (sanitized) parts.push(sanitized);
+
   if (e.validationErrors) {
     const messages = Object.entries(e.validationErrors)
       .map(([field, errs]) => `${field}: ${Array.isArray(errs) ? errs.join(', ') : String(errs)}`)
       .join('; ');
-    if (messages) parts.push(messages);
+    if (messages) parts.push(sanitizeMessage(messages));
   }
-  return parts.join(' | ') || 'Unknown error';
+
+  return parts.filter(Boolean).join(' · ') || 'Unknown error';
 }
 
 function safeLog(entry: AppLogEntry): void { try { addAppLog(entry); } catch { /* no-op */ } }
@@ -291,6 +379,14 @@ function formatDate(value: unknown): string {
   const date = new Date(year, month - 1, day);
   if (Number.isNaN(date.getTime())) return '—';
   return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
+}
+function formatDateTime(value: unknown): string {
+  if (!value) return '—';
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return '—';
+  return new Intl.DateTimeFormat('en-IN', {
+    day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  }).format(d);
 }
 function getLocalToday(): string {
   const now = new Date();
@@ -823,7 +919,7 @@ async function createPurchaseWithVerification(
     await sleep(800);
     const found = await findPurchaseByNumber(purchaseNumber);
     if (found) return { success: true, data: found, verified: true };
-    return { success: false, error: detailed };
+    return { success: false, error: getErrorMessage(err, 'Failed to create purchase.') };
   }
 }
 
@@ -1479,10 +1575,8 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
 
   const [payments, setPayments] = useState<PaymentDraft[]>([]);
 
-  /* Bill-level — state inputs */
   const [generalDiscountType, setGeneralDiscountType] = useState<'percent' | 'amount'>('percent');
   const [generalDiscountPercent, setGeneralDiscountPercent] = useState<number>(0);
-  // NOTE: renamed to avoid collision with the derived `generalDiscountAmount` below.
   const [generalDiscountAmountInput, setGeneralDiscountAmountInput] = useState<number>(0);
   const [generalDiscountApplyType, setGeneralDiscountApplyType] = useState<'before_tax' | 'after_tax'>('before_tax');
   const [packingCharges, setPackingCharges] = useState<number>(0);
@@ -1500,8 +1594,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitDiagnostics, setSubmitDiagnostics] = useState<Record<string, unknown> | null>(null);
-
-  /* ---------- Reset ---------- */
 
   const resetAll = useCallback(() => {
     setStep('upload'); setFile(null); setOcrLoading(false); setOcrError(null); setDragOver(false);
@@ -1523,7 +1615,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
     if (!isOpen) return;
     const { apiKey, model, source } = readGeminiConfig();
     setGeminiModel(model); setGeminiSource(source);
-    setEnvWarning(!apiKey ? 'Gemini API key not found. Add VITE_GEMINI_API_KEY=… to your .env file (and restart the dev server), OR configure it in the BillExtract AI settings page.' : null);
+    setEnvWarning(!apiKey ? 'Gemini API key not found. Configure it in Settings → AI, or add VITE_GEMINI_API_KEY=… to your .env file.' : null);
   }, [isOpen]);
 
   useEffect(() => {
@@ -1553,8 +1645,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
       .catch(() => { if (active) setBranches([]); });
     return () => { active = false; };
   }, [companyId]);
-
-  /* ---------- OCR ---------- */
 
   const runOCR = useCallback(async (f: File, modelOverride?: string) => {
     setOcrLoading(true); setOcrError(null);
@@ -1639,8 +1729,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
     setStep('verify');
   }, []);
 
-  /* ---------- Fetch suppliers + products for mapping ---------- */
-
   useEffect(() => {
     if (step !== 'verify') return;
     if (suppliers.length > 0 && products.length > 0) return;
@@ -1656,8 +1744,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
     }).finally(() => { if (active) setLoadingMappings(false); });
     return () => { active = false; };
   }, [step, suppliers.length, products.length]);
-
-  /* ---------- Auto-match supplier (with learning) ---------- */
 
   useEffect(() => {
     if (!extracted) return;
@@ -1686,8 +1772,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
       }
     }
   }, [extracted, suppliers]);
-
-  /* ---------- Auto-match products (with learning) ---------- */
 
   useEffect(() => {
     if (!extracted) return;
@@ -1730,8 +1814,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
       };
     }));
   }, [extracted, products]);
-
-  /* ---------- Totals (mirror create-purchase-invoice math) ---------- */
 
   const itemSubtotal = useMemo(
     () => round2(items.filter((i) => i.action !== 'skip').reduce((s, i) => s + i.quantity * i.unit_price, 0)),
@@ -1810,8 +1892,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
   );
   const remaining = Math.max(0, round2(draftGrandTotal - totalPaid));
 
-  /* ---------- Step transitions ---------- */
-
   const handleBack = useCallback(() => {
     const order: OCRStep[] = ['upload', 'verify', 'charges', 'overview'];
     const idx = order.indexOf(step);
@@ -1823,8 +1903,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
     const idx = order.indexOf(step);
     if (idx < order.length - 1) setStep(order[idx + 1]);
   }, [step]);
-
-  /* ---------- Item / payment helpers ---------- */
 
   const updateItemField = useCallback((id: string, patch: Partial<LineItemDraft>) => {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
@@ -1856,8 +1934,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
     setPayments((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
   }, []);
 
-  /* ---------- Submittable? ---------- */
-
   const canSubmit = useMemo(() => {
     if (!extracted) return false;
     if (!companyId) return false;
@@ -1867,8 +1943,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
     if (items.filter((i) => i.action !== 'skip').length === 0) return false;
     return true;
   }, [extracted, companyId, supplierMode, matchedSupplierId, items]);
-
-  /* ---------- Submit ---------- */
 
   const handleSubmit = useCallback(async () => {
     if (!extracted || !canSubmit || submitting) return;
@@ -1917,8 +1991,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
             diagnostics.supplierFallback = { id: fallback.id, name: fallback.name };
           } else {
             throw new Error(
-              `Could not create supplier "${extracted.supplier.name}" and no existing suppliers available. ` +
-              `Details: ${getDetailedError(supErr)}`
+              `Could not create supplier "${extracted.supplier.name}" and no existing suppliers available.`
             );
           }
         }
@@ -1943,7 +2016,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
         payments,
         generalDiscountType,
         generalDiscountPercent,
-        // Send the RAW amount the user typed, not the derived discounted figure.
         generalDiscountAmount: generalDiscountAmountInput,
         generalDiscountApplyType,
         packingCharges: round2(packingCharges),
@@ -2024,11 +2096,11 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
       onImported();
       onClose();
     } catch (err: unknown) {
-      const detailed = getDetailedError(err);
+      const userMsg = getErrorMessage(err, 'Failed to save purchase.');
       console.error('[OCR] Save failed:', err, diagnostics);
-      setSubmitError(detailed);
+      setSubmitError(userMsg);
       setSubmitDiagnostics(diagnostics);
-      showError('Save failed', detailed);
+      showError('Save failed', userMsg);
     } finally {
       setSubmitting(false);
     }
@@ -2051,7 +2123,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
       <div className="flex min-h-full items-start justify-center p-3 sm:p-6">
         <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-sm" onClick={onClose} />
         <div className="animate-fadeIn relative w-full max-w-6xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
-          {/* Header */}
           <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:px-6">
             <div className="flex items-center gap-3">
               <div className="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-sm">
@@ -2080,7 +2151,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
             </div>
           )}
 
-          {/* Stepper */}
           <div className="border-b border-slate-100 bg-slate-50/60 px-5 py-3 sm:px-6">
             <ol className="flex items-center gap-1 sm:gap-2">
               {OCR_STEPS.map((s, idx) => {
@@ -2109,9 +2179,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
             </ol>
           </div>
 
-          {/* Body */}
           <div className="max-h-[calc(100vh-260px)] overflow-y-auto px-5 py-5 sm:px-6">
-            {/* =================== STEP 1: UPLOAD =================== */}
             {step === 'upload' && (
               <div className="space-y-5">
                 <div
@@ -2199,7 +2267,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
               </div>
             )}
 
-            {/* =================== STEP 2: VERIFY & MAP =================== */}
             {step === 'verify' && extracted && (
               <div className="space-y-5">
                 {typeof extracted.overall_confidence === 'number' && (
@@ -2490,7 +2557,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
               </div>
             )}
 
-            {/* =================== STEP 3: CHARGES & PAYMENTS =================== */}
             {step === 'charges' && (
               <div className="space-y-5">
                 <div className="rounded-xl border border-slate-200 bg-white p-4">
@@ -2498,7 +2564,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
                     <FiDollarSign size={14} className="text-indigo-500" /> Discounts &amp; charges
                   </h3>
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    {/* Bill discount */}
                     <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
                       <div className="flex items-center justify-between">
                         <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -2533,7 +2598,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
                       <p className="text-right text-xs font-semibold text-rose-600">-{formatCurrency(generalDiscountAmount)}</p>
                     </div>
 
-                    {/* Packing */}
                     <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
                       <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                         <FiPackage size={11} className="mr-1 inline" /> Packing charges
@@ -2554,7 +2618,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
                       <p className="text-right text-xs text-slate-500">Tax {formatCurrency(packingTax)}</p>
                     </div>
 
-                    {/* TCS */}
                     <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
                       <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">TCS %</label>
                       <input type="number" min="0" max="100" step="0.01" value={tcsPercent}
@@ -2564,7 +2627,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
                       <p className="text-right text-xs text-slate-500">= {formatCurrency(tcsAmount)}</p>
                     </div>
 
-                    {/* Round-off */}
                     <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3">
                       <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Round-off</label>
                       <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
@@ -2687,7 +2749,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
               </div>
             )}
 
-            {/* =================== STEP 4: OVERVIEW =================== */}
             {step === 'overview' && extracted && (
               <div className="space-y-5">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -2917,10 +2978,10 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
                           </p>
                         )}
 
-                        {submitDiagnostics && (
+                        {!IS_PROD && submitDiagnostics && (
                           <details className="mt-2 rounded-lg bg-white/70 p-2">
                             <summary className="cursor-pointer font-semibold text-rose-900">
-                              Show diagnostics (what was sent)
+                              Show diagnostics (dev only)
                             </summary>
                             <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-slate-950 p-2 font-mono text-[10px] text-rose-100">
 {JSON.stringify(submitDiagnostics, null, 2)}
@@ -2935,7 +2996,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
             )}
           </div>
 
-          {/* Footer */}
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 bg-slate-50/60 px-5 py-3 sm:px-6">
             <div className="flex items-center gap-2">
               <Button variant="outline" onClick={handleBack} disabled={stepIndex === 0 || submitting} className="h-9 rounded-xl text-xs">
@@ -2974,6 +3034,292 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
 PurchaseOCRModal.displayName = 'PurchaseOCRModal';
 
 /* ==================================================================
+ * Purchase Detail Panel (Offcanvas body) — FULL details
+ * ================================================================== */
+
+interface PurchaseDetailPanelProps {
+  purchase: PurchaseInvoice;
+  onEdit: () => void;
+  onPrint: () => void;
+  onRecordPayment: () => void;
+  onDelete: () => void;
+}
+
+const PurchaseDetailPanel = memo(({
+  purchase, onEdit, onPrint, onRecordPayment, onDelete,
+}: PurchaseDetailPanelProps) => {
+  const supplier = purchase.supplier;
+  const items = purchase.items ?? [];
+  const payments = purchase.payments ?? [];
+
+  const grandTotal = safeNum(purchase.grand_total);
+  const paid = safeNum(purchase.paid_amount);
+  const due = Math.max(0, grandTotal - paid);
+  const subtotal = safeNum(purchase.subtotal);
+  const tax = safeNum(purchase.tax_amount);
+  const billDiscount = safeNum(purchase.order_discount);
+  const packing = safeNum(purchase.packing_charges);
+  const shipping = safeNum(purchase.shipping_charges);
+  const other = safeNum(purchase.other_charges);
+  const roundOff = safeNum(purchase.round_off);
+
+  const supplierGstin = supplier?.gstin || supplier?.gst_number || null;
+  const supplierAddress = [supplier?.billing_street, supplier?.billing_city, supplier?.billing_state]
+    .filter(Boolean).join(', ') || supplier?.address || null;
+
+  const statusColor: Record<string, string> = {
+    Draft: 'border-slate-200 bg-slate-50 text-slate-700',
+    Ordered: 'border-indigo-200/70 bg-indigo-50 text-indigo-700',
+    Received: 'border-cyan-200/70 bg-cyan-50 text-cyan-700',
+    Completed: 'border-emerald-200/70 bg-emerald-50 text-emerald-700',
+    Cancelled: 'border-rose-200/70 bg-rose-50 text-rose-700',
+  };
+  const paymentColor: Record<string, string> = {
+    Paid: 'border-emerald-200/70 bg-emerald-50 text-emerald-700',
+    Partial: 'border-sky-200/70 bg-sky-50 text-sky-700',
+    Unpaid: 'border-rose-200/70 bg-rose-50 text-rose-700',
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="truncate text-lg font-bold tracking-tight text-slate-900">
+            {purchase.purchase_number}
+          </h3>
+          <p className="mt-0.5 truncate text-sm text-slate-500">
+            {supplier?.name || 'Unknown supplier'}
+          </p>
+          <p className="mt-0.5 text-[11px] font-medium text-slate-400">Internal ID #{purchase.id}</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="outline" className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${statusColor[purchase.status] || 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+            {purchase.status || '—'}
+          </Badge>
+          <Badge variant="outline" className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${paymentColor[purchase.payment_status] || 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+            {purchase.payment_status || '—'}
+          </Badge>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Total</p>
+          <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">{formatCurrency(grandTotal)}</p>
+        </div>
+        <div className="rounded-xl border border-emerald-200/70 bg-emerald-50/60 p-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700/80">Paid</p>
+          <p className="mt-0.5 text-sm font-bold tabular-nums text-emerald-700">{formatCurrency(paid)}</p>
+        </div>
+        <div className={`rounded-xl border p-2.5 ${due > 0 ? 'border-rose-200/70 bg-rose-50/60' : 'border-emerald-200/70 bg-emerald-50/60'}`}>
+          <p className={`text-[10px] font-semibold uppercase tracking-wide ${due > 0 ? 'text-rose-700/80' : 'text-emerald-700/80'}`}>Due</p>
+          <p className={`mt-0.5 text-sm font-bold tabular-nums ${due > 0 ? 'text-rose-600' : 'text-emerald-700'}`}>
+            {formatCurrency(due)}
+          </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <InfoRow icon={FiHash} label="Bill #" value={purchase.bill_number || '—'} mono />
+        <InfoRow icon={FiHash} label="Reference" value={purchase.reference_number || '—'} mono />
+        <InfoRow icon={FiCalendar} label="Purchase date" value={formatDate(purchase.purchase_date)} />
+        <InfoRow icon={FiCalendar} label="Due date" value={purchase.due_date ? formatDate(purchase.due_date) : '—'} />
+        <InfoRow icon={FiHome} label="Company" value={purchase.company?.name || '—'} />
+        <InfoRow icon={FiPackage} label="Warehouse" value={purchase.warehouse || '—'} />
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-white p-3">
+        <h4 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+          <FiUserPlus size={12} /> Supplier
+        </h4>
+        <div className="space-y-1.5">
+          <p className="text-sm font-semibold text-slate-800">{supplier?.name || '—'}</p>
+          {supplier?.email && (
+            <p className="flex items-center gap-1.5 text-xs text-slate-600">
+              <FiMail size={11} className="text-slate-400" /> {supplier.email}
+            </p>
+          )}
+          {supplier?.phone && (
+            <p className="flex items-center gap-1.5 text-xs text-slate-600">
+              <FiPhone size={11} className="text-slate-400" /> {supplier.phone}
+            </p>
+          )}
+          {supplierGstin && (
+            <p className="flex items-center gap-1.5 font-mono text-xs text-slate-600">
+              <FiHash size={11} className="text-slate-400" /> {supplierGstin}
+            </p>
+          )}
+          {supplierAddress && (
+            <p className="flex items-start gap-1.5 text-xs text-slate-600">
+              <FiMapPin size={11} className="mt-0.5 shrink-0 text-slate-400" />
+              <span>{supplierAddress}</span>
+            </p>
+          )}
+        </div>
+      </div>
+
+      {items.length > 0 && (
+        <div className="rounded-xl border border-slate-200 bg-white">
+          <div className="border-b border-slate-100 px-3 py-2">
+            <h4 className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              <FiTag size={12} /> Items ({items.length})
+            </h4>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="px-3 py-1.5 text-left">Product</th>
+                  <th className="px-2 py-1.5 text-right">Qty</th>
+                  <th className="px-2 py-1.5 text-right">Rate</th>
+                  <th className="px-2 py-1.5 text-right">Tax</th>
+                  <th className="px-2 py-1.5 text-right">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((it, idx) => {
+                  const qty = safeNum(it.quantity);
+                  const rate = safeNum(it.purchase_price);
+                  const lineTotal = safeNum(it.total) || qty * rate;
+                  const lineTax = safeNum(it.cgst_amount) + safeNum(it.sgst_amount) + safeNum(it.igst_amount);
+                  return (
+                    <tr key={it.id ?? idx} className="border-t border-slate-100">
+                      <td className="px-3 py-1.5">
+                        <p className="font-medium text-slate-800">{it.product_name || 'Item'}</p>
+                        {it.hsn_sac_code && <p className="text-[10px] text-slate-400">HSN {it.hsn_sac_code}</p>}
+                      </td>
+                      <td className="px-2 py-1.5 text-right tabular-nums text-slate-700">
+                        {qty} {it.unit ? <span className="text-slate-400">{it.unit}</span> : null}
+                      </td>
+                      <td className="px-2 py-1.5 text-right tabular-nums text-slate-700">{formatCurrency(rate)}</td>
+                      <td className="px-2 py-1.5 text-right tabular-nums text-slate-600">
+                        {lineTax > 0 ? formatCurrency(lineTax) : '—'}
+                        {it.gst_slab ? <span className="ml-1 text-[10px] text-slate-400">({it.gst_slab}%)</span> : null}
+                      </td>
+                      <td className="px-2 py-1.5 text-right font-semibold tabular-nums text-slate-900">
+                        {formatCurrency(lineTotal)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="rounded-xl border border-slate-200 bg-white p-3">
+        <h4 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+          <FiDollarSign size={12} /> Breakdown
+        </h4>
+        <dl className="space-y-1 text-xs">
+          <BreakdownRow label="Subtotal" value={formatCurrency(subtotal)} />
+          {billDiscount > 0 && <BreakdownRow label="Bill discount" value={`-${formatCurrency(billDiscount)}`} accent="rose" />}
+          <BreakdownRow label="Tax" value={formatCurrency(tax)} />
+          {packing > 0 && <BreakdownRow label="Packing" value={formatCurrency(packing)} />}
+          {shipping > 0 && <BreakdownRow label="Shipping" value={formatCurrency(shipping)} />}
+          {other > 0 && <BreakdownRow label="Other charges" value={formatCurrency(other)} />}
+          {roundOff !== 0 && (
+            <BreakdownRow label="Round off" value={`${roundOff >= 0 ? '+' : ''}${formatCurrency(roundOff)}`} accent={roundOff < 0 ? 'rose' : 'emerald'} />
+          )}
+          <div className="mt-1 flex items-center justify-between border-t border-slate-100 pt-1.5">
+            <dt className="font-semibold text-slate-700">Grand total</dt>
+            <dd className="font-bold tabular-nums text-slate-900">{formatCurrency(grandTotal)}</dd>
+          </div>
+        </dl>
+      </div>
+
+      {payments.length > 0 && (
+        <div className="rounded-xl border border-slate-200 bg-white">
+          <div className="border-b border-slate-100 px-3 py-2">
+            <h4 className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              <FiCreditCard size={12} /> Payments ({payments.length})
+            </h4>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {payments.map((p, idx) => (
+              <div key={p.id ?? idx} className="flex items-center justify-between gap-3 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-semibold text-slate-700">
+                    {p.reference_no || `Payment #${idx + 1}`}
+                  </p>
+                  <p className="text-[10px] text-slate-500">
+                    {formatDate(p.transaction_date)} · {p.payment_method || 'method'} · {p.payment_direction === 'inward' ? 'inward' : 'outward'}
+                  </p>
+                </div>
+                <span className={`shrink-0 text-xs font-bold tabular-nums ${p.payment_direction === 'inward' ? 'text-sky-600' : 'text-emerald-700'}`}>
+                  {p.payment_direction === 'inward' ? '-' : '+'}{formatCurrency(p.amount)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {(purchase.notes || purchase.internal_remarks) && (
+        <div className="rounded-xl border border-slate-200 bg-white p-3">
+          <h4 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+            <FiInfo size={12} /> Notes
+          </h4>
+          {purchase.notes && <p className="whitespace-pre-wrap text-xs text-slate-700">{purchase.notes}</p>}
+          {purchase.internal_remarks && (
+            <p className="mt-2 whitespace-pre-wrap text-xs italic text-slate-500">{purchase.internal_remarks}</p>
+          )}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <div className="rounded-lg bg-slate-50 px-2.5 py-1.5">
+          <span className="text-slate-400">Created</span>
+          <p className="font-medium text-slate-700">{formatDateTime(purchase.created_at)}</p>
+        </div>
+        <div className="rounded-lg bg-slate-50 px-2.5 py-1.5">
+          <span className="text-slate-400">Updated</span>
+          <p className="font-medium text-slate-700">{formatDateTime(purchase.updated_at)}</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 pt-1">
+        <Button size="sm" className="h-9 rounded-xl bg-slate-900 text-xs hover:bg-slate-800" onClick={onEdit}>
+          <FiEdit className="mr-1.5" size={13} /> Edit
+        </Button>
+        <Button size="sm" variant="outline" className="h-9 rounded-xl text-xs" onClick={onPrint}>
+          <FiPrinter className="mr-1.5" size={13} /> Print (A4)
+        </Button>
+        <Button size="sm" variant="outline" className="h-9 rounded-xl text-xs" onClick={onRecordPayment} disabled={due <= 0}>
+          <FiCreditCard className="mr-1.5" size={13} /> Record payment
+        </Button>
+        <Button size="sm" variant="outline" className="h-9 rounded-xl border-rose-200 text-xs text-rose-600 hover:bg-rose-50" onClick={onDelete}>
+          <FiTrash2 className="mr-1.5" size={13} /> Delete
+        </Button>
+      </div>
+    </div>
+  );
+});
+PurchaseDetailPanel.displayName = 'PurchaseDetailPanel';
+
+function InfoRow({ icon: Icon, label, value, mono }: { icon: React.ElementType; label: string; value: React.ReactNode; mono?: boolean }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5">
+      <p className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+        <Icon size={10} /> {label}
+      </p>
+      <p className={`mt-0.5 truncate text-xs font-medium text-slate-800 ${mono ? 'font-mono' : ''}`}>{value}</p>
+    </div>
+  );
+}
+
+function BreakdownRow({ label, value, accent }: { label: string; value: string; accent?: 'rose' | 'emerald' }) {
+  const accentClass = accent === 'rose' ? 'text-rose-600' : accent === 'emerald' ? 'text-emerald-600' : 'text-slate-800';
+  return (
+    <div className="flex items-center justify-between">
+      <dt className="text-slate-500">{label}</dt>
+      <dd className={`tabular-nums ${accentClass}`}>{value}</dd>
+    </div>
+  );
+}
+
+/* ==================================================================
  * Main PurchasePage
  * ================================================================== */
 
@@ -2981,7 +3327,6 @@ export function PurchasePage() {
   const navigate = useNavigate();
   const { showSuccess, showError } = useNotification();
 
-  /* ---------- Filters ---------- */
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
@@ -2989,8 +3334,20 @@ export function PurchasePage() {
   const [filterCompanyId, setFilterCompanyId] = useState<number | undefined>(undefined);
   const [filterDateFrom, setFilterDateFrom] = useState(getMonthStart());
   const [filterDateTo, setFilterDateTo] = useState(getLocalToday());
-  // FIX: explicit preset state so the UI chip highlights the correct preset
   const [datePreset, setDatePreset] = useState<DatePreset>('month');
+
+  const [filtersExpanded, setFiltersExpanded] = useState<boolean>(() => {
+    try {
+      const stored = window.localStorage.getItem(FILTERS_EXPANDED_KEY);
+      if (stored !== null) return stored === 'true';
+    } catch { /* ignore */ }
+    if (typeof window !== 'undefined') return window.innerWidth >= 1024;
+    return true;
+  });
+
+  useEffect(() => {
+    try { window.localStorage.setItem(FILTERS_EXPANDED_KEY, String(filtersExpanded)); } catch { /* ignore */ }
+  }, [filtersExpanded]);
 
   const [isViewPanelOpen, setIsViewPanelOpen] = useState(false);
   const [viewingPurchase, setViewingPurchase] = useState<PurchaseInvoice | null>(null);
@@ -3025,13 +3382,10 @@ export function PurchasePage() {
   const { data: purchases, loading, error, refresh } =
     useApiCache<PurchaseInvoice[]>('purchase-invoices', () => apiClient.getPurchaseInvoices());
 
-  /* ---------- Filtering (FIXED) ---------- */
-
   const filteredPurchases = useMemo(() => {
     if (!purchases) return [];
     let filtered = [...purchases];
 
-    // FIX 1: text search (case-insensitive, includes invoice #, supplier, status)
     if (search) {
       const term = search.toLowerCase().trim();
       filtered = filtered.filter((p) =>
@@ -3043,25 +3397,21 @@ export function PurchasePage() {
       );
     }
 
-    // FIX 2: case-insensitive status match
     if (filterStatus !== 'all') {
       const needle = filterStatus.toLowerCase();
       filtered = filtered.filter((p) => String(p.status || '').toLowerCase() === needle);
     }
 
-    // FIX 3: case-insensitive payment status match
     if (filterPaymentStatus !== 'all') {
       const needle = filterPaymentStatus.toLowerCase();
       filtered = filtered.filter((p) => String(p.payment_status || '').toLowerCase() === needle);
     }
 
-    // FIX 4: numeric-safe company match
     if (filterCompanyId !== undefined) {
       const target = Number(filterCompanyId);
       filtered = filtered.filter((p) => Number(p.company_id) === target);
     }
 
-    // FIX 5: robust date range using normalised YYYY-MM-DD strings
     if (filterDateFrom) {
       filtered = filtered.filter((p) => {
         const d = normalizeDateInput(p.purchase_date);
@@ -3075,7 +3425,6 @@ export function PurchasePage() {
       });
     }
 
-    // FIX 6: newest first — deterministic ordering
     filtered.sort((a, b) => {
       const da = normalizeDateInput(a.purchase_date) || '';
       const db = normalizeDateInput(b.purchase_date) || '';
@@ -3121,24 +3470,34 @@ export function PurchasePage() {
 
   const handleBulkDelete = async () => {
     if (selectedIds.length === 0) return;
-    if (!window.confirm(`Delete ${selectedIds.length} purchase(s)?`)) return;
+    if (!window.confirm(`Delete ${selectedIds.length} purchase(s)? This cannot be undone.`)) return;
     try {
-      await Promise.all(selectedIds.map((id) => apiClient.deletePurchaseInvoice(id)));
-      showSuccess('Bulk delete', `${selectedIds.length} purchase(s) deleted.`);
+      const results = await Promise.allSettled(selectedIds.map((id) => apiClient.deletePurchaseInvoice(id)));
+      const failed = results.filter((r) => r.status === 'rejected').length;
+      if (failed === 0) showSuccess('Bulk delete', `${selectedIds.length} purchase(s) deleted.`);
+      else showError('Bulk delete', `${selectedIds.length - failed} deleted · ${failed} failed.`);
       startTransition(() => setSelectedIds([]));
       refresh();
-    } catch (err: unknown) { showError('Bulk delete failed', getErrorMessage(err, 'Bulk delete failed.')); }
+    } catch (err: unknown) {
+      showError('Bulk delete failed', getErrorMessage(err, 'Bulk delete failed.'));
+    }
   };
 
   const handleBulkStatusChange = async (status: string) => {
     if (selectedIds.length === 0) return;
     if (!window.confirm(`Change ${selectedIds.length} purchase(s) to "${status}"?`)) return;
     try {
-      await Promise.all(selectedIds.map((id) => apiClient.updatePurchaseInvoice(id, { status } as Partial<PurchaseInvoice>)));
-      showSuccess('Bulk update', `${selectedIds.length} purchase(s) updated.`);
+      const results = await Promise.allSettled(
+        selectedIds.map((id) => apiClient.updatePurchaseInvoice(id, { status } as Partial<PurchaseInvoice>))
+      );
+      const failed = results.filter((r) => r.status === 'rejected').length;
+      if (failed === 0) showSuccess('Bulk update', `${selectedIds.length} purchase(s) updated.`);
+      else showError('Bulk update', `${selectedIds.length - failed} updated · ${failed} failed.`);
       startTransition(() => setSelectedIds([]));
       refresh();
-    } catch (err: unknown) { showError('Bulk update failed', getErrorMessage(err, 'Bulk update failed.')); }
+    } catch (err: unknown) {
+      showError('Bulk update failed', getErrorMessage(err, 'Bulk update failed.'));
+    }
   };
 
   const handleView = useCallback((purchase: PurchaseInvoice) => {
@@ -3146,12 +3505,15 @@ export function PurchasePage() {
   }, []);
 
   const handleDelete = useCallback(async (purchase: PurchaseInvoice) => {
-    if (!window.confirm(`Delete purchase ${purchase.purchase_number}?`)) return;
+    if (!window.confirm(`Delete purchase ${purchase.purchase_number}? This cannot be undone.`)) return;
     try {
       await apiClient.deletePurchaseInvoice(purchase.id);
       showSuccess('Purchase deleted', `Purchase ${purchase.purchase_number} removed.`);
+      setIsViewPanelOpen(false);
       refresh();
-    } catch (err: unknown) { showError('Delete failed', getErrorMessage(err, 'Delete failed.')); }
+    } catch (err: unknown) {
+      showError('Delete failed', getErrorMessage(err, 'Delete failed.'));
+    }
   }, [refresh, showSuccess, showError]);
 
   const handleDuplicate = useCallback((purchase: PurchaseInvoice) => {
@@ -3199,7 +3561,7 @@ export function PurchasePage() {
   };
 
   const handleExport = useCallback(() => {
-    if (filteredPurchases.length === 0) { showError('Export failed', 'No data'); return; }
+    if (filteredPurchases.length === 0) { showError('Export failed', 'No data to export.'); return; }
     const headers = ['Purchase #', 'Supplier', 'Company', 'Date', 'Total', 'Paid', 'Outstanding', 'Status', 'Payment'];
     const rows = filteredPurchases.map((p) => [
       escapeCsvField(p.purchase_number),
@@ -3221,7 +3583,6 @@ export function PurchasePage() {
     showSuccess('Export', 'File downloaded.');
   }, [filteredPurchases, showSuccess, showError]);
 
-  /* ---------- Date presets (FIXED) ---------- */
   const applyDatePreset = useCallback((preset: Exclude<DatePreset, 'custom'>) => {
     const today = getLocalToday();
     setDatePreset(preset);
@@ -3230,11 +3591,14 @@ export function PurchasePage() {
     else if (preset === '30d') { setFilterDateFrom(getDaysAgo(29)); setFilterDateTo(today); }
     else if (preset === 'month') { setFilterDateFrom(getMonthStart()); setFilterDateTo(today); }
     else { setFilterDateFrom(''); setFilterDateTo(''); }
+
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+      setFiltersExpanded(false);
+    }
   }, []);
 
   const handleFromDateChange = useCallback((value: string) => {
     setDatePreset('custom');
-    // FIX: swap if user picked a "from" that's after the current "to"
     if (value && filterDateTo && value > filterDateTo) {
       setFilterDateFrom(filterDateTo);
       setFilterDateTo(value);
@@ -3245,7 +3609,6 @@ export function PurchasePage() {
 
   const handleToDateChange = useCallback((value: string) => {
     setDatePreset('custom');
-    // FIX: swap if user picked a "to" that's before the current "from"
     if (value && filterDateFrom && value < filterDateFrom) {
       setFilterDateTo(filterDateFrom);
       setFilterDateFrom(value);
@@ -3261,7 +3624,6 @@ export function PurchasePage() {
     setDatePreset('month');
   }, []);
 
-  /* FIX: active filter count now includes a non-default date range */
   const activeFilterCount = useMemo(() => {
     let count = 0;
     if (search) count++;
@@ -3284,9 +3646,6 @@ export function PurchasePage() {
   const toggleSelected = useCallback((id: number) => {
     setSelectedIds((current) => current.includes(id) ? current.filter((v) => v !== id) : [...current, id]);
   }, []);
-
-  /* Whether we should show the Reset button */
-  const shouldShowReset = activeFilterCount > 0;
 
   if (error) {
     return (
@@ -3361,118 +3720,148 @@ export function PurchasePage() {
             ) : (Array.from({ length: 4 }).map((_, i) => <StatCardSkeleton key={i} />))}
           </section>
 
-          {/* ==================== Filters card ==================== */}
           <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
             <CardHeader className="flex flex-row items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-5">
-              <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => setFiltersExpanded((v) => !v)}
+                aria-expanded={filtersExpanded}
+                aria-controls="purchase-filters-panel"
+                className="flex flex-1 items-center gap-2.5 text-left transition hover:opacity-90"
+              >
                 <div className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600 ring-1 ring-indigo-500/10">
                   <FiFilter size={14} />
                 </div>
-                <div>
-                  <CardTitle className="text-sm font-semibold text-slate-800">Filters</CardTitle>
-                  <CardDescription className="text-[11px] text-slate-500">
-                    {activeFilterCount > 0 ? `${activeFilterCount} active filter${activeFilterCount > 1 ? 's' : ''}` : 'Refine purchases by scope, payment and date'}
+                <div className="min-w-0">
+                  <CardTitle className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+                    Filters
+                    {activeFilterCount > 0 && (
+                      <span className="inline-flex items-center rounded-full bg-indigo-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                        {activeFilterCount}
+                      </span>
+                    )}
+                  </CardTitle>
+                  <CardDescription className="truncate text-[11px] text-slate-500">
+                    {filtersExpanded
+                      ? (activeFilterCount > 0 ? `${activeFilterCount} active filter${activeFilterCount > 1 ? 's' : ''}` : 'Refine purchases by scope, payment and date')
+                      : 'Tap to refine purchases'}
                   </CardDescription>
                 </div>
-              </div>
-              {shouldShowReset && (
-                <Button variant="ghost" size="sm" className="h-9 rounded-lg text-slate-500 hover:text-slate-800" onClick={clearFilters}>
+                <FiChevronDown
+                  size={16}
+                  className={`ml-auto shrink-0 text-slate-400 transition-transform duration-200 ${filtersExpanded ? 'rotate-180' : ''}`}
+                />
+              </button>
+              {activeFilterCount > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-9 shrink-0 rounded-lg text-slate-500 hover:text-slate-800"
+                  onClick={(e) => { e.stopPropagation(); clearFilters(); }}
+                >
                   <FiX className="mr-1.5" size={14} /> Reset
                 </Button>
               )}
             </CardHeader>
-            <CardContent className="bg-white p-4 sm:p-5">
-              {/* Row 1: search + company + status + payment */}
-              <div className="grid gap-3 lg:grid-cols-12">
-                <div className="relative lg:col-span-4">
-                  <FiSearch className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                  <Input value={searchInput} onChange={(e) => setSearchInput(e.target.value)}
-                    className="h-10 rounded-xl border-slate-200 pl-10 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
-                    placeholder="Search purchase #, supplier, status…" autoComplete="off" spellCheck={false} />
-                  {searchInput && (
-                    <button type="button" onClick={() => setSearchInput('')}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                      aria-label="Clear search">
-                      <FiX size={16} />
-                    </button>
-                  )}
-                </div>
-                <div className="lg:col-span-3">
-                  <div className="relative">
-                    <select aria-label="Company" value={filterCompanyId !== undefined ? String(filterCompanyId) : 'all'}
-                      onChange={(e) => setFilterCompanyId(e.target.value === 'all' ? undefined : Number(e.target.value))}
-                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
-                      <option value="all">All companies</option>
-                      {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select>
-                    <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                  </div>
-                </div>
-                <div className="lg:col-span-2">
-                  <div className="relative">
-                    <select aria-label="Purchase status" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}
-                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
-                      {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                    <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                  </div>
-                </div>
-                <div className="lg:col-span-3">
-                  <div className="relative">
-                    <select aria-label="Payment status" value={filterPaymentStatus} onChange={(e) => setFilterPaymentStatus(e.target.value)}
-                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
-                      {PAYMENT_STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                    </select>
-                    <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                  </div>
-                </div>
-              </div>
 
-              {/* Row 2: date range + presets */}
-              <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-12">
-                <div className="flex min-w-0 flex-col gap-2 sm:flex-row lg:col-span-5">
-                  <div className="relative min-w-0 flex-1">
-                    <FiCalendar className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                    <Input type="date" value={filterDateFrom} onChange={(e) => handleFromDateChange(e.target.value)}
-                      className="h-10 rounded-xl border-slate-200 pl-9 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10" />
-                  </div>
-                  <div className="hidden items-center justify-center px-1 text-slate-300 sm:flex">→</div>
-                  <div className="relative min-w-0 flex-1">
-                    <FiCalendar className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                    <Input type="date" value={filterDateTo} min={filterDateFrom || undefined} onChange={(e) => handleToDateChange(e.target.value)}
-                      className="h-10 rounded-xl border-slate-200 pl-9 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10" />
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 lg:col-span-7 lg:justify-end">
-                  <div className="flex items-center rounded-xl border border-slate-200 bg-white p-0.5 shadow-sm">
-                    {([
-                      { key: 'today', label: 'Today' },
-                      { key: '7d', label: '7 days' },
-                      { key: '30d', label: '30 days' },
-                      { key: 'month', label: 'This month' },
-                      { key: 'all', label: 'All' },
-                    ] as const).map((preset) => {
-                      // FIX: accurate active state derived from the `datePreset` state
-                      const isActive = datePreset === preset.key;
-                      return (
-                        <button key={preset.key} type="button"
-                          onClick={() => applyDatePreset(preset.key)}
-                          className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-                            isActive ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'
-                          }`}>
-                          {preset.label}
+            <div
+              id="purchase-filters-panel"
+              className={`grid overflow-hidden border-t border-slate-100 bg-white transition-[grid-template-rows,opacity] duration-300 ease-out ${
+                filtersExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] border-t-0 opacity-0'
+              }`}
+            >
+              <div className="min-h-0">
+                <CardContent className="p-4 sm:p-5">
+                  <div className="grid gap-3 lg:grid-cols-12">
+                    <div className="relative lg:col-span-4">
+                      <FiSearch className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                      <Input value={searchInput} onChange={(e) => setSearchInput(e.target.value)}
+                        className="h-10 rounded-xl border-slate-200 pl-10 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
+                        placeholder="Search purchase #, supplier, status…" autoComplete="off" spellCheck={false} />
+                      {searchInput && (
+                        <button type="button" onClick={() => setSearchInput('')}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                          aria-label="Clear search">
+                          <FiX size={16} />
                         </button>
-                      );
-                    })}
+                      )}
+                    </div>
+                    <div className="lg:col-span-3">
+                      <div className="relative">
+                        <select aria-label="Company" value={filterCompanyId !== undefined ? String(filterCompanyId) : 'all'}
+                          onChange={(e) => setFilterCompanyId(e.target.value === 'all' ? undefined : Number(e.target.value))}
+                          className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
+                          <option value="all">All companies</option>
+                          {companies.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                        </select>
+                        <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                      </div>
+                    </div>
+                    <div className="lg:col-span-2">
+                      <div className="relative">
+                        <select aria-label="Purchase status" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}
+                          className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
+                          {STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                        <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                      </div>
+                    </div>
+                    <div className="lg:col-span-3">
+                      <div className="relative">
+                        <select aria-label="Payment status" value={filterPaymentStatus} onChange={(e) => setFilterPaymentStatus(e.target.value)}
+                          className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
+                          {PAYMENT_STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                        </select>
+                        <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                      </div>
+                    </div>
                   </div>
-                  {datePreset === 'custom' && (
-                    <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">
-                      Custom range
-                    </span>
-                  )}
-                </div>
+
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-12">
+                    <div className="flex min-w-0 flex-col gap-2 sm:flex-row lg:col-span-5">
+                      <div className="relative min-w-0 flex-1">
+                        <FiCalendar className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                        <Input type="date" value={filterDateFrom} onChange={(e) => handleFromDateChange(e.target.value)}
+                          className="h-10 rounded-xl border-slate-200 pl-9 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10" />
+                      </div>
+                      <div className="hidden items-center justify-center px-1 text-slate-300 sm:flex">→</div>
+                      <div className="relative min-w-0 flex-1">
+                        <FiCalendar className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                        <Input type="date" value={filterDateTo} min={filterDateFrom || undefined} onChange={(e) => handleToDateChange(e.target.value)}
+                          className="h-10 rounded-xl border-slate-200 pl-9 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10" />
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 lg:col-span-7 lg:justify-end">
+                      <div className="flex items-center rounded-xl border border-slate-200 bg-white p-0.5 shadow-sm">
+                        {([
+                          { key: 'today', label: 'Today' },
+                          { key: '7d', label: '7 days' },
+                          { key: '30d', label: '30 days' },
+                          { key: 'month', label: 'This month' },
+                          { key: 'all', label: 'All' },
+                        ] as const).map((preset) => {
+                          const isActive = datePreset === preset.key;
+                          return (
+                            <button key={preset.key} type="button"
+                              onClick={() => applyDatePreset(preset.key)}
+                              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                                isActive ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100'
+                              }`}>
+                              {preset.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {datePreset === 'custom' && (
+                        <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-indigo-700">
+                          Custom range
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
               </div>
-            </CardContent>
+            </div>
           </Card>
 
           {selectedIds.length > 0 && (
@@ -3676,46 +4065,19 @@ export function PurchasePage() {
 
       {isViewPanelOpen && (
         <Suspense fallback={<div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm"><div className="rounded-2xl bg-white p-8 text-sm text-slate-600 shadow-xl">Loading details…</div></div>}>
-          <Offcanvas isOpen={isViewPanelOpen} title={`Purchase ${viewingPurchase?.purchase_number || ''}`} onClose={() => setIsViewPanelOpen(false)}>
+          <Offcanvas
+            isOpen={isViewPanelOpen}
+            title={`Purchase ${viewingPurchase?.purchase_number || ''}`}
+            onClose={() => setIsViewPanelOpen(false)}
+          >
             {viewingPurchase && (
-              <div className="space-y-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h3 className="text-lg font-bold tracking-tight text-slate-900">{viewingPurchase.purchase_number}</h3>
-                    <p className="text-sm text-slate-500">{viewingPurchase.supplier?.name || '—'}</p>
-                  </div>
-                  <Badge variant="outline" className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
-                    viewingPurchase.payment_status === 'Paid' ? 'border-emerald-200/70 bg-emerald-50 text-emerald-700'
-                      : viewingPurchase.payment_status === 'Partial' ? 'border-sky-200/70 bg-sky-50 text-sky-700'
-                        : 'border-rose-200/70 bg-rose-50 text-rose-700'
-                  }`}>
-                    {viewingPurchase.payment_status || '—'}
-                  </Badge>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-slate-500">Total</p>
-                    <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">{formatCurrency(viewingPurchase.grand_total)}</p>
-                  </div>
-                  <div className="rounded-xl border border-emerald-200/70 bg-emerald-50/60 p-2.5">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-emerald-700/80">Paid</p>
-                    <p className="mt-0.5 text-sm font-bold tabular-nums text-emerald-700">{formatCurrency(viewingPurchase.paid_amount)}</p>
-                  </div>
-                  <div className="rounded-xl border border-rose-200/70 bg-rose-50/60 p-2.5">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-rose-700/80">Due</p>
-                    <p className="mt-0.5 text-sm font-bold tabular-nums text-rose-600">
-                      {formatCurrency(safeNum(viewingPurchase.grand_total) - safeNum(viewingPurchase.paid_amount))}
-                    </p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2 pt-1">
-                  <Button size="sm" className="h-9 rounded-xl bg-slate-900 text-xs hover:bg-slate-800"
-                    onClick={() => navigate(`/purchases/${viewingPurchase.id}`)}>Open full purchase</Button>
-                  <Button size="sm" variant="outline" className="h-9 rounded-xl text-xs" onClick={() => handlePrint(viewingPurchase)}>
-                    <FiPrinter className="mr-1.5" size={14} /> Print (A4)
-                  </Button>
-                </div>
-              </div>
+              <PurchaseDetailPanel
+                purchase={viewingPurchase}
+                onEdit={() => { setIsViewPanelOpen(false); navigate(`/purchases/${viewingPurchase.id}/edit`); }}
+                onPrint={() => handlePrint(viewingPurchase)}
+                onRecordPayment={() => { setIsViewPanelOpen(false); handleRecordPaymentTrigger(viewingPurchase); }}
+                onDelete={() => handleDelete(viewingPurchase)}
+              />
             )}
           </Offcanvas>
         </Suspense>
@@ -3729,9 +4091,9 @@ export function PurchasePage() {
               <div className="grid h-10 w-10 place-items-center rounded-xl bg-violet-50 text-violet-600 ring-1 ring-violet-500/10">
                 <FiCreditCard size={18} />
               </div>
-              <div>
+              <div className="min-w-0">
                 <h3 className="text-base font-bold text-slate-900">Record payment</h3>
-                <p className="text-xs text-slate-500">{payingPurchase.purchase_number} · {payingPurchase.supplier?.name}</p>
+                <p className="truncate text-xs text-slate-500">{payingPurchase.purchase_number} · {payingPurchase.supplier?.name}</p>
               </div>
             </div>
             <div className="space-y-3">
@@ -3770,7 +4132,7 @@ export function PurchasePage() {
             invoice_no: printInvoice.purchase_number,
             customer: printInvoice.supplier ?? undefined,
             total_amount: printInvoice.grand_total,
-            tax_amount: 0,
+            tax_amount: printInvoice.tax_amount ?? 0,
             items: (printInvoice.items ?? []).map((item) => ({ ...item, product_name: item.product_name ?? 'Item' })),
           } as unknown as React.ComponentProps<typeof InvoicePrint>['invoice']}
           onReady={() => {}} />

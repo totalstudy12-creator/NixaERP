@@ -12,12 +12,21 @@ use App\Models\Branch;
 use App\Models\Customer;
 use App\Models\Supplier;
 use App\Models\ProductPurchasePriceHistory;
+use App\Models\Product;
+use App\Models\SalesReturn;
+use App\Models\ReturnItem;
+use Illuminate\Database\Query\Builder as QueryBuilder;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Carbon\Carbon;
 
 class ReportService
 {
+    /** @var array<string, array{found: bool, unit_cost: float}> */
+    protected array $historicalCostCache = [];
+
     /**
      * Get financial year dates (1 Apr - 31 Mar)
      */
@@ -91,6 +100,334 @@ class ReportService
     }
 
     /**
+     * Return invoice revenue on a GST-exclusive basis.
+     * Invoice subtotal is gross taxable value before discounts; invoice
+     * discount_amount contains item + general discounts in the current schema.
+     */
+    protected function calculateInvoiceRevenue(Invoice $invoice): array
+    {
+        $grossSales = (float) ($invoice->subtotal ?? 0);
+        $discount = min(max(0, (float) ($invoice->discount_amount ?? 0)), $grossSales);
+        $netSales = max(0, $grossSales - $discount);
+
+        return [
+            'gross_sales' => $grossSales,
+            'discount' => $discount,
+            'net_sales' => $netSales,
+            'tax' => (float) ($invoice->tax_amount ?? 0),
+        ];
+    }
+
+    /**
+     * Historical unit cost used for profitability.
+     * Policy: latest purchase-price-history entry on/before sale date, then
+     * current product.purchase_price only when no historical record exists.
+     */
+    protected function resolveHistoricalProductCostInfo(int $productId, ?string $invoiceDate = null): array
+    {
+        if ($productId <= 0) {
+            return ['found' => false, 'unit_cost' => 0.0];
+        }
+
+        $date = $invoiceDate ? Carbon::parse($invoiceDate)->toDateString() : null;
+        $cacheKey = $productId . '|' . ($date ?? 'latest');
+        if (array_key_exists($cacheKey, $this->historicalCostCache)) {
+            return $this->historicalCostCache[$cacheKey];
+        }
+
+        $entry = ProductPurchasePriceHistory::query()
+            ->where('product_id', $productId)
+            ->when($date, fn ($q) => $q->whereDate('purchase_date', '<=', $date))
+            ->where(function ($q) {
+                $q->where('quantity', '>', 0)->orWhereNull('quantity');
+            })
+            ->orderByDesc('purchase_date')
+            ->orderByDesc('id')
+            ->first();
+
+        if ($entry) {
+            $result = [
+                'found' => true,
+                'unit_cost' => max(0.0, (float) ($entry->unit_price ?? 0)),
+            ];
+        } else {
+            $product = Product::query()->find($productId);
+            $purchasePrice = $product ? (float) ($product->purchase_price ?? 0) : 0.0;
+            $result = [
+                'found' => $purchasePrice > 0,
+                'unit_cost' => max(0.0, $purchasePrice),
+            ];
+        }
+
+        $this->historicalCostCache[$cacheKey] = $result;
+        return $result;
+    }
+
+    protected function calculateInvoiceCogs(Invoice $invoice): array
+    {
+        $cogs = 0.0;
+        $missingCostLines = 0;
+        $items = 0;
+
+        foreach ($invoice->items as $item) {
+            $items++;
+            $qty = max(0, (float) ($item->quantity ?? 0));
+            if ($qty <= 0) {
+                continue;
+            }
+
+            $costInfo = $this->resolveHistoricalProductCostInfo(
+                (int) ($item->product_id ?? 0),
+                $invoice->invoice_date ? Carbon::parse($invoice->invoice_date)->toDateString() : null,
+            );
+
+            if (!$costInfo['found']) {
+                $missingCostLines++;
+            }
+
+            $cogs += $qty * (float) $costInfo['unit_cost'];
+        }
+
+        return [
+            'cogs' => round($cogs, 2),
+            'missing_cost_lines' => $missingCostLines,
+            'item_count' => $items,
+        ];
+    }
+
+    /**
+     * Sales returns reduce revenue only for non-draft/non-cancelled returns.
+     * Returned COGS is reversed only when the goods are marked for restocking.
+     */
+    protected function getSalesReturnAdjustment(
+        ?int $companyId,
+        ?int $branchId,
+        Carbon $fromDate,
+        Carbon $toDate
+    ): array {
+        $returns = SalesReturn::query()
+            ->with(['originalSale', 'items.saleItem'])
+            ->whereBetween('return_date', [$fromDate, $toDate])
+            ->whereIn('status', ['confirmed', 'stock_updated', 'refund_pending', 'completed'])
+            ->when($companyId, fn ($q) => $q->where('company_id', $companyId))
+            ->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
+            ->get();
+
+        $salesReturns = 0.0;
+        $returnedCogs = 0.0;
+        $returnCount = 0;
+        $missingCostLines = 0;
+
+        foreach ($returns as $return) {
+            $returnCount++;
+            $salesReturns += (float) ($return->taxable_amount ?? $return->subtotal ?? 0);
+
+            foreach ($return->items as $returnItem) {
+                if (($returnItem->restock_status ?? 'restock') !== 'restock') {
+                    continue;
+                }
+
+                $qty = max(0, (float) ($returnItem->return_qty ?? $returnItem->quantity ?? 0));
+                if ($qty <= 0) continue;
+
+                $saleItem = $returnItem->saleItem;
+                $productId = (int) ($returnItem->product_id ?? $saleItem?->product_id ?? 0);
+                $saleDate = $return->originalSale?->invoice_date
+                    ? Carbon::parse($return->originalSale->invoice_date)->toDateString()
+                    : ($return->return_date ? Carbon::parse($return->return_date)->toDateString() : null);
+
+                $costInfo = $this->resolveHistoricalProductCostInfo($productId, $saleDate);
+                if (!$costInfo['found']) {
+                    $missingCostLines++;
+                }
+                $returnedCogs += $qty * (float) $costInfo['unit_cost'];
+            }
+        }
+
+        return [
+            'sales_returns' => round(max(0, $salesReturns), 2),
+            'returned_cogs' => round(max(0, $returnedCogs), 2),
+            'return_count' => $returnCount,
+            'missing_cost_lines' => $missingCostLines,
+        ];
+    }
+
+    /**
+     * Read operating expenses only when a real expenses table exists.
+     * No fallback/fake expense values are ever introduced.
+     */
+    protected function getOperatingExpenseSummary(
+        ?int $companyId,
+        ?int $branchId,
+        Carbon $fromDate,
+        Carbon $toDate
+    ): array {
+        if (!Schema::hasTable('expenses')) {
+            return [
+                'total' => 0.0,
+                'rows' => [],
+                'source' => 'not_available',
+            ];
+        }
+
+        $columns = Schema::getColumnListing('expenses');
+        $pick = static function (array $candidates) use ($columns): ?string {
+            foreach ($candidates as $candidate) {
+                if (in_array($candidate, $columns, true)) return $candidate;
+            }
+            return null;
+        };
+
+        $dateColumn = $pick(['expense_date', 'date', 'transaction_date', 'occurred_at', 'created_at']);
+        $amountColumn = $pick(['amount', 'total_amount', 'expense_amount', 'value']);
+        if (!$dateColumn || !$amountColumn) {
+            return [
+                'total' => 0.0,
+                'rows' => [],
+                'source' => 'not_available',
+            ];
+        }
+
+        $categoryColumn = $pick(['category', 'expense_category', 'expense_type', 'type', 'name']);
+        $descriptionColumn = $pick(['description', 'remarks', 'note', 'reason']);
+        $vendorColumn = $pick(['vendor', 'vendor_name', 'supplier_name']);
+
+        $query = DB::table('expenses')
+            ->whereBetween($dateColumn, [$fromDate, $toDate]);
+
+        if ($companyId && in_array('company_id', $columns, true)) {
+            $query->where('company_id', $companyId);
+        }
+        if ($branchId && in_array('branch_id', $columns, true)) {
+            $query->where('branch_id', $branchId);
+        }
+        if (in_array('status', $columns, true)) {
+            $query->where(function ($q) {
+                $q->whereNull('status')
+                    ->orWhereNotIn('status', ['cancelled', 'void', 'deleted']);
+            });
+        }
+
+        $select = [DB::raw("$dateColumn as expense_date"), DB::raw("$amountColumn as expense_amount")];
+        if ($categoryColumn) $select[] = DB::raw("$categoryColumn as expense_category");
+        if ($descriptionColumn) $select[] = DB::raw("$descriptionColumn as expense_description");
+        if ($vendorColumn) $select[] = DB::raw("$vendorColumn as expense_vendor");
+
+        $records = $query->select($select)->orderBy($dateColumn, 'asc')->get();
+        $grouped = [];
+        foreach ($records as $record) {
+            $amount = max(0, (float) ($record->expense_amount ?? 0));
+            if ($amount <= 0) continue;
+            $category = (string) ($record->expense_category ?? 'Operating Expense');
+            if (!isset($grouped[$category])) $grouped[$category] = 0.0;
+            $grouped[$category] += $amount;
+        }
+
+        $rows = [];
+        foreach ($grouped as $name => $amount) {
+            $rows[] = ['name' => $name, 'amount' => round($amount, 2)];
+        }
+
+        return [
+            'total' => round(array_sum($grouped), 2),
+            'rows' => $rows,
+            'source' => 'expenses_table',
+        ];
+    }
+
+    protected function calculatePnlBase(
+        ?int $companyId,
+        ?int $branchId,
+        Carbon $fromDate,
+        Carbon $toDate
+    ): array {
+        $this->historicalCostCache = [];
+
+        $invoices = $this->baseInvoiceQuery($companyId, $branchId)
+            ->whereBetween('invoice_date', [$fromDate, $toDate])
+            ->get();
+
+        $grossSales = 0.0;
+        $discounts = 0.0;
+        $cogs = 0.0;
+        $invoiceCount = 0;
+        $missingCostLines = 0;
+
+        foreach ($invoices as $invoice) {
+            if (($invoice->status ?? null) === 'draft') continue;
+            $invoiceCount++;
+            $revenue = $this->calculateInvoiceRevenue($invoice);
+            $grossSales += $revenue['gross_sales'];
+            $discounts += $revenue['discount'];
+
+            $cost = $this->calculateInvoiceCogs($invoice);
+            $cogs += $cost['cogs'];
+            $missingCostLines += $cost['missing_cost_lines'];
+        }
+
+        $returns = $this->getSalesReturnAdjustment($companyId, $branchId, $fromDate, $toDate);
+        $netSales = max(0, $grossSales - $discounts - $returns['sales_returns']);
+        $netCogs = max(0, $cogs - $returns['returned_cogs']);
+        $grossProfit = $netSales - $netCogs;
+
+        return [
+            'gross_sales' => round($grossSales, 2),
+            'sales_discounts' => round($discounts, 2),
+            'sales_returns' => $returns['sales_returns'],
+            'net_sales' => round($netSales, 2),
+            'cogs_before_returns' => round($cogs, 2),
+            'returned_cogs' => $returns['returned_cogs'],
+            'cogs' => round($netCogs, 2),
+            'gross_profit' => round($grossProfit, 2),
+            'invoice_count' => $invoiceCount,
+            'sales_return_count' => $returns['return_count'],
+            'missing_cost_lines' => $missingCostLines + $returns['missing_cost_lines'],
+            'invoices' => $invoices,
+            'returns' => $returns,
+        ];
+    }
+
+    /**
+     * Sum recorded payments safely against schema variations in the live DB.
+     * Some deployments do not have payments.branch_id, so branch filtering is
+     * applied only when that column actually exists.
+     */
+    protected function sumPaymentsByDirection(
+        string $direction,
+        ?int $companyId,
+        ?int $branchId,
+        Carbon $fromDate,
+        Carbon $toDate
+    ): float {
+        if (!Schema::hasTable('payments')) {
+            return 0.0;
+        }
+
+        $columns = Schema::getColumnListing('payments');
+        foreach (['payment_direction', 'transaction_date', 'amount'] as $required) {
+            if (!in_array($required, $columns, true)) {
+                return 0.0;
+            }
+        }
+
+        $query = Payment::query()
+            ->where('payment_direction', $direction)
+            ->whereBetween('transaction_date', [$fromDate, $toDate]);
+
+        if ($companyId && in_array('company_id', $columns, true)) {
+            $query->where('company_id', $companyId);
+        }
+        if ($branchId && in_array('branch_id', $columns, true)) {
+            $query->where('branch_id', $branchId);
+        }
+        if (in_array('status', $columns, true)) {
+            $query->whereIn('status', ['completed', 'paid', 'success']);
+        }
+
+        return (float) $query->sum('amount');
+    }
+
+    /**
      * OVERVIEW DASHBOARD SUMMARY
      */
     public function getDashboardSummary(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
@@ -98,79 +435,61 @@ class ReportService
         if ($from && $to) {
             [$fromDate, $toDate] = $this->validateDateRange($from, $to);
         } else {
-            $fromDate = Carbon::parse('2026-04-01');
-            $toDate = now();
+            $fromDate = Carbon::now()->startOfYear();
+            $toDate = Carbon::now()->endOfDay();
         }
 
-        // Sales
-        $salesData = $this->baseInvoiceQuery($companyId, $branchId)
-            ->whereBetween('invoice_date', [$fromDate, $toDate])
-            ->selectRaw('
-                COUNT(*) as count,
-                COALESCE(SUM(total_amount), 0) as total,
-                COALESCE(SUM(tax_amount), 0) as tax,
-                COALESCE(SUM(discount_amount), 0) as discount
-            ')
-            ->first();
+        $pnl = $this->calculatePnlBase($companyId, $branchId, $fromDate, $toDate);
 
-        $salesCount = $salesData->count ?? 0;
-        $totalSales = $salesData->total ?? 0;
-
-        // Purchases
         $purchaseData = $this->basePurchaseQuery($companyId, $branchId)
             ->whereBetween('purchase_date', [$fromDate, $toDate])
-            ->selectRaw('
-                COUNT(*) as count,
-                COALESCE(SUM(grand_total), 0) as total,
-                COALESCE(SUM(tax_amount), 0) as tax
-            ')
+            ->selectRaw('COUNT(*) as count, COALESCE(SUM(grand_total), 0) as total, COALESCE(SUM(tax_amount), 0) as tax')
             ->first();
 
-        $purchaseCount = $purchaseData->count ?? 0;
-        $totalPurchases = $purchaseData->total ?? 0;
+        $paymentsReceived = $this->sumPaymentsByDirection(
+            'inward', $companyId, $branchId, $fromDate, $toDate
+        );
 
-        // Payments Received (sales) & Payments Made (purchases)
-        $paymentsReceived = Payment::where('payment_direction', 'inward')
-            ->whereBetween('transaction_date', [$fromDate, $toDate])
-            ->when($companyId, fn($q) => $q->where('company_id', $companyId))
-            ->sum('amount') ?? 0;
+        $paymentsMade = $this->sumPaymentsByDirection(
+            'outward', $companyId, $branchId, $fromDate, $toDate
+        );
 
-        $paymentsMade = Payment::where('payment_direction', 'outward')
-            ->whereBetween('transaction_date', [$fromDate, $toDate])
-            ->when($companyId, fn($q) => $q->where('company_id', $companyId))
-            ->sum('amount') ?? 0;
-
-        // Receivables (unpaid invoices)
         $receivables = $this->baseInvoiceQuery($companyId, $branchId)
             ->whereBetween('invoice_date', [$fromDate, $toDate])
-            ->whereNotIn('status', ['paid', 'cancelled'])
-            ->sum('total_amount') ?? 0;
+            ->whereNotIn('status', ['paid', 'cancelled', 'draft'])
+            ->sum(DB::raw('GREATEST(COALESCE(total_amount, 0) - COALESCE(payment_received, paid_amount, 0), 0)'));
 
-        // Payables (unpaid purchases)
         $payables = $this->basePurchaseQuery($companyId, $branchId)
             ->whereBetween('purchase_date', [$fromDate, $toDate])
-            ->whereNotIn('status', ['paid', 'cancelled'])
-            ->sum('grand_total') ?? 0;
+            ->whereNotIn('status', ['paid', 'cancelled', 'draft'])
+            ->sum(DB::raw('GREATEST(COALESCE(grand_total, 0) - COALESCE(paid_amount, 0), 0)'));
 
-        $grossProfit = $totalSales - $totalPurchases;
+        $expense = $this->getOperatingExpenseSummary($companyId, $branchId, $fromDate, $toDate);
+        $netProfit = $pnl['gross_profit'] - $expense['total'];
 
         return [
-            'total_sales' => (float) $totalSales,
-            'total_purchases' => (float) $totalPurchases,
-            'gross_profit' => (float) $grossProfit,
+            'total_sales' => (float) $pnl['net_sales'],
+            'gross_sales' => (float) $pnl['gross_sales'],
+            'total_purchases' => (float) ($purchaseData->total ?? 0),
+            'gross_profit' => (float) $pnl['gross_profit'],
+            'net_profit' => (float) $netProfit,
+            'operating_expenses' => (float) $expense['total'],
             'receivables' => (float) $receivables,
             'payables' => (float) $payables,
             'payments_received' => (float) $paymentsReceived,
             'payments_made' => (float) $paymentsMade,
-            'outstanding_amount' => (float) ($receivables - $paymentsReceived),
-            'sales_count' => (int) $salesCount,
-            'purchase_count' => (int) $purchaseCount,
-            'invoice_count' => (int) $salesCount,
-            'profit_margin' => $totalSales > 0 ? (($grossProfit / $totalSales) * 100) : 0,
+            'payments' => (float) $paymentsReceived,
+            'outstanding_amount' => (float) $receivables,
+            'sales_count' => (int) $pnl['invoice_count'],
+            'purchase_count' => (int) ($purchaseData->count ?? 0),
+            'invoice_count' => (int) $pnl['invoice_count'],
+            'profit_margin' => $pnl['net_sales'] > 0 ? (($pnl['gross_profit'] / $pnl['net_sales']) * 100) : 0.0,
+            'net_margin' => $pnl['net_sales'] > 0 ? (($netProfit / $pnl['net_sales']) * 100) : 0.0,
+            'missing_cost_lines' => (int) $pnl['missing_cost_lines'],
+            'pnl_basis' => 'GST-exclusive revenue less historical purchase-cost COGS less recorded operating expenses',
         ];
     }
-
-    public function getPurchaseRegister(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getPurchaseRegister(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
 
@@ -212,7 +531,7 @@ class ReportService
         ];
     }
 
-    public function getPurchaseByVendor(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getPurchaseByVendor(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
 
@@ -456,7 +775,7 @@ class ReportService
     /**
      * SALES SUMMARY REPORT
      */
-    public function getSalesSummary(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getSalesSummary(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
 
@@ -508,7 +827,7 @@ class ReportService
     /**
      * SALES REGISTER - Transaction level
      */
-    public function getSalesRegister(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getSalesRegister(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
 
@@ -545,7 +864,7 @@ class ReportService
     /**
      * SALES BY CUSTOMER
      */
-    public function getSalesByCustomer(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getSalesByCustomer(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
 
@@ -593,7 +912,7 @@ class ReportService
     /**
      * SALES BY PRODUCT
      */
-    public function getSalesByProduct(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getSalesByProduct(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
 
@@ -646,7 +965,7 @@ class ReportService
     /**
      * OUTSTANDING SALES (Unpaid invoices with due date tracking)
      */
-    public function getOutstandingSales(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getOutstandingSales(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
         $today = now()->format('Y-m-d');
@@ -686,7 +1005,7 @@ class ReportService
     /**
      * GST SALES REPORT (GSTR-1 source data)
      */
-    public function getGstSalesReport(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getGstSalesReport(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
 
@@ -735,7 +1054,7 @@ class ReportService
     /**
      * PURCHASE SUMMARY REPORT
      */
-    public function getPurchaseSummary(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getPurchaseSummary(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
 
@@ -827,66 +1146,80 @@ class ReportService
     /**
      * PRODUCT PROFITABILITY REPORT
      */
-    public function getProductProfitability(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getProductProfitability(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
+        $this->historicalCostCache = [];
 
-        $query = InvoiceItem::query()
-            ->join('invoices', 'invoice_items.invoice_id', '=', 'invoices.id')
-            ->leftJoin('products', 'invoice_items.product_id', '=', 'products.id')
-            ->where('invoices.status', '!=', 'cancelled')
-            ->whereBetween('invoices.invoice_date', [$fromDate, $toDate]);
-
-        if ($companyId) {
-            $query->where('invoices.company_id', $companyId);
-        }
-
-        if ($branchId) {
-            $query->where('invoices.branch_id', $branchId);
-        }
-
-        $baseQuery = $query->select([
-            'invoice_items.product_id',
-            'products.name as product_name',
-            'products.sku',
-            \DB::raw('SUM(invoice_items.quantity) as quantity_sold'),
-            \DB::raw('SUM(invoice_items.subtotal) as sales_value'),
-            \DB::raw('SUM(invoice_items.quantity * COALESCE(products.purchase_price, 0)) as cost_value'),
-        ])->groupBy('invoice_items.product_id', 'products.name', 'products.sku');
-
-        $total = (clone $baseQuery)->count();
-        $items = $baseQuery
-            ->orderByDesc('sales_value')
-            ->skip(($page - 1) * $perPage)
-            ->take($perPage)
+        $invoices = $this->baseInvoiceQuery($companyId, $branchId)
+            ->whereBetween('invoice_date', [$fromDate, $toDate])
             ->get();
 
-        $rows = $items->map(function ($row) {
-            $salesValue = (float) ($row->sales_value ?? 0);
-            $costValue = (float) ($row->cost_value ?? 0);
-            $grossProfit = $salesValue - $costValue;
-            $marginPercent = $salesValue > 0 ? (($grossProfit / $salesValue) * 100) : 0;
+        $grouped = [];
+        foreach ($invoices as $invoice) {
+            if (($invoice->status ?? null) === 'draft') continue;
+            $saleDate = $invoice->invoice_date ? Carbon::parse($invoice->invoice_date)->toDateString() : null;
+            foreach ($invoice->items as $item) {
+                $productId = (int) ($item->product_id ?? 0);
+                $key = (string) $productId;
+                $qty = max(0, (float) ($item->quantity ?? 0));
+                $base = max(0, (float) ($item->subtotal ?? ($qty * (float) ($item->unit_price ?? 0))));
+                $discount = min($base, max(0, (float) ($item->discount_amount ?? 0)));
+                $net = max(0, $base - $discount);
+                $costInfo = $this->resolveHistoricalProductCostInfo($productId, $saleDate);
+                $cogs = $qty * $costInfo['unit_cost'];
 
-            return [
-                'product_id' => (int) ($row->product_id ?? 0),
-                'product_name' => $row->product_name ?? 'Unknown Product',
-                'sku' => $row->sku ?? '-',
-                'quantity_sold' => (float) ($row->quantity_sold ?? 0),
-                'sales_value' => $salesValue,
-                'cost_value' => $costValue,
-                'gross_profit' => $grossProfit,
-                'margin_percent' => (float) $marginPercent,
-            ];
-        })->toArray();
+                if (!isset($grouped[$key])) {
+                    $product = $item->product;
+                    $grouped[$key] = [
+                        'product_id' => $productId,
+                        'product_name' => $product?->name ?? 'Unknown Product',
+                        'sku' => $product?->sku ?? '-',
+                        'quantity_sold' => 0.0,
+                        'sales_value' => 0.0,
+                        'discount' => 0.0,
+                        'net_sales' => 0.0,
+                        'cost_value' => 0.0,
+                        'gross_profit' => 0.0,
+                        'missing_cost_lines' => 0,
+                    ];
+                }
+
+                $grouped[$key]['quantity_sold'] += $qty;
+                $grouped[$key]['sales_value'] += $base;
+                $grouped[$key]['discount'] += $discount;
+                $grouped[$key]['net_sales'] += $net;
+                $grouped[$key]['cost_value'] += $cogs;
+                $grouped[$key]['gross_profit'] += ($net - $cogs);
+                if (!$costInfo['found']) $grouped[$key]['missing_cost_lines']++;
+            }
+        }
+
+        $rows = array_values($grouped);
+        foreach ($rows as &$row) {
+            $row['sales_value'] = round($row['sales_value'], 2);
+            $row['discount'] = round($row['discount'], 2);
+            $row['net_sales'] = round($row['net_sales'], 2);
+            $row['cost_value'] = round($row['cost_value'], 2);
+            $row['gross_profit'] = round($row['gross_profit'], 2);
+            $row['margin_percent'] = $row['net_sales'] > 0 ? (($row['gross_profit'] / $row['net_sales']) * 100) : 0.0;
+        }
+        unset($row);
+
+        usort($rows, fn ($a, $b) => $b['gross_profit'] <=> $a['gross_profit']);
+        $total = count($rows);
+        $data = array_slice($rows, ($page - 1) * $perPage, $perPage);
 
         return [
-            'success' => true,
-            'data' => $rows,
+            'data' => $data,
             'summary' => [
-                'total_products' => count($rows),
-                'total_sales_value' => array_sum(array_column($rows, 'sales_value')),
-                'total_cost_value' => array_sum(array_column($rows, 'cost_value')),
-                'total_gross_profit' => array_sum(array_column($rows, 'gross_profit')),
+                'total_products' => $total,
+                'total_sales_value' => round(array_sum(array_column($rows, 'sales_value')), 2),
+                'total_discount' => round(array_sum(array_column($rows, 'discount')), 2),
+                'total_net_sales' => round(array_sum(array_column($rows, 'net_sales')), 2),
+                'total_cost_value' => round(array_sum(array_column($rows, 'cost_value')), 2),
+                'total_gross_profit' => round(array_sum(array_column($rows, 'gross_profit')), 2),
+                'missing_cost_lines' => array_sum(array_column($rows, 'missing_cost_lines')),
             ],
             'meta' => [
                 'current_page' => $page,
@@ -898,7 +1231,6 @@ class ReportService
             ],
         ];
     }
-
     protected function resolveHistoricalProductCost(int $productId, ?string $invoiceDate = null): float
     {
         $date = $invoiceDate ? Carbon::parse($invoiceDate)->toDateString() : null;
@@ -937,91 +1269,79 @@ class ReportService
         return (float) ($latest->unit_price ?? 0);
     }
 
-    public function getInvoiceProfitability(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getInvoiceProfitability(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null, ?string $paymentStatus = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
+        $this->historicalCostCache = [];
 
         $query = Invoice::query()
-            ->with(['customer', 'items.product.purchasePriceHistory'])
+            ->with(['customer', 'items.product'])
             ->whereBetween('invoice_date', [$fromDate, $toDate])
-            ->where('status', '!=', 'cancelled')
+            ->whereNotIn('status', ['cancelled', 'draft'])
             ->when($companyId, fn ($q) => $q->where('company_id', $companyId))
             ->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
-            ->orderBy('invoice_date', 'desc');
+            ->when($paymentStatus, fn ($q) => $q->where('status', $paymentStatus))
+            ->when($search, function ($q) use ($search) {
+                $q->where(function ($inner) use ($search) {
+                    $inner->where('invoice_no', 'like', '%' . $search . '%')
+                        ->orWhere('customer_name', 'like', '%' . $search . '%')
+                        ->orWhereHas('customer', fn ($c) => $c->where('name', 'like', '%' . $search . '%'));
+                });
+            })
+            ->orderByDesc('invoice_date')
+            ->orderByDesc('id');
 
         $allInvoices = $query->get();
-
         $rows = [];
+        $totalRevenue = 0.0;
+        $totalCogs = 0.0;
+        $totalGrossProfit = 0.0;
+        $missingCostLines = 0;
+
         foreach ($allInvoices as $invoice) {
-            $grossSales = (float) ($invoice->total_amount ?? 0);
-            $discount = (float) ($invoice->discount_amount ?? 0);
-            $tax = (float) ($invoice->tax_amount ?? 0);
-            $revenue = max(0, $grossSales - $discount);
-            $cogs = 0.0;
-            $items = [];
-
-            foreach ($invoice->items as $item) {
-                $quantity = (float) ($item->quantity ?? 0);
-                $unitPrice = (float) ($item->unit_price ?? 0);
-                $itemRevenue = (float) ($item->subtotal ?? ($quantity * $unitPrice));
-                $itemDiscount = (float) ($item->discount_amount ?? 0);
-                $itemNetRevenue = max(0, $itemRevenue - $itemDiscount);
-                $unitCost = $this->resolveHistoricalProductCost((int) ($item->product_id ?? 0), $invoice->invoice_date ? $invoice->invoice_date->format('Y-m-d') : null);
-                $itemCost = $quantity * $unitCost;
-                $cogs += $itemCost;
-
-                $items[] = [
-                    'product_id' => (int) ($item->product_id ?? 0),
-                    'product_name' => $item->product?->name ?? $item->product_name ?? 'Unknown Product',
-                    'sku' => $item->product?->sku ?? '-',
-                    'quantity' => $quantity,
-                    'unit_price' => $unitPrice,
-                    'gross_sales' => $itemRevenue,
-                    'discount' => $itemDiscount,
-                    'net_sales' => $itemNetRevenue,
-                    'unit_cost' => $unitCost,
-                    'cogs' => $itemCost,
-                    'gross_profit' => $itemNetRevenue - $itemCost,
-                    'margin_percent' => $itemNetRevenue > 0 ? ((($itemNetRevenue - $itemCost) / $itemNetRevenue) * 100) : 0,
-                ];
-            }
-
-            $grossProfit = $revenue - $cogs;
-            $marginPercent = $revenue > 0 ? (($grossProfit / $revenue) * 100) : 0;
+            $revenue = $this->calculateInvoiceRevenue($invoice);
+            $cost = $this->calculateInvoiceCogs($invoice);
+            $grossProfit = $revenue['net_sales'] - $cost['cogs'];
+            $totalRevenue += $revenue['net_sales'];
+            $totalCogs += $cost['cogs'];
+            $totalGrossProfit += $grossProfit;
+            $missingCostLines += $cost['missing_cost_lines'];
 
             $rows[] = [
                 'invoice_id' => (int) $invoice->id,
                 'invoice_no' => $invoice->invoice_no,
-                'invoice_date' => $invoice->invoice_date ? $invoice->invoice_date->format('Y-m-d') : null,
+                'invoice_date' => $invoice->invoice_date?->format('Y-m-d'),
                 'customer_id' => $invoice->customer_id,
                 'customer_name' => $invoice->customer?->name ?? $invoice->customer_name ?? 'Walk-in Customer',
-                'gross_sales' => $grossSales,
-                'discount' => $discount,
-                'tax' => $tax,
-                'revenue' => $revenue,
-                'cogs' => $cogs,
+                'gross_sales' => $revenue['gross_sales'],
+                'discount' => $revenue['discount'],
+                'tax' => $revenue['tax'],
+                'revenue' => $revenue['net_sales'],
+                'cogs' => $cost['cogs'],
                 'gross_profit' => $grossProfit,
-                'profit_margin' => $marginPercent,
+                'profit_margin' => $revenue['net_sales'] > 0 ? (($grossProfit / $revenue['net_sales']) * 100) : 0.0,
                 'status' => $invoice->status,
-                'items' => $items,
+                'missing_cost_lines' => $cost['missing_cost_lines'],
             ];
         }
 
+        $expense = $this->getOperatingExpenseSummary($companyId, $branchId, $fromDate, $toDate);
+        $netProfit = $totalGrossProfit - $expense['total'];
         $total = count($rows);
         $paginated = array_slice($rows, ($page - 1) * $perPage, $perPage);
 
-        $summary = [
-            'total_invoices' => $total,
-            'total_revenue' => array_sum(array_column($paginated, 'revenue')),
-            'total_cogs' => array_sum(array_column($paginated, 'cogs')),
-            'total_gross_profit' => array_sum(array_column($paginated, 'gross_profit')),
-            'average_margin_percent' => $total > 0 ? (array_sum(array_column($rows, 'profit_margin')) / $total) : 0,
-        ];
-
         return [
-            'success' => true,
             'data' => $paginated,
-            'summary' => $summary,
+            'summary' => [
+                'total_invoices' => $total,
+                'total_revenue' => round($totalRevenue, 2),
+                'total_cogs' => round($totalCogs, 2),
+                'total_gross_profit' => round($totalGrossProfit, 2),
+                'gross_margin' => $totalRevenue > 0 ? (($totalGrossProfit / $totalRevenue) * 100) : 0.0,
+                'total_expenses' => (float) $expense['total'],
+                'net_profit' => round($netProfit, 2),
+                'missing_cost_lines' => $missingCostLines,
+            ],
             'meta' => [
                 'current_page' => $page,
                 'per_page' => $perPage,
@@ -1032,11 +1352,10 @@ class ReportService
             ],
         ];
     }
-
     public function getInvoiceProfitabilityDetail(?int $companyId = null, ?int $branchId = null, $invoiceId = null): array
     {
         $invoice = Invoice::query()
-            ->with(['customer', 'items.product.purchasePriceHistory'])
+            ->with(['customer', 'items.product'])
             ->when($invoiceId, fn ($query) => $query->where(function ($inner) use ($invoiceId) {
                 $inner->where('id', $invoiceId)->orWhere('invoice_no', $invoiceId);
             }))
@@ -1044,399 +1363,206 @@ class ReportService
             ->when($branchId, fn ($query) => $query->where('branch_id', $branchId))
             ->firstOrFail();
 
-        $grossSales = (float) ($invoice->total_amount ?? 0);
-        $discount = (float) ($invoice->discount_amount ?? 0);
-        $tax = (float) ($invoice->tax_amount ?? 0);
-        $revenue = max(0, $grossSales - $discount);
-        $cogs = 0.0;
+        $revenue = $this->calculateInvoiceRevenue($invoice);
+        $cost = $this->calculateInvoiceCogs($invoice);
+        $grossProfit = $revenue['net_sales'] - $cost['cogs'];
         $items = [];
 
         foreach ($invoice->items as $item) {
-            $quantity = (float) ($item->quantity ?? 0);
-            $unitPrice = (float) ($item->unit_price ?? 0);
-            $itemRevenue = (float) ($item->subtotal ?? ($quantity * $unitPrice));
-            $itemDiscount = (float) ($item->discount_amount ?? 0);
-            $itemNetRevenue = max(0, $itemRevenue - $itemDiscount);
-            $unitCost = $this->resolveHistoricalProductCost((int) ($item->product_id ?? 0), $invoice->invoice_date ? $invoice->invoice_date->format('Y-m-d') : null);
-            $itemCost = $quantity * $unitCost;
-            $cogs += $itemCost;
+            $qty = max(0, (float) ($item->quantity ?? 0));
+            $base = max(0, (float) ($item->subtotal ?? ($qty * (float) ($item->unit_price ?? 0))));
+            $discount = min($base, max(0, (float) ($item->discount_amount ?? 0)));
+            $net = max(0, $base - $discount);
+            $costInfo = $this->resolveHistoricalProductCostInfo(
+                (int) ($item->product_id ?? 0),
+                $invoice->invoice_date ? Carbon::parse($invoice->invoice_date)->toDateString() : null,
+            );
+            $itemCogs = $qty * $costInfo['unit_cost'];
+            $itemProfit = $net - $itemCogs;
 
             $items[] = [
                 'product_id' => (int) ($item->product_id ?? 0),
-                'product_name' => $item->product?->name ?? $item->product_name ?? 'Unknown Product',
+                'product_name' => $item->product?->name ?? 'Unknown Product',
                 'sku' => $item->product?->sku ?? '-',
-                'quantity' => $quantity,
-                'unit_price' => $unitPrice,
-                'gross_sales' => $itemRevenue,
-                'discount' => $itemDiscount,
-                'net_sales' => $itemNetRevenue,
-                'unit_cost' => $unitCost,
-                'cogs' => $itemCost,
-                'gross_profit' => $itemNetRevenue - $itemCost,
-                'margin_percent' => $itemNetRevenue > 0 ? ((($itemNetRevenue - $itemCost) / $itemNetRevenue) * 100) : 0,
+                'quantity' => $qty,
+                'unit_price' => (float) ($item->unit_price ?? 0),
+                'gross_sales' => $base,
+                'discount' => $discount,
+                'net_sales' => $net,
+                'unit_cost' => $costInfo['unit_cost'],
+                'cost_found' => $costInfo['found'],
+                'cogs' => $itemCogs,
+                'gross_profit' => $itemProfit,
+                'margin_percent' => $net > 0 ? (($itemProfit / $net) * 100) : 0.0,
             ];
         }
 
-        $grossProfit = $revenue - $cogs;
-        $marginPercent = $revenue > 0 ? (($grossProfit / $revenue) * 100) : 0;
-
         return [
-            'success' => true,
-            'data' => [
-                'invoice_id' => (int) $invoice->id,
-                'invoice_no' => $invoice->invoice_no,
-                'invoice_date' => $invoice->invoice_date ? $invoice->invoice_date->format('Y-m-d') : null,
-                'customer_id' => $invoice->customer_id,
-                'customer_name' => $invoice->customer?->name ?? $invoice->customer_name ?? 'Walk-in Customer',
-                'gross_sales' => $grossSales,
-                'discount' => $discount,
-                'tax' => $tax,
-                'revenue' => $revenue,
-                'cogs' => $cogs,
-                'gross_profit' => $grossProfit,
-                'profit_margin' => $marginPercent,
-                'status' => $invoice->status,
-                'items' => $items,
-            ],
-            'meta' => [
-                'invoice_id' => (int) $invoice->id,
-                'invoice_no' => $invoice->invoice_no,
-            ],
+            'invoice_id' => (int) $invoice->id,
+            'invoice_no' => $invoice->invoice_no,
+            'invoice_date' => $invoice->invoice_date?->format('Y-m-d'),
+            'customer_id' => $invoice->customer_id,
+            'customer_name' => $invoice->customer?->name ?? $invoice->customer_name ?? 'Walk-in Customer',
+            'gross_sales' => $revenue['gross_sales'],
+            'discount' => $revenue['discount'],
+            'tax' => $revenue['tax'],
+            'revenue' => $revenue['net_sales'],
+            'cogs' => $cost['cogs'],
+            'gross_profit' => $grossProfit,
+            'profit_margin' => $revenue['net_sales'] > 0 ? (($grossProfit / $revenue['net_sales']) * 100) : 0.0,
+            'status' => $invoice->status,
+            'missing_cost_lines' => $cost['missing_cost_lines'],
+            'items' => $items,
         ];
     }
-
     public function getProfitLossSummary(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
+        $pnl = $this->calculatePnlBase($companyId, $branchId, $fromDate, $toDate);
+        $expense = $this->getOperatingExpenseSummary($companyId, $branchId, $fromDate, $toDate);
 
-        $invoiceQuery = $this->baseInvoiceQuery($companyId, $branchId)
-            ->whereBetween('invoice_date', [$fromDate, $toDate]);
-
-        $grossSales = (float) $invoiceQuery->sum('total_amount');
-        $salesDiscounts = (float) $invoiceQuery->sum('discount_amount');
-        $salesReturns = 0.0;
-        $netRevenue = max(0, $grossSales - $salesReturns - $salesDiscounts);
-
-        $costQuery = InvoiceItem::query()
-            ->join('invoices', 'invoice_items.invoice_id', '=', 'invoices.id')
-            ->leftJoin('products', 'invoice_items.product_id', '=', 'products.id')
-            ->whereBetween('invoices.invoice_date', [$fromDate, $toDate])
-            ->where('invoices.status', '!=', 'cancelled');
-
-        if ($companyId) {
-            $costQuery->where('invoices.company_id', $companyId);
-        }
-
-        if ($branchId) {
-            $costQuery->where('invoices.branch_id', $branchId);
-        }
-
-        $productCost = (float) $costQuery->sum(
-            \DB::raw('invoice_items.quantity * COALESCE(products.purchase_price, invoice_items.unit_price, 0)')
-        );
-        $cogs = max(0, $productCost);
-        $grossProfit = $netRevenue - $cogs;
-        $grossMargin = $netRevenue > 0 ? (($grossProfit / $netRevenue) * 100) : 0;
-
-        $operatingExpenses = 0.0;
-        $operatingProfit = $grossProfit - $operatingExpenses;
+        $grossProfit = $pnl['gross_profit'];
+        $operatingProfit = $grossProfit - $expense['total'];
         $otherIncome = 0.0;
         $otherExpenses = 0.0;
         $netProfit = $operatingProfit + $otherIncome - $otherExpenses;
-        $netMargin = $netRevenue > 0 ? (($netProfit / $netRevenue) * 100) : 0;
-        $contributionMargin = $netRevenue - $cogs;
-        $contributionMarginPercent = $netRevenue > 0 ? (($contributionMargin / $netRevenue) * 100) : 0;
 
         return [
-            'success' => true,
-            'data' => [
-                'gross_revenue' => (float) $grossSales,
-                'net_revenue' => (float) $netRevenue,
-                'cogs' => (float) $cogs,
-                'gross_profit' => (float) $grossProfit,
-                'gross_margin' => (float) $grossMargin,
-                'operating_expenses' => (float) $operatingExpenses,
-                'operating_profit' => (float) $operatingProfit,
-                'net_profit' => (float) $netProfit,
-                'net_margin' => (float) $netMargin,
-                'contribution_margin' => (float) $contributionMargin,
-                'contribution_margin_percent' => (float) $contributionMarginPercent,
-                'total_sales' => (float) $grossSales,
-                'total_sales_returns' => (float) $salesReturns,
-                'total_discounts' => (float) $salesDiscounts,
-                'total_purchase_cost' => (float) $productCost,
-            ],
-            'meta' => [
-                'from' => $fromDate->format('Y-m-d'),
-                'to' => $toDate->format('Y-m-d'),
-            ],
+            'gross_revenue' => $pnl['gross_sales'],
+            'net_revenue' => $pnl['net_sales'],
+            'sales_returns' => $pnl['sales_returns'],
+            'sales_discounts' => $pnl['sales_discounts'],
+            'cogs' => $pnl['cogs'],
+            'gross_profit' => $grossProfit,
+            'gross_margin' => $pnl['net_sales'] > 0 ? (($grossProfit / $pnl['net_sales']) * 100) : 0.0,
+            'operating_expenses' => (float) $expense['total'],
+            'operating_profit' => $operatingProfit,
+            'other_income' => $otherIncome,
+            'other_expenses' => $otherExpenses,
+            'net_profit' => $netProfit,
+            'net_margin' => $pnl['net_sales'] > 0 ? (($netProfit / $pnl['net_sales']) * 100) : 0.0,
+            'total_sales' => $pnl['net_sales'],
+            'total_purchase_cost' => $pnl['cogs'],
+            'invoice_count' => $pnl['invoice_count'],
+            'sales_return_count' => $pnl['sales_return_count'],
+            'missing_cost_lines' => $pnl['missing_cost_lines'],
+            'expense_source' => $expense['source'],
+            'cogs_method' => 'perpetual: sold quantity × latest known purchase price on/before sale date',
         ];
     }
-
     public function getProfitLossProducts(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
     {
         return $this->getProductProfitability($companyId, $branchId, $from, $to, $page, $perPage);
     }
 
-    public function getProfitLossCustomers(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getProfitLossCustomers(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
-
-        $invoices = Invoice::query()
-            ->with('customer')
-            ->whereBetween('invoice_date', [$fromDate, $toDate])
-            ->where('status', '!=', 'cancelled')
-            ->when($companyId, fn ($q) => $q->where('company_id', $companyId))
-            ->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
-            ->get();
-
+        $this->historicalCostCache = [];
+        $invoices = $this->baseInvoiceQuery($companyId, $branchId)->whereBetween('invoice_date', [$fromDate, $toDate])->get();
         $grouped = [];
-
         foreach ($invoices as $invoice) {
-            $customerName = $invoice->customer?->name ?? 'Walk-in Customer';
-            $key = $customerName . '|' . ($invoice->customer_id ?? 0);
-
+            if (($invoice->status ?? null) === 'draft') continue;
+            $key = ($invoice->customer_id ?? 0) . '|' . ($invoice->customer?->name ?? $invoice->customer_name ?? 'Walk-in Customer');
+            $revenue = $this->calculateInvoiceRevenue($invoice);
+            $cost = $this->calculateInvoiceCogs($invoice);
             if (!isset($grouped[$key])) {
-                $grouped[$key] = [
-                    'customer' => $customerName,
-                    'invoice_count' => 0,
-                    'gross_sales' => 0,
-                    'net_revenue' => 0,
-                    'cogs' => 0,
-                    'gross_profit' => 0,
-                    'margin_percent' => 0,
-                ];
+                $grouped[$key] = ['customer' => $invoice->customer?->name ?? $invoice->customer_name ?? 'Walk-in Customer', 'invoice_count' => 0, 'gross_sales' => 0.0, 'net_revenue' => 0.0, 'cogs' => 0.0, 'gross_profit' => 0.0, 'missing_cost_lines' => 0];
             }
-
-            $amount = (float) $invoice->total_amount;
-            $discount = (float) $invoice->discount_amount;
-            $net = max(0, $amount - $discount);
-            $cogs = 0.0;
-
-            foreach ($invoice->items as $item) {
-                $costPerUnit = $item->product?->purchase_price ?? $item->unit_price ?? 0;
-                $cogs += (float) ($item->quantity * $costPerUnit);
-            }
-
-            $profit = $net - $cogs;
-
-            $grouped[$key]['invoice_count'] += 1;
-            $grouped[$key]['gross_sales'] += $amount;
-            $grouped[$key]['net_revenue'] += $net;
-            $grouped[$key]['cogs'] += $cogs;
-            $grouped[$key]['gross_profit'] += $profit;
+            $grouped[$key]['invoice_count']++;
+            $grouped[$key]['gross_sales'] += $revenue['gross_sales'];
+            $grouped[$key]['net_revenue'] += $revenue['net_sales'];
+            $grouped[$key]['cogs'] += $cost['cogs'];
+            $grouped[$key]['gross_profit'] += $revenue['net_sales'] - $cost['cogs'];
+            $grouped[$key]['missing_cost_lines'] += $cost['missing_cost_lines'];
         }
-
         $rows = array_values($grouped);
-        foreach ($rows as &$row) {
-            $row['margin_percent'] = $row['net_revenue'] > 0 ? (($row['gross_profit'] / $row['net_revenue']) * 100) : 0;
+        if ($search) {
+            $needle = mb_strtolower($search);
+            $rows = array_values(array_filter($rows, fn ($r) => str_contains(mb_strtolower((string) ($r['customer'] ?? '')), $needle)));
         }
-
+        foreach ($rows as &$row) {
+            $row['gross_profit'] = round($row['gross_profit'], 2);
+            $row['margin_percent'] = $row['net_revenue'] > 0 ? (($row['gross_profit'] / $row['net_revenue']) * 100) : 0.0;
+        }
+        unset($row);
         usort($rows, fn ($a, $b) => $b['gross_profit'] <=> $a['gross_profit']);
-
-        $paged = array_slice($rows, ($page - 1) * $perPage, $perPage);
-
-        return [
-            'success' => true,
-            'data' => $paged,
-            'meta' => [
-                'current_page' => $page,
-                'per_page' => $perPage,
-                'total' => count($rows),
-                'last_page' => max(1, (int) ceil(count($rows) / $perPage)),
-                'from' => $fromDate->format('Y-m-d'),
-                'to' => $toDate->format('Y-m-d'),
-            ],
-        ];
+        $total = count($rows);
+        return ['data' => array_slice($rows, ($page - 1) * $perPage, $perPage), 'meta' => ['current_page' => $page, 'per_page' => $perPage, 'total' => $total, 'last_page' => max(1, (int) ceil($total / $perPage)), 'from' => $fromDate->format('Y-m-d'), 'to' => $toDate->format('Y-m-d')]];
     }
-
-    public function getProfitLossBranches(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    public function getProfitLossBranches(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
-
-        $invoices = Invoice::query()
-            ->with('branch')
-            ->whereBetween('invoice_date', [$fromDate, $toDate])
-            ->where('status', '!=', 'cancelled')
-            ->when($companyId, fn ($q) => $q->where('company_id', $companyId))
-            ->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
-            ->get();
-
+        $this->historicalCostCache = [];
+        $invoices = $this->baseInvoiceQuery($companyId, $branchId)->whereBetween('invoice_date', [$fromDate, $toDate])->get();
         $grouped = [];
-
         foreach ($invoices as $invoice) {
-            $branchName = $invoice->branch?->name ?? 'Main Branch';
-            $key = $branchName . '|' . ($invoice->branch_id ?? 0);
-
-            if (!isset($grouped[$key])) {
-                $grouped[$key] = [
-                    'branch' => $branchName,
-                    'gross_sales' => 0,
-                    'net_revenue' => 0,
-                    'cogs' => 0,
-                    'gross_profit' => 0,
-                    'margin_percent' => 0,
-                ];
-            }
-
-            $amount = (float) $invoice->total_amount;
-            $discount = (float) $invoice->discount_amount;
-            $net = max(0, $amount - $discount);
-            $cogs = 0.0;
-
-            foreach ($invoice->items as $item) {
-                $costPerUnit = $item->product?->purchase_price ?? $item->unit_price ?? 0;
-                $cogs += (float) ($item->quantity * $costPerUnit);
-            }
-
-            $profit = $net - $cogs;
-
-            $grouped[$key]['gross_sales'] += $amount;
-            $grouped[$key]['net_revenue'] += $net;
-            $grouped[$key]['cogs'] += $cogs;
-            $grouped[$key]['gross_profit'] += $profit;
+            if (($invoice->status ?? null) === 'draft') continue;
+            $key = ($invoice->branch_id ?? 0) . '|' . ($invoice->branch?->name ?? 'Main Branch');
+            $revenue = $this->calculateInvoiceRevenue($invoice);
+            $cost = $this->calculateInvoiceCogs($invoice);
+            if (!isset($grouped[$key])) $grouped[$key] = ['branch' => $invoice->branch?->name ?? 'Main Branch', 'gross_sales' => 0.0, 'net_revenue' => 0.0, 'cogs' => 0.0, 'gross_profit' => 0.0, 'missing_cost_lines' => 0];
+            $grouped[$key]['gross_sales'] += $revenue['gross_sales'];
+            $grouped[$key]['net_revenue'] += $revenue['net_sales'];
+            $grouped[$key]['cogs'] += $cost['cogs'];
+            $grouped[$key]['gross_profit'] += $revenue['net_sales'] - $cost['cogs'];
+            $grouped[$key]['missing_cost_lines'] += $cost['missing_cost_lines'];
         }
-
         $rows = array_values($grouped);
-        foreach ($rows as &$row) {
-            $row['margin_percent'] = $row['net_revenue'] > 0 ? (($row['gross_profit'] / $row['net_revenue']) * 100) : 0;
+        if ($search) {
+            $needle = mb_strtolower($search);
+            $rows = array_values(array_filter($rows, fn ($r) => str_contains(mb_strtolower((string) ($r['branch'] ?? '')), $needle)));
         }
-
+        foreach ($rows as &$row) $row['margin_percent'] = $row['net_revenue'] > 0 ? (($row['gross_profit'] / $row['net_revenue']) * 100) : 0.0;
+        unset($row);
         usort($rows, fn ($a, $b) => $b['gross_profit'] <=> $a['gross_profit']);
-        $paged = array_slice($rows, ($page - 1) * $perPage, $perPage);
-
-        return [
-            'success' => true,
-            'data' => $paged,
-            'meta' => [
-                'current_page' => $page,
-                'per_page' => $perPage,
-                'total' => count($rows),
-                'last_page' => max(1, (int) ceil(count($rows) / $perPage)),
-                'from' => $fromDate->format('Y-m-d'),
-                'to' => $toDate->format('Y-m-d'),
-            ],
-        ];
+        $total = count($rows);
+        return ['data' => array_slice($rows, ($page - 1) * $perPage, $perPage), 'meta' => ['current_page' => $page, 'per_page' => $perPage, 'total' => $total, 'last_page' => max(1, (int) ceil($total / $perPage)), 'from' => $fromDate->format('Y-m-d'), 'to' => $toDate->format('Y-m-d')]];
     }
-
     public function getProfitLossMonthly(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
-
-        $invoices = Invoice::query()
-            ->whereBetween('invoice_date', [$fromDate, $toDate])
-            ->where('status', '!=', 'cancelled')
-            ->when($companyId, fn ($q) => $q->where('company_id', $companyId))
-            ->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
-            ->get();
-
+        $this->historicalCostCache = [];
+        $invoices = $this->baseInvoiceQuery($companyId, $branchId)->whereBetween('invoice_date', [$fromDate, $toDate])->get();
         $grouped = [];
-
         foreach ($invoices as $invoice) {
-            $month = $invoice->invoice_date ? Carbon::parse($invoice->invoice_date)->format('Y-m') : 'unknown';
-            $amount = (float) $invoice->total_amount;
-            $discount = (float) $invoice->discount_amount;
-            $net = max(0, $amount - $discount);
-            $cogs = 0.0;
-
-            foreach ($invoice->items as $item) {
-                $costPerUnit = $item->product?->purchase_price ?? $item->unit_price ?? 0;
-                $cogs += (float) ($item->quantity * $costPerUnit);
-            }
-
-            $profit = $net - $cogs;
-
-            if (!isset($grouped[$month])) {
-                $grouped[$month] = [
-                    'month' => $month,
-                    'revenue' => 0,
-                    'cogs' => 0,
-                    'gross_profit' => 0,
-                    'margin_percent' => 0,
-                ];
-            }
-
-            $grouped[$month]['revenue'] += $net;
-            $grouped[$month]['cogs'] += $cogs;
-            $grouped[$month]['gross_profit'] += $profit;
+            if (($invoice->status ?? null) === 'draft') continue;
+            $month = Carbon::parse($invoice->invoice_date)->format('Y-m');
+            $revenue = $this->calculateInvoiceRevenue($invoice);
+            $cost = $this->calculateInvoiceCogs($invoice);
+            if (!isset($grouped[$month])) $grouped[$month] = ['month' => $month, 'revenue' => 0.0, 'cogs' => 0.0, 'gross_profit' => 0.0, 'margin_percent' => 0.0];
+            $grouped[$month]['revenue'] += $revenue['net_sales'];
+            $grouped[$month]['cogs'] += $cost['cogs'];
+            $grouped[$month]['gross_profit'] += $revenue['net_sales'] - $cost['cogs'];
         }
-
         $rows = array_values($grouped);
-        foreach ($rows as &$row) {
-            $row['margin_percent'] = $row['revenue'] > 0 ? (($row['gross_profit'] / $row['revenue']) * 100) : 0;
-        }
-
+        foreach ($rows as &$row) $row['margin_percent'] = $row['revenue'] > 0 ? (($row['gross_profit'] / $row['revenue']) * 100) : 0.0;
+        unset($row);
         usort($rows, fn ($a, $b) => $a['month'] <=> $b['month']);
-
-        return [
-            'success' => true,
-            'data' => $rows,
-            'meta' => [
-                'from' => $fromDate->format('Y-m-d'),
-                'to' => $toDate->format('Y-m-d'),
-            ],
-        ];
+        return ['data' => $rows, 'meta' => ['from' => $fromDate->format('Y-m-d'), 'to' => $toDate->format('Y-m-d')]];
     }
-
     public function getProfitLossYearly(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
-
-        $invoices = Invoice::query()
-            ->whereBetween('invoice_date', [$fromDate, $toDate])
-            ->where('status', '!=', 'cancelled')
-            ->when($companyId, fn ($q) => $q->where('company_id', $companyId))
-            ->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
-            ->get();
-
+        $this->historicalCostCache = [];
+        $invoices = $this->baseInvoiceQuery($companyId, $branchId)->whereBetween('invoice_date', [$fromDate, $toDate])->get();
         $grouped = [];
-
         foreach ($invoices as $invoice) {
-            $year = $invoice->invoice_date ? Carbon::parse($invoice->invoice_date)->format('Y') : 'unknown';
-            $amount = (float) $invoice->total_amount;
-            $discount = (float) $invoice->discount_amount;
-            $net = max(0, $amount - $discount);
-            $cogs = 0.0;
-
-            foreach ($invoice->items as $item) {
-                $costPerUnit = $item->product?->purchase_price ?? $item->unit_price ?? 0;
-                $cogs += (float) ($item->quantity * $costPerUnit);
-            }
-
-            $profit = $net - $cogs;
-
-            if (!isset($grouped[$year])) {
-                $grouped[$year] = [
-                    'year' => $year,
-                    'revenue' => 0,
-                    'cogs' => 0,
-                    'gross_profit' => 0,
-                    'margin_percent' => 0,
-                ];
-            }
-
-            $grouped[$year]['revenue'] += $net;
-            $grouped[$year]['cogs'] += $cogs;
-            $grouped[$year]['gross_profit'] += $profit;
+            if (($invoice->status ?? null) === 'draft') continue;
+            $year = Carbon::parse($invoice->invoice_date)->format('Y');
+            $revenue = $this->calculateInvoiceRevenue($invoice);
+            $cost = $this->calculateInvoiceCogs($invoice);
+            if (!isset($grouped[$year])) $grouped[$year] = ['year' => $year, 'revenue' => 0.0, 'cogs' => 0.0, 'gross_profit' => 0.0, 'margin_percent' => 0.0];
+            $grouped[$year]['revenue'] += $revenue['net_sales'];
+            $grouped[$year]['cogs'] += $cost['cogs'];
+            $grouped[$year]['gross_profit'] += $revenue['net_sales'] - $cost['cogs'];
         }
-
         $rows = array_values($grouped);
-        foreach ($rows as &$row) {
-            $row['margin_percent'] = $row['revenue'] > 0 ? (($row['gross_profit'] / $row['revenue']) * 100) : 0;
-        }
-
+        foreach ($rows as &$row) $row['margin_percent'] = $row['revenue'] > 0 ? (($row['gross_profit'] / $row['revenue']) * 100) : 0.0;
+        unset($row);
         usort($rows, fn ($a, $b) => $a['year'] <=> $b['year']);
-
-        return [
-            'success' => true,
-            'data' => $rows,
-            'meta' => [
-                'from' => $fromDate->format('Y-m-d'),
-                'to' => $toDate->format('Y-m-d'),
-            ],
-        ];
+        return ['data' => $rows, 'meta' => ['from' => $fromDate->format('Y-m-d'), 'to' => $toDate->format('Y-m-d')]];
     }
-
     public function getProfitLossComparison(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
@@ -1447,8 +1573,8 @@ class ReportService
         $current = $this->getProfitLossSummary($companyId, $branchId, $fromDate->format('Y-m-d'), $toDate->format('Y-m-d'));
         $previous = $this->getProfitLossSummary($companyId, $branchId, $previousFrom->format('Y-m-d'), $previousTo->format('Y-m-d'));
 
-        $currentData = $current['data'] ?? [];
-        $previousData = $previous['data'] ?? [];
+        $currentData = $current;
+        $previousData = $previous;
         $comparison = [];
 
         foreach (['gross_revenue', 'net_revenue', 'cogs', 'gross_profit', 'net_profit'] as $metric) {
@@ -1483,125 +1609,273 @@ class ReportService
     public function getDetailedProfitLoss(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
+        $pnl = $this->calculatePnlBase($companyId, $branchId, $fromDate, $toDate);
+        $expense = $this->getOperatingExpenseSummary($companyId, $branchId, $fromDate, $toDate);
 
-        // ===== REVENUE SECTION =====
-        $invoiceQuery = $this->baseInvoiceQuery($companyId, $branchId)
-            ->whereBetween('invoice_date', [$fromDate, $toDate]);
-
-        $grossSalesData = $invoiceQuery->selectRaw('
-            COALESCE(SUM(total_amount), 0) as total,
-            COALESCE(SUM(discount_amount), 0) as discount
-        ')->first();
-
-        $grossSales = $grossSalesData->total ?? 0;
-        $salesDiscounts = $grossSalesData->discount ?? 0;
-
-        // For now, sales returns = 0 (would need separate returns table)
-        $salesReturns = 0;
-        $netSales = $grossSales - $salesReturns - $salesDiscounts;
-
-        // ===== COGS SECTION =====
-        // For now: COGS = Purchases (would need inventory valuation for proper COGS)
+        // Purchases are disclosed as a management reference only; they are NOT
+        // subtracted directly from profit. COGS comes from goods actually sold.
         $purchaseQuery = $this->basePurchaseQuery($companyId, $branchId)
             ->whereBetween('purchase_date', [$fromDate, $toDate]);
-
         $purchaseData = $purchaseQuery->selectRaw('
-            COALESCE(SUM(grand_total), 0) as total,
-            COALESCE(SUM(order_discount), 0) as discount
+            COALESCE(SUM(subtotal), 0) as subtotal,
+            COALESCE(SUM(order_discount), 0) as discount,
+            COALESCE(SUM(tax_amount), 0) as tax,
+            COALESCE(SUM(grand_total), 0) as grand_total
         ')->first();
 
-        $purchases = $purchaseData->total ?? 0;
-        $purchaseDiscounts = $purchaseData->discount ?? 0;
+        $purchasesGrossTaxable = (float) ($purchaseData->subtotal ?? 0);
+        $purchaseDiscounts = min($purchasesGrossTaxable, max(0, (float) ($purchaseData->discount ?? 0)));
+        $netPurchases = max(0, $purchasesGrossTaxable - $purchaseDiscounts);
 
-        $openingStock = 0; // Would need warehouse stock tracking
-        $closingStock = 0;
-        $cogs = $openingStock + $purchases - $purchaseDiscounts - $closingStock;
-
-        // ===== GROSS PROFIT =====
-        $grossProfit = $netSales - $cogs;
-        $grossMargin = $netSales > 0 ? (($grossProfit / $netSales) * 100) : 0;
-
-        // ===== OPERATING EXPENSES =====
-        // For now, expenses would come from accounting entries or separate expense table
-        $totalOperatingExpenses = 0;
-        $operatingExpenses = [];
-
-        // ===== OPERATING PROFIT =====
-        $operatingProfit = $grossProfit - $totalOperatingExpenses;
-
-        // ===== OTHER INCOME & EXPENSES =====
-        $otherIncome = 0;
-        $otherExpenses = 0;
-
-        // ===== NET PROFIT =====
+        $grossProfit = $pnl['gross_profit'];
+        $operatingProfit = $grossProfit - $expense['total'];
+        $otherIncome = 0.0;
+        $otherExpenses = 0.0;
         $netProfit = $operatingProfit + $otherIncome - $otherExpenses;
-        $netMargin = $netSales > 0 ? (($netProfit / $netSales) * 100) : 0;
 
         return [
-            'success' => true,
-            'data' => [
-                'revenue' => [
-                    'gross_sales' => (float) $grossSales,
-                    'sales_returns' => (float) $salesReturns,
-                    'sales_discounts' => (float) $salesDiscounts,
-                    'net_sales' => (float) $netSales,
-                ],
-                'cogs' => [
-                    'opening_stock' => (float) $openingStock,
-                    'purchases' => (float) $purchases,
-                    'purchase_returns' => 0,
-                    'purchase_discounts' => (float) $purchaseDiscounts,
-                    'direct_costs' => 0,
-                    'closing_stock' => (float) $closingStock,
-                    'cost_of_goods_sold' => (float) $cogs,
-                ],
-                'gross_profit' => (float) $grossProfit,
-                'gross_margin' => (float) $grossMargin,
-                'operating_expenses' => $operatingExpenses,
-                'total_operating_expenses' => (float) $totalOperatingExpenses,
-                'operating_profit' => (float) $operatingProfit,
-                'other_income' => (float) $otherIncome,
-                'other_expenses' => (float) $otherExpenses,
-                'net_profit' => (float) $netProfit,
-                'net_margin' => (float) $netMargin,
+            'revenue' => [
+                'gross_sales' => $pnl['gross_sales'],
+                'sales_returns' => $pnl['sales_returns'],
+                'sales_discounts' => $pnl['sales_discounts'],
+                'net_sales' => $pnl['net_sales'],
+                'gst_excluded' => true,
             ],
-            'meta' => [
-                'from' => $fromDate->format('Y-m-d'),
-                'to' => $toDate->format('Y-m-d'),
+            'cogs' => [
+                'opening_stock' => null,
+                'purchases' => $netPurchases,
+                'purchase_returns' => 0.0,
+                'purchase_discounts' => $purchaseDiscounts,
+                'direct_costs' => 0.0,
+                'closing_stock' => null,
+                'cost_of_goods_sold' => $pnl['cogs'],
+                'method' => 'perpetual_historical_purchase_cost',
+                'opening_closing_stock_available' => false,
+            ],
+            'gross_profit' => $grossProfit,
+            'gross_margin' => $pnl['net_sales'] > 0 ? (($grossProfit / $pnl['net_sales']) * 100) : 0.0,
+            'operating_expenses' => $expense['rows'],
+            'total_operating_expenses' => (float) $expense['total'],
+            'operating_profit' => $operatingProfit,
+            'other_income' => $otherIncome,
+            'other_expenses' => $otherExpenses,
+            'net_profit' => $netProfit,
+            'net_margin' => $pnl['net_sales'] > 0 ? (($netProfit / $pnl['net_sales']) * 100) : 0.0,
+            'management_reference' => [
+                'purchase_taxable' => $purchasesGrossTaxable,
+                'purchase_net_taxable' => $netPurchases,
+                'purchase_gst' => (float) ($purchaseData->tax ?? 0),
+                'purchase_grand_total' => (float) ($purchaseData->grand_total ?? 0),
+            ],
+            'data_quality' => [
+                'missing_cost_lines' => $pnl['missing_cost_lines'],
+                'expense_source' => $expense['source'],
+                'note' => $expense['source'] === 'not_available'
+                    ? 'No expenses table with a recognized schema was available, so operating expenses are not assumed.'
+                    : 'Operating expenses are read from the actual expenses table only.',
             ],
         ];
+    }
+    public function getSalesByUser(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
+    {
+        [$fromDate, $toDate] = $this->validateDateRange($from, $to);
+        $column = Schema::hasColumn('invoices', 'created_by') ? 'created_by' : (Schema::hasColumn('invoices', 'user_id') ? 'user_id' : null);
+        $invoices = $this->baseInvoiceQuery($companyId, $branchId)->whereBetween('invoice_date', [$fromDate, $toDate])->get();
+        $grouped=[];
+        foreach ($invoices as $invoice) {
+            if (($invoice->status ?? null)==='draft') continue;
+            $userId=$column ? (int) ($invoice->{$column} ?? 0) : 0;
+            $name=$userId>0 ? 'User #'.$userId : 'Unassigned';
+            $revenue=$this->calculateInvoiceRevenue($invoice);
+            $key=$userId.'|'.$name;
+            if(!isset($grouped[$key])) $grouped[$key]=['user_id'=>$userId,'user_name'=>$name,'invoice_count'=>0,'net_sales'=>0.0];
+            $grouped[$key]['invoice_count']++; $grouped[$key]['net_sales'] += $revenue['net_sales'];
+        }
+        $rows=array_values($grouped); usort($rows,fn($a,$b)=>$b['net_sales']<=>$a['net_sales']);
+        if($search){$needle=mb_strtolower($search);$rows=array_values(array_filter($rows,fn($r)=>str_contains(mb_strtolower($r['user_name']),$needle)||str_contains((string)$r['user_id'],$needle)));}
+        $total=count($rows);
+        return ['data'=>array_slice($rows,($page-1)*$perPage,$perPage),'meta'=>['current_page'=>$page,'per_page'=>$perPage,'total'=>$total,'last_page'=>max(1,(int)ceil($total/$perPage)),'from'=>$fromDate->format('Y-m-d'),'to'=>$toDate->format('Y-m-d')]];
+    }
+
+    public function getPaymentModeSummary(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
+    {
+        [$fromDate,$toDate]=$this->validateDateRange($from,$to);
+        $query=Payment::query()->whereBetween('transaction_date',[$fromDate,$toDate])->whereIn('status',['completed','paid','success'])
+            ->when($companyId,fn($q)=>$q->where('company_id',$companyId))->when($branchId,fn($q)=>$q->where('branch_id',$branchId));
+        $rows=$query->select('payment_method',DB::raw('SUM(amount) as amount'),DB::raw('COUNT(*) as count'))->groupBy('payment_method')->orderByDesc('amount')->get()->map(fn($r)=>['payment_method'=>$r->payment_method ?: 'Unknown','amount'=>(float)$r->amount,'count'=>(int)$r->count])->values()->toArray();
+        return ['data'=>$rows,'meta'=>['from'=>$fromDate->format('Y-m-d'),'to'=>$toDate->format('Y-m-d')]];
+    }
+
+    public function getTopProducts(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $limit = 10): array
+    {
+        $result=$this->getProductProfitability($companyId,$branchId,$from,$to,1,max(1,$limit));
+        return $result['data'];
+    }
+
+    public function getTopCustomers(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $limit = 10): array
+    {
+        $result=$this->getProfitLossCustomers($companyId,$branchId,$from,$to,1,max(1,$limit));
+        return $result['data'];
+    }
+
+    public function getSalesPurchaseTrend(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
+    {
+        [$fromDate,$toDate]=$this->validateDateRange($from,$to);
+        $sales=$this->getProfitLossMonthly($companyId,$branchId,$fromDate->format('Y-m-d'),$toDate->format('Y-m-d'))['data'] ?? [];
+        $purchases=$this->basePurchaseQuery($companyId,$branchId)->whereBetween('purchase_date',[$fromDate,$toDate])->get()->groupBy(fn($p)=>Carbon::parse($p->purchase_date)->format('Y-m'))->map(fn($rows)=>$rows->sum('grand_total'));
+        $months=[];
+        foreach($sales as $row){$months[$row['month']]=['month'=>$row['month'],'sales'=>(float)$row['revenue'],'purchases'=>(float)($purchases[$row['month']]??0)];}
+        foreach($purchases as $month=>$amount){if(!isset($months[$month]))$months[$month]=['month'=>$month,'sales'=>0.0,'purchases'=>(float)$amount];else $months[$month]['purchases']=(float)$amount;}
+        ksort($months); return array_values($months);
+    }
+
+    public function getVendorLedger(?int $companyId = null, ?int $branchId = null, $vendorId = null, $from = null, $to = null, int $page = 1, int $perPage = 100): array
+    {
+        [$fromDate,$toDate]=$this->validateDateRange($from,$to);
+        $rows=[];
+        $purchases=$this->basePurchaseQuery($companyId,$branchId)->whereBetween('purchase_date',[$fromDate,$toDate])->when($vendorId,fn($q)=>$q->where('supplier_id',$vendorId))->get();
+        foreach($purchases as $p){$rows[]=['date'=>$this->formatLedgerDate($p->purchase_date),'type'=>'PURCHASE','reference'=>$p->purchase_number,'debit'=>(float)$p->grand_total,'credit'=>0.0,'balance'=>0.0,'vendor'=>$p->supplier?->name];}
+        $payments=Payment::query()->whereBetween('transaction_date',[$fromDate,$toDate])->where('payment_direction','outward')->whereIn('status',['completed','paid','success'])->when($companyId,fn($q)=>$q->where('company_id',$companyId))->when($branchId,fn($q)=>$q->where('branch_id',$branchId))->get();
+        foreach($payments as $p){$rows[]=['date'=>$this->formatLedgerDate($p->transaction_date),'type'=>'PAYMENT','reference'=>$p->reference_no,'debit'=>0.0,'credit'=>(float)$p->amount,'balance'=>0.0,'vendor'=>null];}
+        usort($rows,fn($a,$b)=>strcmp((string)$a['date'],(string)$b['date'])); $balance=0.0; foreach($rows as &$r){$balance += $r['debit']-$r['credit'];$r['balance']=$balance;} unset($r);
+        $total=count($rows); return ['data'=>array_slice($rows,($page-1)*$perPage,$perPage),'meta'=>['current_page'=>$page,'per_page'=>$perPage,'total'=>$total,'last_page'=>max(1,(int)ceil($total/$perPage))]];
+    }
+
+    public function getDayBook(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 100, ?string $search = null): array
+    {
+        [$fromDate,$toDate]=$this->validateDateRange($from,$to); $rows=[];
+        foreach($this->baseInvoiceQuery($companyId,$branchId)->whereBetween('invoice_date',[$fromDate,$toDate])->get() as $i){if(($i->status??null)==='draft')continue;$rows[]=['date'=>$i->invoice_date?->format('Y-m-d'),'type'=>'SALE','reference'=>$i->invoice_no,'party'=>$i->customer?->name ?? $i->customer_name ?? 'Walk-in','debit'=>0.0,'credit'=>(float)$i->total_amount];}
+        foreach($this->basePurchaseQuery($companyId,$branchId)->whereBetween('purchase_date',[$fromDate,$toDate])->get() as $p){$rows[]=['date'=>$p->purchase_date?->format('Y-m-d'),'type'=>'PURCHASE','reference'=>$p->purchase_number,'party'=>$p->supplier?->name ?? '-','debit'=>(float)$p->grand_total,'credit'=>0.0];}
+        foreach(Payment::query()->whereBetween('transaction_date',[$fromDate,$toDate])->whereIn('status',['completed','paid','success'])->when($companyId,fn($q)=>$q->where('company_id',$companyId))->when($branchId,fn($q)=>$q->where('branch_id',$branchId))->get() as $p){$rows[]=['date'=>Carbon::parse($p->transaction_date)->format('Y-m-d'),'type'=>strtolower((string)$p->payment_direction)==='outward'?'PAYMENT OUT':'PAYMENT IN','reference'=>$p->reference_no,'party'=>'-','debit'=>strtolower((string)$p->payment_direction)==='outward'?(float)$p->amount:0.0,'credit'=>strtolower((string)$p->payment_direction)==='outward'?0.0:(float)$p->amount];}
+        if($search){$needle=mb_strtolower($search);$rows=array_values(array_filter($rows,fn($r)=>str_contains(mb_strtolower(json_encode($r)), $needle)));}
+        usort($rows,fn($a,$b)=>strcmp((string)$b['date'],(string)$a['date']));$total=count($rows);return ['data'=>array_slice($rows,($page-1)*$perPage,$perPage),'meta'=>['current_page'=>$page,'per_page'=>$perPage,'total'=>$total,'last_page'=>max(1,(int)ceil($total/$perPage))]];
+    }
+
+    public function getExpenseReport(?int $companyId = null, ?int $branchId = null, $from = null, $to = null, int $page = 1, int $perPage = 25, ?string $search = null): array
+    {
+        [$fromDate,$toDate]=$this->validateDateRange($from,$to); $expense=$this->getOperatingExpenseSummary($companyId,$branchId,$fromDate,$toDate); $rows=$expense['rows'];
+        if($search){$needle=mb_strtolower($search);$rows=array_values(array_filter($rows,fn($r)=>str_contains(mb_strtolower((string)$r['name']),$needle)));}
+        $total=count($rows);return ['data'=>array_slice($rows,($page-1)*$perPage,$perPage),'summary'=>['total_expenses'=>$expense['total']],'meta'=>['current_page'=>$page,'per_page'=>$perPage,'total'=>$total,'last_page'=>max(1,(int)ceil($total/$perPage)),'from'=>$fromDate->format('Y-m-d'),'to'=>$toDate->format('Y-m-d')]];
+    }
+
+    public function getReceivablesAging(?int $companyId = null, ?int $branchId = null, $to = null, int $page = 1, int $perPage = 25): array
+    {
+        $asOf=Carbon::parse($to ?: now()->toDateString())->endOfDay(); $rows=[];
+        foreach($this->baseInvoiceQuery($companyId,$branchId)->whereNotIn('status',['paid','cancelled','draft'])->whereRaw('COALESCE(total_amount,0) > COALESCE(payment_received,paid_amount,0)')->get() as $i){$due= $i->due_date ? Carbon::parse($i->due_date) : Carbon::parse($i->invoice_date);$days=max(0,$due->diffInDays($asOf,false)<0?$asOf->diffInDays($due):0);$amount=max(0,(float)$i->total_amount-(float)($i->payment_received??$i->paid_amount??0));$bucket=$days<=30?'0-30':($days<=60?'31-60':($days<=90?'61-90':'90+'));$rows[]=['customer'=>$i->customer?->name??$i->customer_name??'Walk-in','invoice'=>$i->invoice_no,'due_date'=>$i->due_date,'outstanding_amount'=>$amount,'overdue_days'=>$days,'aging_bucket'=>$bucket];}
+        $total=count($rows);return ['data'=>array_slice($rows,($page-1)*$perPage,$perPage),'meta'=>['current_page'=>$page,'per_page'=>$perPage,'total'=>$total,'last_page'=>max(1,(int)ceil($total/$perPage))]];
+    }
+
+    public function getPayablesAging(?int $companyId = null, ?int $branchId = null, $to = null, int $page = 1, int $perPage = 25): array
+    {
+        $asOf=Carbon::parse($to ?: now()->toDateString())->endOfDay();$rows=[];
+        foreach($this->basePurchaseQuery($companyId,$branchId)->whereNotIn('status',['paid','cancelled','draft'])->get() as $p){$paid=(float)($p->paid_amount??0);$amount=max(0,(float)$p->grand_total-$paid);if($amount<=0)continue;$due=$p->due_date?Carbon::parse($p->due_date):Carbon::parse($p->purchase_date);$days=max(0,$due->diffInDays($asOf,false)<0?$asOf->diffInDays($due):0);$bucket=$days<=30?'0-30':($days<=60?'31-60':($days<=90?'61-90':'90+'));$rows[]=['supplier'=>$p->supplier?->name,'purchase_number'=>$p->purchase_number,'due_date'=>$p->due_date,'outstanding_amount'=>$amount,'overdue_days'=>$days,'aging_bucket'=>$bucket];}
+        $total=count($rows);return ['data'=>array_slice($rows,($page-1)*$perPage,$perPage),'meta'=>['current_page'=>$page,'per_page'=>$perPage,'total'=>$total,'last_page'=>max(1,(int)ceil($total/$perPage))]];
+    }
+
+    public function getGstRateWiseSummary(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
+    {
+        [$fromDate,$toDate]=$this->validateDateRange($from,$to);$items=InvoiceItem::with('invoice')->whereHas('invoice',fn($q)=>$q->where('status','!=','cancelled')->whereBetween('invoice_date',[$fromDate,$toDate])->when($companyId,fn($x)=>$x->where('company_id',$companyId))->when($branchId,fn($x)=>$x->where('branch_id',$branchId)))->get();$grouped=[];
+        foreach($items as $i){$rate=(float)($i->tax_rate??$i->gst_slab??0);$key=(string)$rate;if(!isset($grouped[$key]))$grouped[$key]=['rate'=>$rate,'taxable_value'=>0.0,'cgst'=>0.0,'sgst'=>0.0,'igst'=>0.0,'total_tax'=>0.0];$tax= (float)$i->cgst_amount+(float)$i->sgst_amount+(float)$i->igst_amount;$grouped[$key]['taxable_value']+=(float)$i->subtotal-(float)$i->discount_amount;$grouped[$key]['cgst']+=(float)$i->cgst_amount;$grouped[$key]['sgst']+=(float)$i->sgst_amount;$grouped[$key]['igst']+=(float)$i->igst_amount;$grouped[$key]['total_tax']+=$tax;}
+        return ['data'=>array_values($grouped),'meta'=>['from'=>$fromDate->format('Y-m-d'),'to'=>$toDate->format('Y-m-d')]];
+    }
+
+    public function getStockSummary(?int $companyId = null, ?int $branchId = null, int $page = 1, int $perPage = 25, ?string $search = null): array
+    {
+        $query=Product::query()->when($companyId,fn($q)=>$q->where('company_id',$companyId))->when($branchId && Schema::hasColumn('products','branch_id'),fn($q)=>$q->where('branch_id',$branchId));
+        if($search){$query->where(function($q)use($search){$q->where('name','like','%'.$search.'%')->orWhere('sku','like','%'.$search.'%')->orWhere('barcode','like','%'.$search.'%');});}
+        $total=(clone $query)->count();$products=$query->orderBy('name')->skip(($page-1)*$perPage)->take($perPage)->get();$data=$products->map(fn($p)=>['product_id'=>(int)$p->id,'product'=>$p->name,'sku'=>$p->sku,'stock_quantity'=>(float)($p->stock_quantity??0),'purchase_price'=>(float)($p->purchase_price??0),'stock_value'=>(float)($p->stock_quantity??0)*(float)($p->purchase_price??0),'reorder_level'=>(float)($p->reorder_level??0)])->toArray();return ['data'=>$data,'meta'=>['current_page'=>$page,'per_page'=>$perPage,'total'=>$total,'last_page'=>max(1,(int)ceil($total/$perPage))]];
+    }
+
+    public function getLowStockReport(?int $companyId = null, ?int $branchId = null, int $page = 1, int $perPage = 25, ?string $search = null): array
+    {
+        $r=$this->getStockSummary($companyId,$branchId,1,100000,$search);$rows=array_values(array_filter($r['data'],fn($x)=>$x['stock_quantity']<=$x['reorder_level']));$total=count($rows);return ['data'=>array_slice($rows,($page-1)*$perPage,$perPage),'meta'=>['current_page'=>$page,'per_page'=>$perPage,'total'=>$total,'last_page'=>max(1,(int)ceil($total/$perPage))]];
+    }
+
+    public function getStockMovement(?int $companyId = null, ?int $branchId = null, $productId = null, $from = null, $to = null, int $page = 1, int $perPage = 25): array
+    {
+        if(!Schema::hasTable('stock_movements')) return ['data'=>[],'meta'=>['current_page'=>$page,'per_page'=>$perPage,'total'=>0,'last_page'=>1,'message'=>'stock_movements table is not available.']];
+        [$fromDate,$toDate]=$this->validateDateRange($from,$to);$columns=Schema::getColumnListing('stock_movements');$query=DB::table('stock_movements')->whereBetween($columns&&in_array('transaction_date',$columns,true)?'transaction_date':(in_array('created_at',$columns,true)?'created_at':'transaction_date'),[$fromDate,$toDate]);if($companyId&&in_array('company_id',$columns,true))$query->where('company_id',$companyId);if($branchId&&in_array('branch_id',$columns,true))$query->where('branch_id',$branchId);if($productId&&in_array('product_id',$columns,true))$query->where('product_id',$productId);$total=(clone $query)->count();$rows=$query->orderByDesc(in_array('transaction_date',$columns,true)?'transaction_date':'created_at')->skip(($page-1)*$perPage)->take($perPage)->get();return ['data'=>$rows->map(fn($r)=>(array)$r)->toArray(),'meta'=>['current_page'=>$page,'per_page'=>$perPage,'total'=>$total,'last_page'=>max(1,(int)ceil($total/$perPage))]];
+    }
+
+    public function getCashFlowSummary(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
+    {
+        [$fromDate,$toDate]=$this->validateDateRange($from,$to);$query=Payment::query()->whereBetween('transaction_date',[$fromDate,$toDate])->whereIn('status',['completed','paid','success'])->when($companyId,fn($q)=>$q->where('company_id',$companyId))->when($branchId,fn($q)=>$q->where('branch_id',$branchId));$in=(float)(clone $query)->where('payment_direction','inward')->sum('amount');$out=(float)(clone $query)->where('payment_direction','outward')->sum('amount');return ['data'=>['cash_inflow'=>$in,'cash_outflow'=>$out,'net_cash_flow'=>$in-$out],'meta'=>['from'=>$fromDate->format('Y-m-d'),'to'=>$toDate->format('Y-m-d')]];
+    }
+
+    public function getTrialBalance(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
+    {
+        return ['data'=>[],'meta'=>['from'=>$from,'to'=>$to,'available'=>false,'message'=>'Trial balance requires configured double-entry accounting ledgers; report data has not been inferred or fabricated.']];
+    }
+
+    public function getBalanceSheet(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
+    {
+        [$fromDate,$toDate]=$this->validateDateRange($from,$to);$receivables=(float)$this->baseInvoiceQuery($companyId,$branchId)->whereNotIn('status',['paid','cancelled','draft'])->sum(DB::raw('GREATEST(COALESCE(total_amount,0)-COALESCE(payment_received,paid_amount,0),0)'));$payables=(float)$this->basePurchaseQuery($companyId,$branchId)->whereNotIn('status',['paid','cancelled','draft'])->sum(DB::raw('GREATEST(COALESCE(grand_total,0)-COALESCE(paid_amount,0),0)'));$inventory=(float)Product::query()->when($companyId,fn($q)=>$q->where('company_id',$companyId))->sum(DB::raw('COALESCE(stock_quantity,0)*COALESCE(purchase_price,0)'));return ['data'=>['assets'=>['accounts_receivable'=>$receivables,'inventory'=>$inventory],'liabilities'=>['accounts_payable'=>$payables],'equity'=>[]],'meta'=>['from'=>$fromDate->format('Y-m-d'),'to'=>$toDate->format('Y-m-d'),'partial'=>true,'message'=>'Only directly available balances are shown; opening equity, fixed assets and other ledger balances require accounting masters.']];
+    }
+
+    public function getBranchPerformance(?int $companyId = null, $from = null, $to = null): array
+    {
+        $r=$this->getProfitLossBranches($companyId,null,$from,$to,1,100000);return $r['data'];
     }
 
     /**
      * GST SUMMARY (GSTR-3B prep)
      */
-    public function getGstSummary(?int $companyId = null, $from = null, $to = null): array
+    /**
+     * GST SUMMARY (GSTR-3B prep)
+     *
+     * GST is reported from the actual invoice/purchase item tax fields.
+     * Missing optional tax columns are treated as zero rather than causing a
+     * 500 error on older databases.
+     */
+    public function getGstSummary(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
 
-        // Outward supplies (Sales)
-        $outwardItems = InvoiceItem::whereHas('invoice', function ($q) use ($companyId, $fromDate, $toDate) {
-            $q->where('status', '!=', 'cancelled')
-                ->whereBetween('invoice_date', [$fromDate, $toDate]);
-            if ($companyId) $q->where('company_id', $companyId);
-        })->get();
+        $invoiceItems = collect();
+        if (Schema::hasTable('invoice_items') && Schema::hasTable('invoices')) {
+            $invoiceItems = InvoiceItem::query()
+                ->whereHas('invoice', function ($q) use ($companyId, $branchId, $fromDate, $toDate) {
+                    $q->where('status', '!=', 'cancelled')
+                        ->whereBetween('invoice_date', [$fromDate, $toDate]);
+                    if ($companyId) $q->where('company_id', $companyId);
+                    if ($branchId) $q->where('branch_id', $branchId);
+                })
+                ->get();
+        }
 
-        $outwardTaxableValue = $outwardItems->sum('subtotal') ?? 0;
-        $outwardCgst = $outwardItems->sum('cgst_amount') ?? 0;
-        $outwardSgst = $outwardItems->sum('sgst_amount') ?? 0;
-        $outwardIgst = $outwardItems->sum('igst_amount') ?? 0;
+        $outwardTaxableValue = 0.0;
+        $outwardCgst = 0.0;
+        $outwardSgst = 0.0;
+        $outwardIgst = 0.0;
+        foreach ($invoiceItems as $item) {
+            $outwardTaxableValue += max(0.0, (float) ($item->subtotal ?? 0) - (float) ($item->discount_amount ?? 0));
+            $outwardCgst += (float) ($item->cgst_amount ?? 0);
+            $outwardSgst += (float) ($item->sgst_amount ?? 0);
+            $outwardIgst += (float) ($item->igst_amount ?? 0);
+        }
 
-        // Inward supplies (Purchases)
-        $inwardItems = PurchaseInvoiceItem::whereHas('purchaseInvoice', function ($q) use ($companyId, $fromDate, $toDate) {
-            $q->where('status', '!=', 'cancelled')
-                ->whereBetween('purchase_date', [$fromDate, $toDate]);
-            if ($companyId) $q->where('company_id', $companyId);
-        })->get();
+        $purchaseItems = collect();
+        if (Schema::hasTable('purchase_invoice_items') && Schema::hasTable('purchase_invoices')) {
+            $purchaseItems = PurchaseInvoiceItem::query()
+                ->whereHas('purchaseInvoice', function ($q) use ($companyId, $branchId, $fromDate, $toDate) {
+                    $q->where('status', '!=', 'cancelled')
+                        ->whereBetween('purchase_date', [$fromDate, $toDate]);
+                    if ($companyId) $q->where('company_id', $companyId);
+                    if ($branchId) $q->where('branch_id', $branchId);
+                })
+                ->get();
+        }
 
-        $inwardTaxableValue = $inwardItems->sum('subtotal') ?? 0;
-        $inwardCgst = $inwardItems->sum('cgst_amount') ?? 0;
-        $inwardSgst = $inwardItems->sum('sgst_amount') ?? 0;
-        $inwardIgst = $inwardItems->sum('igst_amount') ?? 0;
+        $inwardTaxableValue = 0.0;
+        $inwardCgst = 0.0;
+        $inwardSgst = 0.0;
+        $inwardIgst = 0.0;
+        foreach ($purchaseItems as $item) {
+            $inwardTaxableValue += max(0.0, (float) ($item->subtotal ?? 0) - (float) ($item->discount_amount ?? 0));
+            $inwardCgst += (float) ($item->cgst_amount ?? 0);
+            $inwardSgst += (float) ($item->sgst_amount ?? 0);
+            $inwardIgst += (float) ($item->igst_amount ?? 0);
+        }
 
         $netCgst = $outwardCgst - $inwardCgst;
         $netSgst = $outwardSgst - $inwardSgst;
@@ -1609,34 +1883,31 @@ class ReportService
         $netTaxLiability = $netCgst + $netSgst + $netIgst;
 
         return [
-            'success' => true,
-            'data' => [
-                'outward' => [
-                    'taxable_value' => (float) $outwardTaxableValue,
-                    'cgst' => (float) $outwardCgst,
-                    'sgst' => (float) $outwardSgst,
-                    'igst' => (float) $outwardIgst,
-                    'total_tax' => (float) ($outwardCgst + $outwardSgst + $outwardIgst),
-                ],
-                'inward' => [
-                    'taxable_value' => (float) $inwardTaxableValue,
-                    'cgst' => (float) $inwardCgst,
-                    'sgst' => (float) $inwardSgst,
-                    'igst' => (float) $inwardIgst,
-                    'total_tax' => (float) ($inwardCgst + $inwardSgst + $inwardIgst),
-                ],
-                'input_tax_credit' => [
-                    'cgst_itc' => (float) $inwardCgst,
-                    'sgst_itc' => (float) $inwardSgst,
-                    'igst_itc' => (float) $inwardIgst,
-                    'total_itc' => (float) ($inwardCgst + $inwardSgst + $inwardIgst),
-                ],
-                'net_liability' => [
-                    'cgst' => (float) $netCgst,
-                    'sgst' => (float) $netSgst,
-                    'igst' => (float) $netIgst,
-                    'total' => (float) $netTaxLiability,
-                ],
+            'outward' => [
+                'taxable_value' => round($outwardTaxableValue, 2),
+                'cgst' => round($outwardCgst, 2),
+                'sgst' => round($outwardSgst, 2),
+                'igst' => round($outwardIgst, 2),
+                'total_tax' => round($outwardCgst + $outwardSgst + $outwardIgst, 2),
+            ],
+            'inward' => [
+                'taxable_value' => round($inwardTaxableValue, 2),
+                'cgst' => round($inwardCgst, 2),
+                'sgst' => round($inwardSgst, 2),
+                'igst' => round($inwardIgst, 2),
+                'total_tax' => round($inwardCgst + $inwardSgst + $inwardIgst, 2),
+            ],
+            'input_tax_credit' => [
+                'cgst_itc' => round($inwardCgst, 2),
+                'sgst_itc' => round($inwardSgst, 2),
+                'igst_itc' => round($inwardIgst, 2),
+                'total_itc' => round($inwardCgst + $inwardSgst + $inwardIgst, 2),
+            ],
+            'net_liability' => [
+                'cgst' => round($netCgst, 2),
+                'sgst' => round($netSgst, 2),
+                'igst' => round($netIgst, 2),
+                'total' => round($netTaxLiability, 2),
             ],
             'meta' => [
                 'from' => $fromDate->format('Y-m-d'),
@@ -1644,4 +1915,5 @@ class ReportService
             ],
         ];
     }
+
 }

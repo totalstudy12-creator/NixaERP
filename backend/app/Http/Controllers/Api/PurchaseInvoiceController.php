@@ -17,10 +17,14 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Rules\Exists;
 use Illuminate\Validation\ValidationException;
 
 class PurchaseInvoiceController extends Controller
 {
+    /** Half a paisa — anything within this is treated as "equal" money. */
+    private const MONEY_EPSILON = 0.005;
+
     /** Cached optional-column map (per request). */
     private ?array $existingColumnsCache = null;
 
@@ -51,13 +55,31 @@ class PurchaseInvoiceController extends Controller
     }
 
     /**
-     * Returns true when the given purchase_number is already used by a LIVE
-     * (non-soft-deleted) purchase invoice.
+     * Normalise a (grandTotal, paid) pair so tiny float drift does not leave
+     * a ₹0.01 residue on the invoice.
      *
-     * Eloquent's SoftDeletes global scope automatically excludes trashed rows
-     * (assuming the PurchaseInvoice model uses the SoftDeletes trait), so
-     * deleted rows never block a re-use from the app layer.
+     * @return array{0: float, 1: string} [normalisedPaid, paymentStatus]
      */
+    private function normalisePaidAndStatus(float $grandTotal, float $paid): array
+    {
+        $grandTotal = round($grandTotal, 2);
+        $paid       = round($paid, 2);
+
+        if (abs($paid - $grandTotal) < self::MONEY_EPSILON) {
+            $paid = $grandTotal; // snap — kills the ₹0.01 due
+        }
+
+        if ($paid <= 0.0) {
+            $status = 'Unpaid';
+        } elseif ($paid + self::MONEY_EPSILON >= $grandTotal) {
+            $status = 'Paid';
+        } else {
+            $status = 'Partial';
+        }
+
+        return [$paid, $status];
+    }
+
     private function purchaseNumberIsTaken(string $purchaseNumber, ?int $excludeId = null): bool
     {
         $query = PurchaseInvoice::query()->where('purchase_number', $purchaseNumber);
@@ -72,9 +94,13 @@ class PurchaseInvoiceController extends Controller
     /**
      * Validation rule for FK columns that live in tables that may have a
      * `deleted_at` column. Prevents attaching soft-deleted rows.
+     *
+     * FIX: `Rule::exists()` returns `Illuminate\Validation\Rules\Exists`, not
+     * `Illuminate\Validation\Rule`, so the old return type caused a TypeError.
      */
-    private function existsLive(string $table, string $column = 'id'): Rule
+    private function existsLive(string $table, string $column = 'id'): Exists
     {
+        /** @var Exists $rule */
         $rule = Rule::exists($table, $column);
 
         if (Schema::hasColumn($table, 'deleted_at')) {
@@ -84,12 +110,6 @@ class PurchaseInvoiceController extends Controller
         return $rule;
     }
 
-    /**
-     * Convert a duplicate-key QueryException into a ValidationException so
-     * the API returns 422 instead of 500. This is essential when the DB has a
-     * plain UNIQUE index on purchase_number but the row is soft-deleted — the
-     * app-level check passes, but the DB-level insert still fails.
-     */
     private function convertDuplicateKeyException(
         QueryException $e,
         string $field,
@@ -110,13 +130,13 @@ class PurchaseInvoiceController extends Controller
             ]);
         }
 
-        // Not a duplicate-key error → re-throw the original
         throw $e;
     }
 
     public function index(Request $request)
     {
-        $query = PurchaseInvoice::with(['supplier', 'items', 'payments'])
+        // FIX: eager-load `company` so the table can render the company column.
+        $query = PurchaseInvoice::with(['company', 'supplier', 'items', 'payments'])
             ->orderByDesc('created_at');
 
         if ($request->filled('company_id')) {
@@ -166,7 +186,6 @@ class PurchaseInvoiceController extends Controller
             'company_id'  => ['required', 'integer', $this->existsLive('companies')],
             'supplier_id' => ['required', 'integer', $this->existsLive('suppliers')],
 
-            // SoftDeletes-aware uniqueness (deleted numbers can be reused).
             'purchase_number' => [
                 'required', 'string', 'max:100',
                 function ($attribute, $value, $fail) {
@@ -404,165 +423,161 @@ class PurchaseInvoiceController extends Controller
         $totalInward   = round($totalInward, 2);
         $netPaidAmount = round($totalOutward - $totalInward, 2);
 
+        // FIX: snap near-equal totals so we never store a ₹0.01 due.
+        [$netPaidAmount, $paymentStatus] = $this->normalisePaidAndStatus($grandTotal, $netPaidAmount);
+
         $existingColumns = $this->existingPurchaseInvoiceColumns();
 
-        try {
-            $purchase = DB::transaction(function () use (
-                $validated,
-                $branch,
-                $warehouse,
-                $subtotal,
-                $billDiscount,
-                $totalTaxWithPacking,
-                $shippingCharges,
-                $packingCharges,
-                $otherChargesTotal,
-                $roundOff,
-                $grandTotal,
-                $processedItems,
-                $validatedPayments,
-                $netPaidAmount,
-                $generalDiscountType,
-                $generalDiscountPercent,
-                $generalDiscountEnteredAmt,
-                $generalDiscountApplyType,
-                $packingApplyType,
-                $tcsPercent,
-                $existingColumns
-            ) {
-                $attributes = [
-                    'company_id'        => $validated['company_id'],
-                    'supplier_id'       => $validated['supplier_id'],
-                    'purchase_number'   => $validated['purchase_number'],
-                    'bill_number'       => $validated['bill_number'] ?? null,
-                    'purchase_date'     => $validated['purchase_date'],
-                    'due_date'          => $validated['due_date'] ?? null,
-                    'reference_number'  => $validated['reference_number'] ?? null,
-                    'warehouse'         => $warehouse->name,
-                    'notes'             => $validated['notes'] ?? null,
-                    'internal_remarks'  => $validated['internal_remarks'] ?? null,
-                    'subtotal'          => $subtotal,
-                    'order_discount'    => $billDiscount,
-                    'tax_amount'        => $totalTaxWithPacking,
-                    'shipping_charges'  => $shippingCharges,
-                    'packing_charges'   => $packingCharges,
-                    'other_charges'     => $otherChargesTotal,
-                    'round_off'         => $roundOff,
-                    'grand_total'       => $grandTotal,
-                    'status'            => $validated['status'] ?? 'ordered',
-                    'payment_status'    => $netPaidAmount >= $grandTotal ? 'Paid' : ($netPaidAmount > 0 ? 'Partial' : 'Unpaid'),
-                    'paid_amount'       => $netPaidAmount,
-                ];
+        /** @var PurchaseInvoice $purchase */
+        $purchase = DB::transaction(function () use (
+            $validated,
+            $branch,
+            $warehouse,
+            $subtotal,
+            $billDiscount,
+            $totalTaxWithPacking,
+            $shippingCharges,
+            $packingCharges,
+            $otherChargesTotal,
+            $roundOff,
+            $grandTotal,
+            $processedItems,
+            $validatedPayments,
+            $netPaidAmount,
+            $paymentStatus,
+            $generalDiscountType,
+            $generalDiscountPercent,
+            $generalDiscountEnteredAmt,
+            $generalDiscountApplyType,
+            $packingApplyType,
+            $tcsPercent,
+            $existingColumns
+        ) {
+            $attributes = [
+                'company_id'        => $validated['company_id'],
+                'supplier_id'       => $validated['supplier_id'],
+                'purchase_number'   => $validated['purchase_number'],
+                'bill_number'       => $validated['bill_number'] ?? null,
+                'purchase_date'     => $validated['purchase_date'],
+                'due_date'          => $validated['due_date'] ?? null,
+                'reference_number'  => $validated['reference_number'] ?? null,
+                'warehouse'         => $warehouse->name,
+                'notes'             => $validated['notes'] ?? null,
+                'internal_remarks'  => $validated['internal_remarks'] ?? null,
+                'subtotal'          => $subtotal,
+                'order_discount'    => $billDiscount,
+                'tax_amount'        => $totalTaxWithPacking,
+                'shipping_charges'  => $shippingCharges,
+                'packing_charges'   => $packingCharges,
+                'other_charges'     => $otherChargesTotal,
+                'round_off'         => $roundOff,
+                'grand_total'       => $grandTotal,
+                'status'            => $validated['status'] ?? 'ordered',
+                'payment_status'    => $paymentStatus,
+                'paid_amount'       => $netPaidAmount,
+            ];
 
-                foreach ([
-                    'warehouse_id'                => $warehouse->id,
-                    'branch_id'                   => $branch->id,
-                    'packing_apply_type'          => $packingApplyType,
-                    'general_discount_type'       => $generalDiscountType,
-                    'general_discount_percent'    => $generalDiscountType === 'percent' ? $generalDiscountPercent : 0,
-                    'general_discount_amount'     => $generalDiscountType === 'amount' ? $generalDiscountEnteredAmt : 0,
-                    'general_discount_apply_type' => $generalDiscountApplyType,
-                    'tcs_percent'                 => $tcsPercent,
-                ] as $col => $val) {
-                    if (!empty($existingColumns[$col])) {
-                        $attributes[$col] = $val;
-                    }
+            foreach ([
+                'warehouse_id'                => $warehouse->id,
+                'branch_id'                   => $branch->id,
+                'packing_apply_type'          => $packingApplyType,
+                'general_discount_type'       => $generalDiscountType,
+                'general_discount_percent'    => $generalDiscountType === 'percent' ? $generalDiscountPercent : 0,
+                'general_discount_amount'     => $generalDiscountType === 'amount' ? $generalDiscountEnteredAmt : 0,
+                'general_discount_apply_type' => $generalDiscountApplyType,
+                'tcs_percent'                 => $tcsPercent,
+            ] as $col => $val) {
+                if (!empty($existingColumns[$col])) {
+                    $attributes[$col] = $val;
                 }
+            }
 
-                $purchase = PurchaseInvoice::create($attributes);
+            $purchase = PurchaseInvoice::create($attributes);
 
-                $purchase->items()->createMany($processedItems);
+            $purchase->items()->createMany($processedItems);
 
-                foreach ($processedItems as $item) {
-                    if (empty($item['product_id'])) continue;
+            foreach ($processedItems as $item) {
+                if (empty($item['product_id'])) continue;
 
-                    $product = Product::lockForUpdate()->find($item['product_id']);
-                    if (!$product) continue;
+                $product = Product::lockForUpdate()->find($item['product_id']);
+                if (!$product) continue;
 
-                    $quantity      = (float) $item['quantity'];
-                    $purchasePrice = (float) $item['purchase_price'];
-                    $stockBefore   = (float) ($product->stock_quantity ?? 0);
-                    $stockAfter    = $stockBefore + $quantity;
+                $quantity      = (float) $item['quantity'];
+                $purchasePrice = (float) $item['purchase_price'];
+                $stockBefore   = (float) ($product->stock_quantity ?? 0);
+                $stockAfter    = $stockBefore + $quantity;
 
-                    $product->stock_quantity = $stockAfter;
-                    $product->purchase_price = $purchasePrice;
-                    $product->save();
+                $product->stock_quantity = $stockAfter;
+                $product->purchase_price = $purchasePrice;
+                $product->save();
 
-                    StockMovement::create([
-                        'product_id'       => $product->id,
-                        'warehouse_id'     => $warehouse->id,
-                        'company_id'       => $validated['company_id'],
-                        'branch_id'        => $branch->id,
-                        'transaction_type' => 'IN',
-                        'reference_type'   => 'purchase',
-                        'reference_id'     => $purchase->id,
-                        'quantity'         => $quantity,
-                        'unit_price'       => $purchasePrice,
-                        'stock_before'     => $stockBefore,
-                        'stock_after'      => $stockAfter,
-                        'remark'           => 'Purchase invoice #' . $purchase->purchase_number,
-                        'transaction_date' => $purchase->purchase_date,
-                        'created_by'       => Auth::id(),
-                    ]);
-
-                    $warehouseStock = ProductWarehouseStock::firstOrNew([
-                        'product_id'   => $product->id,
-                        'warehouse_id' => $warehouse->id,
-                        'company_id'   => $validated['company_id'],
-                        'branch_id'    => $branch->id,
-                    ]);
-                    $warehouseStock->quantity            = (float) ($warehouseStock->quantity ?? 0) + $quantity;
-                    $warehouseStock->available_quantity  = (float) ($warehouseStock->available_quantity ?? 0) + $quantity;
-                    $warehouseStock->last_purchase_price = $purchasePrice;
-                    $warehouseStock->save();
-
-                    ProductPurchasePriceHistory::create([
-                        'product_id'    => $product->id,
-                        'supplier_id'   => $purchase->supplier_id,
-                        'purchase_id'   => $purchase->id,
-                        'bill_number'   => $purchase->bill_number ?: $purchase->purchase_number,
-                        'quantity'      => $quantity,
-                        'unit_price'    => $purchasePrice,
-                        'purchase_date' => $purchase->purchase_date,
-                    ]);
-                }
-
-                foreach ($validatedPayments as $payment) {
-                    $purchase->payments()->create([
-                        'company_id'        => $purchase->company_id,
-                        'amount'            => (float) $payment['amount'],
-                        'payment_method'    => $payment['payment_method'],
-                        'transaction_date'  => $payment['transaction_date'],
-                        'reference_no'      => $payment['reference_no'] ?? null,
-                        'bank_name'         => $payment['bank_name'] ?? null,
-                        'account_number'    => $payment['account_number'] ?? null,
-                        'remarks'           => $payment['remarks'] ?? null,
-                        'status'            => 'completed',
-                        'payment_direction' => $payment['payment_direction'] ?? 'outward',
-                    ]);
-                }
-
-                Log::info('Purchase invoice created successfully', [
-                    'purchase_id'     => $purchase->id,
-                    'purchase_number' => $purchase->purchase_number,
-                    'supplier_id'     => $purchase->supplier_id,
-                    'grand_total'     => $purchase->grand_total,
-                    'paid_amount'     => $purchase->paid_amount,
+                StockMovement::create([
+                    'product_id'       => $product->id,
+                    'warehouse_id'     => $warehouse->id,
+                    'company_id'       => $validated['company_id'],
+                    'branch_id'        => $branch->id,
+                    'transaction_type' => 'IN',
+                    'reference_type'   => 'purchase',
+                    'reference_id'     => $purchase->id,
+                    'quantity'         => $quantity,
+                    'unit_price'       => $purchasePrice,
+                    'stock_before'     => $stockBefore,
+                    'stock_after'      => $stockAfter,
+                    'remark'           => 'Purchase invoice #' . $purchase->purchase_number,
+                    'transaction_date' => $purchase->purchase_date,
+                    'created_by'       => Auth::id(),
                 ]);
 
-                return $purchase;
-            });
-        } catch (QueryException $e) {
-            // Convert DB-level duplicate errors (e.g. plain UNIQUE index that
-            // also covers soft-deleted rows) into friendly validation errors.
-            $this->convertDuplicateKeyException(
-                $e,
-                'purchase_number',
-                'The purchase number has already been taken.'
-            );
-        }
+                $warehouseStock = ProductWarehouseStock::firstOrNew([
+                    'product_id'   => $product->id,
+                    'warehouse_id' => $warehouse->id,
+                    'company_id'   => $validated['company_id'],
+                    'branch_id'    => $branch->id,
+                ]);
+                $warehouseStock->quantity            = (float) ($warehouseStock->quantity ?? 0) + $quantity;
+                $warehouseStock->available_quantity  = (float) ($warehouseStock->available_quantity ?? 0) + $quantity;
+                $warehouseStock->last_purchase_price = $purchasePrice;
+                $warehouseStock->save();
 
-        $purchase->load(['supplier', 'items.product', 'payments']);
+                ProductPurchasePriceHistory::create([
+                    'product_id'    => $product->id,
+                    'supplier_id'   => $purchase->supplier_id,
+                    'purchase_id'   => $purchase->id,
+                    'bill_number'   => $purchase->bill_number ?: $purchase->purchase_number,
+                    'quantity'      => $quantity,
+                    'unit_price'    => $purchasePrice,
+                    'purchase_date' => $purchase->purchase_date,
+                ]);
+            }
+
+            foreach ($validatedPayments as $payment) {
+                $purchase->payments()->create([
+                    'company_id'        => $purchase->company_id,
+                    'amount'            => (float) $payment['amount'],
+                    'payment_method'    => $payment['payment_method'],
+                    'transaction_date'  => $payment['transaction_date'],
+                    'reference_no'      => $payment['reference_no'] ?? null,
+                    'bank_name'         => $payment['bank_name'] ?? null,
+                    'account_number'    => $payment['account_number'] ?? null,
+                    'remarks'           => $payment['remarks'] ?? null,
+                    'status'            => 'completed',
+                    'payment_direction' => $payment['payment_direction'] ?? 'outward',
+                ]);
+            }
+
+            Log::info('Purchase invoice created successfully', [
+                'purchase_id'     => $purchase->id,
+                'purchase_number' => $purchase->purchase_number,
+                'supplier_id'     => $purchase->supplier_id,
+                'grand_total'     => $purchase->grand_total,
+                'paid_amount'     => $purchase->paid_amount,
+            ]);
+
+            return $purchase;
+        });
+
+        // FIX: also load `company` in the response so the frontend table has it.
+        $purchase->load(['company', 'supplier', 'items.product', 'payments']);
 
         return response()->json([
             'success'     => true,
@@ -575,7 +590,9 @@ class PurchaseInvoiceController extends Controller
 
     public function show($id)
     {
+        // FIX: include company relation.
         $purchase = PurchaseInvoice::with([
+            'company',
             'supplier',
             'items.product',
             'payments',
@@ -834,213 +851,204 @@ class PurchaseInvoiceController extends Controller
         }
 
         $netPaidAmount = round(($existingOutward + $newOutward) - ($existingInward + $newInward), 2);
-        $paymentStatus = $netPaidAmount >= $grandTotal
-            ? 'Paid'
-            : ($netPaidAmount > 0 ? 'Partial' : 'Unpaid');
+
+        // FIX: snap near-equal totals so we never store a ₹0.01 due.
+        [$netPaidAmount, $paymentStatus] = $this->normalisePaidAndStatus($grandTotal, $netPaidAmount);
 
         $existingColumns = $this->existingPurchaseInvoiceColumns();
 
-        try {
-            DB::transaction(function () use (
-                $purchase,
-                $validated,
-                $branch,
-                $warehouse,
-                $subtotal,
-                $billDiscount,
-                $totalTaxWithPacking,
-                $shippingCharges,
-                $packingCharges,
-                $otherChargesTotal,
-                $roundOff,
-                $grandTotal,
-                $processedItems,
-                $validatedPayments,
-                $netPaidAmount,
-                $paymentStatus,
-                $generalDiscountType,
-                $generalDiscountPercent,
-                $generalDiscountEnteredAmt,
-                $generalDiscountApplyType,
-                $packingApplyType,
-                $tcsPercent,
-                $existingColumns
-            ) {
-                // Reversal of previously applied stock
-                foreach ($purchase->items as $oldItem) {
-                    if (empty($oldItem->product_id)) continue;
+        DB::transaction(function () use (
+            $purchase,
+            $validated,
+            $branch,
+            $warehouse,
+            $subtotal,
+            $billDiscount,
+            $totalTaxWithPacking,
+            $shippingCharges,
+            $packingCharges,
+            $otherChargesTotal,
+            $roundOff,
+            $grandTotal,
+            $processedItems,
+            $validatedPayments,
+            $netPaidAmount,
+            $paymentStatus,
+            $generalDiscountType,
+            $generalDiscountPercent,
+            $generalDiscountEnteredAmt,
+            $generalDiscountApplyType,
+            $packingApplyType,
+            $tcsPercent,
+            $existingColumns
+        ) {
+            foreach ($purchase->items as $oldItem) {
+                if (empty($oldItem->product_id)) continue;
 
-                    $product = Product::lockForUpdate()->find($oldItem->product_id);
-                    if (!$product) continue;
+                $product = Product::lockForUpdate()->find($oldItem->product_id);
+                if (!$product) continue;
 
-                    $qty         = (float) $oldItem->quantity;
-                    $stockBefore = (float) ($product->stock_quantity ?? 0);
-                    $stockAfter  = $stockBefore - $qty;
+                $qty         = (float) $oldItem->quantity;
+                $stockBefore = (float) ($product->stock_quantity ?? 0);
+                $stockAfter  = $stockBefore - $qty;
 
-                    $product->stock_quantity = $stockAfter;
-                    $product->save();
+                $product->stock_quantity = $stockAfter;
+                $product->save();
 
-                    StockMovement::create([
-                        'product_id'       => $product->id,
-                        'warehouse_id'     => $warehouse->id,
-                        'company_id'       => $validated['company_id'],
-                        'branch_id'        => $branch->id,
-                        'transaction_type' => 'OUT',
-                        'reference_type'   => 'purchase',
-                        'reference_id'     => $purchase->id,
-                        'quantity'         => $qty,
-                        'unit_price'       => (float) $oldItem->purchase_price,
-                        'stock_before'     => $stockBefore,
-                        'stock_after'      => $stockAfter,
-                        'remark'           => 'Reversal for purchase update #' . $purchase->purchase_number,
-                        'transaction_date' => now()->toDateString(),
-                        'created_by'       => Auth::id(),
-                    ]);
-
-                    $whStock = ProductWarehouseStock::where([
-                        'product_id'   => $product->id,
-                        'warehouse_id' => $warehouse->id,
-                        'company_id'   => $validated['company_id'],
-                        'branch_id'    => $branch->id,
-                    ])->first();
-
-                    if ($whStock) {
-                        $whStock->quantity           = max(0, (float) $whStock->quantity - $qty);
-                        $whStock->available_quantity = max(0, (float) $whStock->available_quantity - $qty);
-                        $whStock->save();
-                    }
-                }
-
-                $purchase->items()->delete();
-                $purchase->items()->createMany($processedItems);
-
-                // Re-apply stock for new items
-                foreach ($processedItems as $item) {
-                    if (empty($item['product_id'])) continue;
-
-                    $product = Product::lockForUpdate()->find($item['product_id']);
-                    if (!$product) continue;
-
-                    $qty         = (float) $item['quantity'];
-                    $price       = (float) $item['purchase_price'];
-                    $stockBefore = (float) ($product->stock_quantity ?? 0);
-                    $stockAfter  = $stockBefore + $qty;
-
-                    $product->stock_quantity = $stockAfter;
-                    $product->purchase_price = $price;
-                    $product->save();
-
-                    StockMovement::create([
-                        'product_id'       => $product->id,
-                        'warehouse_id'     => $warehouse->id,
-                        'company_id'       => $validated['company_id'],
-                        'branch_id'        => $branch->id,
-                        'transaction_type' => 'IN',
-                        'reference_type'   => 'purchase',
-                        'reference_id'     => $purchase->id,
-                        'quantity'         => $qty,
-                        'unit_price'       => $price,
-                        'stock_before'     => $stockBefore,
-                        'stock_after'      => $stockAfter,
-                        'remark'           => 'Reapplied purchase #' . $purchase->purchase_number,
-                        'transaction_date' => $purchase->purchase_date,
-                        'created_by'       => Auth::id(),
-                    ]);
-
-                    $whStock = ProductWarehouseStock::firstOrNew([
-                        'product_id'   => $product->id,
-                        'warehouse_id' => $warehouse->id,
-                        'company_id'   => $validated['company_id'],
-                        'branch_id'    => $branch->id,
-                    ]);
-                    $whStock->quantity            = (float) ($whStock->quantity ?? 0) + $qty;
-                    $whStock->available_quantity  = (float) ($whStock->available_quantity ?? 0) + $qty;
-                    $whStock->last_purchase_price = $price;
-                    $whStock->save();
-
-                    ProductPurchasePriceHistory::create([
-                        'product_id'    => $product->id,
-                        'supplier_id'   => $purchase->supplier_id,
-                        'purchase_id'   => $purchase->id,
-                        'bill_number'   => $purchase->bill_number ?: $purchase->purchase_number,
-                        'quantity'      => $qty,
-                        'unit_price'    => $price,
-                        'purchase_date' => $purchase->purchase_date,
-                    ]);
-                }
-
-                $updateAttrs = [
-                    'company_id'        => $validated['company_id'],
-                    'supplier_id'       => $validated['supplier_id'],
-                    'purchase_number'   => $validated['purchase_number'],
-                    'bill_number'       => $validated['bill_number'] ?? null,
-                    'purchase_date'     => $validated['purchase_date'],
-                    'due_date'          => $validated['due_date'] ?? null,
-                    'reference_number'  => $validated['reference_number'] ?? null,
-                    'warehouse'         => $warehouse->name,
-                    'notes'             => $validated['notes'] ?? null,
-                    'internal_remarks'  => $validated['internal_remarks'] ?? null,
-                    'subtotal'          => $subtotal,
-                    'order_discount'    => $billDiscount,
-                    'tax_amount'        => $totalTaxWithPacking,
-                    'shipping_charges'  => $shippingCharges,
-                    'packing_charges'   => $packingCharges,
-                    'other_charges'     => $otherChargesTotal,
-                    'round_off'         => $roundOff,
-                    'grand_total'       => $grandTotal,
-                    'status'            => $validated['status'] ?? $purchase->status,
-                    'paid_amount'       => $netPaidAmount,
-                    'payment_status'    => $paymentStatus,
-                ];
-
-                foreach ([
-                    'warehouse_id'                => $warehouse->id,
-                    'branch_id'                   => $branch->id,
-                    'packing_apply_type'          => $packingApplyType,
-                    'general_discount_type'       => $generalDiscountType,
-                    'general_discount_percent'    => $generalDiscountType === 'percent' ? $generalDiscountPercent : 0,
-                    'general_discount_amount'     => $generalDiscountType === 'amount' ? $generalDiscountEnteredAmt : 0,
-                    'general_discount_apply_type' => $generalDiscountApplyType,
-                    'tcs_percent'                 => $tcsPercent,
-                ] as $col => $val) {
-                    if (!empty($existingColumns[$col])) {
-                        $updateAttrs[$col] = $val;
-                    }
-                }
-
-                $purchase->update($updateAttrs);
-
-                foreach ($validatedPayments as $payment) {
-                    $purchase->payments()->create([
-                        'company_id'        => $purchase->company_id,
-                        'amount'            => (float) $payment['amount'],
-                        'payment_method'    => $payment['payment_method'],
-                        'transaction_date'  => $payment['transaction_date'],
-                        'reference_no'      => $payment['reference_no'] ?? null,
-                        'bank_name'         => $payment['bank_name'] ?? null,
-                        'account_number'    => $payment['account_number'] ?? null,
-                        'remarks'           => $payment['remarks'] ?? null,
-                        'status'            => 'completed',
-                        'payment_direction' => $payment['payment_direction'] ?? 'outward',
-                    ]);
-                }
-
-                Log::info('Purchase invoice updated successfully', [
-                    'purchase_id'     => $purchase->id,
-                    'purchase_number' => $purchase->purchase_number,
-                    'grand_total'     => $purchase->grand_total,
-                    'paid_amount'     => $purchase->paid_amount,
+                StockMovement::create([
+                    'product_id'       => $product->id,
+                    'warehouse_id'     => $warehouse->id,
+                    'company_id'       => $validated['company_id'],
+                    'branch_id'        => $branch->id,
+                    'transaction_type' => 'OUT',
+                    'reference_type'   => 'purchase',
+                    'reference_id'     => $purchase->id,
+                    'quantity'         => $qty,
+                    'unit_price'       => (float) $oldItem->purchase_price,
+                    'stock_before'     => $stockBefore,
+                    'stock_after'      => $stockAfter,
+                    'remark'           => 'Reversal for purchase update #' . $purchase->purchase_number,
+                    'transaction_date' => now()->toDateString(),
+                    'created_by'       => Auth::id(),
                 ]);
-            });
-        } catch (QueryException $e) {
-            $this->convertDuplicateKeyException(
-                $e,
-                'purchase_number',
-                'The purchase number has already been taken.'
-            );
-        }
 
-        $updated = $purchase->fresh(['supplier', 'items.product', 'payments']);
+                $whStock = ProductWarehouseStock::where([
+                    'product_id'   => $product->id,
+                    'warehouse_id' => $warehouse->id,
+                    'company_id'   => $validated['company_id'],
+                    'branch_id'    => $branch->id,
+                ])->first();
+
+                if ($whStock) {
+                    $whStock->quantity           = max(0, (float) $whStock->quantity - $qty);
+                    $whStock->available_quantity = max(0, (float) $whStock->available_quantity - $qty);
+                    $whStock->save();
+                }
+            }
+
+            $purchase->items()->delete();
+            $purchase->items()->createMany($processedItems);
+
+            foreach ($processedItems as $item) {
+                if (empty($item['product_id'])) continue;
+
+                $product = Product::lockForUpdate()->find($item['product_id']);
+                if (!$product) continue;
+
+                $qty         = (float) $item['quantity'];
+                $price       = (float) $item['purchase_price'];
+                $stockBefore = (float) ($product->stock_quantity ?? 0);
+                $stockAfter  = $stockBefore + $qty;
+
+                $product->stock_quantity = $stockAfter;
+                $product->purchase_price = $price;
+                $product->save();
+
+                StockMovement::create([
+                    'product_id'       => $product->id,
+                    'warehouse_id'     => $warehouse->id,
+                    'company_id'       => $validated['company_id'],
+                    'branch_id'        => $branch->id,
+                    'transaction_type' => 'IN',
+                    'reference_type'   => 'purchase',
+                    'reference_id'     => $purchase->id,
+                    'quantity'         => $qty,
+                    'unit_price'       => $price,
+                    'stock_before'     => $stockBefore,
+                    'stock_after'      => $stockAfter,
+                    'remark'           => 'Reapplied purchase #' . $purchase->purchase_number,
+                    'transaction_date' => $purchase->purchase_date,
+                    'created_by'       => Auth::id(),
+                ]);
+
+                $whStock = ProductWarehouseStock::firstOrNew([
+                    'product_id'   => $product->id,
+                    'warehouse_id' => $warehouse->id,
+                    'company_id'   => $validated['company_id'],
+                    'branch_id'    => $branch->id,
+                ]);
+                $whStock->quantity            = (float) ($whStock->quantity ?? 0) + $qty;
+                $whStock->available_quantity  = (float) ($whStock->available_quantity ?? 0) + $qty;
+                $whStock->last_purchase_price = $price;
+                $whStock->save();
+
+                ProductPurchasePriceHistory::create([
+                    'product_id'    => $product->id,
+                    'supplier_id'   => $purchase->supplier_id,
+                    'purchase_id'   => $purchase->id,
+                    'bill_number'   => $purchase->bill_number ?: $purchase->purchase_number,
+                    'quantity'      => $qty,
+                    'unit_price'    => $price,
+                    'purchase_date' => $purchase->purchase_date,
+                ]);
+            }
+
+            $updateAttrs = [
+                'company_id'        => $validated['company_id'],
+                'supplier_id'       => $validated['supplier_id'],
+                'purchase_number'   => $validated['purchase_number'],
+                'bill_number'       => $validated['bill_number'] ?? null,
+                'purchase_date'     => $validated['purchase_date'],
+                'due_date'          => $validated['due_date'] ?? null,
+                'reference_number'  => $validated['reference_number'] ?? null,
+                'warehouse'         => $warehouse->name,
+                'notes'             => $validated['notes'] ?? null,
+                'internal_remarks'  => $validated['internal_remarks'] ?? null,
+                'subtotal'          => $subtotal,
+                'order_discount'    => $billDiscount,
+                'tax_amount'        => $totalTaxWithPacking,
+                'shipping_charges'  => $shippingCharges,
+                'packing_charges'   => $packingCharges,
+                'other_charges'     => $otherChargesTotal,
+                'round_off'         => $roundOff,
+                'grand_total'       => $grandTotal,
+                'status'            => $validated['status'] ?? $purchase->status,
+                'paid_amount'       => $netPaidAmount,
+                'payment_status'    => $paymentStatus,
+            ];
+
+            foreach ([
+                'warehouse_id'                => $warehouse->id,
+                'branch_id'                   => $branch->id,
+                'packing_apply_type'          => $packingApplyType,
+                'general_discount_type'       => $generalDiscountType,
+                'general_discount_percent'    => $generalDiscountType === 'percent' ? $generalDiscountPercent : 0,
+                'general_discount_amount'     => $generalDiscountType === 'amount' ? $generalDiscountEnteredAmt : 0,
+                'general_discount_apply_type' => $generalDiscountApplyType,
+                'tcs_percent'                 => $tcsPercent,
+            ] as $col => $val) {
+                if (!empty($existingColumns[$col])) {
+                    $updateAttrs[$col] = $val;
+                }
+            }
+
+            $purchase->update($updateAttrs);
+
+            foreach ($validatedPayments as $payment) {
+                $purchase->payments()->create([
+                    'company_id'        => $purchase->company_id,
+                    'amount'            => (float) $payment['amount'],
+                    'payment_method'    => $payment['payment_method'],
+                    'transaction_date'  => $payment['transaction_date'],
+                    'reference_no'      => $payment['reference_no'] ?? null,
+                    'bank_name'         => $payment['bank_name'] ?? null,
+                    'account_number'    => $payment['account_number'] ?? null,
+                    'remarks'           => $payment['remarks'] ?? null,
+                    'status'            => 'completed',
+                    'payment_direction' => $payment['payment_direction'] ?? 'outward',
+                ]);
+            }
+
+            Log::info('Purchase invoice updated successfully', [
+                'purchase_id'     => $purchase->id,
+                'purchase_number' => $purchase->purchase_number,
+                'grand_total'     => $purchase->grand_total,
+                'paid_amount'     => $purchase->paid_amount,
+            ]);
+        });
+
+        // FIX: include company relation in the update response too.
+        $updated = $purchase->fresh(['company', 'supplier', 'items.product', 'payments']);
 
         return response()->json([
             'success' => true,
@@ -1049,13 +1057,6 @@ class PurchaseInvoiceController extends Controller
         ]);
     }
 
-    /**
-     * Delete a purchase invoice AND reverse all stock/warehouse/price-history
-     * effects that were applied when it was created.
-     *
-     * Mirrors the reversal logic used in `update()` so stock_quantity stays
-     * consistent regardless of whether the invoice is edited or deleted.
-     */
     public function destroy($id)
     {
         $purchase = PurchaseInvoice::with(['items', 'payments'])->findOrFail($id);
@@ -1090,7 +1091,6 @@ class PurchaseInvoiceController extends Controller
                 $warehouseId = $wh ? (int) $wh->id : null;
             }
 
-            // ── Reverse stock for every line item ─────────────────────────────
             foreach ($purchase->items as $item) {
                 if (empty($item->product_id)) continue;
 
@@ -1137,11 +1137,8 @@ class PurchaseInvoiceController extends Controller
                 }
             }
 
-            // ── Remove purchase price history tied to this invoice ────────────
             ProductPurchasePriceHistory::where('purchase_id', $purchase->id)->delete();
 
-            // ── Delete child rows then the invoice itself ─────────────────────
-            // (items/payments must go before the parent to satisfy FKs.)
             $purchase->items()->delete();
             $purchase->payments()->delete();
 
@@ -1194,9 +1191,11 @@ class PurchaseInvoiceController extends Controller
             $inward    = (float) $purchase->payments()->where('payment_direction', 'inward')->sum('amount');
             $totalPaid = round($outward - $inward, 2);
 
-            $paymentStatus = $totalPaid >= (float) $purchase->grand_total
-                ? 'Paid'
-                : ($totalPaid > 0 ? 'Partial' : 'Unpaid');
+            // FIX: same epsilon-snap so addPayment does not leave a ₹0.01 due.
+            [$totalPaid, $paymentStatus] = $this->normalisePaidAndStatus(
+                (float) $purchase->grand_total,
+                $totalPaid
+            );
 
             $purchase->update([
                 'paid_amount'    => $totalPaid,
@@ -1204,7 +1203,7 @@ class PurchaseInvoiceController extends Controller
             ]);
 
             return [
-                'purchase' => $purchase->fresh(['supplier', 'items.product', 'payments']),
+                'purchase' => $purchase->fresh(['company', 'supplier', 'items.product', 'payments']),
                 'payment'  => $payment,
             ];
         });

@@ -189,10 +189,32 @@ Route::middleware('auth:sanctum')->group(function () {
          *
          *     mcp:read
          *
+         * Optional query params:
+         *   ?sections=customers,products,sales
+         *   ?from=2026-04-01&to=2026-09-14
+         *   ?limit=50
+         *   ?company_id=1&branch_id=2
          */
         Route::get(
             'context',
             [McpController::class, 'context']
+        );
+
+        /*
+         * GET /api/mcp/context/{section}
+         *
+         * Fetch a single business section on demand.
+         *
+         * Valid sections:
+         *   company, branches, warehouses, customers, suppliers,
+         *   dealers, products, sales, purchases, payments,
+         *   employees, attendance, accounting, reports
+         *
+         * Requires the same dedicated MCP token with mcp:read.
+         */
+        Route::get(
+            'context/{section}',
+            [McpController::class, 'section']
         );
 
         /*
@@ -1735,3 +1757,6 @@ Route::post(
     'invoices/bulk-delete',
     [InvoiceController::class, 'bulkDelete']
 );
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/reports/invoice-profitability', [ReportController::class, 'invoiceProfitability']);
+});
