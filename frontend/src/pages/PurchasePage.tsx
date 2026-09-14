@@ -927,8 +927,56 @@ async function createPurchaseWithVerification(
  * Gemini Vision OCR
  * ================================================================== */
 
-const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
-const FALLBACK_GEMINI_MODEL = 'gemini-1.5-flash';
+const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash';
+
+/**
+ * Ordered list of models tried automatically. If one returns 404 (retired,
+ * unavailable on v1beta, or not accessible), the next is attempted.
+ */
+const GEMINI_MODEL_FALLBACKS = [
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-3.5-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-pro',
+] as const;
+
+const FALLBACK_GEMINI_MODEL = GEMINI_MODEL_FALLBACKS[1];
+
+/**
+ * Google now issues TWO formats of API keys for the Generative Language API:
+ *
+ *   1. Legacy / classic format  →  AIzaSy…  (~39 chars)   [AI Studio + GCP]
+ *   2. New format               →  AQ.Ab8RN6…             [AI Studio, 2024+]
+ *
+ * BOTH are API keys, BOTH are sent via the `?key=` query parameter.
+ *
+ * The only credential that goes in `Authorization: Bearer` is a Google OAuth
+ * access token (used by some server-side flows) — those start with `ya29.`
+ * and are NOT what a normal AI Studio user has.
+ */
+function isGeminiApiKey(key: string): boolean {
+  const k = (key || '').trim();
+  if (!k) return false;
+  if (/^AIza[0-9A-Za-z_\-]{30,}$/.test(k)) return true;   // legacy format
+  if (/^AQ\.[0-9A-Za-z_\-]{20,}$/.test(k))   return true; // new format
+  return false;
+}
+
+/** Real Google OAuth access tokens (server-side flows). Start with "ya29.". */
+function isGeminiOAuthToken(key: string): boolean {
+  return /^ya29\.[0-9A-Za-z_\-]+$/.test((key || '').trim());
+}
+
+type GeminiAuthKind = 'apiKey' | 'oauth' | 'none' | 'unknown';
+
+function detectAuthKind(key: string): GeminiAuthKind {
+  if (!key) return 'none';
+  if (isGeminiApiKey(key)) return 'apiKey';
+  if (isGeminiOAuthToken(key)) return 'oauth';
+  return 'unknown';
+}
 
 const GEMINI_OCR_PROMPT = `You are an expert Indian GST Accounting AI system. Extract structured financial data from handwritten or printed Indian bills, cash receipts, and GST invoices.
 The documents often contain mixed Hindi + English (Hinglish), handwritten amounts, Rupee symbols (₹, Rs, रुपये), GSTIN numbers, HSN/SAC codes, CGST/SGST/IGST breakdowns, and handwritten totals.
@@ -998,24 +1046,47 @@ const GEMINI_OCR_SCHEMA = {
   },
 };
 
-function readGeminiConfig(): { apiKey: string; model: string; source: string } {
-  const env = (import.meta as unknown as { env?: Record<string, unknown> }).env ?? {};
-  let apiKey = safeStr(env.VITE_GEMINI_API_KEY || env.GEMINI_API_KEY).trim();
-  let model = safeStr(env.VITE_GEMINI_MODEL || env.GEMINI_MODEL).trim();
-  let source = apiKey ? '.env' : '';
+/**
+ * Reads the Gemini credential from localStorage only.
+ * No .env / build-time variable is consulted — this makes dev and live
+ * servers behave identically.
+ */
+function readGeminiConfig(): {
+  apiKey: string;
+  model: string;
+  source: string;
+  authKind: GeminiAuthKind;
+} {
+  let apiKey = '';
+  let model = '';
+  let source = '';
 
-  if (!apiKey) {
-    try {
-      const stored = window.localStorage.getItem('bill_extract_settings');
-      if (stored) {
-        const parsed = JSON.parse(stored) as { apiKey?: string; selectedModel?: string };
-        if (parsed.apiKey) { apiKey = String(parsed.apiKey).trim(); source = 'BillExtract settings'; }
-        if (!model && parsed.selectedModel) model = String(parsed.selectedModel).trim();
+  try {
+    const stored = window.localStorage.getItem('bill_extract_settings');
+    if (stored) {
+      const parsed = JSON.parse(stored) as { apiKey?: string; selectedModel?: string };
+      if (parsed.apiKey) {
+        apiKey = String(parsed.apiKey).trim();
+        source = 'Settings → AI';
       }
-    } catch { /* ignore */ }
-  }
+      if (parsed.selectedModel) {
+        model = String(parsed.selectedModel).trim();
+      }
+    }
+  } catch { /* ignore */ }
+
   if (!model) model = DEFAULT_GEMINI_MODEL;
-  return { apiKey, model, source };
+
+  const authKind = detectAuthKind(apiKey);
+
+  if (typeof console !== 'undefined') {
+    console.info(
+      `[Gemini] source=${source || 'NONE'} model=${model} ` +
+      `present=${Boolean(apiKey)} kind=${authKind} prefix=${apiKey.slice(0, 6)}`
+    );
+  }
+
+  return { apiKey, model, source, authKind };
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -1039,14 +1110,24 @@ function classifyOCRError(error: unknown): OCRErrorInfo {
   const msg = error instanceof Error ? error.message : String(error || '');
   const lower = msg.toLowerCase();
 
-  if (lower.includes('api key') || lower.includes('authentication') || lower.includes('unauthorized')) {
+  if (
+    lower.includes('not configured') ||
+    lower.includes('does not look like') ||
+    lower.includes('not a recognized')
+  ) {
+    return { kind: 'auth', message: msg, canRetry: false, canSwitchModel: false };
+  }
+  if (lower.includes('api key') || lower.includes('authentication') || lower.includes('unauthorized') || lower.includes('401')) {
     return { kind: 'auth', message: msg, canRetry: false, canSwitchModel: false };
   }
   if (lower.includes('quota') || lower.includes('rate limit') || lower.includes('429')) {
     return { kind: 'quota', message: 'API quota or rate limit reached. Wait a moment and retry.', canRetry: true, canSwitchModel: true };
   }
-  if (lower.includes('model') && (lower.includes('not found') || lower.includes('404'))) {
-    return { kind: 'model', message: 'The requested model is unavailable. Try switching to a different model.', canRetry: false, canSwitchModel: true };
+  if (lower.includes('permission') || lower.includes('403')) {
+    return { kind: 'auth', message: msg, canRetry: false, canSwitchModel: false };
+  }
+  if (lower.includes('model') && (lower.includes('not found') || lower.includes('404') || lower.includes('unavailable'))) {
+    return { kind: 'model', message: msg, canRetry: true, canSwitchModel: true };
   }
   if (lower.includes('network') || lower.includes('failed to fetch') || lower.includes('timeout')) {
     return { kind: 'network', message: msg, canRetry: true, canSwitchModel: true };
@@ -1067,15 +1148,32 @@ function classifyOCRError(error: unknown): OCRErrorInfo {
 }
 
 async function extractWithGemini(file: File, modelOverride?: string): Promise<OCRInvoiceData> {
-  const { apiKey, model: configuredModel } = readGeminiConfig();
+  const { apiKey, model: configuredModel, authKind, source } = readGeminiConfig();
   const model = modelOverride || configuredModel;
 
   if (!apiKey) {
-    throw new Error('Gemini API key is not configured. Add VITE_GEMINI_API_KEY=… to .env and restart the dev server, OR configure it in the BillExtract AI settings page.');
+    throw new Error(
+      'Gemini credential is not configured. Open Settings → AI and paste your Gemini API key.'
+    );
+  }
+
+  if (authKind === 'unknown') {
+    throw new Error(
+      `The saved credential (starts with "${apiKey.slice(0, 6)}…", source: ${source || 'unknown'}) ` +
+      'is not a recognized Google API key. Gemini API keys look like "AIzaSy…" or "AQ.Ab8RN6…". ' +
+      'Please replace it in Settings → AI.'
+    );
   }
 
   const base64 = await fileToBase64(file);
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  // Both Google API key formats (AIza… AND AQ.…) go in the query string.
+  // Only true OAuth tokens (ya29.…) use the Authorization: Bearer header.
+  const baseUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const url = authKind === 'oauth' ? baseUrl : `${baseUrl}?key=${encodeURIComponent(apiKey)}`;
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (authKind === 'oauth') headers.Authorization = `Bearer ${apiKey}`;
 
   const payload = {
     contents: [{
@@ -1100,26 +1198,46 @@ async function extractWithGemini(file: File, modelOverride?: string): Promise<OC
   try {
     response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload),
     });
   } catch (networkErr) {
-    throw new Error(`Network request to Gemini failed: ${networkErr instanceof Error ? networkErr.message : 'unknown error'}. Check your internet connection.`);
+    throw new Error(
+      `Network request to Gemini failed: ${networkErr instanceof Error ? networkErr.message : 'unknown error'}. Check your internet connection.`
+    );
   }
 
   if (!response.ok) {
-    if (response.status === 400) throw new Error('Invalid API payload or unsupported image format. Please verify the image file.');
-    if (response.status === 401 || response.status === 403) throw new Error('Gemini API Key Authentication Failed. Please check your key in the BillExtract settings page or .env file.');
-    if (response.status === 429) throw new Error('API Quota Rate Limit Exceeded. Please wait a moment and try again.');
-    if (response.status === 404) throw new Error(`Model "${model}" was not found. Try switching to a different model.`);
-    if (response.status >= 500) throw new Error(`Server returned HTTP Error ${response.status}. This is temporary — please retry.`);
+    if (response.status === 400) {
+      throw new Error('Invalid API payload or unsupported image format. Please verify the image file.');
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(
+        'Gemini rejected the credential. Please verify your API key in Settings → AI.'
+      );
+    }
+    if (response.status === 429) {
+      throw new Error('API quota or rate limit reached. Please wait a moment and try again.');
+    }
+    if (response.status === 404) {
+      throw new Error(
+        `Model "${model}" was not found on the Gemini API (v1beta), or the credential was rejected.`
+      );
+    }
+    if (response.status >= 500) {
+      throw new Error(`Server returned HTTP Error ${response.status}. This is temporary — please retry.`);
+    }
     throw new Error(`Server returned HTTP Error ${response.status}.`);
   }
 
   const result = await response.json();
   if (!result.candidates || result.candidates.length === 0) {
     const reason = result?.promptFeedback?.blockReason;
-    throw new Error(reason ? `AI engine refused to process this image (${reason}).` : 'AI Engine did not return any candidate response. Image might be unreadable.');
+    throw new Error(
+      reason
+        ? `AI engine refused to process this image (${reason}).`
+        : 'AI Engine did not return any candidate response. Image might be unreadable.'
+    );
   }
 
   const rawText = result.candidates[0]?.content?.parts?.[0]?.text;
@@ -1613,9 +1731,27 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
 
   useEffect(() => {
     if (!isOpen) return;
-    const { apiKey, model, source } = readGeminiConfig();
-    setGeminiModel(model); setGeminiSource(source);
-    setEnvWarning(!apiKey ? 'Gemini API key not found. Configure it in Settings → AI, or add VITE_GEMINI_API_KEY=… to your .env file.' : null);
+    const { apiKey, model, source, authKind } = readGeminiConfig();
+    setGeminiModel(model);
+    setGeminiSource(source);
+
+    if (!apiKey) {
+      setEnvWarning(
+        'Gemini credential not found. Open Settings → AI and paste your Gemini API key.'
+      );
+    } else if (authKind === 'unknown') {
+      setEnvWarning(
+        `The saved credential (starts with "${apiKey.slice(0, 6)}…") is not a recognized Google API key. ` +
+        'Gemini API keys look like "AIzaSy…" or "AQ.Ab8RN6…". Please replace it in Settings → AI.'
+      );
+    } else if (authKind === 'oauth') {
+      setEnvWarning(
+        'You are using an OAuth access token (starts with "ya29."). These expire quickly and are not ' +
+        'recommended for browser use. Please use a regular API key from Settings → AI instead.'
+      );
+    } else {
+      setEnvWarning(null);
+    }
   }, [isOpen]);
 
   useEffect(() => {
@@ -1647,32 +1783,59 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
   }, [companyId]);
 
   const runOCR = useCallback(async (f: File, modelOverride?: string) => {
-    setOcrLoading(true); setOcrError(null);
-    try {
-      const data = await extractWithGemini(f, modelOverride);
-      setExtracted(data);
-      setItems(data.items.map((it) => ({
-        id: uid('item'),
-        description: it.description,
-        hsn_sac: it.hsn_sac,
-        quantity: it.quantity,
-        unit: it.unit,
-        unit_price: it.unit_price,
-        tax_rate: it.tax_rate ?? 0,
-        discount_type: 'percent' as const,
-        discount_percent: 0,
-        discount_amount: 0,
-        total: it.total,
-        action: 'new' as const,
-        matched_product_id: null,
-        matched_product_name: null,
-      })));
-      setStep('verify');
-      showSuccess('Scan complete', `Extracted ${data.items.length} line item(s).`);
-    } catch (err: unknown) {
-      const info = classifyOCRError(err);
-      setOcrError(info);
-    } finally { setOcrLoading(false); }
+    setOcrLoading(true);
+    setOcrError(null);
+
+    const configured = readGeminiConfig().model;
+    const candidates = modelOverride
+      ? [modelOverride]
+      : Array.from(new Set([configured, ...GEMINI_MODEL_FALLBACKS]));
+
+    let lastError: unknown = null;
+
+    for (const model of candidates) {
+      try {
+        const data = await extractWithGemini(f, model);
+
+        setExtracted(data);
+        setItems(data.items.map((it) => ({
+          id: uid('item'),
+          description: it.description,
+          hsn_sac: it.hsn_sac,
+          quantity: it.quantity,
+          unit: it.unit,
+          unit_price: it.unit_price,
+          tax_rate: it.tax_rate ?? 0,
+          discount_type: 'percent' as const,
+          discount_percent: 0,
+          discount_amount: 0,
+          total: it.total,
+          action: 'new' as const,
+          matched_product_id: null,
+          matched_product_name: null,
+        })));
+        setGeminiModel(model);
+        setStep('verify');
+        showSuccess('Scan complete', `Extracted ${data.items.length} line item(s) via ${model}.`);
+        setOcrLoading(false);
+        return;
+      } catch (err) {
+        lastError = err;
+        const info = classifyOCRError(err);
+
+        // Only cascade to the next model when the failure is per-model.
+        // Auth / quota / network / parse failures won't be fixed by swapping models.
+        if (info.kind !== 'model') {
+          setOcrError(info);
+          setOcrLoading(false);
+          return;
+        }
+        await sleep(150);
+      }
+    }
+
+    setOcrError(classifyOCRError(lastError));
+    setOcrLoading(false);
   }, [showSuccess]);
 
   const handleFile = useCallback((f: File) => {
@@ -1699,10 +1862,12 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
 
   const retryWithAlternateModel = useCallback(() => {
     if (!file) return;
-    const alt = geminiModel === FALLBACK_GEMINI_MODEL ? DEFAULT_GEMINI_MODEL : FALLBACK_GEMINI_MODEL;
-    setGeminiModel(alt);
-    showSuccess('Switching model', `Retrying with ${alt}…`);
-    void runOCR(file, alt);
+    const list = GEMINI_MODEL_FALLBACKS as readonly string[];
+    const idx = list.indexOf(geminiModel);
+    const next = list[(idx + 1) % list.length] || DEFAULT_GEMINI_MODEL;
+    setGeminiModel(next);
+    showSuccess('Switching model', `Retrying with ${next}…`);
+    void runOCR(file, next);
   }, [file, geminiModel, runOCR, showSuccess]);
 
   const skipOCR = useCallback(() => {
