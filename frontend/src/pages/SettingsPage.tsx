@@ -108,7 +108,7 @@ const DEFAULT_AI_CONFIG: AiConfig = {
 const AI_MODEL_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — recommended (fast, accurate)' },
   { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — highest accuracy (slower)' },
-  { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+  { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
   { value: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash — legacy fallback' },
   { value: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro — legacy' },
 ];
