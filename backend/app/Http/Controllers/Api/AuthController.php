@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
+use App\Services\TwoFactorChallengeService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Hash;
@@ -11,39 +13,73 @@ use Illuminate\Support\Facades\Validator;
 
 class AuthController extends Controller
 {
-    public function login(Request $request)
+    /**
+     * Precomputed bcrypt hash (cost 12) used purely to equalize response time
+     * when the submitted email does not exist, mitigating user enumeration
+     * via timing side-channels.
+     *
+     * Regenerate with:
+     *   php artisan tinker --execute="echo Illuminate\Support\Facades\Hash::make(Str::random(40));"
+     */
+    private const DUMMY_HASH = '$2y$12$abcdefghijklmnopqrstuvabcdefghijklmnopqrstuvwxyz01234';
+
+    public function __construct(
+        private readonly TwoFactorChallengeService $challenges,
+    ) {
+    }
+
+    public function login(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
-            'email' => 'required|email',
-            'password' => 'required|string',
+            'email' => ['required', 'email', 'max:254'],
+            'password' => ['required', 'string', 'max:128'],
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], Response::HTTP_UNPROCESSABLE_ENTITY);
+            return response()->json(
+                ['errors' => $validator->errors()],
+                Response::HTTP_UNPROCESSABLE_ENTITY,
+            );
         }
 
         $user = User::where('email', $request->email)->first();
 
-        if (! $user || ! Hash::check($request->password, $user->password)) {
-            return response()->json(['message' => 'Invalid credentials'], Response::HTTP_UNAUTHORIZED);
+        // Always run a bcrypt check to flatten timing between
+        // "unknown email" and "wrong password".
+        $passwordValid = Hash::check(
+            $request->password,
+            $user?->password ?? self::DUMMY_HASH,
+        );
+
+        if ($user === null || ! $passwordValid) {
+            return response()->json(
+                ['message' => 'Invalid credentials'],
+                Response::HTTP_UNAUTHORIZED,
+            );
         }
 
-        $token = $user->createToken('auth-token');
+        // Branch: 2FA-enabled accounts must complete a second step.
+        if ($user->hasTwoFactorEnabled()) {
+            $challengeToken = $this->challenges->issue($user, $request);
 
-        return response()->json([
-            'access_token' => $token->plainTextToken,
-            'token_type' => 'bearer',
-        ]);
+            return response()->json([
+                'two_factor_required' => true,
+                'challenge_token' => $challengeToken,
+                'expires_in' => TwoFactorChallengeService::TTL_SECONDS,
+            ]);
+        }
+
+        return response()->json($this->issueAccessToken($user));
     }
 
-    public function logout(Request $request)
+    public function logout(Request $request): JsonResponse
     {
-        $request->user()->currentAccessToken()->delete();
+        $request->user()?->currentAccessToken()?->delete();
 
         return response()->json(['message' => 'Logged out successfully']);
     }
- 
-    public function me(Request $request)
+
+    public function me(Request $request): JsonResponse
     {
         $user = $request->user()->load('roles');
 
@@ -56,6 +92,7 @@ class AuthController extends Controller
             'timezone' => $user->timezone,
             'bio' => $user->bio,
             'avatar_url' => $user->avatar_url,
+            'two_factor_enabled' => $user->hasTwoFactorEnabled(),
             'roles' => $user->roles->map(function ($role) {
                 return ['id' => $role->id, 'name' => $role->name];
             }),
@@ -64,23 +101,23 @@ class AuthController extends Controller
         ]);
     }
 
-    public function profile(Request $request)
+    public function profile(Request $request): JsonResponse
     {
         return $this->me($request);
     }
 
-    public function updateProfile(Request $request)
+    public function updateProfile(Request $request): JsonResponse
     {
         $user = $request->user();
 
         $validator = Validator::make($request->all(), [
-            'name' => 'sometimes|string|max:255',
-            'email' => ['sometimes', 'email', 'max:255', 'unique:users,email,' . $user->id],
-            'phone' => 'sometimes|nullable|string|max:50',
-            'location' => 'sometimes|nullable|string|max:255',
-            'timezone' => 'sometimes|nullable|string|max:64',
-            'bio' => 'sometimes|nullable|string|max:1000',
-            'avatar_url' => 'sometimes|nullable|url|max:2048',
+            'name' => ['sometimes', 'string', 'max:255'],
+            'email' => ['sometimes', 'email', 'max:255', 'unique:users,email,'.$user->id],
+            'phone' => ['sometimes', 'nullable', 'string', 'max:50'],
+            'location' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'timezone' => ['sometimes', 'nullable', 'string', 'max:64'],
+            'bio' => ['sometimes', 'nullable', 'string', 'max:1000'],
+            'avatar_url' => ['sometimes', 'nullable', 'url', 'max:2048'],
         ]);
 
         if ($validator->fails()) {
@@ -88,7 +125,7 @@ class AuthController extends Controller
                 'success' => false,
                 'message' => 'Validation failed',
                 'errors' => $validator->errors(),
-            ], 422);
+            ], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
         $user->fill($request->only([
@@ -107,5 +144,22 @@ class AuthController extends Controller
             'message' => 'Profile updated successfully',
             'data' => $this->me($request)->getData(true),
         ]);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function issueAccessToken(User $user): array
+    {
+        $expiresAt = now()->addDays(7);
+
+        // Named ability scope keeps room for future granular tokens.
+        $token = $user->createToken('auth-token', ['*'], $expiresAt);
+
+        return [
+            'access_token' => $token->plainTextToken,
+            'token_type' => 'bearer',
+            'expires_at' => $expiresAt->toIso8601String(),
+        ];
     }
 }

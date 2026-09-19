@@ -57,7 +57,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
-type PaymentMethod = 'qr' | 'bank_transfer' | 'cash' | 'card';
+type PaymentMethod = 'qr' | 'bank_transfer' | 'cash' | 'card' | 'upi';
 type PaymentStatus = 'pending' | 'completed' | 'failed' | 'reconciled';
 type PaymentDirection = 'inward' | 'outward';
 type BillType = 'sales' | 'purchase' | 'other' | 'unlinked';
@@ -132,6 +132,7 @@ interface Payment {
 interface PaymentForm {
   company_id: number;
   branch_id?: number;
+  invoice_id?: number | null;
   reference_no: string;
   amount: number | string;
   payment_method: PaymentMethod;
@@ -141,6 +142,37 @@ interface PaymentForm {
   account_number: string;
   ledger_reference: string;
   remarks: string;
+}
+
+/**
+ * Row shape used by the "Apply to invoice" picker.
+ *
+ * The invoice index endpoint (`InvoiceController@index`) returns each row
+ * with `received_amount` and `outstanding_amount` precomputed via a
+ * correlated sub-select — so we can rely on them here and fall back to
+ * client-side math only for defensive purposes.
+ */
+interface DueInvoice {
+  id: number;
+  invoice_no: string;
+  company_id?: number;
+  branch_id?: number | null;
+  customer_id?: number;
+  customer_name?: string | null;
+  customer?: {
+    id?: number;
+    name?: string | null;
+    email?: string | null;
+  } | null;
+  total_amount: number | string;
+  received_amount?: number | string | null;
+  outstanding_amount?: number | string | null;
+  payment_received?: number | string | null;
+  paid_amount?: number | string | null;
+  due_date?: string | null;
+  invoice_date?: string | null;
+  status?: string | null;
+  [key: string]: unknown;
 }
 
 const PER_PAGE = [15, 25, 50, 100] as const;
@@ -287,6 +319,26 @@ const billId = (p: Payment) =>
       p.purchase_invoice?.id ||
       p.invoice?.id,
   ) || null;
+
+/**
+ * Outstanding amount for a due invoice row.
+ * Prefers the server-computed `outstanding_amount`; falls back to
+ * `max(0, total - received)` using whatever received figure is present.
+ */
+const invoiceOutstanding = (inv: DueInvoice): number => {
+  if (inv.outstanding_amount != null) {
+    const v = Number(inv.outstanding_amount);
+    if (Number.isFinite(v)) return Math.max(0, v);
+  }
+  const total = n(inv.total_amount);
+  const received = n(
+    inv.received_amount ?? inv.payment_received ?? inv.paid_amount,
+  );
+  return Math.max(0, total - received);
+};
+
+const invoiceCustomer = (inv: DueInvoice): string =>
+  inv.customer?.name || inv.customer_name || '—';
 
 const createReference = () => {
   const date = new Date();
@@ -507,6 +559,7 @@ export function PaymentsPage() {
   const [form, setForm] = useState<PaymentForm>({
     company_id: 0,
     branch_id: undefined,
+    invoice_id: null,
     reference_no: '',
     amount: '',
     payment_method: 'qr',
@@ -521,9 +574,17 @@ export function PaymentsPage() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [sections, setSections] = useState({
     payment: true,
+    invoice: true,
     bank: true,
     remarks: true,
   });
+
+  /* ---------------- Due-invoice picker state ---------------- */
+
+  const [dueInvoices, setDueInvoices] = useState<DueInvoice[]>([]);
+  const [dueInvoicesLoading, setDueInvoicesLoading] = useState(false);
+  const [dueInvoicesError, setDueInvoicesError] = useState<string | null>(null);
+  const [dueInvoiceSearch, setDueInvoiceSearch] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -796,6 +857,7 @@ export function PaymentsPage() {
     setForm({
       company_id: 0,
       branch_id: undefined,
+      invoice_id: null,
       reference_no: '',
       amount: '',
       payment_method: 'qr',
@@ -806,7 +868,13 @@ export function PaymentsPage() {
       ledger_reference: '',
       remarks: '',
     });
-    setSections({ payment: true, bank: true, remarks: true });
+    setDueInvoiceSearch('');
+    setSections({
+      payment: true,
+      invoice: true,
+      bank: true,
+      remarks: true,
+    });
     setEditOpen(true);
   };
 
@@ -817,6 +885,7 @@ export function PaymentsPage() {
     setForm({
       company_id: p.company_id || 0,
       branch_id: p.branch_id || undefined,
+      invoice_id: p.invoice_id || p.sales_invoice_id || null,
       reference_no: p.reference_no || '',
       amount: p.amount ?? '',
       payment_method: p.payment_method || 'qr',
@@ -828,6 +897,7 @@ export function PaymentsPage() {
       remarks: p.remarks || '',
     });
 
+    setDueInvoiceSearch('');
     setFormErrors({});
     setEditOpen(true);
   };
@@ -973,6 +1043,7 @@ export function PaymentsPage() {
       ...form,
       company_id: Number(form.company_id),
       branch_id: form.branch_id ? Number(form.branch_id) : null,
+      invoice_id: form.invoice_id || null,
       amount: n(form.amount),
       reference_no: reference,
     };
@@ -1110,6 +1181,110 @@ export function PaymentsPage() {
     directionFilter !== 'all' ? directionFilter : '',
     billFilter !== 'all' ? billFilter : '',
   ].filter(Boolean).length;
+
+  /* ---------------- Due-invoice picker: fetch + derive ---------------- */
+
+  /**
+   * Fetch outstanding invoices (due > 0) for the selected company/branch
+   * while the create/edit sheet is open. Uses the shared invoice index
+   * endpoint (`InvoiceController@index`), which returns per-row
+   * `outstanding_amount` — no extra aggregation needed client-side.
+   */
+  useEffect(() => {
+    if (!editOpen) return;
+
+    if (!form.company_id) {
+      setDueInvoices([]);
+      setDueInvoicesError(null);
+      setDueInvoicesLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setDueInvoicesLoading(true);
+    setDueInvoicesError(null);
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await apiClient.getInvoices({
+          page: 1,
+          per_page: 100,
+          company_id: Number(form.company_id),
+          branch_id: form.branch_id
+            ? Number(form.branch_id)
+            : undefined,
+          sort_by: 'due_date',
+          sort_dir: 'asc',
+        });
+
+        if (cancelled) return;
+
+        const rows = normalize<DueInvoice>(response).filter(
+          (inv) => invoiceOutstanding(inv) > 0,
+        );
+
+        setDueInvoices(rows);
+      } catch (err) {
+        if (cancelled) return;
+        setDueInvoicesError(
+          err instanceof Error
+            ? err.message
+            : 'Unable to load outstanding invoices.',
+        );
+      } finally {
+        if (!cancelled) setDueInvoicesLoading(false);
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [editOpen, form.company_id, form.branch_id]);
+
+  const filteredDueInvoices = useMemo(() => {
+    const q = dueInvoiceSearch.trim().toLowerCase();
+    if (!q) return dueInvoices;
+
+    return dueInvoices.filter((inv) => {
+      const hay = [
+        inv.invoice_no,
+        invoiceCustomer(inv),
+        String(inv.id),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return hay.includes(q);
+    });
+  }, [dueInvoices, dueInvoiceSearch]);
+
+  const selectedInvoice = useMemo(() => {
+    if (!form.invoice_id) return null;
+    return (
+      dueInvoices.find((inv) => inv.id === form.invoice_id) ?? null
+    );
+  }, [dueInvoices, form.invoice_id]);
+
+  const hasLinkedInvoiceOutsideList =
+    !!form.invoice_id && !selectedInvoice;
+
+  const applyInvoice = (inv: DueInvoice) => {
+    const outstanding = invoiceOutstanding(inv);
+    setForm((x) => ({
+      ...x,
+      invoice_id: inv.id,
+      // Auto-fill only when the user hasn't already typed an amount.
+      amount:
+        x.amount === '' || n(x.amount) === 0
+          ? outstanding
+          : x.amount,
+    }));
+  };
+
+  const clearInvoiceLink = () => {
+    setForm((x) => ({ ...x, invoice_id: null }));
+  };
 
   return (
     <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
@@ -1267,10 +1442,6 @@ export function PaymentsPage() {
                 {filtersOpen ? 'Hide' : 'Show'}
               </Button>
 
-              {/* ✅ FIX: `activeFilters` is a number and the right-hand side
-                  comparisons produce booleans, so the `||` chain is
-                  `number | boolean`. Comparing that with `> 0` is invalid.
-                  Wrap the whole expression in `Boolean(...)` instead. */}
               {Boolean(
                 activeFilters ||
                   dateFrom !== today() ||
@@ -1357,6 +1528,7 @@ export function PaymentsPage() {
                 options={[
                   { value: 'all', label: 'All methods' },
                   { value: 'qr', label: 'QR' },
+                  { value: 'upi', label: 'UPI' },
                   { value: 'bank_transfer', label: 'Bank transfer' },
                   { value: 'cash', label: 'Cash' },
                   { value: 'card', label: 'Card' },
@@ -2258,6 +2430,8 @@ export function PaymentsPage() {
                           ...x,
                           company_id: Number(e.target.value),
                           branch_id: undefined,
+                          // Invoice belongs to the previous company — reset it.
+                          invoice_id: null,
                         }))
                       }
                       className={`h-10 w-full rounded-xl border bg-white px-3 text-sm outline-none ${
@@ -2290,6 +2464,8 @@ export function PaymentsPage() {
                           branch_id: e.target.value
                             ? Number(e.target.value)
                             : undefined,
+                          // Invoice might belong to a different branch too.
+                          invoice_id: null,
                         }))
                       }
                       className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm disabled:bg-slate-50"
@@ -2352,6 +2528,24 @@ export function PaymentsPage() {
                       }
                       placeholder="0.00"
                     />
+
+                    {selectedInvoice && (
+                      <p className="mt-1 text-[10px] text-slate-500">
+                        Due on {selectedInvoice.invoice_no}:{' '}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setForm((x) => ({
+                              ...x,
+                              amount: invoiceOutstanding(selectedInvoice),
+                            }))
+                          }
+                          className="font-semibold text-indigo-600 underline decoration-dotted hover:text-indigo-700"
+                        >
+                          use {money(invoiceOutstanding(selectedInvoice))}
+                        </button>
+                      </p>
+                    )}
                   </div>
 
                   <Select
@@ -2365,6 +2559,7 @@ export function PaymentsPage() {
                     }
                     options={[
                       { value: 'qr', label: 'QR' },
+                      { value: 'upi', label: 'UPI' },
                       {
                         value: 'bank_transfer',
                         label: 'Bank transfer',
@@ -2450,6 +2645,200 @@ export function PaymentsPage() {
                       </button>
                     </div>
                   </div>
+                </div>
+              )}
+            </div>
+
+            {/* Apply to invoice */}
+            <div className="rounded-2xl border border-slate-200 bg-white">
+              <button
+                type="button"
+                onClick={() =>
+                  setSections((s) => ({
+                    ...s,
+                    invoice: !s.invoice,
+                  }))
+                }
+                className="flex w-full items-center justify-between px-4 py-3 text-left"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="grid h-8 w-8 place-items-center rounded-lg bg-sky-50 text-sky-600">
+                    <FileText className="h-4 w-4" />
+                  </span>
+                  <div>
+                    <p className="text-sm font-semibold">
+                      Apply to invoice
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      {selectedInvoice
+                        ? `Linked to ${selectedInvoice.invoice_no}`
+                        : form.invoice_id
+                          ? `Linked to invoice #${form.invoice_id}`
+                          : 'Link this payment to an outstanding invoice'}
+                    </p>
+                  </div>
+                </div>
+
+                <ChevronDown
+                  className={`h-4 w-4 transition ${
+                    sections.invoice ? '' : '-rotate-90'
+                  }`}
+                />
+              </button>
+
+              {sections.invoice && (
+                <div className="space-y-3 border-t border-slate-100 p-4">
+                  {!form.company_id ? (
+                    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-6 text-center">
+                      <p className="text-xs font-medium text-slate-600">
+                        Select a company to see outstanding invoices.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      {/* Currently-linked invoice that is not in the
+                          due list (e.g. already fully paid). */}
+                      {hasLinkedInvoiceOutsideList && (
+                        <div className="flex items-center justify-between gap-3 rounded-xl border border-sky-200 bg-sky-50 px-3.5 py-2.5">
+                          <div className="min-w-0">
+                            <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-700">
+                              Currently linked
+                            </p>
+                            <p className="truncate text-xs font-semibold text-slate-800">
+                              Invoice #{form.invoice_id}
+                            </p>
+                          </div>
+
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 rounded-lg text-slate-500 hover:text-slate-800"
+                            onClick={clearInvoiceLink}
+                          >
+                            <X className="mr-1 h-3.5 w-3.5" />
+                            Unlink
+                          </Button>
+                        </div>
+                      )}
+
+                      <div className="relative">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                        <Input
+                          value={dueInvoiceSearch}
+                          onChange={(e) =>
+                            setDueInvoiceSearch(e.target.value)
+                          }
+                          placeholder="Search invoice # or customer…"
+                          className="h-9 rounded-xl pl-9 text-sm"
+                        />
+                      </div>
+
+                      {dueInvoicesError && (
+                        <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
+                          {dueInvoicesError}
+                        </div>
+                      )}
+
+                      <div className="max-h-[320px] overflow-y-auto rounded-xl border border-slate-100 bg-slate-50/40 p-1.5">
+                        {dueInvoicesLoading ? (
+                          <div className="space-y-1.5 p-1">
+                            {Array.from({ length: 4 }).map((_, i) => (
+                              <div
+                                key={i}
+                                className="h-14 animate-pulse rounded-lg bg-white"
+                              />
+                            ))}
+                          </div>
+                        ) : filteredDueInvoices.length === 0 ? (
+                          <div className="px-4 py-8 text-center">
+                            <p className="text-xs font-semibold text-slate-600">
+                              {dueInvoiceSearch
+                                ? 'No matching invoices'
+                                : 'No outstanding invoices'}
+                            </p>
+                            <p className="mt-1 text-[11px] text-slate-400">
+                              {dueInvoiceSearch
+                                ? 'Try a different search term.'
+                                : 'Every invoice for this company is fully paid.'}
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="space-y-1.5">
+                            {filteredDueInvoices.map((inv) => {
+                              const outstanding =
+                                invoiceOutstanding(inv);
+                              const isSelected =
+                                form.invoice_id === inv.id;
+
+                              return (
+                                <button
+                                  key={inv.id}
+                                  type="button"
+                                  onClick={() => applyInvoice(inv)}
+                                  className={`flex w-full items-start gap-3 rounded-lg border p-2.5 text-left transition ${
+                                    isSelected
+                                      ? 'border-indigo-300 bg-indigo-50 ring-2 ring-indigo-500/15'
+                                      : 'border-transparent bg-white hover:border-slate-200 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  <span
+                                    className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full border ${
+                                      isSelected
+                                        ? 'border-indigo-500 bg-indigo-500'
+                                        : 'border-slate-300 bg-white'
+                                    }`}
+                                  >
+                                    {isSelected && (
+                                      <span className="h-1.5 w-1.5 rounded-full bg-white" />
+                                    )}
+                                  </span>
+
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="truncate text-xs font-semibold text-slate-900">
+                                        {inv.invoice_no}
+                                      </span>
+                                      <span className="whitespace-nowrap text-xs font-bold tabular-nums text-rose-600">
+                                        {money(outstanding)}
+                                      </span>
+                                    </div>
+
+                                    <div className="mt-0.5 flex items-center justify-between gap-2">
+                                      <span className="truncate text-[11px] text-slate-500">
+                                        {invoiceCustomer(inv)}
+                                      </span>
+                                      {inv.due_date && (
+                                        <span className="whitespace-nowrap text-[10px] text-slate-400">
+                                          Due {dateText(inv.due_date)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+
+                      {form.invoice_id && selectedInvoice && (
+                        <div className="flex items-center justify-between gap-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] text-emerald-800">
+                          <span className="truncate">
+                            Linked to <b>{selectedInvoice.invoice_no}</b> — due{' '}
+                            {money(invoiceOutstanding(selectedInvoice))}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={clearInvoiceLink}
+                            className="shrink-0 font-semibold text-emerald-700 underline decoration-dotted hover:text-emerald-900"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
             </div>

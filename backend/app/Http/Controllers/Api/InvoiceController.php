@@ -21,6 +21,9 @@ class InvoiceController extends Controller
     /**
      * Display a listing of invoices with production-grade server-side
      * filtering, searching, sorting and pagination.
+     *
+     * Each row also exposes `received_amount` and `outstanding_amount`
+     * (computed in a single correlated sub-select — no N+1 queries).
      */
     public function index(Request $request)
     {
@@ -29,7 +32,15 @@ class InvoiceController extends Controller
             100
         );
 
+        $receivedSubquery = DB::table('payments')
+            ->selectRaw('COALESCE(SUM(payments.amount), 0)')
+            ->whereColumn('payments.invoice_id', 'invoices.id')
+            ->where('payments.payment_direction', 'inward')
+            ->whereNull('payments.deleted_at');
+
         $query = $this->filteredQuery($request)
+            ->select('invoices.*')
+            ->selectSub($receivedSubquery, 'received_amount')
             ->with([
                 'company',
                 'branch',
@@ -71,6 +82,19 @@ class InvoiceController extends Controller
             'page',
             max((int) $request->input('page', 1), 1)
         );
+
+        $paginator->through(function (Invoice $invoice) {
+            $received = (float) ($invoice->received_amount ?? 0);
+            $total    = (float) ($invoice->total_amount ?? 0);
+
+            $invoice->received_amount    = round($received, 2);
+            $invoice->outstanding_amount = round(
+                max(0, $total - $received),
+                2
+            );
+
+            return $invoice;
+        });
 
         $paginator->appends(
             $request->except('page')
@@ -600,7 +624,17 @@ class InvoiceController extends Controller
             $data['status'] = 'issued';
         }
 
-        return DB::transaction(function () use ($data) {
+        $actorId    = Auth::id();
+        $actorUser  = Auth::user();
+        $actorName  = $actorUser?->name;
+        $actorEmail = $actorUser?->email;
+
+        return DB::transaction(function () use (
+            $data,
+            $actorId,
+            $actorName,
+            $actorEmail
+        ) {
             $invoice = Invoice::create($data);
 
             $subtotal = 0;
@@ -609,9 +643,7 @@ class InvoiceController extends Controller
 
             foreach ($data['items'] as $item) {
                 $qty = (float) $item['quantity'];
-
                 $price = (float) $item['unit_price'];
-
                 $itemSubtotal = $qty * $price;
 
                 $discountType = $item['discount_type'] ?? 'percent';
@@ -626,13 +658,8 @@ class InvoiceController extends Controller
                     $itemSubtotal
                 );
 
-                $afterDiscount = max(
-                    0,
-                    $itemSubtotal - $discountAmount
-                );
-
+                $afterDiscount = max(0, $itemSubtotal - $discountAmount);
                 $gstSlab = (float) ($item['gst_slab'] ?? 0);
-
                 $isInterState = (bool) ($item['is_inter_state'] ?? false);
 
                 $cgstAmount = 0;
@@ -641,93 +668,42 @@ class InvoiceController extends Controller
 
                 if ($gstSlab > 0) {
                     if ($isInterState) {
-                        $igstAmount = $afterDiscount
-                            * ($gstSlab / 100);
+                        $igstAmount = $afterDiscount * ($gstSlab / 100);
                     } else {
                         $half = $gstSlab / 2;
-
-                        $cgstAmount = $afterDiscount
-                            * ($half / 100);
-
+                        $cgstAmount = $afterDiscount * ($half / 100);
                         $sgstAmount = $cgstAmount;
                     }
                 }
 
-                $itemTotal =
-                    $afterDiscount
+                $itemTotal = $afterDiscount
                     + $cgstAmount
                     + $sgstAmount
                     + $igstAmount;
 
                 $subtotal += $itemSubtotal;
-
                 $totalDiscount += $discountAmount;
-
-                $totalTax +=
-                    $cgstAmount
-                    + $sgstAmount
-                    + $igstAmount;
+                $totalTax += $cgstAmount + $sgstAmount + $igstAmount;
 
                 InvoiceItem::create([
                     'invoice_id' => $invoice->id,
-
                     'product_id' => $item['product_id'],
-
                     'quantity' => $qty,
-
                     'unit_price' => $price,
-
                     'discount_type' => $discountType,
-
                     'discount_percent' => $item['discount_percent'] ?? 0,
-
-                    'discount_amount' => round(
-                        $discountAmount,
-                        2
-                    ),
-
+                    'discount_amount' => round($discountAmount, 2),
                     'gst_slab' => $gstSlab,
-
                     'is_inter_state' => $isInterState,
-
-                    'cgst_percent' => $isInterState
-                        ? 0
-                        : ($gstSlab / 2),
-
-                    'sgst_percent' => $isInterState
-                        ? 0
-                        : ($gstSlab / 2),
-
-                    'igst_percent' => $isInterState
-                        ? $gstSlab
-                        : 0,
-
-                    'cgst_amount' => round(
-                        $cgstAmount,
-                        2
-                    ),
-
-                    'sgst_amount' => round(
-                        $sgstAmount,
-                        2
-                    ),
-
-                    'igst_amount' => round(
-                        $igstAmount,
-                        2
-                    ),
-
+                    'cgst_percent' => $isInterState ? 0 : ($gstSlab / 2),
+                    'sgst_percent' => $isInterState ? 0 : ($gstSlab / 2),
+                    'igst_percent' => $isInterState ? $gstSlab : 0,
+                    'cgst_amount' => round($cgstAmount, 2),
+                    'sgst_amount' => round($sgstAmount, 2),
+                    'igst_amount' => round($igstAmount, 2),
                     'tax_rate' => $gstSlab,
-
-                    'subtotal' => round(
-                        $itemSubtotal,
-                        2
-                    ),
-
-                    'total' => round(
-                        $itemTotal,
-                        2
-                    ),
+                    'subtotal' => round($itemSubtotal, 2),
+                    'total' => round($itemTotal, 2),
                 ]);
             }
 
@@ -740,12 +716,8 @@ class InvoiceController extends Controller
                 $generalDiscount =
                     ($subtotal - $totalDiscount)
                     * ((float) $data['general_discount_percent'] / 100);
-
-            } elseif (
-                ! empty($data['general_discount_amount'])
-            ) {
-                $generalDiscount =
-                    (float) $data['general_discount_amount'];
+            } elseif (! empty($data['general_discount_amount'])) {
+                $generalDiscount = (float) $data['general_discount_amount'];
             }
 
             $generalDiscount = min(
@@ -753,19 +725,13 @@ class InvoiceController extends Controller
                 max($subtotal - $totalDiscount, 0)
             );
 
-            $packing = (float) (
-                $data['packing_charges'] ?? 0
-            );
+            $packing = (float) ($data['packing_charges'] ?? 0);
 
-            $additionalCharges = collect(
-                $data['additional_charges'] ?? []
-            )->sum(
-                fn ($charge) => (float) ($charge['amount'] ?? 0)
-            );
+            $additionalCharges = collect($data['additional_charges'] ?? [])
+                ->sum(fn ($charge) => (float) ($charge['amount'] ?? 0));
 
             $netBeforeTaxDiscount =
-                ($subtotal - $totalDiscount)
-                - $generalDiscount;
+                ($subtotal - $totalDiscount) - $generalDiscount;
 
             $totalBeforeTcs =
                 $netBeforeTaxDiscount
@@ -773,64 +739,22 @@ class InvoiceController extends Controller
                 + $packing
                 + $additionalCharges;
 
-            $tcsPercent = (float) (
-                $data['tcs_percent'] ?? 0
-            );
+            $tcsPercent = (float) ($data['tcs_percent'] ?? 0);
+            $tcsAmount = $totalBeforeTcs * ($tcsPercent / 100);
 
-            $tcsAmount =
-                $totalBeforeTcs
-                * ($tcsPercent / 100);
-
-            $rawGrandTotal =
-                $totalBeforeTcs
-                + $tcsAmount;
-
-            $grandTotal = round(
-                $rawGrandTotal
-            );
-
-            $roundOff =
-                $grandTotal
-                - $rawGrandTotal;
+            $rawGrandTotal = $totalBeforeTcs + $tcsAmount;
+            $grandTotal = round($rawGrandTotal);
+            $roundOff = $grandTotal - $rawGrandTotal;
 
             $invoice->update([
-                'subtotal' => round(
-                    $subtotal,
-                    2
-                ),
-
-                'discount_amount' => round(
-                    $totalDiscount + $generalDiscount,
-                    2
-                ),
-
-                'tax_amount' => round(
-                    $totalTax,
-                    2
-                ),
-
-                'tcs_amount' => round(
-                    $tcsAmount,
-                    2
-                ),
-
-                'round_off' => round(
-                    $roundOff,
-                    2
-                ),
-
-                'total_amount' => round(
-                    $grandTotal,
-                    2
-                ),
+                'subtotal' => round($subtotal, 2),
+                'discount_amount' => round($totalDiscount + $generalDiscount, 2),
+                'tax_amount' => round($totalTax, 2),
+                'tcs_amount' => round($tcsAmount, 2),
+                'round_off' => round($roundOff, 2),
+                'total_amount' => round($grandTotal, 2),
             ]);
 
-            /*
-             * ----------------------------------------------------------
-             * STOCK OUT (dated to invoice_date)
-             * ----------------------------------------------------------
-             * Skipped for draft/cancelled invoices — they haven't shipped.
-             */
             if (! in_array($invoice->status, ['draft', 'cancelled'], true)) {
                 $invoice->load('items');
                 $this->deductInvoiceStock($invoice);
@@ -839,12 +763,15 @@ class InvoiceController extends Controller
             Log::info(
                 'Invoice created via API',
                 [
-                    'invoice_id' => $invoice->id,
-                    'invoice_no' => $invoice->invoice_no,
-                    'company_id' => $invoice->company_id,
-                    'branch_id' => $invoice->branch_id,
-                    'customer_id' => $invoice->customer_id,
-                    'total_amount' => $invoice->total_amount,
+                    'invoice_id'       => $invoice->id,
+                    'invoice_no'       => $invoice->invoice_no,
+                    'company_id'       => $invoice->company_id,
+                    'branch_id'        => $invoice->branch_id,
+                    'customer_id'      => $invoice->customer_id,
+                    'total_amount'     => $invoice->total_amount,
+                    'created_by'       => $actorId,
+                    'created_by_name'  => $actorName,
+                    'created_by_email' => $actorEmail,
                 ]
             );
 
@@ -874,10 +801,17 @@ class InvoiceController extends Controller
     }
 
     /**
-     * Update the invoice header.
+     * Update the invoice header AND its line items.
      *
-     * NOTE: This endpoint only updates the invoice header — no item changes,
-     * so no stock impact.
+     * Side effects (all inside a single DB transaction):
+     *   1. Recompute every item's tax/total using the same math as `store()`.
+     *   2. Sync line items:
+     *        • items with an `id` that belongs to this invoice → UPDATE
+     *        • items without an `id` (or with an id that doesn't belong) → CREATE
+     *        • items present in the DB but absent from the payload → DELETE
+     *   3. Recalculate the invoice header totals.
+     *   4. Reconcile stock for any line-item delta.
+     *   5. Log who performed the update.
      */
     public function update(
         Request $request,
@@ -911,6 +845,26 @@ class InvoiceController extends Controller
                     ),
             ],
 
+            'customer_name' => 'nullable|string|max:255',
+
+            'billing_street' => 'nullable|string',
+            'billing_city' => 'nullable|string',
+            'billing_state' => 'nullable|string',
+            'billing_country' => 'nullable|string',
+            'billing_pincode' => 'nullable|string',
+
+            'shipping_street' => 'nullable|string',
+            'shipping_city' => 'nullable|string',
+            'shipping_state' => 'nullable|string',
+            'shipping_country' => 'nullable|string',
+            'shipping_pincode' => 'nullable|string',
+
+            'contact_person' => 'nullable|string|max:100',
+            'contact_no' => 'nullable|string|max:20',
+            'gstin' => 'nullable|string|max:50',
+            'pan' => 'nullable|string|max:50',
+            'invoice_type' => 'nullable|string|max:50',
+
             'invoice_no' => [
                 'required',
                 'string',
@@ -918,61 +872,388 @@ class InvoiceController extends Controller
                 'unique:invoices,invoice_no,' . $invoice->id,
             ],
 
-            'total_amount' => 'nullable|numeric|min:0',
+            'invoice_date' => 'nullable|date',
 
-            'tax_amount' => 'nullable|numeric|min:0',
+            'challan_no' => 'nullable|string|max:100',
+            'challan_date' => 'nullable|date',
 
-            'discount_amount' => 'nullable|numeric|min:0',
+            'po_no' => 'nullable|string|max:100',
+            'po_date' => 'nullable|date',
+
+            'lr_no' => 'nullable|string|max:100',
+            'eway_no' => 'nullable|string|max:100',
+
+            'delivery_mode' => 'nullable|string|max:50',
+            'payment_term' => 'nullable|string|max:100',
+
+            'bank_id' => 'nullable|exists:banks,id',
+
+            'packing_charges' => 'nullable|numeric|min:0',
+
+            'general_discount_percent' => 'nullable|numeric|min:0',
+
+            'general_discount_amount' => 'nullable|numeric|min:0',
+
+            'tcs_percent' => 'nullable|numeric|min:0',
+
+            'terms_title' => 'nullable|string',
+            'terms_detail' => 'nullable|string',
+            'document_note' => 'nullable|string',
+            'internal_note' => 'nullable|string',
+
+            'additional_charges' => 'nullable|array',
+
+            'additional_charges.*.label' => 'nullable|string',
+
+            'additional_charges.*.amount' => 'nullable|numeric|min:0',
 
             'status' => 'nullable|string|max:50',
 
             'due_date' => 'nullable|date',
 
             'notes' => 'nullable|string',
+
+            'items' => 'required|array|min:1',
+
+            'items.*.id' => 'nullable|integer',
+
+            'items.*.product_id' => 'required|exists:products,id',
+
+            'items.*.quantity' => 'required|numeric|min:0.01',
+
+            'items.*.unit_price' => 'required|numeric|min:0',
+
+            'items.*.discount_type' => 'nullable|string|in:percent,amount',
+
+            'items.*.discount_percent' => 'nullable|numeric|min:0',
+
+            'items.*.discount_amount' => 'nullable|numeric|min:0',
+
+            'items.*.gst_slab' => 'nullable|numeric|min:0',
+
+            'items.*.is_inter_state' => 'nullable|boolean',
+
+            'items.*.cgst_percent' => 'nullable|numeric|min:0',
+
+            'items.*.sgst_percent' => 'nullable|numeric|min:0',
+
+            'items.*.igst_percent' => 'nullable|numeric|min:0',
+
+            'items.*.cgst_amount' => 'nullable|numeric|min:0',
+
+            'items.*.sgst_amount' => 'nullable|numeric|min:0',
+
+            'items.*.igst_amount' => 'nullable|numeric|min:0',
+
+            'items.*.total' => 'nullable|numeric|min:0',
         ]);
 
-        $invoice->update($data);
+        $actorId    = Auth::id();
+        $actorUser  = Auth::user();
+        $actorName  = $actorUser?->name;
+        $actorEmail = $actorUser?->email;
 
-        return response()->json(
-            $invoice->fresh([
-                'company',
-                'branch',
-                'customer',
-                'items.product',
-            ])
-        );
+        return DB::transaction(function () use (
+            $invoice,
+            $data,
+            $actorId,
+            $actorName,
+            $actorEmail
+        ) {
+            // Snapshot original items BEFORE any mutation.
+            $invoice->loadMissing('items');
+            $originalItems = $invoice->items->map(function (InvoiceItem $item) {
+                return [
+                    'id'          => (int) $item->id,
+                    'product_id'  => (int) $item->product_id,
+                    'quantity'    => (float) $item->quantity,
+                    'unit_price'  => (float) $item->unit_price,
+                ];
+            })->all();
+
+            // ── 1. Persist header fields only ──
+            $headerKeys = [
+                'company_id', 'branch_id', 'customer_id', 'customer_name',
+                'billing_street', 'billing_city', 'billing_state',
+                'billing_country', 'billing_pincode',
+                'shipping_street', 'shipping_city', 'shipping_state',
+                'shipping_country', 'shipping_pincode',
+                'contact_person', 'contact_no', 'gstin', 'pan',
+                'invoice_type', 'invoice_no', 'invoice_date',
+                'challan_no', 'challan_date', 'po_no', 'po_date',
+                'lr_no', 'eway_no', 'delivery_mode', 'payment_term',
+                'bank_id', 'packing_charges', 'general_discount_percent',
+                'general_discount_amount', 'tcs_percent',
+                'terms_title', 'terms_detail', 'document_note',
+                'internal_note', 'additional_charges', 'status',
+                'due_date', 'notes',
+            ];
+
+            $header = [];
+            foreach ($headerKeys as $key) {
+                if (array_key_exists($key, $data)) {
+                    $header[$key] = $data[$key];
+                }
+            }
+
+            if (! empty($header)) {
+                $invoice->update($header);
+            }
+
+            // ── 2. Recompute & persist line items ──
+            $subtotal = 0.0;
+            $totalDiscount = 0.0;
+            $totalTax = 0.0;
+            $keptItemIds = [];
+
+            foreach ($data['items'] as $row) {
+                $qty = (float) $row['quantity'];
+                $price = (float) $row['unit_price'];
+                $itemSubtotal = $qty * $price;
+
+                $discountType = $row['discount_type'] ?? 'percent';
+
+                $discountAmount = $discountType === 'amount'
+                    ? (float) ($row['discount_amount'] ?? 0)
+                    : $itemSubtotal
+                        * ((float) ($row['discount_percent'] ?? 0) / 100);
+
+                $discountAmount = min(max($discountAmount, 0), $itemSubtotal);
+                $afterDiscount = max(0, $itemSubtotal - $discountAmount);
+
+                $gstSlab = (float) ($row['gst_slab'] ?? 0);
+                $isInterState = (bool) ($row['is_inter_state'] ?? false);
+
+                $cgstAmount = 0.0;
+                $sgstAmount = 0.0;
+                $igstAmount = 0.0;
+
+                if ($gstSlab > 0) {
+                    if ($isInterState) {
+                        $igstAmount = $afterDiscount * ($gstSlab / 100);
+                    } else {
+                        $half = $gstSlab / 2;
+                        $cgstAmount = $afterDiscount * ($half / 100);
+                        $sgstAmount = $cgstAmount;
+                    }
+                }
+
+                $itemTotal = $afterDiscount + $cgstAmount + $sgstAmount + $igstAmount;
+
+                $subtotal += $itemSubtotal;
+                $totalDiscount += $discountAmount;
+                $totalTax += $cgstAmount + $sgstAmount + $igstAmount;
+
+                $itemPayload = [
+                    'product_id' => (int) $row['product_id'],
+                    'quantity' => $qty,
+                    'unit_price' => $price,
+                    'discount_type' => $discountType,
+                    'discount_percent' => $row['discount_percent'] ?? 0,
+                    'discount_amount' => round($discountAmount, 2),
+                    'gst_slab' => $gstSlab,
+                    'is_inter_state' => $isInterState,
+                    'cgst_percent' => $isInterState ? 0 : ($gstSlab / 2),
+                    'sgst_percent' => $isInterState ? 0 : ($gstSlab / 2),
+                    'igst_percent' => $isInterState ? $gstSlab : 0,
+                    'cgst_amount' => round($cgstAmount, 2),
+                    'sgst_amount' => round($sgstAmount, 2),
+                    'igst_amount' => round($igstAmount, 2),
+                    'tax_rate' => $gstSlab,
+                    'subtotal' => round($itemSubtotal, 2),
+                    'total' => round($itemTotal, 2),
+                ];
+
+                $incomingId = isset($row['id']) && $row['id'] ? (int) $row['id'] : null;
+
+                if ($incomingId) {
+                    $existing = InvoiceItem::query()
+                        ->where('invoice_id', $invoice->id)
+                        ->where('id', $incomingId)
+                        ->first();
+
+                    if ($existing) {
+                        $existing->update($itemPayload);
+                        $keptItemIds[] = $existing->id;
+                        continue;
+                    }
+                }
+
+                $matched = InvoiceItem::query()
+                    ->where('invoice_id', $invoice->id)
+                    ->where('product_id', $itemPayload['product_id'])
+                    ->first();
+
+                if ($matched && ! in_array($matched->id, $keptItemIds, true)) {
+                    $matched->update($itemPayload);
+                    $keptItemIds[] = $matched->id;
+                    continue;
+                }
+
+                $created = InvoiceItem::create(
+                    array_merge($itemPayload, ['invoice_id' => $invoice->id])
+                );
+                $keptItemIds[] = $created->id;
+            }
+
+            InvoiceItem::query()
+                ->where('invoice_id', $invoice->id)
+                ->whereNotIn('id', $keptItemIds)
+                ->delete();
+
+            // ── 3. Recompute header totals ──
+            $generalDiscount = 0.0;
+
+            if (
+                ! empty($data['general_discount_percent'])
+                && (float) $data['general_discount_percent'] > 0
+            ) {
+                $generalDiscount =
+                    ($subtotal - $totalDiscount)
+                    * ((float) $data['general_discount_percent'] / 100);
+            } elseif (! empty($data['general_discount_amount'])) {
+                $generalDiscount = (float) $data['general_discount_amount'];
+            }
+
+            $generalDiscount = min(
+                max($generalDiscount, 0),
+                max($subtotal - $totalDiscount, 0)
+            );
+
+            $packing = (float) ($data['packing_charges'] ?? 0);
+
+            $additionalCharges = collect($data['additional_charges'] ?? [])
+                ->sum(fn ($charge) => (float) ($charge['amount'] ?? 0));
+
+            $netBeforeTaxDiscount =
+                ($subtotal - $totalDiscount) - $generalDiscount;
+
+            $totalBeforeTcs =
+                $netBeforeTaxDiscount + $totalTax + $packing + $additionalCharges;
+
+            $tcsPercent = (float) ($data['tcs_percent'] ?? 0);
+            $tcsAmount = $totalBeforeTcs * ($tcsPercent / 100);
+
+            $rawGrandTotal = $totalBeforeTcs + $tcsAmount;
+            $grandTotal = round($rawGrandTotal);
+            $roundOff = $grandTotal - $rawGrandTotal;
+
+            $invoice->update([
+                'subtotal' => round($subtotal, 2),
+                'discount_amount' => round($totalDiscount + $generalDiscount, 2),
+                'tax_amount' => round($totalTax, 2),
+                'tcs_amount' => round($tcsAmount, 2),
+                'round_off' => round($roundOff, 2),
+                'total_amount' => round($grandTotal, 2),
+            ]);
+
+            // ── 4. Reconcile stock delta ──
+            $invoice->refresh()->loadMissing('items');
+
+            $stockRelevant = ! in_array(
+                $invoice->status,
+                ['draft', 'cancelled'],
+                true
+            );
+
+            if ($stockRelevant) {
+                $this->reconcileInvoiceStockDelta($invoice, $originalItems);
+            }
+
+            // ── 5. Log ──
+            Log::info('Invoice updated via API', [
+                'invoice_id'       => $invoice->id,
+                'invoice_no'       => $invoice->invoice_no,
+                'company_id'       => $invoice->company_id,
+                'branch_id'        => $invoice->branch_id,
+                'customer_id'      => $invoice->customer_id,
+                'total_amount'     => $invoice->total_amount,
+                'items_original'   => count($originalItems),
+                'items_final'      => $invoice->items->count(),
+                'updated_by'       => $actorId,
+                'updated_by_name'  => $actorName,
+                'updated_by_email' => $actorEmail,
+            ]);
+
+            return response()->json(
+                $invoice->fresh([
+                    'company',
+                    'branch',
+                    'customer',
+                    'items.product',
+                    'payments',
+                ])
+            );
+        });
     }
 
     /**
-     * Soft delete the specified invoice AND restore stock for every line item.
+     * Soft delete the specified invoice.
+     *
+     * Cascade (all in ONE transaction):
+     *   1. Soft-delete every related payment (payments.invoice_id = invoice.id)
+     *   2. Restore stock for every line item — only if the invoice was
+     *      actually shipped (skip draft / cancelled, which never deducted).
+     *   3. Soft-delete the invoice itself.
      *
      * Timeline rule:
      *   - The OUT movement used the invoice's business date.
-     *   - The IN (reversal) movement is stamped with TODAY — the reversal is
-     *     a real event happening now, not a backdated correction.
-     *
-     * Wrapped in a single DB transaction so partial failures roll back.
+     *   - The IN (reversal) movement is stamped with TODAY — the reversal
+     *     is a real event happening now, not a backdated correction.
      */
     public function destroy(Invoice $invoice)
     {
+        $actorId    = Auth::id();
+        $actorName  = Auth::user()?->name;
+        $actorEmail = Auth::user()?->email;
+
         Log::debug('Invoice delete request', [
-            'user_id'    => Auth::id(),
+            'user_id'    => $actorId,
             'invoice_id' => $invoice->id,
             'invoice_no' => $invoice->invoice_no,
         ]);
 
-        DB::transaction(function () use ($invoice) {
-            $this->restoreInvoiceStock($invoice);
+        return DB::transaction(function () use (
+            $invoice,
+            $actorId,
+            $actorName,
+            $actorEmail
+        ) {
+            $invoice->loadMissing(['items', 'payments']);
 
+            $statusWasShipped = ! in_array(
+                $invoice->status,
+                ['draft', 'cancelled'],
+                true
+            );
+
+            // ── 1. Cascade: soft-delete related payments ──
+            $paymentsDeleted = $this->softDeleteInvoicePayments($invoice->id);
+
+            // ── 2. Restore stock only for shipped invoices ──
+            $stockRestored = false;
+            if ($statusWasShipped) {
+                $this->restoreInvoiceStock($invoice);
+                $stockRestored = true;
+            }
+
+            // ── 3. Soft-delete the invoice ──
             $invoice->delete();
 
-            Log::info('Invoice deleted with stock restoration', [
-                'invoice_id' => $invoice->id,
-                'invoice_no' => $invoice->invoice_no,
+            Log::info('Invoice deleted (with cascade)', [
+                'invoice_id'         => $invoice->id,
+                'invoice_no'         => $invoice->invoice_no,
+                'status'             => $invoice->status,
+                'payments_deleted'   => $paymentsDeleted,
+                'stock_restored'     => $stockRestored,
+                'items_count'        => $invoice->items->count(),
+                'deleted_by'         => $actorId,
+                'deleted_by_name'    => $actorName,
+                'deleted_by_email'   => $actorEmail,
             ]);
-        });
 
-        return response()->noContent();
+            return response()->noContent();
+        });
     }
 
     /**
@@ -997,10 +1278,7 @@ class InvoiceController extends Controller
             &$updated
         ) {
             $updated = Invoice::query()
-                ->whereIn(
-                    'id',
-                    $data['ids']
-                )
+                ->whereIn('id', $data['ids'])
                 ->update([
                     'status' => $data['status'],
                     'updated_at' => now(),
@@ -1015,7 +1293,12 @@ class InvoiceController extends Controller
     }
 
     /**
-     * Bulk soft-delete invoices AND restore stock for each invoice's items.
+     * Bulk soft-delete invoices.
+     *
+     * For each invoice:
+     *   • Soft-delete all its related payments
+     *   • Restore stock (skipped for draft / cancelled)
+     *   • Soft-delete the invoice
      *
      * POST /api/invoices/bulk-delete
      */
@@ -1027,35 +1310,65 @@ class InvoiceController extends Controller
             'ids.*' => 'integer|distinct|exists:invoices,id',
         ]);
 
+        $actorId    = Auth::id();
+        $actorName  = Auth::user()?->name;
+        $actorEmail = Auth::user()?->email;
+
         $deleted = 0;
+        $totalPaymentsDeleted = 0;
 
         DB::transaction(function () use (
             $data,
-            &$deleted
+            $actorId,
+            $actorName,
+            $actorEmail,
+            &$deleted,
+            &$totalPaymentsDeleted
         ) {
-            $invoices = Invoice::with('items')
+            $invoices = Invoice::with(['items', 'payments'])
                 ->whereIn('id', $data['ids'])
                 ->get();
 
             foreach ($invoices as $invoice) {
-                $this->restoreInvoiceStock($invoice);
+                $statusWasShipped = ! in_array(
+                    $invoice->status,
+                    ['draft', 'cancelled'],
+                    true
+                );
+
+                // Cascade payments
+                $paymentsDeleted = $this->softDeleteInvoicePayments($invoice->id);
+                $totalPaymentsDeleted += $paymentsDeleted;
+
+                // Restore stock (skip for draft/cancelled)
+                if ($statusWasShipped) {
+                    $this->restoreInvoiceStock($invoice);
+                }
+
                 $invoice->delete();
                 $deleted++;
             }
+
+            Log::info('Invoices bulk-deleted (with cascade)', [
+                'invoice_ids'             => $data['ids'],
+                'deleted_count'           => $deleted,
+                'payments_deleted_total'  => $totalPaymentsDeleted,
+                'deleted_by'              => $actorId,
+                'deleted_by_name'         => $actorName,
+                'deleted_by_email'        => $actorEmail,
+            ]);
         });
 
         return response()->json([
             'success' => true,
             'deleted_count' => $deleted,
+            'payments_deleted' => $totalPaymentsDeleted,
             'message' => "{$deleted} invoice(s) deleted successfully and stock restored.",
         ]);
     }
 
     /**
      * Create an invoice from an existing order.
-     *
-     * Runs in a transaction and deducts stock (OUT) dated to the new
-     * invoice's business date.
      */
     public function fromOrder(Request $request)
     {
@@ -1069,7 +1382,17 @@ class InvoiceController extends Controller
             'notes' => 'nullable|string',
         ]);
 
-        return DB::transaction(function () use ($data) {
+        $actorId    = Auth::id();
+        $actorUser  = Auth::user();
+        $actorName  = $actorUser?->name;
+        $actorEmail = $actorUser?->email;
+
+        return DB::transaction(function () use (
+            $data,
+            $actorId,
+            $actorName,
+            $actorEmail
+        ) {
             $order = \App\Models\Order::with(
                 'items.product'
             )->findOrFail(
@@ -1078,73 +1401,52 @@ class InvoiceController extends Controller
 
             $invoice = Invoice::create([
                 'company_id' => $order->company_id,
-
                 'branch_id' => $order->branch_id ?? null,
-
                 'customer_id' => $order->customer_id,
-
                 'order_id' => $order->id,
-
                 'invoice_no' => $data['invoice_no'],
-
                 'total_amount' => $order->total_amount,
-
                 'tax_amount' => $order->tax_amount ?? 0,
-
                 'status' => 'unpaid',
-
                 'due_date' => $data['due_date'] ?? null,
-
                 'notes' => $data['notes'] ?? null,
-
                 'invoice_date' => now()->toDateString(),
             ]);
 
             foreach ($order->items as $item) {
                 $quantity = $item->quantity ?? 1;
-
-                $unitPrice =
-                    $item->unit_price
-                    ?? ($item->product->price ?? 0);
-
-                $subtotal =
-                    $quantity
-                    * $unitPrice;
-
-                $taxRate =
-                    $item->tax_rate ?? 0;
+                $unitPrice = $item->unit_price ?? ($item->product->price ?? 0);
+                $subtotal = $quantity * $unitPrice;
+                $taxRate = $item->tax_rate ?? 0;
 
                 $invoice->items()->create([
                     'product_id' => $item->product_id,
-
                     'quantity' => $quantity,
-
                     'unit_price' => $unitPrice,
-
                     'tax_rate' => $taxRate,
-
                     'subtotal' => $subtotal,
-
                     'total' => $subtotal,
-
                     'discount_type' => 'percent',
-
                     'discount_percent' => 0,
-
                     'discount_amount' => 0,
-
                     'gst_slab' => $taxRate,
                 ]);
             }
 
-            /* STOCK OUT dated to the new invoice's business date. */
             $invoice->load('items');
             $this->deductInvoiceStock($invoice);
 
             Log::info('Invoice created from order', [
-                'invoice_id' => $invoice->id,
-                'invoice_no' => $invoice->invoice_no,
-                'order_id'   => $order->id,
+                'invoice_id'       => $invoice->id,
+                'invoice_no'       => $invoice->invoice_no,
+                'order_id'         => $order->id,
+                'company_id'       => $invoice->company_id,
+                'branch_id'        => $invoice->branch_id,
+                'customer_id'      => $invoice->customer_id,
+                'total_amount'     => $invoice->total_amount,
+                'created_by'       => $actorId,
+                'created_by_name'  => $actorName,
+                'created_by_email' => $actorEmail,
             ]);
 
             return response()->json(
@@ -1159,11 +1461,73 @@ class InvoiceController extends Controller
         });
     }
 
+    /* ======================================================================
+     |  CASCADE: PAYMENTS
+     ====================================================================== */
+
+    /**
+     * Soft-delete every payment tied to an invoice.
+     *
+     * Works whether the payments table uses soft deletes or not — checks
+     * the schema first and falls back to a hard delete only if the table
+     * has no `deleted_at` column.
+     *
+     * NOTE: caller must wrap this in a DB::transaction().
+     */
+    private function softDeleteInvoicePayments(int $invoiceId): int
+    {
+        if ($invoiceId <= 0) {
+            return 0;
+        }
+
+        $hasSoftDeletes = \Illuminate\Support\Facades\Schema::hasColumn(
+            'payments',
+            'deleted_at'
+        );
+
+        $query = DB::table('payments')
+            ->where('invoice_id', $invoiceId);
+
+        if ($hasSoftDeletes) {
+            $query->whereNull('deleted_at');
+
+            $affected = $query->update([
+                'deleted_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            if ($affected > 0) {
+                Log::info('Cascade delete: payments soft-deleted', [
+                    'invoice_id'      => $invoiceId,
+                    'payments_count'  => $affected,
+                ]);
+            }
+
+            return (int) $affected;
+        }
+
+        // No soft deletes on payments → hard delete the children.
+        $affected = $query->delete();
+
+        if ($affected > 0) {
+            Log::info('Cascade delete: payments hard-deleted', [
+                'invoice_id'     => $invoiceId,
+                'payments_count' => $affected,
+            ]);
+        }
+
+        return (int) $affected;
+    }
+
+    /* ======================================================================
+     |  STOCK / INVENTORY
+     ====================================================================== */
+
     /**
      * Resolve the warehouse to use for a given invoice.
      *
      * Priority:
-     *   1. invoices.warehouse_id (if the column exists and is populated)
+     *   1. invoices.warehouse_id (if populated)
      *   2. First warehouse for the invoice's branch + company
      *   3. First warehouse for the invoice's company
      *   4. null
@@ -1193,10 +1557,6 @@ class InvoiceController extends Controller
 
     /**
      * Resolve the business date to stamp on a stock movement.
-     *
-     * For the ORIGINAL event (invoice creation), the movement should appear
-     * on the invoice's business date so the ledger matches reality. Falls
-     * back to today if the invoice date is missing.
      */
     private function invoiceBusinessDate(Invoice $invoice): string
     {
@@ -1221,8 +1581,7 @@ class InvoiceController extends Controller
      * IMPORTANT — Timeline:
      *   `transaction_date` is stamped with the invoice's **business date**
      *   (invoice_date), NOT `now()`, so a backdated invoice creates a
-     *   backdated OUT movement. This keeps the stock ledger in sync with
-     *   the sales timeline.
+     *   backdated OUT movement.
      *
      * NOTE: The caller MUST wrap this in a DB::transaction().
      */
@@ -1235,9 +1594,7 @@ class InvoiceController extends Controller
         }
 
         $companyId     = (int) $invoice->company_id;
-        $branchId      = $invoice->branch_id
-            ? (int) $invoice->branch_id
-            : null;
+        $branchId      = $invoice->branch_id ? (int) $invoice->branch_id : null;
         $warehouseId   = $this->resolveWarehouseId($invoice);
         $businessDate  = $this->invoiceBusinessDate($invoice);
 
@@ -1246,8 +1603,7 @@ class InvoiceController extends Controller
                 continue;
             }
 
-            $product = Product::lockForUpdate()
-                ->find($item->product_id);
+            $product = Product::lockForUpdate()->find($item->product_id);
 
             if (! $product) {
                 continue;
@@ -1278,7 +1634,6 @@ class InvoiceController extends Controller
                 'stock_before'     => $stockBefore,
                 'stock_after'      => $stockAfter,
                 'remark'           => 'Invoice #' . $invoice->invoice_no,
-                // ── Timeline fix: use the invoice's business date ──
                 'transaction_date' => $businessDate,
                 'created_by'       => Auth::id(),
             ]);
@@ -1315,14 +1670,26 @@ class InvoiceController extends Controller
      *
      * IMPORTANT — Timeline:
      *   `transaction_date` is stamped with **today**, because the reversal
-     *   is a real event happening now (not a backdated correction). This is
-     *   the standard accounting treatment: business date for the original
-     *   event, posting date for the correction.
+     *   is a real event happening now (not a backdated correction).
+     *
+     * Guards:
+     *   - Skips if the invoice was never shipped (draft / cancelled).
+     *     `deductInvoiceStock()` also skips those, so the ledger stays
+     *     balanced.
      *
      * NOTE: The caller MUST wrap this in a DB::transaction().
      */
     private function restoreInvoiceStock(Invoice $invoice): void
     {
+        // ── Guard: never shipped → nothing to reverse ──
+        if (in_array($invoice->status, ['draft', 'cancelled'], true)) {
+            Log::debug('restoreInvoiceStock skipped (draft/cancelled)', [
+                'invoice_id' => $invoice->id,
+                'status'     => $invoice->status,
+            ]);
+            return;
+        }
+
         $invoice->loadMissing('items');
 
         if ($invoice->items->isEmpty()) {
@@ -1330,12 +1697,10 @@ class InvoiceController extends Controller
         }
 
         $companyId   = (int) $invoice->company_id;
-        $branchId    = $invoice->branch_id
-            ? (int) $invoice->branch_id
-            : null;
+        $branchId    = $invoice->branch_id ? (int) $invoice->branch_id : null;
         $warehouseId = $this->resolveWarehouseId($invoice);
 
-        // ── Timeline: reversal happens NOW, not on the original invoice date ──
+        // Reversal posts on TODAY's date — the event is happening now.
         $reversalDate = now()->toDateString();
 
         foreach ($invoice->items as $item) {
@@ -1343,8 +1708,7 @@ class InvoiceController extends Controller
                 continue;
             }
 
-            $product = Product::lockForUpdate()
-                ->find($item->product_id);
+            $product = Product::lockForUpdate()->find($item->product_id);
 
             if (! $product) {
                 continue;
@@ -1375,7 +1739,7 @@ class InvoiceController extends Controller
                 'stock_before'     => $stockBefore,
                 'stock_after'      => $stockAfter,
                 'remark'           => 'Reversal for deleted invoice #' . $invoice->invoice_no,
-                // ── Timeline fix: reversal is posted on today's date ──
+                // ── Timeline: reversal posts on TODAY's date ──
                 'transaction_date' => $reversalDate,
                 'created_by'       => Auth::id(),
             ]);
@@ -1396,15 +1760,202 @@ class InvoiceController extends Controller
     }
 
     /**
+     * Reconcile stock for an edited invoice.
+     *
+     * Compares the pre-update item snapshot with the post-update items and
+     * applies only the *delta* per product:
+     *
+     *   • Same product, qty increased   → stock-out (new − old)
+     *   • Same product, qty decreased   → stock-in  (old − new)
+     *   • Same product, qty unchanged   → no movement
+     *   • Removed entirely              → stock-in  (old qty)
+     *   • Brand-new product             → stock-out (new qty)
+     *
+     * The OUT movement is dated to the invoice's business date; the IN
+     * reversal is dated to today.
+     *
+     * NOTE: The caller MUST wrap this in a DB::transaction().
+     *
+     * @param  array<int, array{id:int, product_id:int, quantity:float, unit_price:float}>  $originalItems
+     */
+    private function reconcileInvoiceStockDelta(
+        Invoice $invoice,
+        array $originalItems
+    ): void {
+        $invoice->loadMissing('items');
+
+        $companyId    = (int) $invoice->company_id;
+        $branchId     = $invoice->branch_id ? (int) $invoice->branch_id : null;
+        $warehouseId  = $this->resolveWarehouseId($invoice);
+        $businessDate = $this->invoiceBusinessDate($invoice);
+        $reversalDate = now()->toDateString();
+
+        $originalByProduct = [];
+        foreach ($originalItems as $row) {
+            $originalByProduct[(int) $row['product_id']] = $row;
+        }
+
+        $currentByProduct = [];
+        foreach ($invoice->items as $item) {
+            if (empty($item->product_id)) {
+                continue;
+            }
+            $currentByProduct[(int) $item->product_id] = [
+                'product_id' => (int) $item->product_id,
+                'quantity'   => (float) $item->quantity,
+                'unit_price' => (float) $item->unit_price,
+            ];
+        }
+
+        $deduct = function (int $productId, float $qty, float $unitPrice) use (
+            $invoice, $companyId, $branchId, $warehouseId, $businessDate
+        ): void {
+            if ($qty <= 0) {
+                return;
+            }
+
+            $product = Product::lockForUpdate()->find($productId);
+            if (! $product) {
+                return;
+            }
+
+            $stockBefore = (float) ($product->stock_quantity ?? 0);
+            $stockAfter  = $stockBefore - $qty;
+
+            $product->stock_quantity = $stockAfter;
+            $product->save();
+
+            StockMovement::create([
+                'product_id'       => $product->id,
+                'warehouse_id'     => $warehouseId,
+                'company_id'       => $companyId,
+                'branch_id'        => $branchId,
+                'transaction_type' => 'OUT',
+                'reference_type'   => 'sale',
+                'reference_id'     => $invoice->id,
+                'quantity'         => $qty,
+                'unit_price'       => $unitPrice,
+                'stock_before'     => $stockBefore,
+                'stock_after'      => $stockAfter,
+                'remark'           => 'Invoice update (delta) #' . $invoice->invoice_no,
+                'transaction_date' => $businessDate,
+                'created_by'       => Auth::id(),
+            ]);
+
+            if ($warehouseId) {
+                $whStock = ProductWarehouseStock::where([
+                    'product_id'   => $product->id,
+                    'warehouse_id' => $warehouseId,
+                    'company_id'   => $companyId,
+                ])
+                    ->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
+                    ->first();
+
+                if ($whStock) {
+                    $whStock->quantity = max(0, (float) $whStock->quantity - $qty);
+                    $whStock->available_quantity = max(0, (float) $whStock->available_quantity - $qty);
+                    $whStock->save();
+                }
+            }
+        };
+
+        $restore = function (int $productId, float $qty, float $unitPrice) use (
+            $invoice, $companyId, $branchId, $warehouseId, $reversalDate
+        ): void {
+            if ($qty <= 0) {
+                return;
+            }
+
+            $product = Product::lockForUpdate()->find($productId);
+            if (! $product) {
+                return;
+            }
+
+            $stockBefore = (float) ($product->stock_quantity ?? 0);
+            $stockAfter  = $stockBefore + $qty;
+
+            $product->stock_quantity = $stockAfter;
+            $product->save();
+
+            StockMovement::create([
+                'product_id'       => $product->id,
+                'warehouse_id'     => $warehouseId,
+                'company_id'       => $companyId,
+                'branch_id'        => $branchId,
+                'transaction_type' => 'IN',
+                'reference_type'   => 'sale',
+                'reference_id'     => $invoice->id,
+                'quantity'         => $qty,
+                'unit_price'       => $unitPrice,
+                'stock_before'     => $stockBefore,
+                'stock_after'      => $stockAfter,
+                'remark'           => 'Invoice update reversal (delta) #' . $invoice->invoice_no,
+                'transaction_date' => $reversalDate,
+                'created_by'       => Auth::id(),
+            ]);
+
+            if ($warehouseId) {
+                $whStock = ProductWarehouseStock::firstOrNew([
+                    'product_id'   => $product->id,
+                    'warehouse_id' => $warehouseId,
+                    'company_id'   => $companyId,
+                    'branch_id'    => $branchId,
+                ]);
+
+                $whStock->quantity = (float) ($whStock->quantity ?? 0) + $qty;
+                $whStock->available_quantity = (float) ($whStock->available_quantity ?? 0) + $qty;
+                $whStock->save();
+            }
+        };
+
+        // Products present in BOTH snapshots — apply the delta.
+        foreach ($originalByProduct as $productId => $orig) {
+            $current = $currentByProduct[$productId] ?? null;
+
+            if (! $current) {
+                $restore(
+                    (int) $productId,
+                    (float) $orig['quantity'],
+                    (float) $orig['unit_price']
+                );
+                continue;
+            }
+
+            $delta = (float) $current['quantity'] - (float) $orig['quantity'];
+
+            if (abs($delta) < 1e-9) {
+                continue;
+            }
+
+            if ($delta > 0) {
+                $deduct((int) $productId, $delta, (float) $current['unit_price']);
+            } else {
+                $restore((int) $productId, abs($delta), (float) $orig['unit_price']);
+            }
+        }
+
+        // Brand-new products (not in original snapshot) — deduct full qty.
+        foreach ($currentByProduct as $productId => $current) {
+            if (isset($originalByProduct[$productId])) {
+                continue;
+            }
+
+            $deduct(
+                (int) $productId,
+                (float) $current['quantity'],
+                (float) $current['unit_price']
+            );
+        }
+    }
+
+    /**
      * Resolve an invoice number, auto-generating one when missing
      * or already taken.
      */
     private function resolveInvoiceNumber(
         ?string $invoiceNo = null
     ): string {
-        $invoiceNo = trim(
-            (string) ($invoiceNo ?? '')
-        );
+        $invoiceNo = trim((string) ($invoiceNo ?? ''));
 
         if (
             $invoiceNo !== ''
@@ -1418,61 +1969,31 @@ class InvoiceController extends Controller
         $year = date('Y');
 
         $lastInvoice = Invoice::withTrashed()
-            ->whereYear(
-                'created_at',
-                $year
-            )
-            ->orderBy(
-                'id',
-                'desc'
-            )
+            ->whereYear('created_at', $year)
+            ->orderBy('id', 'desc')
             ->first();
 
-        if (
-            $lastInvoice
-            && $lastInvoice->invoice_no
-        ) {
-            if (
-                preg_match(
-                    '/(\d+)$/',
-                    $lastInvoice->invoice_no,
-                    $matches
-                )
-            ) {
-                $lastNumber =
-                    (int) $matches[1];
+        if ($lastInvoice && $lastInvoice->invoice_no) {
+            if (preg_match('/(\d+)$/', $lastInvoice->invoice_no, $matches)) {
+                $lastNumber = (int) $matches[1];
             } else {
-                $lastNumber =
-                    (int) $lastInvoice->id;
+                $lastNumber = (int) $lastInvoice->id;
             }
 
-            $nextNumber =
-                $lastNumber + 1;
+            $nextNumber = $lastNumber + 1;
         } else {
             $nextNumber = 1;
         }
 
-        $generated = sprintf(
-            'INV-%s-%06d',
-            $year,
-            $nextNumber
-        );
+        $generated = sprintf('INV-%s-%06d', $year, $nextNumber);
 
         while (
             Invoice::withTrashed()
-                ->where(
-                    'invoice_no',
-                    $generated
-                )
+                ->where('invoice_no', $generated)
                 ->exists()
         ) {
             $nextNumber++;
-
-            $generated = sprintf(
-                'INV-%s-%06d',
-                $year,
-                $nextNumber
-            );
+            $generated = sprintf('INV-%s-%06d', $year, $nextNumber);
         }
 
         return $generated;

@@ -12,6 +12,28 @@ const normalizeEndpoint = (endpoint: string) =>
   endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
 
 // -----------------------------------------------------------------------------
+// ENDPOINT CLASSIFICATION
+// -----------------------------------------------------------------------------
+
+/**
+ * Endpoints that must NOT trigger the global "session expired → logout +
+ * redirect to /login" behaviour on a 401, because the caller is either
+ * unauthenticated (login) or deliberately handling the error inline
+ * (2FA challenge verification).
+ */
+const PUBLIC_AUTH_ENDPOINTS: readonly string[] = [
+  '/login',
+  '/auth/login',
+  '/auth/2fa/verify',
+];
+
+const isPublicAuthEndpoint = (endpoint: string): boolean =>
+  PUBLIC_AUTH_ENDPOINTS.some(
+    (publicEndpoint) =>
+      endpoint === publicEndpoint || endpoint.startsWith(`${publicEndpoint}?`),
+  );
+
+// -----------------------------------------------------------------------------
 // FALLBACK ENDPOINTS
 // -----------------------------------------------------------------------------
 
@@ -67,11 +89,7 @@ export interface PaginatedResponse<T> {
   total: number;
 }
 
-export type InvoicePaymentState =
-  | 'paid'
-  | 'partial'
-  | 'unpaid'
-  | 'overdue';
+export type InvoicePaymentState = 'paid' | 'partial' | 'unpaid' | 'overdue';
 
 export interface InvoiceListQuery {
   page?: number;
@@ -117,6 +135,33 @@ export interface InvoiceSummaryResponse {
   success: boolean;
   data: InvoiceSummary;
   filters?: Record<string, unknown>;
+}
+
+export interface TwoFactorStatus {
+  enabled: boolean;
+  pending: boolean;
+  confirmed_at: string | null;
+  recovery_codes_remaining: number;
+}
+
+export interface TwoFactorChallengeResponse {
+  two_factor_required: true;
+  challenge_token: string;
+  expires_in: number;
+}
+
+export interface TwoFactorEnableResponse {
+  secret: string;
+  otpauth_url: string;
+}
+
+export interface TwoFactorConfirmResponse {
+  message: string;
+  recovery_codes: string[];
+}
+
+export interface TwoFactorRecoveryCodesResponse {
+  recovery_codes: string[];
 }
 
 // -----------------------------------------------------------------------------
@@ -275,14 +320,6 @@ export const apiClient = {
         signal: controller.signal,
       };
 
-      console.debug(
-        `API Request: ${method.toUpperCase()} ${requestUrl}`,
-        {
-          'Content-Length': getBodyByteLength(requestOptions.body),
-          'Has Auth': !!headers.Authorization,
-        }
-      );
-
       const response = await fetch(requestUrl, requestOptionsWithRedirect);
 
       // -----------------------------------------------------------------------
@@ -291,12 +328,6 @@ export const apiClient = {
 
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get('location');
-
-        console.warn(
-          `API redirect (${response.status}): ${method} ${endpoint}\n` +
-            `Location: ${location}\n` +
-            `This may indicate an authentication or permission issue.`
-        );
 
         throw buildApiError({
           status: response.status,
@@ -311,10 +342,23 @@ export const apiClient = {
       // -----------------------------------------------------------------------
       // UNAUTHORIZED
       // -----------------------------------------------------------------------
+      //
+      // A 401 from a public auth endpoint (login, 2FA challenge) is a normal
+      // user-facing error, not a session expiry. We must let it fall through
+      // to the standard error handling so the caller can read `status` and
+      // `backendMessage`. Only a 401 from an authenticated endpoint means
+      // "session expired" — that is when we wipe the store and bounce to /login.
+      //
 
-      if (response.status === 401) {
+      if (response.status === 401 && !isPublicAuthEndpoint(endpoint)) {
         useAuthStore.getState().logout();
-        window.location.href = '/login';
+
+        if (
+          typeof window !== 'undefined' &&
+          window.location.pathname !== '/login'
+        ) {
+          window.location.href = '/login';
+        }
 
         throw buildApiError({
           status: 401,
@@ -345,13 +389,13 @@ export const apiClient = {
           body = raw ? (isJson ? JSON.parse(raw) : raw) : null;
         }
       } catch (parseError: any) {
-        console.error(
-          `Failed to parse response for ${method} ${endpoint}\n` +
-            `Status: ${response.status}\n` +
-            `Content-Type: ${contentType}\n` +
-            `Parse Error: ${parseError.message}`
-        );
-        throw parseError;
+        throw buildApiError({
+          status: response.status,
+          endpoint,
+          method,
+          fallbackMessage: 'Failed to parse server response.',
+          payload: { parseError: parseError?.message },
+        });
       }
 
       // -----------------------------------------------------------------------
@@ -399,15 +443,6 @@ export const apiClient = {
       const apiError = error as ApiError;
 
       if (apiError?.name === 'ApiRequestError') {
-        console.error(
-          `API request failed: ${method.toUpperCase()} ${endpoint}`,
-          {
-            status: apiError.status,
-            backendMessage: apiError.backendMessage,
-            validationErrors: apiError.validationErrors,
-          }
-        );
-
         throw apiError;
       }
 
@@ -417,30 +452,13 @@ export const apiClient = {
 
       let networkMessage = 'Network request failed';
 
-      const diagnostics: Record<string, unknown> = {
-        'Attempted URL': requestUrl,
-        Method: method.toUpperCase(),
-        Endpoint: endpoint,
-      };
-
       if (error instanceof DOMException && error.name === 'AbortError') {
         networkMessage =
           'Request timeout (30s). The backend server is not responding in time.';
-        diagnostics['Possible Causes'] = [
-          '1. Backend server is slow or hanging',
-          '2. Database query is slow',
-          '3. Large request or response',
-        ];
       } else if (error instanceof TypeError) {
         if (error.message.includes('Failed to fetch')) {
           networkMessage =
             'Failed to connect to server. The backend may be offline, or there might be a CORS issue.';
-          diagnostics['Possible Causes'] = [
-            '1. Backend server is not running',
-            '2. API server is not accessible at ' + API_BASE,
-            '3. Network connectivity issue',
-            '4. CORS policy blocking the request',
-          ];
         } else {
           networkMessage = `Network error: ${error.message}`;
         }
@@ -448,23 +466,16 @@ export const apiClient = {
         networkMessage = error.message;
       }
 
-      diagnostics['Error Message'] = networkMessage;
-      diagnostics['Has Authorization'] = !!useAuthStore.getState().token;
-
-      console.error(
-        `API request failed: ${method.toUpperCase()} ${endpoint}`,
-        diagnostics
-      );
-      console.error('Full error object:', error);
-
       throw buildApiError({
         status: 0,
         endpoint,
         method,
         fallbackMessage: networkMessage || 'Network request failed',
         payload: {
-          diagnostics,
+          attempted_url: requestUrl,
+          has_authorization: !!useAuthStore.getState().token,
           error: error?.message,
+          body_bytes: getBodyByteLength(requestOptions.body),
         },
       });
     } finally {
@@ -499,7 +510,14 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async login(email: string, password: string) {
-    return this.request('POST', '/login', { email, password });
+    return this.request<
+      | {
+          access_token: string;
+          token_type: string;
+          expires_at?: string;
+        }
+      | TwoFactorChallengeResponse
+    >('POST', '/login', { email, password });
   },
 
   async logout() {
@@ -516,6 +534,58 @@ export const apiClient = {
 
   async updateProfile(data: any) {
     return this.request('PUT', '/profile', data);
+  },
+
+  // ---------------------------------------------------------------------------
+  // TWO-FACTOR AUTHENTICATION
+  // ---------------------------------------------------------------------------
+  //
+  // 2FA challenge verification: uses the short-lived challenge_token issued
+  // by /login, NOT the Sanctum bearer token. The endpoint is public by
+  // design and the 401 returned on bad codes is handled inline by the caller.
+  //
+
+  async verifyTwoFactor(challengeToken: string, code: string) {
+    return this.request<{
+      access_token: string;
+      token_type: string;
+      expires_at?: string;
+      recovery_code_used?: boolean;
+    }>('POST', '/auth/2fa/verify', {
+      challenge_token: challengeToken,
+      code,
+    });
+  },
+
+  async getTwoFactorStatus() {
+    return this.request<TwoFactorStatus>('GET', '/auth/2fa/status');
+  },
+
+  async enableTwoFactor(password: string) {
+    return this.request<TwoFactorEnableResponse>('POST', '/auth/2fa/enable', {
+      password,
+    });
+  },
+
+  async confirmTwoFactor(code: string) {
+    return this.request<TwoFactorConfirmResponse>('POST', '/auth/2fa/confirm', {
+      code,
+    });
+  },
+
+  async disableTwoFactor(password: string, code: string) {
+    return this.request<{ message: string }>('POST', '/auth/2fa/disable', {
+      password,
+      code,
+    });
+  },
+
+  async regenerateRecoveryCodes(password: string) {
+    return this.request<TwoFactorRecoveryCodesResponse>(
+      'POST',
+      '/auth/2fa/recovery-codes',
+      { password }
+    );
   },
 
   // ---------------------------------------------------------------------------
@@ -907,8 +977,7 @@ export const apiClient = {
       'GET',
       `/sales-returns/search/invoices${buildQuery({
         query: trimmedQuery,
-        customer_id:
-          customerId && customerId > 0 ? customerId : undefined,
+        customer_id: customerId && customerId > 0 ? customerId : undefined,
         per_page: 20,
       })}`
     );
@@ -1123,10 +1192,7 @@ export const apiClient = {
   },
 
   async getEnrolledFingers(employeeId: number) {
-    return this.request(
-      'GET',
-      `/biometric/employees/${employeeId}/fingers`
-    );
+    return this.request('GET', `/biometric/employees/${employeeId}/fingers`);
   },
 
   // ---------------------------------------------------------------------------
@@ -1283,9 +1349,7 @@ export const apiClient = {
     queryOrPage: number | InvoiceListQuery = 1
   ): Promise<PaginatedResponse<any>> {
     const params =
-      typeof queryOrPage === 'number'
-        ? { page: queryOrPage }
-        : queryOrPage;
+      typeof queryOrPage === 'number' ? { page: queryOrPage } : queryOrPage;
 
     return this.request<PaginatedResponse<any>>(
       'GET',
@@ -1359,9 +1423,7 @@ export const apiClient = {
    * POST /api/invoices/bulk-status
    */
   async bulkUpdateInvoiceStatus(ids: number[], status: string) {
-    const validIds = ids.filter(
-      (id) => Number.isInteger(id) && id > 0
-    );
+    const validIds = ids.filter((id) => Number.isInteger(id) && id > 0);
 
     if (validIds.length === 0) {
       throw new Error('At least one valid invoice ID is required.');
@@ -1383,9 +1445,7 @@ export const apiClient = {
    * POST /api/invoices/bulk-delete
    */
   async bulkDeleteInvoices(ids: number[]) {
-    const validIds = ids.filter(
-      (id) => Number.isInteger(id) && id > 0
-    );
+    const validIds = ids.filter((id) => Number.isInteger(id) && id > 0);
 
     if (validIds.length === 0) {
       throw new Error('At least one valid invoice ID is required.');
@@ -1442,11 +1502,7 @@ export const apiClient = {
   },
 
   async addPurchaseInvoicePayment(id: number, data: any) {
-    return this.request(
-      'POST',
-      `/purchase-invoices/${id}/payments`,
-      data
-    );
+    return this.request('POST', `/purchase-invoices/${id}/payments`, data);
   },
 
   // Aliases
@@ -1469,10 +1525,7 @@ export const apiClient = {
   },
 
   async getBranchesByCompany(companyId: number) {
-    if (
-      !Number.isInteger(Number(companyId)) ||
-      Number(companyId) <= 0
-    ) {
+    if (!Number.isInteger(Number(companyId)) || Number(companyId) <= 0) {
       throw new Error('Invalid company ID.');
     }
 
@@ -1695,17 +1748,11 @@ export const apiClient = {
   },
 
   async getTopSellingProducts(limit = 5) {
-    return this.request(
-      'GET',
-      `/reports/top-selling-products?limit=${limit}`
-    );
+    return this.request('GET', `/reports/top-selling-products?limit=${limit}`);
   },
 
   async getLeastSellingProducts(limit = 5) {
-    return this.request(
-      'GET',
-      `/reports/least-selling-products?limit=${limit}`
-    );
+    return this.request('GET', `/reports/least-selling-products?limit=${limit}`);
   },
 
   async getLowStockProducts() {
@@ -1938,18 +1985,12 @@ export const apiClient = {
 
   async getProfitLossComparison(params: any = {}) {
     const query = buildQuery(params);
-    return this.request(
-      'GET',
-      `/reports/profit-loss/comparison${query}`
-    );
+    return this.request('GET', `/reports/profit-loss/comparison${query}`);
   },
 
   async getInvoiceProfitabilityReport(params: any = {}) {
     const query = buildQuery(params);
-    return this.request(
-      'GET',
-      `/reports/profit-loss/invoices${query}`
-    );
+    return this.request('GET', `/reports/profit-loss/invoices${query}`);
   },
 
   async getInvoiceProfitabilityDetail(
@@ -1965,10 +2006,7 @@ export const apiClient = {
 
   async getProductProfitabilityReport(params: any = {}) {
     const query = buildQuery(params);
-    return this.request(
-      'GET',
-      `/reports/product-profitability${query}`
-    );
+    return this.request('GET', `/reports/product-profitability${query}`);
   },
 
   async getGstSummary(params: any = {}) {
@@ -2017,10 +2055,7 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
 
   async getAutomationWorkflows(params: Record<string, unknown> = {}) {
-    return this.request(
-      'GET',
-      `/automation/workflows${buildQuery(params)}`
-    );
+    return this.request('GET', `/automation/workflows${buildQuery(params)}`);
   },
 
   async createAutomationWorkflow(data: any) {
@@ -2036,18 +2071,11 @@ export const apiClient = {
   },
 
   async runAutomationWorkflow(id: number, data: any = {}) {
-    return this.request(
-      'POST',
-      `/automation/workflows/${id}/run`,
-      data
-    );
+    return this.request('POST', `/automation/workflows/${id}/run`, data);
   },
 
   async duplicateAutomationWorkflow(id: number) {
-    return this.request(
-      'POST',
-      `/automation/workflows/${id}/duplicate`
-    );
+    return this.request('POST', `/automation/workflows/${id}/duplicate`);
   },
 
   async getAutomationRuns(params: Record<string, unknown> = {}) {

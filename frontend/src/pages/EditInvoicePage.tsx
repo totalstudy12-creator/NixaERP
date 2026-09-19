@@ -131,6 +131,7 @@ interface Product {
 interface BankAccount { id: number; bank_name: string; account_no: string }
 
 interface InvoiceItem {
+  id?: number;
   product_id: number;
   product_name: string;
   hsn_sac_code: string;
@@ -149,6 +150,7 @@ interface InvoiceItem {
 interface AdditionalCharge { id: string; label: string; amount: number }
 interface PaymentEntry {
   id: string;
+  server_id?: number;
   amount: number;
   payment_method: 'UPI' | 'cash' | 'cheque' | 'other';
   reference_no: string;
@@ -157,7 +159,6 @@ interface PaymentEntry {
   account_number: string;
   remarks: string;
   payment_direction?: 'inward' | 'outward';
-  /** true if payment already exists on the server (do not re‑POST) */
   persisted?: boolean;
 }
 interface InvoiceFormData {
@@ -580,7 +581,6 @@ export function EditInvoicePage() {
   /* ── Form state ── */
   const [form, setForm] = useState<InvoiceFormData>(createInitialForm);
   const [items, setItems] = useState<InvoiceItem[]>([]);
-  /** Original server state — used for stock delta reconciliation */
   const [originalItems, setOriginalItems] = useState<InvoiceItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -596,8 +596,15 @@ export function EditInvoicePage() {
   const [loadingInvoice, setLoadingInvoice] = useState(true);
   const [invoiceNotFound, setInvoiceNotFound] = useState(false);
 
-  /* ── Automation toggles ── */
-  const [autoAdjustStock, setAutoAdjustStock] = useState(true);
+  /* ── Automation toggles ──
+   *
+   * DEFAULT OFF. Stock reconciliation is now performed authoritatively by
+   * the backend (`InvoiceController::update` → `reconcileInvoiceStockDelta`)
+   * inside a single DB transaction. Turning this ON causes the browser to
+   * ALSO issue /products/{id}/stock-out and /stock-in calls — which is only
+   * useful if the backend doesn't do it, and risks double-adjustment.
+   */
+  const [autoAdjustStock, setAutoAdjustStock] = useState(false);
   const [postTasks, setPostTasks] = useState<PostSaveTask[]>([]);
   const [has404Warning, setHas404Warning] = useState(false);
 
@@ -610,6 +617,13 @@ export function EditInvoicePage() {
     return JSON.stringify(form) !== initialFormRef.current
       || JSON.stringify(items) !== initialItemsRef.current;
   }, [form, items, hydrated]);
+
+  /**
+   * Server IDs of persisted payments the user removed from the invoice
+   * during this editing session. Flushed to `DELETE /payments/{id}` after
+   * the invoice update succeeds. Reset on successful save.
+   */
+  const removedPaymentIdsRef = useRef<number[]>([]);
 
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -640,7 +654,6 @@ export function EditInvoicePage() {
         const list = Array.isArray(res) ? res : ((res as any)?.data ?? []);
         setAvailableBranches(list);
         setForm((p) => {
-          // Preserve existing branch when possible; otherwise use first
           if (p.branch_id && list.some((b: Branch) => b.id === Number(p.branch_id))) {
             return p;
           }
@@ -755,24 +768,30 @@ export function EditInvoicePage() {
             : [],
           internal_note: inv.internal_note || '',
           payments: Array.isArray(inv.payments)
-            ? inv.payments.map((p: any) => ({
-                id: `existing_${p.id ?? Date.now()}`,
-                amount: safeNumber(p.amount),
-                payment_method: (p.payment_method as PaymentEntry['payment_method']) || 'cash',
-                reference_no: p.reference_no || '',
-                transaction_date: p.transaction_date?.split('T')[0] || '',
-                bank_name: p.bank_name || '',
-                account_number: p.account_number || '',
-                remarks: p.remarks || '',
-                payment_direction: p.payment_direction || 'inward',
-                persisted: true,
-              }))
+            ? inv.payments.map((p: any) => {
+                const serverId = Number(p.id);
+                return {
+                  id: `existing_${Number.isFinite(serverId) ? serverId : Date.now()}`,
+                  server_id: Number.isFinite(serverId) ? serverId : undefined,
+                  amount: safeNumber(p.amount),
+                  payment_method: (p.payment_method as PaymentEntry['payment_method']) || 'cash',
+                  reference_no: p.reference_no || '',
+                  transaction_date: p.transaction_date?.split('T')[0] || '',
+                  bank_name: p.bank_name || '',
+                  account_number: p.account_number || '',
+                  remarks: p.remarks || '',
+                  payment_direction: p.payment_direction || 'inward',
+                  persisted: true,
+                };
+              })
             : [],
           status: inv.status || 'pending',
         };
 
         const loadedItems: InvoiceItem[] = (Array.isArray(inv.items) ? inv.items : []).map((it: any) => {
+          const serverItemId = Number(it.id);
           const base = {
+            id: Number.isFinite(serverItemId) ? serverItemId : undefined,
             product_id: it.product_id,
             product_name: it.product?.name || it.product_name || `Product #${it.product_id}`,
             hsn_sac_code: it.product?.hsn_sac_code || it.hsn_sac_code || '',
@@ -790,9 +809,12 @@ export function EditInvoicePage() {
 
         setForm(loadedForm);
         setItems(loadedItems);
+        // Baseline for the very first edit — refreshed after every save.
         setOriginalItems(loadedItems.map((x) => ({ ...x })));
+        removedPaymentIdsRef.current = [];
+        setPostTasks([]);
+        setHas404Warning(false);
 
-        // Prime refs AFTER setState — do it in microtask so state is applied
         queueMicrotask(() => {
           initialFormRef.current = JSON.stringify(loadedForm);
           initialItemsRef.current = JSON.stringify(loadedItems);
@@ -929,9 +951,9 @@ export function EditInvoicePage() {
 
   /* ── Item handlers ── */
   const addItem = useCallback((product: Product) => {
+    let added = false;
     setItems((prev) => {
       if (prev.some((i) => i.product_id === product.id)) {
-        showError('Duplicate', 'Product already added.');
         return prev;
       }
       const base = {
@@ -947,10 +969,15 @@ export function EditInvoicePage() {
         gst_slab: clamp(safeNumber(product.igst_rate ?? product.tax_rate), 0, 100),
         is_inter_state: true,
       };
+      added = true;
       return [...prev, calculateItem(base)];
     });
+    if (!added) {
+      showError('Duplicate', 'Product already added.');
+    }
     setProductSearch('');
     setShowProductDropdown(false);
+    setProductHighlight(-1);
   }, [showError]);
 
   const removeItem = useCallback((index: number) => {
@@ -1012,8 +1039,17 @@ export function EditInvoicePage() {
       payments: p.payments.map((pay) => (pay.id === id ? { ...pay, [field]: value } : pay)),
     }));
   };
+
   const removePayment = (id: string) => {
-    setForm((p) => ({ ...p, payments: p.payments.filter((x) => x.id !== id) }));
+    setForm((p) => {
+      const payment = p.payments.find((x) => x.id === id);
+      if (payment?.persisted && payment.server_id && Number.isFinite(payment.server_id)) {
+        if (!removedPaymentIdsRef.current.includes(payment.server_id)) {
+          removedPaymentIdsRef.current.push(payment.server_id);
+        }
+      }
+      return { ...p, payments: p.payments.filter((x) => x.id !== id) };
+    });
   };
 
   /* ── Combobox keyboard nav ── */
@@ -1069,15 +1105,16 @@ export function EditInvoicePage() {
   };
 
   /* ────────────────────────────────────────────────────────────────────────
-   * Post-save automation — STOCK DELTA ADJUSTMENT
+   * Post-save automation — CLIENT-SIDE STOCK ADJUSTMENT (opt-in only)
    *
-   * Editing an invoice should reconcile inventory, not just re-deduct:
-   *   • Item was in original & still in new  → adjust by (new_qty - old_qty)
-   *   • Item is new                          → deduct full qty (stock-out)
-   *   • Item was in original but now removed → add back full old qty (stock-in)
+   * DEFAULT OFF. When OFF, the backend's `reconcileInvoiceStockDelta()`
+   * (running inside the invoice update transaction) is the single source
+   * of truth for stock reconciliation.
    *
-   * Backend auto-creates missing stock rows and allows negatives, so we only
-   * report per-item results.
+   * When ON, this function additionally calls `/products/{id}/stock-out`
+   * and `/products/{id}/stock-in` — only useful if the backend does NOT
+   * already handle stock. It is a strict no-op when the qty deltas are all
+   * zero (which is the source of the phantom-movement bug we're fixing).
    * ──────────────────────────────────────────────────────────────────────── */
 
   const runPostSaveAutomation = useCallback(async (
@@ -1092,7 +1129,6 @@ export function EditInvoicePage() {
       return { stockErrors, notFoundIds };
     }
 
-    // Build delta map: product_id -> { delta (positive = deduct), item }
     const originalMap = new Map<number, InvoiceItem>();
     originalItems.forEach((i) => originalMap.set(i.product_id, i));
     const newMap = new Map<number, InvoiceItem>();
@@ -1101,7 +1137,6 @@ export function EditInvoicePage() {
     type DeltaRow = { item: InvoiceItem; delta: number; kind: 'deduct' | 'restore' };
     const deltas: DeltaRow[] = [];
 
-    // New / still-present items
     for (const it of items) {
       const orig = originalMap.get(it.product_id);
       if (!orig) {
@@ -1113,13 +1148,13 @@ export function EditInvoicePage() {
         }
       }
     }
-    // Removed items → restore
     for (const orig of originalItems) {
       if (!newMap.has(orig.product_id)) {
         deltas.push({ item: orig, delta: orig.qty, kind: 'restore' });
       }
     }
 
+    // ── Strict no-op when no qty actually changed ──
     if (deltas.length === 0) {
       setPostTasks([]);
       setHas404Warning(false);
@@ -1228,6 +1263,28 @@ export function EditInvoicePage() {
       return;
     }
 
+    const itemsPayload = items.map((i) => {
+      const row: Record<string, unknown> = {
+        product_id: i.product_id,
+        quantity: i.qty,
+        unit_price: i.price,
+        discount_type: i.discount_type,
+        discount_percent: i.discount_percent,
+        discount_amount: i.discount_amount,
+        gst_slab: i.gst_slab,
+        is_inter_state: i.is_inter_state,
+        cgst_percent: i.cgst_percent,
+        sgst_percent: i.sgst_percent,
+        igst_percent: i.igst_percent,
+        cgst_amount: i.cgst_amount,
+        sgst_amount: i.sgst_amount,
+        igst_amount: i.igst_amount,
+        total: i.total,
+      };
+      if (i.id !== undefined && i.id !== null) row.id = i.id;
+      return row;
+    });
+
     const payload = {
       company_id: Number(form.company_id),
       branch_id: form.branch_id || null,
@@ -1275,51 +1332,29 @@ export function EditInvoicePage() {
       total_amount: summary.grandTotal,
       tax_amount: summary.totalTax,
       discount_amount: summary.itemDiscountTotal + summary.generalDiscountAmount,
-      items: items.map((i) => ({
-        product_id: i.product_id,
-        quantity: i.qty,
-        unit_price: i.price,
-        discount_type: i.discount_type,
-        discount_percent: i.discount_percent,
-        discount_amount: i.discount_amount,
-        gst_slab: i.gst_slab,
-        is_inter_state: i.is_inter_state,
-        cgst_percent: i.cgst_percent,
-        sgst_percent: i.sgst_percent,
-        igst_percent: i.igst_percent,
-        cgst_amount: i.cgst_amount,
-        sgst_amount: i.sgst_amount,
-        igst_amount: i.igst_amount,
-        total: i.total,
-      })),
+      items: itemsPayload,
     };
 
     setSubmitting(true);
     try {
+      // ── 1. Update invoice (header + items). The backend reconciles stock. ──
       await apiClient.updateInvoice(Number(id), payload);
 
-      /* ── New payments only ── */
-      const validNewPayments: PaymentEntry[] = [];
-      let remaining = summary.grandTotal - summary.totalPaid; // balance after persisted payments
-      for (const p of form.payments) {
-        if (p.persisted) continue;
-        if (p.amount <= 0 || remaining <= 0) continue;
-        const amt = Math.min(p.amount, remaining);
-        if (amt > 0) {
-          validNewPayments.push({ ...p, amount: amt });
-          remaining -= amt;
-        }
-      }
+      // ── 2. Record newly-added payments — exact amounts, no capping. ──
+      const newPayments = form.payments.filter(
+        (p) => !p.persisted && safeNumber(p.amount) > 0,
+      );
 
       let paymentsRecorded = 0;
-      if (validNewPayments.length > 0) {
-        try {
-          await Promise.all(validNewPayments.map((p, idx) =>
+      if (newPayments.length > 0) {
+        const results = await Promise.allSettled(
+          newPayments.map((p, idx) =>
             apiClient.request('POST', '/payments', {
               company_id: Number(form.company_id),
+              branch_id: form.branch_id ? Number(form.branch_id) : null,
               invoice_id: Number(id),
               reference_no: p.reference_no || `PAY-${id}-${idx + 1}`,
-              amount: p.amount,
+              amount: safeNumber(p.amount),
               payment_method: p.payment_method,
               status: 'completed',
               payment_direction: 'inward',
@@ -1329,21 +1364,63 @@ export function EditInvoicePage() {
               ledger_reference: p.reference_no || `PAY-${id}-${idx + 1}`,
               remarks: sanitizeText(p.remarks, LIMITS.TEXT),
             }),
-          ));
-          paymentsRecorded = validNewPayments.length;
-        } catch (payErr) {
-          const payMsg = getUserFriendlyError(payErr, 'Payment recording failed');
-          addAppLog({
-            module: 'Invoices', action: 'RecordPayments', status: 'error', message: payMsg,
-          });
+          ),
+        );
+
+        const failures: string[] = [];
+        results.forEach((r, idx) => {
+          if (r.status === 'fulfilled') {
+            paymentsRecorded++;
+          } else {
+            const msg = getUserFriendlyError(r.reason, 'Payment recording failed');
+            failures.push(`#${idx + 1}: ${msg}`);
+            addAppLog({
+              module: 'Invoices',
+              action: 'RecordPayments',
+              status: 'error',
+              message: `payment attempt ${idx + 1}: ${msg}`,
+            });
+          }
+        });
+
+        if (failures.length > 0) {
           showInfo?.(
-            'Payment not recorded',
-            `${payMsg} — the invoice was updated. Add the payment from the invoice page.`,
+            'Some payments not recorded',
+            `${failures.length} of ${newPayments.length} payment(s) failed. The invoice was updated.`,
           );
         }
       }
 
-      /* ── Stock delta adjustment ── */
+      // ── 3. Delete payments the user removed from this invoice ──
+      let paymentsDeleted = 0;
+      const removedIds = [...removedPaymentIdsRef.current];
+      if (removedIds.length > 0) {
+        const results = await Promise.allSettled(
+          removedIds.map((serverId) => apiClient.deletePayment(serverId)),
+        );
+        results.forEach((r, idx) => {
+          if (r.status === 'fulfilled') {
+            paymentsDeleted++;
+          } else {
+            const msg = getUserFriendlyError(r.reason, 'Payment deletion failed');
+            addAppLog({
+              module: 'Invoices',
+              action: 'DeletePayments',
+              status: 'error',
+              message: `payment #${removedIds[idx]}: ${msg}`,
+            });
+          }
+        });
+        if (paymentsDeleted < removedIds.length) {
+          showInfo?.(
+            'Some payments not deleted',
+            `${removedIds.length - paymentsDeleted} payment(s) couldn't be removed. The invoice was updated.`,
+          );
+        }
+        removedPaymentIdsRef.current = [];
+      }
+
+      // ── 4. Client-side stock automation (opt-in only — default off) ──
       let automationSummary = '';
       if (autoAdjustStock) {
         try {
@@ -1357,27 +1434,21 @@ export function EditInvoicePage() {
           if (notFoundIds.length > 0) {
             const unique = Array.from(new Set(notFoundIds));
             showInfo?.(
-              'Automation skipped — product not found',
+              'Client automation skipped — product not found',
               `${unique.length} product${unique.length > 1 ? 's' : ''} could not be found on the server ` +
-              `(IDs: ${unique.join(', ')}). The invoice was updated. Refresh the products list and re-check.`,
+              `(IDs: ${unique.join(', ')}). The invoice was updated.`,
             );
-            addAppLog({
-              module: 'Invoices', action: 'PostSaveAutomation', status: 'error',
-              message: `404 on product IDs: ${unique.join(', ')}`,
-            });
           } else if (stockErrors.length > 0) {
             showInfo?.(
               'Stock adjustment warnings',
               `${stockErrors.length} task(s) failed. See log for details.`,
             );
-            addAppLog({
-              module: 'Invoices', action: 'PostSaveAutomation', status: 'error',
-              message: stockErrors.join(' | ').slice(0, 500),
-            });
           }
         } catch (autoErr) {
           addAppLog({
-            module: 'Invoices', action: 'PostSaveAutomation', status: 'error',
+            module: 'Invoices',
+            action: 'PostSaveAutomation',
+            status: 'error',
             message: getUserFriendlyError(autoErr, 'Automation crashed'),
           });
         }
@@ -1385,16 +1456,25 @@ export function EditInvoicePage() {
 
       addAppLog({ module: 'Invoices', action: 'Update', status: 'success', message: form.invoice_no });
 
-      showSuccess(
-        'Invoice updated',
-        `Invoice ${form.invoice_no} updated.${paymentsRecorded ? ' Payments recorded.' : ''}${automationSummary}` +
-        (changeToReturn > 0 ? ` Change to return: ₹${formatCurrency(changeToReturn)}` : ''),
-      );
+      // ── Success summary ──
+      const parts: string[] = [`Invoice ${form.invoice_no} updated.`];
+      if (paymentsRecorded) parts.push(`${paymentsRecorded} payment(s) recorded.`);
+      if (paymentsDeleted) parts.push(`${paymentsDeleted} payment(s) removed.`);
+      if (automationSummary) parts.push(automationSummary.replace(/^\s*·\s*/, ''));
+      if (changeToReturn > 0) parts.push(`Change to return: ₹${formatCurrency(changeToReturn)}`);
 
-      // Reset dirty tracking so we can navigate cleanly
+      showSuccess('Invoice updated', parts.join(' '));
+
+      // ── Re-sync the "original" baseline so subsequent edits compute
+      //    their stock delta against the CURRENT server state, not the
+      //    state from the previous page load. This is what prevents the
+      //    phantom stock-movement bug. ──
+      setOriginalItems(items.map((x) => ({ ...x })));
       initialFormRef.current = JSON.stringify(form);
       initialItemsRef.current = JSON.stringify(items);
       setHydrated(false);
+      setPostTasks([]);
+      setHas404Warning(false);
 
       if (autoAdjustStock) void refreshProducts();
       if (autoAdjustStock) await new Promise((r) => setTimeout(r, 500));
@@ -1997,11 +2077,10 @@ export function EditInvoicePage() {
                 <Toggle
                   checked={autoAdjustStock}
                   onChange={setAutoAdjustStock}
-                  label="Auto-adjust stock"
+                  label="Client-side stock reconciliation (advanced)"
                   description={
-                    defaultWarehouseId
-                      ? `Reconcile each item's stock delta against warehouse #${defaultWarehouseId}. Negative stock allowed.`
-                      : 'No warehouse available — adjustment will be skipped.'
+                    'OFF (recommended): the server reconciles inventory inside the update transaction. ' +
+                    'ON: also run stock-out / stock-in calls from the browser — enable only if the backend does NOT already handle it.'
                   }
                 />
               </div>
@@ -2129,7 +2208,7 @@ export function EditInvoicePage() {
                   const original = originalItems.find((o) => o.product_id === item.product_id);
                   const delta = original ? item.qty - original.qty : null;
                   return (
-                    <tr key={idx} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/60 transition">
+                    <tr key={item.id ?? `new-${idx}`} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/60 transition">
                       <td className="py-2 px-4 max-w-[240px]">
                         <input
                           type="text" value={item.product_name}
@@ -2140,6 +2219,9 @@ export function EditInvoicePage() {
                         />
                         <div className="flex items-center gap-2 text-[10px]">
                           <span className="text-slate-400">ID #{item.product_id}</span>
+                          {item.id && (
+                            <span className="text-slate-400">· Line #{item.id}</span>
+                          )}
                           {item.hsn_sac_code && <span className="text-slate-400">HSN: {item.hsn_sac_code}</span>}
                           {stale && (
                             <span className="text-amber-600 inline-flex items-center gap-0.5" title="Not in current product cache">
@@ -2273,9 +2355,11 @@ export function EditInvoicePage() {
                 <p className="text-sm">No products added yet.</p>
               </div>
             ) : items.map((item, idx) => (
-              <div key={idx} className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
+              <div key={item.id ?? `new-${idx}`} className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
                 <div className="flex justify-between items-start">
-                  <span className="text-xs font-semibold text-slate-400">#{idx + 1} · ID {item.product_id}</span>
+                  <span className="text-xs font-semibold text-slate-400">
+                    #{idx + 1} · ID {item.product_id}{item.id ? ` · Line #${item.id}` : ''}
+                  </span>
                   <button
                     onClick={() => removeItem(idx)}
                     className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50"
@@ -2563,7 +2647,12 @@ export function EditInvoicePage() {
                           Payment #{idx + 1}
                           {pay.persisted && (
                             <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">
-                              saved
+                              saved{pay.server_id ? ` #${pay.server_id}` : ''}
+                            </span>
+                          )}
+                          {!pay.persisted && (
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200">
+                              new
                             </span>
                           )}
                         </span>
@@ -2571,6 +2660,7 @@ export function EditInvoicePage() {
                           onClick={() => removePayment(pay.id)}
                           className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
                           aria-label="Remove payment"
+                          title={pay.persisted ? 'Removing this will delete it on save' : 'Remove'}
                         >
                           <FiTrash2 size={13} />
                         </button>
@@ -2637,6 +2727,12 @@ export function EditInvoicePage() {
                   <div className="flex justify-between text-amber-600">
                     <span>Change to Return</span>
                     <span className="tabular-nums">₹{formatCurrency(changeToReturn)}</span>
+                  </div>
+                )}
+                {removedPaymentIdsRef.current.length > 0 && (
+                  <div className="flex justify-between text-rose-600 text-xs pt-1">
+                    <span>Queued for deletion on save</span>
+                    <span className="tabular-nums">{removedPaymentIdsRef.current.length} payment(s)</span>
                   </div>
                 )}
               </div>
@@ -3113,3 +3209,5 @@ function OffcanvasFallback() {
     </div>
   );
 }
+
+export default EditInvoicePage;

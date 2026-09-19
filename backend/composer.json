@@ -16,6 +16,7 @@
         "laravel/socialite": "^5.30",
         "laravel/tinker": "^2.10.1",
         "php-imap/php-imap": "^2.0",
+        "pragmarx/google2fa": "^9.1",
         "socialiteproviders/facebook": "^4.1",
         "socialiteproviders/instagram": "^5.2",
         "socialiteproviders/linkedin": "^5.0",

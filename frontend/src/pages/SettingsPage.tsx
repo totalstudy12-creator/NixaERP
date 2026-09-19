@@ -40,6 +40,7 @@ import {
 
 import { apiClient, API_BASE } from '../api';
 import { useNotification } from '../components/NotificationContext';
+import { TwoFactorSettings } from '../features/security/TwoFactorSettings';
 
 // -----------------------------------------------------------------------------
 // Types
@@ -52,13 +53,7 @@ interface SettingItem {
   group: string | null;
   description: string | null;
   is_public: boolean;
-  type?:
-    | 'string'
-    | 'boolean'
-    | 'number'
-    | 'json'
-    | 'color'
-    | 'select';
+  type?: 'string' | 'boolean' | 'number' | 'json' | 'color' | 'select';
   options?: string[];
   defaultValue?: string;
 }
@@ -89,7 +84,7 @@ interface McpStatus {
   version: string;
 }
 
-type ActiveTab = 'settings' | 'printer' | 'api' | 'ai';
+type ActiveTab = 'settings' | 'printer' | 'api' | 'ai' | 'security';
 
 interface AiConfig {
   provider: 'gemini';
@@ -117,17 +112,10 @@ const AI_MODEL_OPTIONS: Array<{ value: string; label: string }> = [
 // Helpers
 // -----------------------------------------------------------------------------
 
-function inferType(
-  key: string
-): SettingItem['type'] {
+function inferType(key: string): SettingItem['type'] {
   const lower = key.toLowerCase();
 
-  if (
-    lower.includes('color') ||
-    lower.includes('colour')
-  ) {
-    return 'color';
-  }
+  if (lower.includes('color') || lower.includes('colour')) return 'color';
 
   if (
     lower.includes('maintenance') ||
@@ -173,10 +161,7 @@ function inferType(
   return 'string';
 }
 
-const DEFAULT_OPTIONS: Record<
-  string,
-  string[]
-> = {
+const DEFAULT_OPTIONS: Record<string, string[]> = {
   currency: ['USD', 'INR', 'EUR', 'GBP', 'JPY', 'AED', 'AUD'],
   timezone: ['UTC', 'Asia/Kolkata', 'America/New_York', 'Europe/London', 'Asia/Dubai'],
   language: ['en', 'hi', 'es', 'fr', 'de', 'zh'],
@@ -187,10 +172,7 @@ const DEFAULT_OPTIONS: Record<
   printer_connection: ['browser', 'bluetooth', 'system'],
 };
 
-const GROUP_META: Record<
-  string,
-  { icon: string; color: string }
-> = {
+const GROUP_META: Record<string, { icon: string; color: string }> = {
   general:       { icon: '⚙️', color: 'bg-blue-100 text-blue-700' },
   finance:       { icon: '💰', color: 'bg-emerald-100 text-emerald-700' },
   system:        { icon: '🖥️', color: 'bg-purple-100 text-purple-700' },
@@ -639,7 +621,6 @@ export function SettingsPage() {
           warning: data.warning ? String(data.warning) : undefined,
         };
 
-        // React-memory only — never persisted.
         setCreatedMcpToken(createdToken);
         setShowMcpToken(true);
 
@@ -1287,7 +1268,7 @@ export function SettingsPage() {
           </h1>
 
           <p className="text-sm text-slate-300">
-            Manage application settings, printer, AI, API and MCP access.
+            Manage application settings, printer, AI, API, MCP access and security.
           </p>
         </div>
 
@@ -1380,6 +1361,19 @@ export function SettingsPage() {
         >
           <FiCode className="mr-1 inline" size={14} />
           API &amp; MCP
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('security')}
+          className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+            activeTab === 'security'
+              ? 'bg-slate-900 text-white shadow-lg'
+              : 'bg-white text-slate-600 hover:bg-slate-50'
+          }`}
+        >
+          <FiShield className="mr-1 inline" size={14} />
+          Security
         </button>
       </div>
 
@@ -2571,6 +2565,45 @@ export function SettingsPage() {
                   <FiCopy className="ml-auto" size={14} />
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================== */}
+      {/* SECURITY TAB                                                        */}
+      {/* =================================================================== */}
+
+      {activeTab === 'security' && (
+        <div className="space-y-6">
+          <TwoFactorSettings />
+
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <FiShield className="mb-2 text-blue-600" />
+              <h4 className="font-semibold text-slate-800">TOTP standard</h4>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                Works with any RFC 6238 authenticator app: Google Authenticator, Authy,
+                1Password, Bitwarden, Microsoft Authenticator.
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <FiKey className="mb-2 text-amber-600" />
+              <h4 className="font-semibold text-slate-800">Recovery codes</h4>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                Each recovery code is single-use and hashed on the server. Store them in a
+                password manager — they are your only backup if you lose your device.
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <FiDatabase className="mb-2 text-emerald-600" />
+              <h4 className="font-semibold text-slate-800">Encrypted secret</h4>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                The TOTP secret is encrypted at rest with your application key. It is never
+                returned by the API after enrolment.
+              </p>
             </div>
           </div>
         </div>

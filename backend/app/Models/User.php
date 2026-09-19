@@ -23,9 +23,14 @@ class User extends Authenticatable
         'avatar_url',
     ];
 
+    /**
+     * Fields never serialized to JSON responses.
+     * two_factor_secret must never leave the server after enrolment.
+     */
     protected $hidden = [
         'password',
         'remember_token',
+        'two_factor_secret',
     ];
 
     protected function casts(): array
@@ -33,8 +38,15 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            // Encrypted at rest using APP_KEY (Laravel encrypted cast).
+            'two_factor_secret' => 'encrypted',
+            'two_factor_confirmed_at' => 'datetime',
         ];
     }
+
+    /* -----------------------------------------------------------------
+     | Roles
+     | ----------------------------------------------------------------- */
 
     public function roles()
     {
@@ -58,12 +70,17 @@ class User extends Authenticatable
     public function hasAllRoles(array $roles): bool
     {
         foreach ($roles as $role) {
-            if (!$this->hasRole($role)) {
+            if (! $this->hasRole($role)) {
                 return false;
             }
         }
+
         return true;
     }
+
+    /* -----------------------------------------------------------------
+     | Permissions
+     | ----------------------------------------------------------------- */
 
     public function permissions()
     {
@@ -89,10 +106,32 @@ class User extends Authenticatable
     public function hasAllPermissions(array $permissions): bool
     {
         foreach ($permissions as $permission) {
-            if (!$this->hasPermission($permission)) {
+            if (! $this->hasPermission($permission)) {
                 return false;
             }
         }
+
         return true;
+    }
+
+    /* -----------------------------------------------------------------
+     | Two-factor authentication
+     | ----------------------------------------------------------------- */
+
+    public function twoFactorRecoveryCodes()
+    {
+        return $this->hasMany(TwoFactorRecoveryCode::class);
+    }
+
+    public function hasTwoFactorEnabled(): bool
+    {
+        return $this->two_factor_secret !== null
+            && $this->two_factor_confirmed_at !== null;
+    }
+
+    public function hasPendingTwoFactorSetup(): bool
+    {
+        return $this->two_factor_secret !== null
+            && $this->two_factor_confirmed_at === null;
     }
 }

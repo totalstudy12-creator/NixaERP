@@ -111,8 +111,20 @@ interface Invoice {
   total_amount: number | string;
   tax_amount: number | string;
   discount_amount?: number | string | null;
+
+  /**
+   * Server-computed values added by the backend `index()` endpoint.
+   * `received_amount` is a correlated sub-select sum of inward payments.
+   * `outstanding_amount` is `max(0, total_amount - received_amount)`.
+   * Prefer these over client-side math when present.
+   */
+  received_amount?: number | string | null;
+  outstanding_amount?: number | string | null;
+
+  /** Legacy fallbacks that predate the server-side fields. */
   payment_received?: number | string | null;
   paid_amount?: number | string | null;
+
   status?: string | null;
   due_date?: string | null;
   invoice_date?: string | null;
@@ -157,6 +169,25 @@ interface InvoiceSummary {
   partial: number;
 }
 
+/**
+ * Shape of the payload returned by `GET /api/invoices/summary`.
+ * See `InvoiceController::summary()` on the backend.
+ */
+interface BackendInvoiceSummary {
+  total_invoices: number;
+  total_amount: number;
+  tax_amount: number;
+  received_amount: number;
+  outstanding_amount: number;
+  paid_count: number;
+  partial_count: number;
+  unpaid_count: number;
+  draft_count: number;
+  overdue_count: number;
+  today_count: number;
+  today_amount: number;
+}
+
 interface AppLogEntry {
   module: string;
   action: string;
@@ -179,14 +210,11 @@ const UNWRAP_DEPTH = 3;
 const TABLE_COLUMN_COUNT = 9;
 
 /**
- * Aggregate-fetch tuning. The KPI cards pull every page of the current
- * filtered set so the totals reflect the whole filter — not just the
- * visible page. The caps below protect against runaway requests.
+ * KPI totals are now sourced from the dedicated `/invoices/summary`
+ * endpoint. Only a short debounce is needed to coalesce rapid filter
+ * changes into a single request.
  */
-const TOTALS_BATCH_SIZE = 500;      // rows requested per page during the sweep
-const TOTALS_MAX_PAGES = 40;        // hard cap on pages fetched (40 × 500 = 20k)
-const TOTALS_PARALLEL = 4;          // concurrent page requests
-const TOTALS_DEBOUNCE_MS = 120;     // coalesce rapid filter changes
+const TOTALS_DEBOUNCE_MS = 120;
 
 /** Shared class for every table header cell so all columns match exactly. */
 const TABLE_HEAD_CLASS =
@@ -317,7 +345,19 @@ function escapeCsvField(value: unknown): string {
   return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
+/**
+ * Resolve the received amount for an invoice.
+ *
+ * Priority:
+ *   1. `invoice.received_amount` — computed server-side in the index endpoint
+ *   2. Sum of inward payments (if the `payments` relation was eager-loaded)
+ *   3. Legacy `payment_received` / `paid_amount` columns
+ */
 function getReceived(invoice: Invoice): number {
+  if (invoice.received_amount != null) {
+    const n = Number(invoice.received_amount);
+    if (Number.isFinite(n)) return n;
+  }
   if (invoice.payments?.length) {
     const received = invoice.payments
       .filter((payment) => String(payment.payment_direction ?? 'inward').toLowerCase() === 'inward')
@@ -327,7 +367,17 @@ function getReceived(invoice: Invoice): number {
   return toNumber(invoice.payment_received ?? invoice.paid_amount);
 }
 
+/**
+ * Resolve the outstanding amount for an invoice.
+ *
+ * Prefers the server-computed `outstanding_amount`; falls back to
+ * `max(0, total - received)` when the field is absent.
+ */
 function getOutstanding(invoice: Invoice): number {
+  if (invoice.outstanding_amount != null) {
+    const n = Number(invoice.outstanding_amount);
+    if (Number.isFinite(n)) return Math.max(0, n);
+  }
   return Math.max(0, toNumber(invoice.total_amount) - getReceived(invoice));
 }
 
@@ -376,7 +426,7 @@ function normalizePaginated(
   };
 }
 
-/** Aggregate totals across a set of invoices — used for KPI cards. */
+/** Aggregate totals across a set of invoices — used as a page fallback. */
 function summarizeInvoices(rows: Invoice[]): InvoiceSummary {
   const summary: InvoiceSummary = { ...EMPTY_SUMMARY, total: rows.length };
   for (const invoice of rows) {
@@ -389,6 +439,20 @@ function summarizeInvoices(rows: Invoice[]): InvoiceSummary {
     else if (payment === 'partial') summary.partial += 1;
   }
   return summary;
+}
+
+/** Map the backend summary payload into the frontend `InvoiceSummary` shape. */
+function mapBackendSummary(data: Partial<BackendInvoiceSummary> | null | undefined): InvoiceSummary {
+  if (!data) return { ...EMPTY_SUMMARY };
+  return {
+    total: Math.max(0, toNumber(data.total_invoices)),
+    total_amount: toNumber(data.total_amount),
+    received_amount: toNumber(data.received_amount),
+    outstanding_amount: toNumber(data.outstanding_amount),
+    tax_amount: toNumber(data.tax_amount),
+    overdue: Math.max(0, toNumber(data.overdue_count)),
+    partial: Math.max(0, toNumber(data.partial_count)),
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -740,12 +804,12 @@ export function InvoicesPage() {
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
   /**
-   * Aggregate totals for the entire filtered set (not just the visible page).
-   * Fetched in the background whenever the filter signature changes.
+   * KPI totals for the entire filtered set. Sourced from the dedicated
+   * `/invoices/summary` endpoint — a single request that runs the same
+   * aggregate query server-side instead of sweeping every page here.
    */
   const [totals, setTotals] = useState<InvoiceSummary | null>(null);
   const [totalsLoading, setTotalsLoading] = useState(false);
-  const [totalsCapped, setTotalsCapped] = useState(false);
 
   const dateInitializedRef = useRef(false);
   const invoicesRequestIdRef = useRef(0);
@@ -909,10 +973,10 @@ export function InvoicesPage() {
   /* -------------------- Aggregate totals (whole filtered set) -------------------- */
 
   /**
-   * Fetches every page of the currently filtered result set and computes the
-   * KPI totals. Runs only when the filter signature changes (pagination and
-   * sorting do NOT retrigger it). Includes a per-request debounce and a hard
-   * cap on total pages to keep large datasets from spamming the server.
+   * Fetch KPI totals from `/api/invoices/summary`. The backend runs the
+   * aggregate over the entire filtered scope in one query — no client-side
+   * page sweep, no N+1, no artificial page cap. Runs only when the filter
+   * signature changes (pagination and sorting do not retrigger it).
    */
   useEffect(() => {
     const requestId = ++totalsRequestIdRef.current;
@@ -921,7 +985,7 @@ export function InvoicesPage() {
     setTotalsLoading(true);
 
     const timer = window.setTimeout(async () => {
-      const filters = {
+      const filters: Record<string, string | number | undefined> = {
         search: search || undefined,
         company_id: companyId,
         branch_id: branchId,
@@ -931,54 +995,38 @@ export function InvoicesPage() {
         date_to: dateTo || undefined,
       };
 
-      try {
-        // First page reveals how many pages we need.
-        const firstResponse = await apiClient.getInvoices({
-          ...filters,
-          page: 1,
-          per_page: TOTALS_BATCH_SIZE,
-        } as unknown as InvoiceQuery);
-
-        if (cancelled || requestId !== totalsRequestIdRef.current) return;
-
-        const first = normalizePaginated(firstResponse, 1, TOTALS_BATCH_SIZE);
-        const rows: Invoice[] = [...first.data];
-
-        const totalPages = Math.max(1, first.last_page);
-        const pagesToFetch = Math.min(totalPages, TOTALS_MAX_PAGES);
-        setTotalsCapped(totalPages > TOTALS_MAX_PAGES);
-
-        if (pagesToFetch > 1) {
-          const remainingPages: number[] = [];
-          for (let p = 2; p <= pagesToFetch; p += 1) remainingPages.push(p);
-
-          for (let i = 0; i < remainingPages.length; i += TOTALS_PARALLEL) {
-            if (cancelled || requestId !== totalsRequestIdRef.current) return;
-            const chunk = remainingPages.slice(i, i + TOTALS_PARALLEL);
-            const results = await Promise.allSettled(
-              chunk.map((p) =>
-                apiClient.getInvoices({
-                  ...filters,
-                  page: p,
-                  per_page: TOTALS_BATCH_SIZE,
-                } as unknown as InvoiceQuery),
-              ),
-            );
-            results.forEach((r) => {
-              if (r.status === 'fulfilled') {
-                const norm = normalizePaginated(r.value, 1, TOTALS_BATCH_SIZE);
-                rows.push(...norm.data);
-              }
-            });
-          }
+      const searchParams = new URLSearchParams();
+      Object.entries(filters).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== '') {
+          searchParams.set(key, String(value));
         }
+      });
 
+      const qs = searchParams.toString();
+      const url = `/invoices/summary${qs ? `?${qs}` : ''}`;
+
+      try {
+        const response = await apiClient.get(url);
         if (cancelled || requestId !== totalsRequestIdRef.current) return;
-        setTotals(summarizeInvoices(rows));
+
+        // The endpoint returns `{ success, data: {...}, filters: {...} }`.
+        // Be tolerant of the api client pre-unwrapping `.data`.
+        const body = response as
+          | { data?: BackendInvoiceSummary }
+          | BackendInvoiceSummary
+          | null
+          | undefined;
+
+        const payload =
+          body && typeof body === 'object' && 'data' in body && (body as { data?: unknown }).data
+            ? ((body as { data?: BackendInvoiceSummary }).data ?? null)
+            : (body as BackendInvoiceSummary | null | undefined);
+
+        setTotals(mapBackendSummary(payload ?? null));
       } catch {
         if (cancelled || requestId !== totalsRequestIdRef.current) return;
-        // Leave the previous totals in place; KPI will keep showing whatever
-        // we last successfully computed (or the page fallback on first run).
+        // Leave the previous totals in place; the KPI will keep showing the
+        // last successful snapshot, or fall back to the page summary below.
       } finally {
         if (!cancelled && requestId === totalsRequestIdRef.current) {
           setTotalsLoading(false);
@@ -995,9 +1043,9 @@ export function InvoicesPage() {
   /* -------------------- Visible summary (KPI source of truth) -------------------- */
 
   /**
-   * Prefer the aggregate across the entire filtered set. Fall back to the
-   * current page when the sweep hasn't completed yet, and clearly mark that
-   * fallback with a "This page only" hint.
+   * Prefer the aggregate across the entire filtered set (from the summary
+   * endpoint). Fall back to the current page when the summary hasn't
+   * completed yet, and mark that fallback with a "This page only" hint.
    */
   const pageSummary = useMemo<InvoiceSummary>(() => {
     const rows = invoices?.data ?? [];
@@ -1007,11 +1055,10 @@ export function InvoicesPage() {
   const visibleSummary = totals ?? pageSummary;
 
   const summaryScopeHint: string | undefined = useMemo(() => {
-    if (totalsCapped) return `First ${TOTALS_MAX_PAGES * TOTALS_BATCH_SIZE} invoices`;
     if (totals) return undefined;
     if ((invoices?.last_page ?? 1) > 1) return 'This page only';
     return undefined;
-  }, [totals, totalsCapped, invoices]);
+  }, [totals, invoices]);
 
   /* -------------------- Selection resets on filter change -------------------- */
 
@@ -1266,8 +1313,6 @@ export function InvoicesPage() {
   const lastPage = invoices?.last_page || 1;
 
   const kpiDisplay = (value: number, formatter: (v: number) => string): string => {
-    // While the page hasn't loaded yet, show a placeholder. Once we have any
-    // numbers (page fallback or totals), always render them.
     if (loading && !invoices && !totals) return '…';
     return formatter(value);
   };
