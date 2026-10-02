@@ -56,6 +56,12 @@
 /storage/*.key
 /storage/pail
 
+# WhatsApp Web browser credentials and downloaded browser cache
+/backend/storage/whatsapp-session/
+/backend/whatsapp-service/.wwebjs_auth/
+/backend/whatsapp-service/.wwebjs_cache/
+/backend/public/*.sql
+
 # ============================================================
 
 # COMPOSER

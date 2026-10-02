@@ -22,6 +22,7 @@ class ApiRouteSecurityInventoryTest extends TestCase
             'api/marketing/gbp-locations',
             'api/status',
             'api/webhooks/whatsapp',
+            'api/webhooks/twilio/notification-status',
         ];
         $apiRoutes = 0;
 
@@ -66,6 +67,8 @@ class ApiRouteSecurityInventoryTest extends TestCase
             'GET api/audit-logs',
             'POST api/audit-logs',
             'DELETE api/audit-logs',
+            'POST api/notifications/push-subscriptions',
+            'DELETE api/notifications/push-subscriptions',
             'GET api/mcp/status',
             'GET api/mcp/context',
             'GET api/mcp/context/{section}',

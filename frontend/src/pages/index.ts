@@ -28,6 +28,7 @@ export * from './AIAssistantPage';
 export * from './MarketingPage';
 export * from './BannerPosterPage';
 export * from './QRPaymentPage';
+export * from './NotificationsPage';
 export * from './SettingsPage';
 export * from './ProfilePage';
 export * from './UserRoleManagementPage';

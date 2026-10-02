@@ -268,6 +268,8 @@ class UserAccessController extends Controller
             'email'            => 'required|email|unique:users,email',
             'password'         => 'required|string|min:6',
             'phone'            => 'nullable|string|max:50',
+            'company_id'       => 'nullable|integer|exists:companies,id',
+            'branch_id'        => 'nullable|integer|exists:branches,id',
             'role_ids'         => 'nullable|array',
             'role_ids.*'       => 'integer|exists:roles,id',
             'permission_ids'   => 'nullable|array',
@@ -288,6 +290,8 @@ class UserAccessController extends Controller
                 'email'    => $request->input('email'),
                 'password' => Hash::make($request->input('password')),
                 'phone'    => $request->input('phone'),
+                'company_id' => $request->input('company_id'),
+                'branch_id' => $request->input('branch_id'),
             ]);
 
             if ($request->has('role_ids')) {
@@ -316,6 +320,8 @@ class UserAccessController extends Controller
             'email'      => 'sometimes|email|unique:users,email,' . $user->id,
             'password'   => 'sometimes|nullable|string|min:6',
             'phone'      => 'sometimes|nullable|string|max:50',
+            'company_id' => 'sometimes|nullable|integer|exists:companies,id',
+            'branch_id'  => 'sometimes|nullable|integer|exists:branches,id',
             'role_ids'   => 'nullable|array',
             'role_ids.*' => 'integer|exists:roles,id',
         ]);
@@ -335,7 +341,7 @@ class UserAccessController extends Controller
         }
 
         DB::transaction(function () use ($request, $user) {
-            $data = $request->only(['name', 'email', 'phone']);
+            $data = $request->only(['name', 'email', 'phone', 'company_id', 'branch_id']);
 
             if ($request->filled('password')) {
                 $data['password'] = Hash::make($request->input('password'));
@@ -482,6 +488,8 @@ class UserAccessController extends Controller
             'name'               => $user->name,
             'email'              => $user->email,
             'phone'              => $user->phone,
+            'company_id'         => $user->company_id,
+            'branch_id'          => $user->branch_id,
             'two_factor_enabled' => $user->hasTwoFactorEnabled(),
             'email_verified_at'  => $user->email_verified_at,
             'roles' => $user->roles->map(fn ($r) => [

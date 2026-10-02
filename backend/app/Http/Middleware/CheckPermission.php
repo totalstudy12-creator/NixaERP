@@ -78,8 +78,11 @@ class CheckPermission
             'result' => 'denied',
         ]);
 
+        $notificationRoute = str_contains($request->path(), '/notifications') || str_contains($request->path(), '/daily-summary');
+
         return response()->json([
             'message' => "You don't have permission to perform this action.",
+            'code' => $notificationRoute ? 'NOTIFICATION_PERMISSION_DENIED' : 'PERMISSION_DENIED',
         ], Response::HTTP_FORBIDDEN);
     }
 }

@@ -36,8 +36,26 @@ return [
     ],
 
     'twilio' => [
+        'sid' => env('TWILIO_SID'),
         'auth_token' => env('TWILIO_AUTH_TOKEN'),
+        'sms_from' => env('TWILIO_SMS_FROM'),
+        'whatsapp_from' => env('TWILIO_WHATSAPP_FROM'),
         'webhook_url' => env('TWILIO_WEBHOOK_URL'),
+        'status_callback_url' => env('TWILIO_STATUS_CALLBACK_URL'),
+    ],
+
+    'whatsapp_web_js' => [
+        'enabled' => env('WHATSAPP_WEB_JS_ENABLED', true),
+        'service_url' => env('WHATSAPP_SERVICE_URL'),
+        'service_token' => env('WHATSAPP_SERVICE_TOKEN'),
+        'auth_path' => env('WWEBJS_AUTH_PATH', storage_path('whatsapp-session')),
+        'session_client_id' => env('WWEBJS_CLIENT_ID', 'nexa-erp'),
+    ],
+
+    'webpush' => [
+        'subject' => env('WEBPUSH_SUBJECT', 'mailto:admin@example.com'),
+        'public_key' => env('WEBPUSH_VAPID_PUBLIC_KEY'),
+        'private_key' => env('WEBPUSH_VAPID_PRIVATE_KEY'),
     ],
 
     

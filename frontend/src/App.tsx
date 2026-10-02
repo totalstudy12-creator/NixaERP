@@ -31,6 +31,7 @@ import {
   MarketingPage,
   BannerPosterPage,
   QRPaymentPage,
+  NotificationsPage,
   SettingsPage,
   ProfilePage,
   UserRoleManagementPage,
@@ -275,6 +276,11 @@ const protectedRoutes: ProtectedRouteDef[] = [
     path: 'settings',
     element: <SettingsPage />,
     permissions: ['settings.view', 'view settings'],
+  },
+  {
+    path: 'notifications',
+    element: <NotificationsPage />,
+    permissions: ['notifications.view', 'view notifications'],
   },
   {
     path: 'security',

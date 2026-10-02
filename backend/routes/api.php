@@ -25,6 +25,7 @@ use App\Http\Controllers\Api\InboxController;
 use App\Http\Controllers\Api\InvoiceController;
 use App\Http\Controllers\Api\MarketingController;
 use App\Http\Controllers\Api\McpController;
+use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\OfflineSyncController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\PayrollController;
@@ -103,6 +104,7 @@ Route::post('biometric/device/{device}/enroll-status', [BiometricDeviceControlle
 
 Route::get('/auth/{provider}/callback',                 [SocialAuthController::class, 'callback']);
 Route::post('/webhooks/whatsapp', [WhatsAppWebhookController::class, 'handle'])->middleware('throttle:60,1');
+Route::post('/webhooks/twilio/notification-status', [NotificationController::class, 'twilioStatus'])->middleware('throttle:120,1');
 Route::get('marketing/gbp-locations',                   [MarketingController::class, 'gbpLocations']);
 
 /* =========================================================================
@@ -524,6 +526,56 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('settings/bulk',     [SettingsController::class, 'bulkUpdate'])->middleware('permission:bulk update settings');
     Route::put('settings/{key}',     [SettingsController::class, 'update'])->middleware('permission:edit settings');
     Route::delete('settings/{key}',  [SettingsController::class, 'destroy'])->middleware('permission:delete settings');
+
+    /* --------------------------- Notifications -------------------------- */
+    Route::get('notifications', [NotificationController::class, 'index'])->middleware('permission:notifications.view');
+    Route::get('notifications/unread-count', [NotificationController::class, 'unreadCount'])->middleware('permission:notifications.view');
+    Route::get('notifications/summary', [NotificationController::class, 'summaryStats'])->middleware('permission:notifications.view');
+    Route::get('notifications/providers', [NotificationController::class, 'providerStatus'])->middleware('permission:notifications.providers,notifications.view');
+    Route::get('notifications/providers/whatsapp/status', [\App\Http\Controllers\Api\WhatsAppProviderController::class, 'status'])->middleware('permission:notifications.providers,notifications.whatsapp.view');
+    Route::get('notifications/providers/whatsapp/qr', [\App\Http\Controllers\Api\WhatsAppProviderController::class, 'qr'])->middleware('permission:notifications.providers,notifications.whatsapp.view');
+    Route::post('notifications/providers/whatsapp/connect', [\App\Http\Controllers\Api\WhatsAppProviderController::class, 'connect'])->middleware('permission:notifications.whatsapp.connect,notifications.providers');
+    Route::post('notifications/providers/whatsapp/logout', [\App\Http\Controllers\Api\WhatsAppProviderController::class, 'logout'])->middleware('permission:notifications.whatsapp.logout,notifications.providers');
+    Route::post('notifications/providers/whatsapp/test', [\App\Http\Controllers\Api\WhatsAppProviderController::class, 'test'])->middleware('permission:notifications.whatsapp.test,notifications.send');
+    Route::get('notifications/deliveries', [NotificationController::class, 'deliveryLogs'])->middleware('permission:notifications.delivery,notifications.view');
+    Route::get('notifications/recipients', [NotificationController::class, 'recipientOptions'])->middleware('permission:notifications.send');
+    Route::get('notifications/{id}', [NotificationController::class, 'show'])->whereNumber('id')->middleware('permission:notifications.view');
+    Route::post('notifications/send', [NotificationController::class, 'send'])->middleware(['permission:notifications.send', 'throttle:60,1']);
+    Route::post('notifications/test', [NotificationController::class, 'sendTest'])->middleware(['permission:notifications.send', 'throttle:30,1']);
+    Route::post('notifications/attachments', [NotificationController::class, 'uploadAttachment'])->middleware(['permission:notifications.send', 'throttle:30,1']);
+    Route::post('notifications/push-subscriptions', [NotificationController::class, 'savePushSubscription']);
+    Route::delete('notifications/push-subscriptions', [NotificationController::class, 'removePushSubscriptions']);
+    Route::get('notifications/templates', [NotificationController::class, 'templates'])->middleware('permission:notifications.templates,notifications.view');
+    Route::post('notifications/templates', [NotificationController::class, 'storeTemplate'])->middleware('permission:notifications.templates');
+    Route::post('notifications/templates/{id}/test', [NotificationController::class, 'testTemplate'])->whereNumber('id')->middleware(['permission:notifications.templates', 'permission:notifications.send']);
+    Route::put('notifications/templates/{id}', [NotificationController::class, 'updateTemplate'])->whereNumber('id')->middleware('permission:notifications.templates');
+    Route::delete('notifications/templates/{id}', [NotificationController::class, 'deleteTemplate'])->whereNumber('id')->middleware('permission:notifications.templates');
+    Route::get('notifications/automation', [NotificationController::class, 'automationRules'])->middleware('permission:notifications.automation,notifications.view');
+    Route::post('notifications/automation', [NotificationController::class, 'storeAutomationRule'])->middleware('permission:notifications.automation');
+    Route::put('notifications/automation/{id}', [NotificationController::class, 'updateAutomationRule'])->whereNumber('id')->middleware('permission:notifications.automation');
+    Route::delete('notifications/automation/{id}', [NotificationController::class, 'deleteAutomationRule'])->whereNumber('id')->middleware('permission:notifications.automation');
+    Route::get('notifications/scheduled', [NotificationController::class, 'scheduledNotifications'])->middleware('permission:notifications.schedule,notifications.view');
+    Route::post('notifications/scheduled', [NotificationController::class, 'storeScheduledNotification'])->middleware('permission:notifications.schedule');
+    Route::put('notifications/scheduled/{id}', [NotificationController::class, 'updateScheduledNotification'])->whereNumber('id')->middleware('permission:notifications.schedule');
+    Route::delete('notifications/scheduled/{id}', [NotificationController::class, 'deleteScheduledNotification'])->whereNumber('id')->middleware('permission:notifications.schedule');
+    Route::get('notifications/queue', [NotificationController::class, 'queueItems'])->middleware('permission:notifications.queue,notifications.view');
+    Route::post('notifications/queue/{id}/retry', [NotificationController::class, 'retryQueueItem'])->whereNumber('id')->middleware('permission:notifications.queue');
+    Route::post('notifications/queue/{id}/cancel', [NotificationController::class, 'cancelQueueItem'])->whereNumber('id')->middleware('permission:notifications.queue');
+    Route::post('notifications/{id}/read', [NotificationController::class, 'markRead'])->whereNumber('id')->middleware('permission:notifications.view');
+    Route::post('notifications/{id}/unread', [NotificationController::class, 'markUnread'])->whereNumber('id')->middleware('permission:notifications.view');
+    Route::post('notifications/{id}/archive', [NotificationController::class, 'archive'])->whereNumber('id')->middleware('permission:notifications.view');
+    Route::delete('notifications/{id}', [NotificationController::class, 'destroy'])->whereNumber('id')->middleware('permission:notifications.view');
+    Route::post('notifications/read-all', [NotificationController::class, 'markAllRead'])->middleware('permission:notifications.view');
+    Route::get('notifications/preferences', [NotificationController::class, 'preferences'])->middleware('permission:notifications.preferences,notifications.view');
+    Route::put('notifications/preferences', [NotificationController::class, 'updatePreferences'])->middleware('permission:notifications.preferences');
+    Route::get('notifications/fallback', [NotificationController::class, 'fallback'])->middleware('permission:notifications.providers,notifications.view');
+    Route::put('notifications/fallback', [NotificationController::class, 'updateFallback'])->middleware('permission:notifications.manage');
+    Route::get('notification-settings', [NotificationController::class, 'settings'])->middleware('permission:notifications.manage,notifications.view');
+    Route::put('notification-settings', [NotificationController::class, 'updateSettings'])->middleware('permission:notifications.manage');
+
+    Route::get('daily-summary/settings', [NotificationController::class, 'settings'])->middleware('permission:daily_summary.configure,reports.daily_summary.configure');
+    Route::put('daily-summary/settings', [NotificationController::class, 'updateSettings'])->middleware('permission:daily_summary.configure,reports.daily_summary.configure');
+    Route::get('daily-summary', [NotificationController::class, 'dailySummary'])->middleware(['permission:daily_summary.view,reports.daily_summary.view', 'permission:view dashboard profit']);
 
     /* --------------------------- API Tokens ---------------------------- */
     Route::prefix('api-tokens')->middleware('permission:view settings')->group(function () {

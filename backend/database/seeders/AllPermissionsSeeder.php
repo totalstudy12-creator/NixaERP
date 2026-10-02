@@ -367,6 +367,25 @@ class AllPermissionsSeeder extends Seeder
             'delete permissions',
 
             // =====================================================================
+            // NOTIFICATIONS
+            // =====================================================================
+            'notifications.view',
+            'notifications.manage',
+            'notifications.send',
+            'notifications.templates',
+            'notifications.automation',
+            'notifications.schedule',
+            'notifications.queue',
+            'notifications.delivery',
+            'notifications.preferences',
+            'notifications.providers',
+            'notifications.whatsapp.view',
+            'notifications.whatsapp.connect',
+            'notifications.whatsapp.send',
+            'notifications.whatsapp.logout',
+            'notifications.whatsapp.test',
+
+            // =====================================================================
             // INCOME & EXPENSES
             // =====================================================================
             'income_expenses.view',

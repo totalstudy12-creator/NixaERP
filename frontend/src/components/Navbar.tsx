@@ -113,6 +113,8 @@ export function Navbar({ onMenuClick }: NavbarProps) {
   const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
+  const [notificationUnreadCount, setNotificationUnreadCount] = useState(0);
+  const [notificationsError, setNotificationsError] = useState<string | null>(null);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
   const notificationsRef = useRef<HTMLDivElement>(null);
@@ -120,32 +122,42 @@ export function Navbar({ onMenuClick }: NavbarProps) {
 
   /* -------------------- Fetch notifications -------------------- */
 
-  useEffect(() => {
-    let active = true;
+  const loadNotifications = useCallback(async () => {
     setNotificationsLoading(true);
-
-    apiClient
-      .request('GET', '/notifications?per_page=10')
-      .then((res: unknown) => {
-        if (!active) return;
-        const list = Array.isArray(res)
-          ? res
-          : ((res as { data?: NotificationItem[] })?.data ?? []);
-        setNotifications(list);
-      })
-      .catch(() => {
-        if (active) setNotifications([]);
-      })
-      .finally(() => {
-        if (active) setNotificationsLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
+    try {
+      const [inboxResponse, unreadResponse] = await Promise.all([
+        apiClient.request('GET', '/notifications?per_page=10'),
+        apiClient.request('GET', '/notifications/unread-count'),
+      ]);
+      const list = Array.isArray(inboxResponse) ? inboxResponse : (inboxResponse as { data?: unknown })?.data;
+      const unreadData = (unreadResponse as { data?: { count?: number } })?.data;
+      if (!Array.isArray(list) || typeof unreadData?.count !== 'number') {
+        throw new Error('The notification service returned an invalid response.');
+      }
+      setNotifications(list as NotificationItem[]);
+      setNotificationUnreadCount(unreadData.count);
+      setNotificationsError(null);
+    } catch (error) {
+      const apiError = error as { status?: number; backendMessage?: string; message?: string };
+      setNotificationsError(apiError.status === 403
+        ? "You don't have permission to view notifications."
+        : apiError.status === 500
+          ? 'The server could not load notifications.'
+          : !apiError.status
+            ? 'Unable to connect to the notification service.'
+            : apiError.backendMessage ?? apiError.message ?? 'Unable to load notifications.');
+    } finally {
+      setNotificationsLoading(false);
+    }
   }, []);
 
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  useEffect(() => {
+    void loadNotifications();
+    const refreshTimer = window.setInterval(() => void loadNotifications(), 60_000);
+    return () => window.clearInterval(refreshTimer);
+  }, [loadNotifications]);
+
+  const unreadCount = notificationUnreadCount;
 
   /* -------------------- Logout -------------------- */
 
@@ -312,6 +324,13 @@ export function Navbar({ onMenuClick }: NavbarProps) {
                     <div className="px-4 py-8 text-center text-xs text-slate-500">
                       Loading…
                     </div>
+                  ) : notifications.length === 0 && notificationsError ? (
+                    <div className="px-4 py-8 text-center" role="alert">
+                      <p className="text-xs text-rose-300">{notificationsError}</p>
+                      <button type="button" onClick={() => void loadNotifications()} className="mt-3 text-xs font-semibold text-slate-200 underline underline-offset-2">
+                        Retry
+                      </button>
+                    </div>
                   ) : notifications.length === 0 ? (
                     <div className="flex flex-col items-center justify-center px-4 py-10 text-center">
                       <div className="grid h-10 w-10 place-items-center rounded-xl bg-slate-800 text-slate-500">
@@ -364,6 +383,19 @@ export function Navbar({ onMenuClick }: NavbarProps) {
                       ))}
                     </ul>
                   )}
+                </div>
+
+                <div className="border-t border-slate-800 p-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsNotificationsOpen(false);
+                      navigate('/notifications');
+                    }}
+                    className="flex w-full items-center justify-center rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-700"
+                  >
+                    View all notifications
+                  </button>
                 </div>
               </div>
             )}

@@ -1144,6 +1144,9 @@ class ReportService
             ->whereRaw('COALESCE(paid_amount, 0) < COALESCE(total_amount, 0)');
 
         $total = $query->count();
+        $totalOutstanding = (float) (clone $query)
+            ->selectRaw('SUM(total_amount - COALESCE(paid_amount, 0)) as total_outstanding')
+            ->value('total_outstanding');
         $invoices = $query->orderBy('due_date', 'ASC')
             ->skip(($page - 1) * $perPage)
             ->take($perPage)
@@ -1161,6 +1164,8 @@ class ReportService
                 'overdue_days' => $inv->due_date ? max(0, (int) \Carbon\Carbon::parse($inv->due_date)->diffInDays(now())) : 0,
                 'status' => $inv->status,
             ])->toArray(),
+            'total_outstanding' => round($totalOutstanding, 2),
+            'total_count' => $total,
             'meta' => [
                 'current_page' => $page,
                 'per_page' => $perPage,
@@ -1286,6 +1291,9 @@ class ReportService
             });
 
         $total = $query->count();
+        $totalOutstanding = (float) (clone $query)
+            ->selectRaw('SUM(grand_total - COALESCE(paid_amount, 0)) as total_outstanding')
+            ->value('total_outstanding');
         $purchases = $query->orderBy('due_date', 'ASC')
             ->skip(($page - 1) * $perPage)
             ->take($perPage)
@@ -1303,6 +1311,8 @@ class ReportService
                 'overdue_days' => $pur->due_date ? max(0, (int) \Carbon\Carbon::parse($pur->due_date)->diffInDays(now())) : 0,
                 'status' => $pur->status,
             ])->toArray(),
+            'total_outstanding' => round($totalOutstanding, 2),
+            'total_count' => $total,
             'meta' => [
                 'current_page' => $page,
                 'per_page' => $perPage,

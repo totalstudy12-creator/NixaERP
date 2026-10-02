@@ -1,0 +1,13 @@
+{
+  "name": "raptore-whatsapp-service",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.33.0"
+  }
+}

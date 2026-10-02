@@ -90,7 +90,28 @@ interface McpStatus {
   version: string;
 }
 
-type ActiveTab = 'settings' | 'printer' | 'api' | 'ai' | 'security' | 'operations';
+interface NotificationProviderStatus {
+  configured: boolean;
+  ready: boolean;
+  detail: string;
+  subscriptions?: number;
+  status?: string;
+  connected?: boolean;
+  last_error?: string | null;
+}
+
+interface WhatsAppConnectionStatus {
+  provider: string;
+  status: string;
+  configured: boolean;
+  connected: boolean;
+  ready: boolean;
+  authenticated: boolean;
+  qr_available: boolean;
+  last_error?: string | null;
+}
+
+type ActiveTab = 'settings' | 'providers' | 'printer' | 'api' | 'ai' | 'security' | 'operations';
 
 interface AiConfig {
   provider: 'gemini';
@@ -221,6 +242,22 @@ function normalizeSpeechProvider(value: unknown): SpeechProviderArg {
   if (provider === 'browser') return 'browser';
   if (provider === 'cloud' || provider === 'elevenlabs') return 'cloud';
   return 'auto';
+}
+
+function whatsappStatusText(status?: string): string {
+  switch (status) {
+    case 'not_configured': return 'WhatsApp Web.js is not configured.';
+    case 'starting':
+    case 'initializing': return 'Connecting to WhatsApp…';
+    case 'qr_required': return 'Scan the QR code to connect WhatsApp.';
+    case 'authenticating':
+    case 'authenticated': return 'Authenticating…';
+    case 'ready': return 'WhatsApp connected and ready.';
+    case 'disconnected': return 'WhatsApp is disconnected.';
+    case 'auth_failure': return 'WhatsApp authentication failed. Please reconnect.';
+    case 'service_unavailable': return 'WhatsApp notification service is unavailable.';
+    default: return 'WhatsApp provider status is unavailable.';
+  }
 }
 
 function inferType(key: string): SettingItem['type'] {
@@ -392,6 +429,11 @@ export function SettingsPage() {
   const canApiView        = can(PERMISSIONS.API_VIEW);
   const canMcpManage      = can(PERMISSIONS.MCP_MANAGE);
   const canSecurityView   = can(PERMISSIONS.SECURITY_VIEW);
+  const canViewChannelProviders = can(['notifications.providers', 'notifications.view']);
+  const canViewWhatsAppProvider = can(['notifications.whatsapp.view', 'notifications.providers']);
+  const canViewProviders  = canViewChannelProviders || canViewWhatsAppProvider;
+  const canConnectWhatsApp = can(['notifications.whatsapp.connect', 'notifications.providers']);
+  const canLogoutWhatsApp = can(['notifications.whatsapp.logout', 'notifications.providers']);
 
   // ---------------------------------------------------------------------------
   // General settings state
@@ -407,6 +449,12 @@ export function SettingsPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [showAuthToken, setShowAuthToken] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>('settings');
+  const [notificationProviders, setNotificationProviders] = useState<Record<string, NotificationProviderStatus>>({});
+  const [whatsappConnection, setWhatsappConnection] = useState<WhatsAppConnectionStatus | null>(null);
+  const [whatsappQr, setWhatsappQr] = useState<string | null>(null);
+  const [providersLoading, setProvidersLoading] = useState(false);
+  const [providerAction, setProviderAction] = useState<'connect' | 'logout' | null>(null);
+  const [providerError, setProviderError] = useState('');
 
   // ---------------------------------------------------------------------------
   // Voice state
@@ -691,6 +739,84 @@ export function SettingsPage() {
     },
     [showError, canViewSettings]
   );
+
+  const loadProviderSettings = useCallback(async (showLoading = true) => {
+    if (!canViewProviders) return;
+    if (showLoading) setProvidersLoading(true);
+    setProviderError('');
+
+    try {
+      const [channelResponse, whatsappResponse] = await Promise.all([
+        canViewChannelProviders
+          ? apiClient.request('GET', '/notifications/providers')
+          : Promise.resolve(null),
+        canViewWhatsAppProvider
+          ? apiClient.request('GET', '/notifications/providers/whatsapp/status')
+          : Promise.resolve(null),
+      ]);
+      const channelData = channelResponse
+        ? (channelResponse as { data?: unknown })?.data ?? channelResponse
+        : {};
+      const whatsappData = (whatsappResponse as { data?: unknown })?.data ?? whatsappResponse;
+
+      if (!channelData || typeof channelData !== 'object' || Array.isArray(channelData)) {
+        throw new Error('The notification provider response was invalid.');
+      }
+      setNotificationProviders(channelData as Record<string, NotificationProviderStatus>);
+      if (!whatsappData || typeof whatsappData !== 'object' || Array.isArray(whatsappData)) {
+        setWhatsappConnection(null);
+        setWhatsappQr(null);
+        return;
+      }
+
+      const whatsapp = whatsappData as WhatsAppConnectionStatus;
+      setWhatsappConnection(whatsapp);
+
+      if (whatsapp.status === 'qr_required' && whatsapp.qr_available) {
+        const qrResponse = await apiClient.request('GET', '/notifications/providers/whatsapp/qr');
+        const qrData = (qrResponse as { data?: { qr?: string } })?.data ?? qrResponse as { qr?: string };
+        setWhatsappQr(qrData?.qr || null);
+      } else {
+        setWhatsappQr(null);
+      }
+    } catch (error) {
+      const apiError = error as { backendMessage?: string; message?: string };
+      setProviderError(apiError.backendMessage || apiError.message || 'Unable to load notification provider status.');
+      setWhatsappQr(null);
+    } finally {
+      if (showLoading) setProvidersLoading(false);
+    }
+  }, [canViewChannelProviders, canViewWhatsAppProvider]);
+
+  const connectWhatsApp = useCallback(async () => {
+    if (!canConnectWhatsApp) return;
+    setProviderAction('connect');
+    try {
+      await apiClient.request('POST', '/notifications/providers/whatsapp/connect');
+      showSuccess('WhatsApp connection started', 'Provider status will update as the session initializes.');
+      await loadProviderSettings(false);
+    } catch (error) {
+      const apiError = error as { backendMessage?: string; message?: string };
+      showError('WhatsApp connection failed', apiError.backendMessage || apiError.message || 'Unable to connect WhatsApp.');
+    } finally {
+      setProviderAction(null);
+    }
+  }, [canConnectWhatsApp, loadProviderSettings, showError, showSuccess]);
+
+  const logoutWhatsApp = useCallback(async () => {
+    if (!canLogoutWhatsApp) return;
+    setProviderAction('logout');
+    try {
+      await apiClient.request('POST', '/notifications/providers/whatsapp/logout');
+      showSuccess('WhatsApp logged out', 'The provider status will refresh shortly.');
+      await loadProviderSettings(false);
+    } catch (error) {
+      const apiError = error as { backendMessage?: string; message?: string };
+      showError('WhatsApp logout failed', apiError.backendMessage || apiError.message || 'Unable to log out WhatsApp.');
+    } finally {
+      setProviderAction(null);
+    }
+  }, [canLogoutWhatsApp, loadProviderSettings, showError, showSuccess]);
 
   // ---------------------------------------------------------------------------
   // Load MCP Tokens
@@ -1050,6 +1176,13 @@ export function SettingsPage() {
     }
   }, [activeTab, loadMcpTokens, checkMcpStatus]);
 
+  useEffect(() => {
+    if (activeTab !== 'providers' || !canViewProviders) return;
+    void loadProviderSettings();
+    const interval = window.setInterval(() => void loadProviderSettings(false), 5000);
+    return () => window.clearInterval(interval);
+  }, [activeTab, canViewProviders, loadProviderSettings]);
+
   // ---------------------------------------------------------------------------
   // Tab availability (RBAC)
   // ---------------------------------------------------------------------------
@@ -1062,8 +1195,9 @@ export function SettingsPage() {
     if (canApiView) tabs.push('api');
     if (canSecurityView) tabs.push('security');
     if (canViewSettings) tabs.push('operations');
+    if (canViewProviders) tabs.push('providers');
     return tabs;
-  }, [canViewSettings, canPrinterView, canAiView, canApiView, canSecurityView]);
+  }, [canViewSettings, canPrinterView, canAiView, canApiView, canSecurityView, canViewProviders]);
 
   useEffect(() => {
     if (availableTabs.length === 0) return;
@@ -1626,12 +1760,12 @@ export function SettingsPage() {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => void loadSettings()}
+            onClick={() => activeTab === 'providers' ? void loadProviderSettings() : void loadSettings()}
             className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20 disabled:opacity-60"
-            disabled={loading}
+            disabled={activeTab === 'providers' ? providersLoading : loading}
           >
             <FiRefreshCw
-              className={loading ? 'mr-1 inline animate-spin' : 'mr-1 inline'}
+              className={(activeTab === 'providers' ? providersLoading : loading) ? 'mr-1 inline animate-spin' : 'mr-1 inline'}
               size={14}
             />
             Refresh
@@ -1675,6 +1809,17 @@ export function SettingsPage() {
           >
             <FiSettings className="mr-1 inline" size={14} />
             Settings
+          </button>
+        )}
+
+        {availableTabs.includes('providers') && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('providers')}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${activeTab === 'providers' ? 'bg-slate-900 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
+          >
+            <FiRadio className="mr-1 inline" size={14} />
+            Providers
           </button>
         )}
 
@@ -1776,6 +1921,100 @@ export function SettingsPage() {
           <FiAlertCircle size={20} />
           {error}
         </div>
+      )}
+
+      {activeTab === 'providers' && (
+        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center">
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">Notification providers</h2>
+              <p className="mt-1 text-xs text-slate-500">Email and messaging credentials are managed by the server.</p>
+            </div>
+            {canConnectWhatsApp && (
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void connectWhatsApp()}
+                  disabled={providerAction !== null}
+                  className="rounded-lg bg-emerald-700 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
+                >
+                  {providerAction === 'connect' ? 'Connecting…' : whatsappConnection?.ready ? 'Reconnect WhatsApp' : 'Connect WhatsApp'}
+                </button>
+                {canLogoutWhatsApp && whatsappConnection?.configured && (
+                  <button
+                    type="button"
+                    onClick={() => void logoutWhatsApp()}
+                    disabled={providerAction !== null}
+                    className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                  >
+                    {providerAction === 'logout' ? 'Logging out…' : 'Logout'}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {providerError && (
+            <div role="alert" className="mx-5 mt-4 flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+              <FiAlertCircle className="mt-0.5 shrink-0" />
+              <span>{providerError}</span>
+            </div>
+          )}
+
+          <div className="divide-y divide-slate-100">
+            {[
+              { key: 'whatsapp', label: 'WhatsApp Web.js' },
+              { key: 'email', label: 'Email' },
+              { key: 'sms', label: 'SMS / Twilio' },
+              { key: 'push', label: 'Browser Push' },
+              { key: 'in_app', label: 'In-App' },
+            ].filter((provider) => provider.key === 'whatsapp' ? canViewWhatsAppProvider : canViewChannelProviders).map((provider) => {
+              const channel = notificationProviders[provider.key];
+              const session = provider.key === 'whatsapp' ? whatsappConnection : null;
+              const configured = session?.configured ?? channel?.configured ?? false;
+              const ready = session?.ready ?? channel?.ready ?? false;
+              const detail = session
+                ? session.last_error || whatsappStatusText(session.status)
+                : channel?.detail || 'Provider status is unavailable.';
+              const state = session
+                ? session.status === 'ready' ? 'Connected' : session.status.replace(/_/g, ' ')
+                : ready ? 'Ready' : configured ? 'Setup needed' : 'Not configured';
+
+              return (
+                <div key={provider.key}>
+                  <div className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-sm font-semibold text-slate-800">{provider.label}</h3>
+                        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${ready ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : configured ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+                          {state}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">{detail}</p>
+                      {provider.key === 'push' && channel?.subscriptions !== undefined && (
+                        <p className="mt-1 text-[11px] text-slate-400">{channel.subscriptions} device subscriptions</p>
+                      )}
+                    </div>
+                    {provider.key === 'whatsapp' && whatsappConnection?.status === 'qr_required' && (
+                      <div className="w-full rounded-lg border border-slate-200 bg-slate-50 p-4 sm:w-72">
+                        <p className="text-center text-xs font-semibold text-slate-700">Scan QR code with WhatsApp</p>
+                        {whatsappQr ? (
+                          <img src={whatsappQr} alt="WhatsApp connection QR code" className="mx-auto mt-3 h-40 w-40 bg-white p-2" />
+                        ) : (
+                          <p className="py-10 text-center text-xs text-slate-500">{providersLoading ? 'Loading current QR…' : 'Waiting for a current QR code…'}</p>
+                        )}
+                        <p className="mt-2 text-center text-[11px] text-slate-500">WhatsApp → Linked devices → Link a device → Scan QR code</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {providersLoading && (
+            <div className="border-t border-slate-100 px-5 py-3 text-xs text-slate-500">Refreshing provider status…</div>
+          )}
+        </section>
       )}
 
       {/* SETTINGS TAB */}

@@ -359,12 +359,14 @@ export const apiClient = {
     options?: any
   ): Promise<T> {
     const token = useAuthStore.getState().token;
+    const isFormData = typeof FormData !== 'undefined' && data instanceof FormData;
 
     const headers: Record<string, string> = {
       Accept: 'application/json',
-      'Content-Type': 'application/json',
       ...(options?.headers || {}),
     };
+
+    if (!isFormData) headers['Content-Type'] = 'application/json';
 
     if (token) {
       headers.Authorization = `Bearer ${token}`;
@@ -376,7 +378,7 @@ export const apiClient = {
     };
 
     if (data !== undefined && data !== null) {
-      requestOptions.body = JSON.stringify(data);
+      requestOptions.body = isFormData ? data : JSON.stringify(data);
     }
 
     const requestUrl = `${API_BASE}${normalizeEndpoint(endpoint)}`;

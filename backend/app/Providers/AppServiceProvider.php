@@ -2,6 +2,11 @@
 
 namespace App\Providers;
 
+use App\Models\Customer;
+use App\Models\FinancialEntry;
+use App\Models\Invoice;
+use App\Models\Payment;
+use App\Models\PurchaseInvoice;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Http\Request;
@@ -26,6 +31,7 @@ class AppServiceProvider extends ServiceProvider
     {
         $this->registerRateLimiters();
         $this->registerSchedules();
+        $this->registerNotificationEvents();
     }
 
     /**
@@ -102,5 +108,56 @@ class AppServiceProvider extends ServiceProvider
             ->everyFifteenMinutes()
             ->name('mark-offline-devices')
             ->withoutOverlapping();
+
+        $schedule
+            ->call(fn () => app(\App\Services\NotificationScheduleService::class)->runDueSchedules())
+            ->everyMinute()
+            ->name('process-notification-schedules')
+            ->withoutOverlapping();
+
+        $schedule
+            ->call(fn () => app(\App\Services\DailySummaryService::class)->dispatchDueSummary())
+            ->everyMinute()
+            ->name('dispatch-daily-admin-summary')
+            ->withoutOverlapping();
+
+        $schedule
+            ->call(fn () => app(\App\Services\NotificationAutomationService::class)->dispatchOverdueInvoices())
+            ->dailyAt('09:00')
+            ->name('notify-overdue-invoices')
+            ->withoutOverlapping();
+    }
+
+    private function registerNotificationEvents(): void
+    {
+        Invoice::created(function (Invoice $invoice) {
+            $automation = app(\App\Services\NotificationAutomationService::class);
+            $automation->queueModelEvent('invoice.created', $invoice);
+            if (in_array(strtolower((string) $invoice->status), ['paid', 'completed'], true)) $automation->queueModelEvent('invoice.paid', $invoice);
+        });
+        Invoice::updated(function (Invoice $invoice) {
+            if ($invoice->wasChanged('status') && in_array(strtolower((string) $invoice->status), ['paid', 'completed'], true)) {
+                app(\App\Services\NotificationAutomationService::class)->queueModelEvent('invoice.paid', $invoice);
+            }
+        });
+        Payment::created(function (Payment $payment) {
+            if (in_array(strtolower((string) $payment->status), ['paid', 'completed', 'success'], true)) {
+                app(\App\Services\NotificationAutomationService::class)->queueModelEvent('payment.received', $payment);
+            }
+        });
+        Customer::created(fn (Customer $customer) => app(\App\Services\NotificationAutomationService::class)->queueModelEvent('customer.created', $customer));
+        PurchaseInvoice::created(fn (PurchaseInvoice $purchase) => app(\App\Services\NotificationAutomationService::class)->queueModelEvent('purchase.created', $purchase));
+        FinancialEntry::created(function (FinancialEntry $entry) {
+            if ($entry->direction === 'expense') app(\App\Services\NotificationAutomationService::class)->queueModelEvent('expense.created', $entry);
+        });
+        FinancialEntry::updated(function (FinancialEntry $entry) {
+            if (! $entry->wasChanged('status') || $entry->direction !== 'expense') return;
+            $event = match (strtolower((string) $entry->status)) {
+                'approved' => 'expense.approved',
+                'rejected' => 'expense.rejected',
+                default => null,
+            };
+            if ($event) app(\App\Services\NotificationAutomationService::class)->queueModelEvent($event, $entry);
+        });
     }
 }
