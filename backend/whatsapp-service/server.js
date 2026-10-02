@@ -9,7 +9,7 @@ const { Client, LocalAuth } = whatsappWeb;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const host = process.env.WHATSAPP_SERVICE_HOST || '127.0.0.1';
-const port = Number(process.env.WHATSAPP_SERVICE_PORT || 3010);
+const port = Number(process.env.PORT || process.env.WHATSAPP_SERVICE_PORT || 3010);
 const token = process.env.WHATSAPP_SERVICE_TOKEN || '';
 const authPath = process.env.WWEBJS_AUTH_PATH || path.resolve(__dirname, '../storage/whatsapp-session');
 const clientId = process.env.WWEBJS_CLIENT_ID || 'nexa-erp';
@@ -28,6 +28,15 @@ const state = {
   last_error_at: null,
 };
 
+const describeRuntimeError = (error) => {
+  const message = error?.message || 'WhatsApp runtime error.';
+  const missingLibrary = message.match(/error while loading shared libraries:\s*([^:]+): cannot open shared object file/i);
+
+  if (!missingLibrary) return message;
+
+  return `Chromium cannot start because the server is missing ${missingLibrary[1]}. Install the matching Linux package or run this worker on a host/container with Chromium dependencies; shared cPanel hosting may not permit system package installation.`;
+};
+
 let client = null;
 let clientInitialization = null;
 
@@ -38,7 +47,7 @@ const invalidateClient = (activeClient, error) => {
   state.authenticated = false;
   state.qr_available = false;
   state.qr = null;
-  state.last_error = error?.message || 'WhatsApp runtime error.';
+  state.last_error = describeRuntimeError(error);
   state.last_error_at = new Date().toISOString();
 
   if (client === activeClient) {
@@ -153,7 +162,7 @@ const createClient = () => {
     state.authenticated = false;
     state.qr_available = false;
     state.qr = null;
-    state.last_error = error?.message || 'WhatsApp runtime error.';
+    state.last_error = describeRuntimeError(error);
     state.last_error_at = new Date().toISOString();
     client = null;
     clientInitialization = null;
@@ -248,7 +257,7 @@ app.post('/connect', authorize, async (req, res) => {
     return res.json({ success: true, data: passportQrResponse() });
   } catch (error) {
     state.status = 'error';
-    state.last_error = error.message;
+    state.last_error = describeRuntimeError(error);
     state.last_error_at = new Date().toISOString();
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -271,7 +280,7 @@ app.post('/logout', authorize, async (req, res) => {
     state.last_error_at = new Date().toISOString();
     return res.json({ success: true, data: passportQrResponse() });
   } catch (error) {
-    state.last_error = error.message;
+    state.last_error = describeRuntimeError(error);
     state.last_error_at = new Date().toISOString();
     return res.status(500).json({ success: false, error: error.message });
   }
@@ -338,7 +347,7 @@ const boot = async () => {
     await ensureClient();
   } catch (error) {
     state.status = 'error';
-    state.last_error = error.message;
+    state.last_error = describeRuntimeError(error);
     state.last_error_at = new Date().toISOString();
   }
 };

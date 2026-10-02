@@ -175,6 +175,15 @@ All secret values remain in the backend `.env` and must not be embedded in the f
 - Confirm `WHATSAPP_SERVICE_TOKEN` matches exactly.
 - Check `WWEBJS_AUTH_PATH` permissions and session folder access.
 
+### cPanel Chromium error: missing `libatk-bridge-2.0.so.0`
+
+This is a missing Linux system library, not an npm dependency. `npm install` cannot install it, and changing `CHROME_BIN` will not help unless the alternate browser has all required shared libraries.
+
+- Ask the hosting provider to install the package that supplies `libatk-bridge-2.0.so.0` and the other Puppeteer/Chromium runtime dependencies, and confirm that headless Chromium is supported for Node.js applications.
+- Restart the Node.js application after the host installs the libraries. Check the worker's `/health` and `/status` endpoints; its status error should identify the missing dependency.
+- If shared hosting does not allow those system packages or a persistent Node.js process, run the WhatsApp worker on a VPS/container with Chromium dependencies and configure Laravel's `WHATSAPP_SERVICE_URL` to reach it over a restricted network connection.
+- If neither option is available, set `WHATSAPP_WEB_JS_ENABLED=false` and use another supported messaging provider, such as Twilio.
+
 ### Queue jobs are not processing
 
 - Start `php artisan queue:work` in a separate terminal.
