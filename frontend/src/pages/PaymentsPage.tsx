@@ -18,6 +18,7 @@ import {
   FileText,
   Filter,
   GitBranch,
+  Lock,
   BookOpen,
   Building2,
   Landmark,
@@ -35,6 +36,8 @@ import {
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 import { formatDate, formatDateTime } from '../utils/date';
 
 import { Badge } from '@/components/ui/badge';
@@ -57,23 +60,28 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
-type PaymentMethod = 'qr' | 'bank_transfer' | 'cash' | 'card' | 'upi';
+/* ------------------------------------------------------------------ */
+/* Types                                                              */
+/* ------------------------------------------------------------------ */
+
+type PaymentMethod =
+  | 'qr'
+  | 'bank_transfer'
+  | 'cash'
+  | 'card'
+  | 'upi'
+  | 'cheque'
+  | 'net_banking'
+  | 'wallet'
+  | 'other'
+  | (string & {}); // allow any additional value coming from the API
+
 type PaymentStatus = 'pending' | 'completed' | 'failed' | 'reconciled';
 type PaymentDirection = 'inward' | 'outward';
 type BillType = 'sales' | 'purchase' | 'other' | 'unlinked';
 
-interface Company {
-  id: number;
-  name: string;
-  code?: string | null;
-}
-
-interface Branch {
-  id: number;
-  company_id: number;
-  name: string;
-  code?: string | null;
-}
+interface Company { id: number; name: string; code?: string | null; }
+interface Branch { id: number; company_id: number; name: string; code?: string | null; }
 
 interface Payment {
   id: number;
@@ -91,41 +99,21 @@ interface Payment {
   payment_date?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
-
   company_name?: string | null;
   branch_name?: string | null;
-
   invoice_id?: number | null;
   sales_invoice_id?: number | null;
   purchase_invoice_id?: number | null;
-
   invoice_no?: string | null;
   bill_no?: string | null;
   sales_invoice_no?: string | null;
   purchase_invoice_no?: string | null;
   bill_type?: string | null;
-
-  invoice?: {
-    id?: number | null;
-    invoice_no?: string | null;
-    bill_no?: string | null;
-  } | null;
-
-  sales_invoice?: {
-    id?: number | null;
-    invoice_no?: string | null;
-    bill_no?: string | null;
-  } | null;
-
-  purchase_invoice?: {
-    id?: number | null;
-    invoice_no?: string | null;
-    bill_no?: string | null;
-  } | null;
-
+  invoice?: { id?: number | null; invoice_no?: string | null; bill_no?: string | null; } | null;
+  sales_invoice?: { id?: number | null; invoice_no?: string | null; bill_no?: string | null; } | null;
+  purchase_invoice?: { id?: number | null; invoice_no?: string | null; bill_no?: string | null; } | null;
   customer_name?: string | null;
   supplier_name?: string | null;
-
   [key: string]: unknown;
 }
 
@@ -144,14 +132,6 @@ interface PaymentForm {
   remarks: string;
 }
 
-/**
- * Row shape used by the "Apply to invoice" picker.
- *
- * The invoice index endpoint (`InvoiceController@index`) returns each row
- * with `received_amount` and `outstanding_amount` precomputed via a
- * correlated sub-select — so we can rely on them here and fall back to
- * client-side math only for defensive purposes.
- */
 interface DueInvoice {
   id: number;
   invoice_no: string;
@@ -159,11 +139,7 @@ interface DueInvoice {
   branch_id?: number | null;
   customer_id?: number;
   customer_name?: string | null;
-  customer?: {
-    id?: number;
-    name?: string | null;
-    email?: string | null;
-  } | null;
+  customer?: { id?: number; name?: string | null; email?: string | null; } | null;
   total_amount: number | string;
   received_amount?: number | string | null;
   outstanding_amount?: number | string | null;
@@ -175,204 +151,186 @@ interface DueInvoice {
   [key: string]: unknown;
 }
 
+/* ------------------------------------------------------------------ */
+/* Constants                                                          */
+/* ------------------------------------------------------------------ */
+
 const PER_PAGE = [15, 25, 50, 100] as const;
-const HEAD =
-  'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
+const HEAD = 'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
 
-const STATUS: Record<
-  PaymentStatus,
-  { label: string; cls: string; dot: string }
-> = {
-  pending: {
-    label: 'Pending',
-    cls: 'border-amber-200 bg-amber-50 text-amber-700',
-    dot: 'bg-amber-500',
-  },
-  completed: {
-    label: 'Completed',
-    cls: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-    dot: 'bg-emerald-500',
-  },
-  failed: {
-    label: 'Failed',
-    cls: 'border-rose-200 bg-rose-50 text-rose-700',
-    dot: 'bg-rose-500',
-  },
-  reconciled: {
-    label: 'Reconciled',
-    cls: 'border-indigo-200 bg-indigo-50 text-indigo-700',
-    dot: 'bg-indigo-500',
-  },
+const STATUS: Record<PaymentStatus, { label: string; cls: string; dot: string }> = {
+  pending:    { label: 'Pending',    cls: 'border-amber-200 bg-amber-50 text-amber-700',     dot: 'bg-amber-500' },
+  completed:  { label: 'Completed',  cls: 'border-emerald-200 bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500' },
+  failed:     { label: 'Failed',     cls: 'border-rose-200 bg-rose-50 text-rose-700',       dot: 'bg-rose-500' },
+  reconciled: { label: 'Reconciled', cls: 'border-indigo-200 bg-indigo-50 text-indigo-700', dot: 'bg-indigo-500' },
 };
 
-const n = (v: unknown) => {
-  const x = Number(v);
-  return Number.isFinite(x) ? x : 0;
+/**
+ * Canonical payment methods that we always show as filter options,
+ * even when no payment in the current dataset uses them.
+ */
+const CANONICAL_METHODS: PaymentMethod[] = [
+  'qr',
+  'upi',
+  'bank_transfer',
+  'cash',
+  'card',
+  'cheque',
+  'net_banking',
+  'wallet',
+  'other',
+];
+
+/** Human-friendly labels for known methods. */
+const METHOD_LABELS: Record<string, string> = {
+  qr: 'QR Code',
+  upi: 'UPI',
+  bank_transfer: 'Bank Transfer',
+  cash: 'Cash',
+  card: 'Card',
+  cheque: 'Cheque',
+  net_banking: 'Net Banking',
+  wallet: 'Wallet',
+  other: 'Other',
 };
+
+/* ------------------------------------------------------------------ */
+/* Payment method normalization — the core fix                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Normalize ANY payment-method value coming from the API or the form
+ * into a canonical lowercase-underscore key.
+ *
+ *   "UPI"              → "upi"
+ *   " Cash "           → "cash"
+ *   "Bank Transfer"    → "bank_transfer"
+ *   "bank-transfer"    → "bank_transfer"
+ *   "net banking"      → "net_banking"
+ *   "net_banking"      → "net_banking"
+ *   "QR Code"          → "qr_code" (still usable; label falls back)
+ */
+function methodKey(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+/** Pretty label for any method key (known or unknown). */
+function methodLabel(value: unknown): string {
+  const key = methodKey(value);
+  if (!key) return '—';
+  if (METHOD_LABELS[key]) return METHOD_LABELS[key];
+  return key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/* ------------------------------------------------------------------ */
+/* Other helpers                                                      */
+/* ------------------------------------------------------------------ */
+
+const n = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
 
 const money = (v: unknown) =>
-  new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    maximumFractionDigits: 2,
-  }).format(n(v));
+  new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(n(v));
 
 const today = () => {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
-    d.getDate(),
-  ).padStart(2, '0')}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
 const addDays = (value: string, days: number) => {
   const [y, m, d] = value.split('-').map(Number);
   const date = new Date(y, m - 1, d);
   date.setDate(date.getDate() + days);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
-    date.getDate(),
-  ).padStart(2, '0')}`;
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 };
 
 const dateText = (v?: string | null) => {
   if (!v) return '—';
-  try {
-    return formatDate(v);
-  } catch {
-    return v.slice(0, 10);
-  }
+  try { return formatDate(v); } catch { return v.slice(0, 10); }
 };
 
 const dateTimeText = (v?: string | null) => {
   if (!v) return '—';
-  try {
-    return formatDateTime(v);
-  } catch {
-    return v;
-  }
+  try { return formatDateTime(v); } catch { return v; }
 };
 
 const getDate = (p: Payment) => p.payment_date || p.created_at || '';
 
 const normalize = <T,>(response: unknown): T[] => {
   if (Array.isArray(response)) return response as T[];
-
   if (response && typeof response === 'object') {
     const r = response as { data?: unknown };
-
     if (Array.isArray(r.data)) return r.data as T[];
-
     if (r.data && typeof r.data === 'object') {
       const nested = r.data as { data?: unknown };
       if (Array.isArray(nested.data)) return nested.data as T[];
     }
   }
-
   return [];
 };
 
 const getCompany = (p: Payment, list: Company[]) =>
-  p.company_name ||
-  list.find((x) => x.id === p.company_id)?.name ||
-  '—';
+  p.company_name || list.find((x) => x.id === p.company_id)?.name || '—';
 
 const getBranch = (p: Payment, list: Branch[]) =>
-  p.branch_name ||
-  list.find((x) => x.id === p.branch_id)?.name ||
-  '—';
+  p.branch_name || list.find((x) => x.id === p.branch_id)?.name || '—';
 
 const billType = (p: Payment): BillType => {
   const type = String(p.bill_type || '').toLowerCase();
-
   if (type === 'sales' || type === 'purchase') return type;
-
-  if (p.sales_invoice_id || p.sales_invoice_no || p.sales_invoice)
-    return 'sales';
-
-  if (p.purchase_invoice_id || p.purchase_invoice_no || p.purchase_invoice)
-    return 'purchase';
-
-  if (p.invoice_id || p.invoice_no || p.bill_no || p.invoice)
-    return 'other';
-
+  if (p.sales_invoice_id || p.sales_invoice_no || p.sales_invoice) return 'sales';
+  if (p.purchase_invoice_id || p.purchase_invoice_no || p.purchase_invoice) return 'purchase';
+  if (p.invoice_id || p.invoice_no || p.bill_no || p.invoice) return 'other';
   return 'unlinked';
 };
 
 const billNo = (p: Payment) =>
-  p.sales_invoice_no ||
-  p.purchase_invoice_no ||
-  p.invoice_no ||
-  p.bill_no ||
-  p.sales_invoice?.invoice_no ||
-  p.sales_invoice?.bill_no ||
-  p.purchase_invoice?.invoice_no ||
-  p.purchase_invoice?.bill_no ||
-  p.invoice?.invoice_no ||
-  p.invoice?.bill_no ||
-  null;
+  p.sales_invoice_no || p.purchase_invoice_no || p.invoice_no || p.bill_no ||
+  p.sales_invoice?.invoice_no || p.sales_invoice?.bill_no ||
+  p.purchase_invoice?.invoice_no || p.purchase_invoice?.bill_no ||
+  p.invoice?.invoice_no || p.invoice?.bill_no || null;
 
 const billId = (p: Payment) =>
-  n(
-    p.sales_invoice_id ||
-      p.purchase_invoice_id ||
-      p.invoice_id ||
-      p.sales_invoice?.id ||
-      p.purchase_invoice?.id ||
-      p.invoice?.id,
-  ) || null;
+  n(p.sales_invoice_id || p.purchase_invoice_id || p.invoice_id ||
+    p.sales_invoice?.id || p.purchase_invoice?.id || p.invoice?.id) || null;
 
-/**
- * Outstanding amount for a due invoice row.
- * Prefers the server-computed `outstanding_amount`; falls back to
- * `max(0, total - received)` using whatever received figure is present.
- */
 const invoiceOutstanding = (inv: DueInvoice): number => {
   if (inv.outstanding_amount != null) {
     const v = Number(inv.outstanding_amount);
     if (Number.isFinite(v)) return Math.max(0, v);
   }
   const total = n(inv.total_amount);
-  const received = n(
-    inv.received_amount ?? inv.payment_received ?? inv.paid_amount,
-  );
+  const received = n(inv.received_amount ?? inv.payment_received ?? inv.paid_amount);
   return Math.max(0, total - received);
 };
 
-const invoiceCustomer = (inv: DueInvoice): string =>
-  inv.customer?.name || inv.customer_name || '—';
+const invoiceCustomer = (inv: DueInvoice): string => inv.customer?.name || inv.customer_name || '—';
 
 const createReference = () => {
   const date = new Date();
-  const stamp =
-    `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(
-      date.getDate(),
-    ).padStart(2, '0')}-${String(date.getHours()).padStart(2, '0')}${String(
-      date.getMinutes(),
-    ).padStart(2, '0')}${String(date.getSeconds()).padStart(2, '0')}`;
-
-  const random =
-    typeof crypto !== 'undefined' &&
-    typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()
-      : Math.random().toString(36).slice(2, 10).toUpperCase();
-
+  const stamp = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}-${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}${String(date.getSeconds()).padStart(2, '0')}`;
+  const random = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID().replace(/-/g, '').slice(0, 8).toUpperCase()
+    : Math.random().toString(36).slice(2, 10).toUpperCase();
   return `PAY-${stamp}-${random}`;
 };
 
 const escapeCsv = (value: unknown) => {
   const raw = String(value ?? '');
   const safe = /^[=+\-@\t\r]/.test(raw) ? `\t${raw}` : raw;
-  return /[",\n\r]/.test(safe)
-    ? `"${safe.replace(/"/g, '""')}"`
-    : safe;
+  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 };
 
+/* ------------------------------------------------------------------ */
+/* Small presentational pieces                                        */
+/* ------------------------------------------------------------------ */
+
 function Select({
-  value,
-  onChange,
-  options,
-  disabled = false,
-  label,
-  className = '',
+  value, onChange, options, disabled = false, label, className = '',
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -390,11 +348,7 @@ function Select({
         onChange={(e) => onChange(e.target.value)}
         className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 disabled:bg-slate-50 disabled:text-slate-400"
       >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
+        {options.map((o) => (<option key={o.value} value={o.value}>{o.label}</option>))}
       </select>
       <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
     </div>
@@ -403,39 +357,22 @@ function Select({
 
 function StatusBadge({ status }: { status: PaymentStatus }) {
   const s = STATUS[status] || STATUS.pending;
-
   return (
-    <Badge
-      variant="outline"
-      className={`gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${s.cls}`}
-    >
+    <Badge variant="outline" className={`gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${s.cls}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
       {s.label}
     </Badge>
   );
 }
 
-function DirectionBadge({
-  direction,
-}: {
-  direction: PaymentDirection;
-}) {
+function DirectionBadge({ direction }: { direction: PaymentDirection }) {
   const inward = direction === 'inward';
-
   return (
-    <Badge
-      variant="outline"
-      className={
-        inward
-          ? 'gap-1.5 rounded-full border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700'
-          : 'gap-1.5 rounded-full border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[11px] font-semibold text-rose-700'
-      }
-    >
-      {inward ? (
-        <ArrowDown className="h-3 w-3" />
-      ) : (
-        <ArrowUp className="h-3 w-3" />
-      )}
+    <Badge variant="outline"
+      className={inward
+        ? 'gap-1.5 rounded-full border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700'
+        : 'gap-1.5 rounded-full border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[11px] font-semibold text-rose-700'}>
+      {inward ? <ArrowDown className="h-3 w-3" /> : <ArrowUp className="h-3 w-3" />}
       {inward ? 'INWARD' : 'OUTWARD'}
     </Badge>
   );
@@ -444,48 +381,32 @@ function DirectionBadge({
 function BillBadge({ payment }: { payment: Payment }) {
   const type = billType(payment);
   const value = billNo(payment);
-
   if (type === 'unlinked') {
     return (
-      <Badge
-        variant="outline"
-        className="rounded-full border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] text-slate-500"
-      >
+      <Badge variant="outline" className="rounded-full border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] text-slate-500">
         Unlinked
       </Badge>
     );
   }
-
   return (
-    <Badge
-      variant="outline"
+    <Badge variant="outline"
       className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
         type === 'sales'
           ? 'border-indigo-200 bg-indigo-50 text-indigo-700'
           : type === 'purchase'
             ? 'border-violet-200 bg-violet-50 text-violet-700'
             : 'border-slate-200 bg-slate-50 text-slate-700'
-      }`}
-    >
-      {type === 'sales'
-        ? 'Sales'
-        : type === 'purchase'
-          ? 'Purchase'
-          : 'Bill'}
+      }`}>
+      {type === 'sales' ? 'Sales' : type === 'purchase' ? 'Purchase' : 'Bill'}
       {value ? ` · ${value}` : ''}
     </Badge>
   );
 }
 
 function Kpi({
-  title,
-  value,
-  icon: Icon,
-  tone,
+  title, value, icon: Icon, tone,
 }: {
-  title: string;
-  value: string;
-  icon: React.ElementType;
+  title: string; value: string; icon: React.ElementType;
   tone: 'indigo' | 'emerald' | 'rose' | 'amber' | 'violet' | 'blue';
 }) {
   const styles = {
@@ -496,17 +417,12 @@ function Kpi({
     violet: 'bg-violet-50 text-violet-600',
     blue: 'bg-blue-50 text-blue-600',
   };
-
   return (
     <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-            {title}
-          </p>
-          <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
-            {value}
-          </p>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">{title}</p>
+          <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">{value}</p>
         </div>
         <div className={`grid h-10 w-10 place-items-center rounded-xl ${styles[tone]}`}>
           <Icon className="h-5 w-5" />
@@ -516,8 +432,23 @@ function Kpi({
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Main component                                                     */
+/* ------------------------------------------------------------------ */
+
 export function PaymentsPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ---- RBAC capability flags ---- */
+  const canViewPayments   = isSuperAdmin || can('view payments');
+  const canCreatePayment  = isSuperAdmin || can('create payments');
+  const canEditPayment    = isSuperAdmin || can('edit payments');
+  const canDeletePayment  = isSuperAdmin || can('delete payments');
+
+  const canManagePayments = canCreatePayment || canEditPayment || canDeletePayment;
 
   const [payments, setPayments] = useState<Payment[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -573,134 +504,103 @@ export function PaymentsPage() {
 
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [sections, setSections] = useState({
-    payment: true,
-    invoice: true,
-    bank: true,
-    remarks: true,
+    payment: true, invoice: true, bank: true, remarks: true,
   });
-
-  /* ---------------- Due-invoice picker state ---------------- */
 
   const [dueInvoices, setDueInvoices] = useState<DueInvoice[]>([]);
   const [dueInvoicesLoading, setDueInvoicesLoading] = useState(false);
   const [dueInvoicesError, setDueInvoicesError] = useState<string | null>(null);
   const [dueInvoiceSearch, setDueInvoiceSearch] = useState('');
 
+  /* ---------------- Load data ---------------- */
+
   const load = useCallback(async () => {
+    if (!canViewPayments) {
+      setPayments([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
-
     try {
       const [paymentRes, companyRes, branchRes] = await Promise.all([
         apiClient.getPayments(),
         apiClient.getCompanies(),
         apiClient.getBranches(),
       ]);
-
       setPayments(normalize<Payment>(paymentRes));
       setCompanies(normalize<Company>(companyRes));
       setBranches(normalize<Branch>(branchRes));
     } catch (err) {
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'Unable to load payment records.';
-
+      const message = err instanceof Error ? err.message : 'Unable to load payment records.';
       setError(message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [canViewPayments]);
 
   useEffect(() => {
+    if (loadingUser && !hasUser) return;
     void load();
-  }, [load]);
+  }, [load, loadingUser, hasUser]);
 
   useEffect(() => {
-    const t = window.setTimeout(
-      () => setSearch(searchInput.trim().toLowerCase()),
-      250,
-    );
-
+    const t = window.setTimeout(() => setSearch(searchInput.trim().toLowerCase()), 250);
     return () => window.clearTimeout(t);
   }, [searchInput]);
 
   const companyBranches = useMemo(
-    () =>
-      companyFilter === 'all'
-        ? branches
-        : branches.filter(
-            (b) => b.company_id === Number(companyFilter),
-          ),
+    () => companyFilter === 'all' ? branches : branches.filter((b) => b.company_id === Number(companyFilter)),
     [branches, companyFilter],
   );
 
   useEffect(() => {
-    if (
-      branchFilter !== 'all' &&
-      !companyBranches.some((b) => b.id === Number(branchFilter))
-    ) {
+    if (branchFilter !== 'all' && !companyBranches.some((b) => b.id === Number(branchFilter))) {
       setBranchFilter('all');
     }
   }, [branchFilter, companyBranches]);
 
+  /**
+   * Dynamic payment-method options built from the actual dataset.
+   * Always includes the canonical list so the dropdown is stable even
+   * before data is loaded; adds any unknown methods the API returns.
+   */
+  const availableMethods = useMemo(() => {
+    const found = new Set<string>();
+    payments.forEach((p) => {
+      const k = methodKey(p.payment_method);
+      if (k) found.add(k);
+    });
+    // Merge canonical + discovered, dedupe, then sort alphabetically by label.
+    const merged = new Set<string>([...CANONICAL_METHODS.map(methodKey), ...found]);
+    return Array.from(merged).sort((a, b) => methodLabel(a).localeCompare(methodLabel(b)));
+  }, [payments]);
+
+  /* ---------------- Filtering ---------------- */
+
   const filtered = useMemo(() => {
     let rows = [...payments];
 
-    if (companyFilter !== 'all') {
-      rows = rows.filter(
-        (p) => p.company_id === Number(companyFilter),
-      );
-    }
+    if (companyFilter !== 'all') rows = rows.filter((p) => p.company_id === Number(companyFilter));
+    if (branchFilter !== 'all') rows = rows.filter((p) => p.branch_id === Number(branchFilter));
+    if (statusFilter !== 'all') rows = rows.filter((p) => p.status === statusFilter);
 
-    if (branchFilter !== 'all') {
-      rows = rows.filter(
-        (p) => p.branch_id === Number(branchFilter),
-      );
-    }
-
-    if (statusFilter !== 'all') {
-      rows = rows.filter((p) => p.status === statusFilter);
-    }
-
+    // ✅ FIXED: compare normalized keys so "UPI" === "upi" === " upi "
     if (methodFilter !== 'all') {
-      rows = rows.filter(
-        (p) => p.payment_method === methodFilter,
-      );
+      const target = methodKey(methodFilter);
+      rows = rows.filter((p) => methodKey(p.payment_method) === target);
     }
 
-    if (directionFilter !== 'all') {
-      rows = rows.filter(
-        (p) => p.payment_direction === directionFilter,
-      );
-    }
-
-    if (billFilter !== 'all') {
-      rows = rows.filter((p) => billType(p) === billFilter);
-    }
+    if (directionFilter !== 'all') rows = rows.filter((p) => p.payment_direction === directionFilter);
+    if (billFilter !== 'all') rows = rows.filter((p) => billType(p) === billFilter);
 
     if (search) {
       rows = rows.filter((p) =>
-        [
-          p.reference_no,
-          p.bank_name,
-          p.account_number,
-          p.ledger_reference,
-          p.remarks,
-          p.company_name,
-          p.branch_name,
-          p.customer_name,
-          p.supplier_name,
-          p.invoice_no,
-          p.bill_no,
-          p.sales_invoice_no,
-          p.purchase_invoice_no,
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase()
-          .includes(search),
-      );
+        [p.reference_no, p.bank_name, p.account_number, p.ledger_reference, p.remarks,
+         p.company_name, p.branch_name, p.customer_name, p.supplier_name,
+         p.invoice_no, p.bill_no, p.sales_invoice_no, p.purchase_invoice_no,
+         methodLabel(p.payment_method)]
+          .filter(Boolean).join(' ').toLowerCase().includes(search));
     }
 
     if (dateFrom || dateTo) {
@@ -716,55 +616,22 @@ export function PaymentsPage() {
     rows.sort((a, b) => {
       let x: string | number = '';
       let y: string | number = '';
-
-      if (sortBy === 'amount') {
-        x = n(a.amount);
-        y = n(b.amount);
-      } else if (sortBy === 'reference_no') {
-        x = a.reference_no || '';
-        y = b.reference_no || '';
-      } else if (sortBy === 'status') {
-        x = a.status;
-        y = b.status;
-      } else {
-        x = getDate(a);
-        y = getDate(b);
-      }
-
+      if (sortBy === 'amount') { x = n(a.amount); y = n(b.amount); }
+      else if (sortBy === 'reference_no') { x = a.reference_no || ''; y = b.reference_no || ''; }
+      else if (sortBy === 'status') { x = a.status; y = b.status; }
+      else { x = getDate(a); y = getDate(b); }
       if (typeof x === 'number' && typeof y === 'number') {
         return sortDir === 'asc' ? x - y : y - x;
       }
-
-      return sortDir === 'asc'
-        ? String(x).localeCompare(String(y))
-        : String(y).localeCompare(String(x));
+      return sortDir === 'asc' ? String(x).localeCompare(String(y)) : String(y).localeCompare(String(x));
     });
 
     return rows;
-  }, [
-    payments,
-    companyFilter,
-    branchFilter,
-    statusFilter,
-    methodFilter,
-    directionFilter,
-    billFilter,
-    search,
-    dateFrom,
-    dateTo,
-    sortBy,
-    sortDir,
-  ]);
+  }, [payments, companyFilter, branchFilter, statusFilter, methodFilter, directionFilter, billFilter, search, dateFrom, dateTo, sortBy, sortDir]);
 
   const summary = useMemo(() => {
-    const inward = filtered
-      .filter((p) => p.payment_direction === 'inward')
-      .reduce((s, p) => s + n(p.amount), 0);
-
-    const outward = filtered
-      .filter((p) => p.payment_direction === 'outward')
-      .reduce((s, p) => s + n(p.amount), 0);
-
+    const inward = filtered.filter((p) => p.payment_direction === 'inward').reduce((s, p) => s + n(p.amount), 0);
+    const outward = filtered.filter((p) => p.payment_direction === 'outward').reduce((s, p) => s + n(p.amount), 0);
     return {
       total: filtered.length,
       totalAmount: filtered.reduce((s, p) => s + n(p.amount), 0),
@@ -772,9 +639,7 @@ export function PaymentsPage() {
       pending: filtered.filter((p) => p.status === 'pending').length,
       failed: filtered.filter((p) => p.status === 'failed').length,
       reconciled: filtered.filter((p) => p.status === 'reconciled').length,
-      inward,
-      outward,
-      net: inward - outward,
+      inward, outward, net: inward - outward,
       sales: filtered.filter((p) => billType(p) === 'sales').length,
       purchase: filtered.filter((p) => billType(p) === 'purchase').length,
       unlinked: filtered.filter((p) => billType(p) === 'unlinked').length,
@@ -785,110 +650,73 @@ export function PaymentsPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [
-    search,
-    companyFilter,
-    branchFilter,
-    statusFilter,
-    methodFilter,
-    directionFilter,
-    billFilter,
-    dateFrom,
-    dateTo,
-    perPage,
-  ]);
+  }, [search, companyFilter, branchFilter, statusFilter, methodFilter, directionFilter, billFilter, dateFrom, dateTo, perPage]);
 
   const rows = useMemo(
-    () =>
-      filtered.slice(
-        (page - 1) * perPage,
-        (page - 1) * perPage + perPage,
-      ),
+    () => filtered.slice((page - 1) * perPage, (page - 1) * perPage + perPage),
     [filtered, page, perPage],
   );
 
-  const allSelected =
-    rows.length > 0 && rows.every((p) => selected.includes(p.id));
+  const allSelected = rows.length > 0 && rows.every((p) => selected.includes(p.id));
 
   const setSort = (field: string) => {
-    if (sortBy === field) {
-      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-    } else {
-      setSortBy(field);
-      setSortDir('asc');
-    }
+    if (sortBy === field) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortBy(field); setSortDir('asc'); }
   };
 
   const clearFilters = () => {
-    setSearchInput('');
-    setSearch('');
-    setCompanyFilter('all');
-    setBranchFilter('all');
-    setStatusFilter('all');
-    setMethodFilter('all');
-    setDirectionFilter('all');
-    setBillFilter('all');
-    setDateFrom(today());
-    setDateTo(today());
+    setSearchInput(''); setSearch('');
+    setCompanyFilter('all'); setBranchFilter('all');
+    setStatusFilter('all'); setMethodFilter('all');
+    setDirectionFilter('all'); setBillFilter('all');
+    setDateFrom(today()); setDateTo(today());
     setSelected([]);
   };
 
   const toggleSelection = (id: number) => {
-    setSelected((current) =>
-      current.includes(id)
-        ? current.filter((x) => x !== id)
-        : [...current, id],
-    );
+    setSelected((current) => current.includes(id) ? current.filter((x) => x !== id) : [...current, id]);
   };
 
   const toggleAll = () => {
     const ids = rows.map((p) => p.id);
-
-    setSelected((current) =>
-      allSelected
-        ? current.filter((id) => !ids.includes(id))
-        : Array.from(new Set([...current, ...ids])),
-    );
+    setSelected((current) => allSelected ? current.filter((id) => !ids.includes(id)) : Array.from(new Set([...current, ...ids])));
   };
 
+  /* ---------------- CRUD ---------------- */
+
   const openCreate = () => {
+    if (!canCreatePayment) {
+      showError('Permission denied', 'You do not have permission to create payments.');
+      return;
+    }
     setEditingId(null);
     setFormErrors({});
     setForm({
-      company_id: 0,
-      branch_id: undefined,
-      invoice_id: null,
-      reference_no: '',
-      amount: '',
-      payment_method: 'qr',
-      status: 'pending',
-      payment_direction: 'inward',
-      bank_name: '',
-      account_number: '',
-      ledger_reference: '',
-      remarks: '',
+      company_id: 0, branch_id: undefined, invoice_id: null,
+      reference_no: '', amount: '', payment_method: 'qr', status: 'pending',
+      payment_direction: 'inward', bank_name: '', account_number: '',
+      ledger_reference: '', remarks: '',
     });
     setDueInvoiceSearch('');
-    setSections({
-      payment: true,
-      invoice: true,
-      bank: true,
-      remarks: true,
-    });
+    setSections({ payment: true, invoice: true, bank: true, remarks: true });
     setEditOpen(true);
   };
 
   const openEdit = (p: Payment) => {
+    if (!canEditPayment) {
+      showError('Permission denied', 'You do not have permission to edit payments.');
+      return;
+    }
     setMenuId(null);
     setEditingId(p.id);
-
     setForm({
       company_id: p.company_id || 0,
       branch_id: p.branch_id || undefined,
       invoice_id: p.invoice_id || p.sales_invoice_id || null,
       reference_no: p.reference_no || '',
       amount: p.amount ?? '',
-      payment_method: p.payment_method || 'qr',
+      // ✅ FIXED: normalize on load so the select pre-fills correctly
+      payment_method: methodKey(p.payment_method) || 'qr',
       status: p.status || 'pending',
       payment_direction: p.payment_direction || 'inward',
       bank_name: p.bank_name || '',
@@ -896,7 +724,6 @@ export function PaymentsPage() {
       ledger_reference: p.ledger_reference || '',
       remarks: p.remarks || '',
     });
-
     setDueInvoiceSearch('');
     setFormErrors({});
     setEditOpen(true);
@@ -909,268 +736,135 @@ export function PaymentsPage() {
   };
 
   const deletePayment = async (p: Payment) => {
-    setMenuId(null);
-
-    if (!window.confirm(`Delete payment "${p.reference_no || p.id}"?`)) {
+    if (!canDeletePayment) {
+      showError('Permission denied', 'You do not have permission to delete payments.');
       return;
     }
-
+    setMenuId(null);
+    if (!window.confirm(`Delete payment "${p.reference_no || p.id}"?`)) return;
     try {
       await apiClient.deletePayment(p.id);
-
-      showSuccess(
-        'Payment deleted',
-        `${p.reference_no || `Payment #${p.id}`} was deleted.`,
-      );
-
-      addAppLog({
-        module: 'Payments',
-        action: 'Delete payment',
-        status: 'success',
-        message: p.reference_no || String(p.id),
-      });
-
+      showSuccess('Payment deleted', `${p.reference_no || `Payment #${p.id}`} was deleted.`);
+      addAppLog({ module: 'Payments', action: 'Delete payment', status: 'success', message: p.reference_no || String(p.id) });
       setSelected((ids) => ids.filter((id) => id !== p.id));
-
-      if (viewPayment?.id === p.id) {
-        setViewPayment(null);
-        setViewOpen(false);
-      }
-
+      if (viewPayment?.id === p.id) { setViewPayment(null); setViewOpen(false); }
       await load();
     } catch (err) {
-      showError(
-        'Delete failed',
-        err instanceof Error
-          ? err.message
-          : 'Unable to delete payment.',
-      );
+      showError('Delete failed', err instanceof Error ? err.message : 'Unable to delete payment.');
     }
   };
 
   const bulkStatus = async (status: PaymentStatus) => {
-    if (!selected.length) return;
-
-    if (
-      !window.confirm(
-        `Update ${selected.length} selected payment(s) to ${status}?`,
-      )
-    ) {
+    if (!canEditPayment) {
+      showError('Permission denied', 'You do not have permission to update payments.');
       return;
     }
-
+    if (!selected.length) return;
+    if (!window.confirm(`Update ${selected.length} selected payment(s) to ${status}?`)) return;
     try {
-      await Promise.all(
-        selected.map((id) =>
-          apiClient.updatePayment(id, { status }),
-        ),
-      );
-
-      showSuccess(
-        'Bulk update complete',
-        `${selected.length} payment(s) updated.`,
-      );
-
+      await Promise.all(selected.map((id) => apiClient.updatePayment(id, { status })));
+      showSuccess('Bulk update complete', `${selected.length} payment(s) updated.`);
       setSelected([]);
       await load();
     } catch (err) {
-      showError(
-        'Bulk update failed',
-        err instanceof Error
-          ? err.message
-          : 'Unable to update payments.',
-      );
+      showError('Bulk update failed', err instanceof Error ? err.message : 'Unable to update payments.');
     }
   };
 
   const bulkDelete = async () => {
-    if (!selected.length) return;
-
-    if (
-      !window.confirm(
-        `Delete ${selected.length} selected payment(s)? This cannot be undone.`,
-      )
-    ) {
+    if (!canDeletePayment) {
+      showError('Permission denied', 'You do not have permission to delete payments.');
       return;
     }
-
+    if (!selected.length) return;
+    if (!window.confirm(`Delete ${selected.length} selected payment(s)? This cannot be undone.`)) return;
     try {
-      await Promise.all(
-        selected.map((id) => apiClient.deletePayment(id)),
-      );
-
-      showSuccess(
-        'Bulk delete complete',
-        `${selected.length} payment(s) deleted.`,
-      );
-
+      await Promise.all(selected.map((id) => apiClient.deletePayment(id)));
+      showSuccess('Bulk delete complete', `${selected.length} payment(s) deleted.`);
       setSelected([]);
       await load();
     } catch (err) {
-      showError(
-        'Bulk delete failed',
-        err instanceof Error
-          ? err.message
-          : 'Unable to delete selected payments.',
-      );
+      showError('Bulk delete failed', err instanceof Error ? err.message : 'Unable to delete selected payments.');
     }
   };
 
   const save = async () => {
+    const isUpdate = Boolean(editingId);
+    if (isUpdate && !canEditPayment) {
+      showError('Permission denied', 'You do not have permission to edit payments.');
+      return;
+    }
+    if (!isUpdate && !canCreatePayment) {
+      showError('Permission denied', 'You do not have permission to create payments.');
+      return;
+    }
     const errors: Record<string, boolean> = {};
-
     if (!form.company_id) errors.company_id = true;
     if (n(form.amount) <= 0) errors.amount = true;
-
     setFormErrors(errors);
-
     if (Object.keys(errors).length) {
-      showError(
-        'Validation',
-        'Please select a company and enter a valid amount.',
-      );
+      showError('Validation', 'Please select a company and enter a valid amount.');
       return;
     }
 
-    /*
-     * Blank reference => secure client-generated reference.
-     * Backend should ALSO have a UNIQUE constraint.
-     */
-    const reference =
-      form.reference_no.trim() || createReference();
-
+    const reference = form.reference_no.trim() || createReference();
     const payload = {
       ...form,
       company_id: Number(form.company_id),
       branch_id: form.branch_id ? Number(form.branch_id) : null,
       invoice_id: form.invoice_id || null,
       amount: n(form.amount),
+      // ✅ FIXED: send normalized key so backend columns stay consistent
+      payment_method: methodKey(form.payment_method) || 'other',
       reference_no: reference,
     };
 
     setSaving(true);
-
     try {
       if (editingId) {
         await apiClient.updatePayment(editingId, payload);
-
-        showSuccess(
-          'Payment updated',
-          `${reference} updated successfully.`,
-        );
-
-        addAppLog({
-          module: 'Payments',
-          action: 'Update payment',
-          status: 'success',
-          message: reference,
-        });
+        showSuccess('Payment updated', `${reference} updated successfully.`);
+        addAppLog({ module: 'Payments', action: 'Update payment', status: 'success', message: reference });
       } else {
         await apiClient.createPayment(payload);
-
-        showSuccess(
-          'Payment created',
-          `${reference} created successfully.`,
-        );
-
-        addAppLog({
-          module: 'Payments',
-          action: 'Create payment',
-          status: 'success',
-          message: reference,
-        });
+        showSuccess('Payment created', `${reference} created successfully.`);
+        addAppLog({ module: 'Payments', action: 'Create payment', status: 'success', message: reference });
       }
-
       setEditOpen(false);
       await load();
     } catch (err) {
-      showError(
-        'Save failed',
-        err instanceof Error
-          ? err.message
-          : 'Unable to save payment.',
-      );
+      showError('Save failed', err instanceof Error ? err.message : 'Unable to save payment.');
     } finally {
       setSaving(false);
     }
   };
 
   const exportCsv = () => {
+    if (!canViewPayments) return;
     if (!filtered.length) {
-      showError(
-        'Nothing to export',
-        'No payments match the current filters.',
-      );
+      showError('Nothing to export', 'No payments match the current filters.');
       return;
     }
-
-    const header = [
-      'Reference',
-      'Amount',
-      'Method',
-      'Status',
-      'Direction',
-      'Bill Type',
-      'Bill No',
-      'Bill ID',
-      'Company',
-      'Branch',
-      'Customer',
-      'Supplier',
-      'Bank',
-      'Account',
-      'Ledger Reference',
-      'Payment Date',
-      'Remarks',
-    ];
-
-    const lines = filtered.map((p) =>
-      [
-        p.reference_no || '',
-        n(p.amount).toFixed(2),
-        p.payment_method,
-        p.status,
-        p.payment_direction,
-        billType(p),
-        billNo(p) || '',
-        billId(p) || '',
-        getCompany(p, companies),
-        getBranch(p, branches),
-        p.customer_name || '',
-        p.supplier_name || '',
-        p.bank_name || '',
-        p.account_number || '',
-        p.ledger_reference || '',
-        dateText(getDate(p)),
-        p.remarks || '',
-      ]
-        .map(escapeCsv)
-        .join(','),
-    );
-
-    const blob = new Blob(
-      [[header.map(escapeCsv).join(','), ...lines].join('\n')],
-      { type: 'text/csv;charset=utf-8;' },
-    );
-
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `payments-${today()}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-
-    showSuccess(
-      'Export complete',
-      `${filtered.length} payment(s) exported.`,
-    );
+    try {
+      const header = ['Reference', 'Amount', 'Method', 'Status', 'Direction', 'Bill Type', 'Bill No', 'Bill ID', 'Company', 'Branch', 'Customer', 'Supplier', 'Bank', 'Account', 'Ledger Reference', 'Payment Date', 'Remarks'];
+      const lines = filtered.map((p) =>
+        [p.reference_no || '', n(p.amount).toFixed(2), methodLabel(p.payment_method), p.status, p.payment_direction,
+         billType(p), billNo(p) || '', billId(p) || '', getCompany(p, companies), getBranch(p, branches),
+         p.customer_name || '', p.supplier_name || '', p.bank_name || '', p.account_number || '',
+         p.ledger_reference || '', dateText(getDate(p)), p.remarks || ''].map(escapeCsv).join(','));
+      const blob = new Blob([[header.map(escapeCsv).join(','), ...lines].join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `payments-${today()}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      showSuccess('Export complete', `${filtered.length} payment(s) exported.`);
+    } catch (err) {
+      showError('Export failed', err instanceof Error ? err.message : 'Unable to export payments.');
+    }
   };
 
-  const formBranches = branches.filter(
-    (b) => b.company_id === Number(form.company_id),
-  );
+  const formBranches = branches.filter((b) => b.company_id === Number(form.company_id));
 
   const activeFilters = [
     search,
@@ -1182,109 +876,99 @@ export function PaymentsPage() {
     billFilter !== 'all' ? billFilter : '',
   ].filter(Boolean).length;
 
-  /* ---------------- Due-invoice picker: fetch + derive ---------------- */
+  /* ---------------- Due-invoice picker ---------------- */
 
-  /**
-   * Fetch outstanding invoices (due > 0) for the selected company/branch
-   * while the create/edit sheet is open. Uses the shared invoice index
-   * endpoint (`InvoiceController@index`), which returns per-row
-   * `outstanding_amount` — no extra aggregation needed client-side.
-   */
   useEffect(() => {
     if (!editOpen) return;
-
     if (!form.company_id) {
-      setDueInvoices([]);
-      setDueInvoicesError(null);
-      setDueInvoicesLoading(false);
+      setDueInvoices([]); setDueInvoicesError(null); setDueInvoicesLoading(false);
       return;
     }
-
     let cancelled = false;
     setDueInvoicesLoading(true);
     setDueInvoicesError(null);
-
     const timer = window.setTimeout(async () => {
       try {
         const response = await apiClient.getInvoices({
-          page: 1,
-          per_page: 100,
+          page: 1, per_page: 100,
           company_id: Number(form.company_id),
-          branch_id: form.branch_id
-            ? Number(form.branch_id)
-            : undefined,
-          sort_by: 'due_date',
-          sort_dir: 'asc',
+          branch_id: form.branch_id ? Number(form.branch_id) : undefined,
+          sort_by: 'due_date', sort_dir: 'asc',
         });
-
         if (cancelled) return;
-
-        const rows = normalize<DueInvoice>(response).filter(
-          (inv) => invoiceOutstanding(inv) > 0,
-        );
-
+        const rows = normalize<DueInvoice>(response).filter((inv) => invoiceOutstanding(inv) > 0);
         setDueInvoices(rows);
       } catch (err) {
         if (cancelled) return;
-        setDueInvoicesError(
-          err instanceof Error
-            ? err.message
-            : 'Unable to load outstanding invoices.',
-        );
+        setDueInvoicesError(err instanceof Error ? err.message : 'Unable to load outstanding invoices.');
       } finally {
         if (!cancelled) setDueInvoicesLoading(false);
       }
     }, 250);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [editOpen, form.company_id, form.branch_id]);
 
   const filteredDueInvoices = useMemo(() => {
     const q = dueInvoiceSearch.trim().toLowerCase();
     if (!q) return dueInvoices;
-
     return dueInvoices.filter((inv) => {
-      const hay = [
-        inv.invoice_no,
-        invoiceCustomer(inv),
-        String(inv.id),
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
+      const hay = [inv.invoice_no, invoiceCustomer(inv), String(inv.id)].filter(Boolean).join(' ').toLowerCase();
       return hay.includes(q);
     });
   }, [dueInvoices, dueInvoiceSearch]);
 
   const selectedInvoice = useMemo(() => {
     if (!form.invoice_id) return null;
-    return (
-      dueInvoices.find((inv) => inv.id === form.invoice_id) ?? null
-    );
+    return dueInvoices.find((inv) => inv.id === form.invoice_id) ?? null;
   }, [dueInvoices, form.invoice_id]);
 
-  const hasLinkedInvoiceOutsideList =
-    !!form.invoice_id && !selectedInvoice;
+  const hasLinkedInvoiceOutsideList = !!form.invoice_id && !selectedInvoice;
 
   const applyInvoice = (inv: DueInvoice) => {
     const outstanding = invoiceOutstanding(inv);
     setForm((x) => ({
       ...x,
       invoice_id: inv.id,
-      // Auto-fill only when the user hasn't already typed an amount.
-      amount:
-        x.amount === '' || n(x.amount) === 0
-          ? outstanding
-          : x.amount,
+      amount: x.amount === '' || n(x.amount) === 0 ? outstanding : x.amount,
     }));
   };
 
-  const clearInvoiceLink = () => {
-    setForm((x) => ({ ...x, invoice_id: null }));
-  };
+  const clearInvoiceLink = () => { setForm((x) => ({ ...x, invoice_id: null })); };
+
+  /* ---------------- Loading guard ---------------- */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* ---------------- No-access panel ---------------- */
+
+  if (!canViewPayments) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <Lock className="h-5 w-5" />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">You don't have permission to view payments.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const showBulkToolbar = selected.length > 0 && (canEditPayment || canDeletePayment);
+  const showSelectionColumn = canEditPayment || canDeletePayment;
+
+  /* ================================================================ */
+  /* Render                                                           */
+  /* ================================================================ */
 
   return (
     <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
@@ -1300,69 +984,48 @@ export function PaymentsPage() {
                 <WalletCards className="h-3 w-3" />
                 Finance · Payments
               </div>
-
               <h1 className="flex items-center gap-3 text-2xl font-bold tracking-tight text-white sm:text-3xl">
                 <CreditCard className="h-7 w-7 text-cyan-300" />
                 Payment workspace
               </h1>
-
               <p className="mt-1.5 max-w-2xl text-sm text-slate-300">
-                Track money in, money out, bill links, bank transactions and
-                reconciliation across companies and branches.
+                Track money in, money out, bill links, bank transactions and reconciliation across companies and branches.
               </p>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Button
-                variant="outline"
-                onClick={exportCsv}
-                disabled={loading || !filtered.length}
-                className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none hover:bg-white/10 hover:text-white"
-              >
+              {!canManagePayments && (
+                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                  Read-only
+                </span>
+              )}
+              <Button variant="outline" onClick={exportCsv} disabled={loading || !filtered.length}
+                className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none hover:bg-white/10 hover:text-white disabled:opacity-50">
                 <Download className="mr-2 h-4 w-4" />
                 Export
               </Button>
-
-              <Button
-                onClick={openCreate}
-                className="h-10 rounded-xl bg-cyan-400 font-semibold text-slate-950 hover:bg-cyan-300"
-              >
-                <Plus className="mr-2 h-4 w-4" />
-                New payment
-              </Button>
+              {canCreatePayment && (
+                <Button onClick={openCreate}
+                  className="h-10 rounded-xl bg-cyan-400 font-semibold text-slate-950 hover:bg-cyan-300">
+                  <Plus className="mr-2 h-4 w-4" />
+                  New payment
+                </Button>
+              )}
             </div>
           </div>
 
           <div className="relative mt-5 grid gap-2 sm:grid-cols-3">
             <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-              <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                Money in
-              </p>
-              <p className="mt-1 text-sm font-bold text-emerald-300">
-                {money(summary.inward)}
-              </p>
+              <p className="text-[10px] uppercase tracking-wide text-slate-400">Money in</p>
+              <p className="mt-1 text-sm font-bold text-emerald-300">{money(summary.inward)}</p>
             </div>
-
             <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-              <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                Money out
-              </p>
-              <p className="mt-1 text-sm font-bold text-rose-300">
-                {money(summary.outward)}
-              </p>
+              <p className="text-[10px] uppercase tracking-wide text-slate-400">Money out</p>
+              <p className="mt-1 text-sm font-bold text-rose-300">{money(summary.outward)}</p>
             </div>
-
             <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-              <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                Net movement
-              </p>
-              <p
-                className={`mt-1 text-sm font-bold ${
-                  summary.net >= 0
-                    ? 'text-cyan-300'
-                    : 'text-rose-300'
-                }`}
-              >
+              <p className="text-[10px] uppercase tracking-wide text-slate-400">Net movement</p>
+              <p className={`mt-1 text-sm font-bold ${summary.net >= 0 ? 'text-cyan-300' : 'text-rose-300'}`}>
                 {money(summary.net)}
               </p>
             </div>
@@ -1371,42 +1034,12 @@ export function PaymentsPage() {
 
         {/* KPIs */}
         <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-          <Kpi
-            title="Payments"
-            value={summary.total.toLocaleString('en-IN')}
-            icon={ReceiptText}
-            tone="indigo"
-          />
-          <Kpi
-            title="Total value"
-            value={money(summary.totalAmount)}
-            icon={CircleDollarSign}
-            tone="violet"
-          />
-          <Kpi
-            title="Completed"
-            value={String(summary.completed)}
-            icon={CheckCircle2}
-            tone="emerald"
-          />
-          <Kpi
-            title="Pending"
-            value={String(summary.pending)}
-            icon={Clock3}
-            tone="amber"
-          />
-          <Kpi
-            title="Reconciled"
-            value={String(summary.reconciled)}
-            icon={BookOpen}
-            tone="blue"
-          />
-          <Kpi
-            title="Failed"
-            value={String(summary.failed)}
-            icon={AlertCircle}
-            tone="rose"
-          />
+          <Kpi title="Payments" value={summary.total.toLocaleString('en-IN')} icon={ReceiptText} tone="indigo" />
+          <Kpi title="Total value" value={money(summary.totalAmount)} icon={CircleDollarSign} tone="violet" />
+          <Kpi title="Completed" value={String(summary.completed)} icon={CheckCircle2} tone="emerald" />
+          <Kpi title="Pending" value={String(summary.pending)} icon={Clock3} tone="amber" />
+          <Kpi title="Reconciled" value={String(summary.reconciled)} icon={BookOpen} tone="blue" />
+          <Kpi title="Failed" value={String(summary.failed)} icon={AlertCircle} tone="rose" />
         </section>
 
         {/* Filters */}
@@ -1416,43 +1049,20 @@ export function PaymentsPage() {
               <div className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
                 <Filter className="h-4 w-4" />
               </div>
-
               <div>
-                <p className="text-sm font-semibold text-slate-800">
-                  Filters
-                </p>
+                <p className="text-sm font-semibold text-slate-800">Filters</p>
                 <p className="text-[11px] text-slate-500">
-                  {activeFilters
-                    ? `${activeFilters} active filter${
-                        activeFilters > 1 ? 's' : ''
-                      }`
-                    : 'Scope, date, payment and bill tracking'}
+                  {activeFilters ? `${activeFilters} active filter${activeFilters > 1 ? 's' : ''}` : 'Scope, date, payment and bill tracking'}
                 </p>
               </div>
             </div>
-
             <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-9 rounded-lg lg:hidden"
-                onClick={() => setFiltersOpen((v) => !v)}
-              >
+              <Button variant="outline" size="sm" className="h-9 rounded-lg lg:hidden" onClick={() => setFiltersOpen((v) => !v)}>
                 <Filter className="mr-2 h-3.5 w-3.5" />
                 {filtersOpen ? 'Hide' : 'Show'}
               </Button>
-
-              {Boolean(
-                activeFilters ||
-                  dateFrom !== today() ||
-                  dateTo !== today(),
-              ) && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={clearFilters}
-                  className="h-9 rounded-lg text-slate-500"
-                >
+              {(activeFilters > 0 || dateFrom !== today() || dateTo !== today()) && (
+                <Button variant="ghost" size="sm" onClick={clearFilters} className="h-9 rounded-lg text-slate-500">
                   <X className="mr-1.5 h-3.5 w-3.5" />
                   Reset
                 </Button>
@@ -1460,57 +1070,26 @@ export function PaymentsPage() {
             </div>
           </CardHeader>
 
-          <CardContent
-            className={`${
-              filtersOpen ? 'block' : 'hidden'
-            } p-4 sm:p-5 lg:block`}
-          >
+          <CardContent className={`${filtersOpen ? 'block' : 'hidden'} p-4 sm:p-5 lg:block`}>
             <div className="grid gap-3 lg:grid-cols-12">
               <div className="relative lg:col-span-4">
                 <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <Input
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
+                <Input value={searchInput} onChange={(e) => setSearchInput(e.target.value)}
                   placeholder="Search reference, bill, bank, customer, ledger…"
-                  className="h-10 rounded-xl pl-10"
-                />
+                  className="h-10 rounded-xl pl-10" />
               </div>
 
-              <Select
-                value={companyFilter}
-                onChange={(v) => {
-                  setCompanyFilter(v);
-                  setBranchFilter('all');
-                }}
+              <Select value={companyFilter}
+                onChange={(v) => { setCompanyFilter(v); setBranchFilter('all'); }}
                 label="Company"
-                options={[
-                  { value: 'all', label: 'All companies' },
-                  ...companies.map((c) => ({
-                    value: String(c.id),
-                    label: c.name,
-                  })),
-                ]}
-                className="lg:col-span-2"
-              />
+                options={[{ value: 'all', label: 'All companies' }, ...companies.map((c) => ({ value: String(c.id), label: c.name }))]}
+                className="lg:col-span-2" />
 
-              <Select
-                value={branchFilter}
-                onChange={setBranchFilter}
-                label="Branch"
-                options={[
-                  { value: 'all', label: 'All branches' },
-                  ...companyBranches.map((b) => ({
-                    value: String(b.id),
-                    label: b.name,
-                  })),
-                ]}
-                className="lg:col-span-2"
-              />
+              <Select value={branchFilter} onChange={setBranchFilter} label="Branch"
+                options={[{ value: 'all', label: 'All branches' }, ...companyBranches.map((b) => ({ value: String(b.id), label: b.name }))]}
+                className="lg:col-span-2" />
 
-              <Select
-                value={statusFilter}
-                onChange={setStatusFilter}
-                label="Status"
+              <Select value={statusFilter} onChange={setStatusFilter} label="Status"
                 options={[
                   { value: 'all', label: 'All statuses' },
                   { value: 'pending', label: 'Pending' },
@@ -1518,61 +1097,32 @@ export function PaymentsPage() {
                   { value: 'failed', label: 'Failed' },
                   { value: 'reconciled', label: 'Reconciled' },
                 ]}
-                className="lg:col-span-2"
-              />
+                className="lg:col-span-2" />
 
-              <Select
-                value={methodFilter}
-                onChange={setMethodFilter}
-                label="Payment method"
+              {/* ✅ FIXED: dynamic payment-method filter */}
+              <Select value={methodFilter} onChange={setMethodFilter} label="Payment method"
                 options={[
                   { value: 'all', label: 'All methods' },
-                  { value: 'qr', label: 'QR' },
-                  { value: 'upi', label: 'UPI' },
-                  { value: 'bank_transfer', label: 'Bank transfer' },
-                  { value: 'cash', label: 'Cash' },
-                  { value: 'card', label: 'Card' },
+                  ...availableMethods.map((m) => ({ value: m, label: methodLabel(m) })),
                 ]}
-                className="lg:col-span-2"
-              />
+                className="lg:col-span-2" />
             </div>
 
             <div className="mt-3 grid gap-3 md:grid-cols-2 lg:grid-cols-12">
               <div className="flex gap-2 lg:col-span-5">
-                <Input
-                  type="date"
-                  value={dateFrom}
-                  onChange={(e) => setDateFrom(e.target.value)}
-                  aria-label="Date from"
-                  className="h-10 rounded-xl"
-                />
-
-                <Input
-                  type="date"
-                  value={dateTo}
-                  min={dateFrom || undefined}
-                  onChange={(e) => setDateTo(e.target.value)}
-                  aria-label="Date to"
-                  className="h-10 rounded-xl"
-                />
+                <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} aria-label="Date from" className="h-10 rounded-xl" />
+                <Input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)} aria-label="Date to" className="h-10 rounded-xl" />
               </div>
 
-              <Select
-                value={directionFilter}
-                onChange={setDirectionFilter}
-                label="Direction"
+              <Select value={directionFilter} onChange={setDirectionFilter} label="Direction"
                 options={[
                   { value: 'all', label: 'IN + OUT' },
                   { value: 'inward', label: 'INWARD · Money in' },
                   { value: 'outward', label: 'OUTWARD · Money out' },
                 ]}
-                className="lg:col-span-2"
-              />
+                className="lg:col-span-2" />
 
-              <Select
-                value={billFilter}
-                onChange={setBillFilter}
-                label="Bill type"
+              <Select value={billFilter} onChange={setBillFilter} label="Bill type"
                 options={[
                   { value: 'all', label: 'All bill links' },
                   { value: 'sales', label: 'Sales bills' },
@@ -1580,8 +1130,7 @@ export function PaymentsPage() {
                   { value: 'other', label: 'Other bills' },
                   { value: 'unlinked', label: 'Unlinked' },
                 ]}
-                className="lg:col-span-2"
-              />
+                className="lg:col-span-2" />
 
               <div className="flex flex-wrap items-center justify-end gap-1 rounded-xl border border-slate-200 bg-white p-1 lg:col-span-3">
                 {[
@@ -1590,22 +1139,12 @@ export function PaymentsPage() {
                   ['30 days', addDays(today(), -29), today()],
                   ['All', '', ''],
                 ].map(([label, from, to]) => (
-                  <button
-                    key={label}
-                    type="button"
-                    onClick={() => {
-                      setDateFrom(from);
-                      setDateTo(to);
-                    }}
+                  <button key={label} type="button"
+                    onClick={() => { setDateFrom(from); setDateTo(to); }}
                     className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold ${
-                      dateFrom === from && dateTo === to
-                        ? 'bg-slate-900 text-white'
-                        : 'text-slate-600 hover:bg-slate-100'
-                    }`}
-                  >
-                    {label === 'Today' && (
-                      <CalendarDays className="mr-1 inline h-3.5 w-3.5" />
-                    )}
+                      dateFrom === from && dateTo === to ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+                    }`}>
+                    {label === 'Today' && <CalendarDays className="mr-1 inline h-3.5 w-3.5" />}
                     {label}
                   </button>
                 ))}
@@ -1618,11 +1157,13 @@ export function PaymentsPage() {
         {error && (
           <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-rose-600" />
-
             <div className="min-w-0 flex-1">
               <p className="font-semibold">Unable to load payments</p>
               <p className="mt-0.5 break-words">{error}</p>
             </div>
+            <Button size="sm" variant="outline" className="rounded-lg border-rose-200 bg-white text-rose-700 hover:bg-rose-50" onClick={load}>
+              Retry
+            </Button>
           </div>
         )}
 
@@ -1630,99 +1171,51 @@ export function PaymentsPage() {
         <Card className="rounded-2xl border-slate-200/80">
           <CardContent className="grid gap-3 p-4 sm:grid-cols-2 sm:p-5 lg:grid-cols-4">
             <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
-              <p className="text-xs font-semibold text-indigo-700">
-                Sales linked
-              </p>
-              <p className="mt-1 text-xl font-bold text-slate-900">
-                {summary.sales}
-              </p>
+              <p className="text-xs font-semibold text-indigo-700">Sales linked</p>
+              <p className="mt-1 text-xl font-bold text-slate-900">{summary.sales}</p>
             </div>
-
             <div className="rounded-xl border border-violet-100 bg-violet-50/60 p-3">
-              <p className="text-xs font-semibold text-violet-700">
-                Purchase linked
-              </p>
-              <p className="mt-1 text-xl font-bold text-slate-900">
-                {summary.purchase}
-              </p>
+              <p className="text-xs font-semibold text-violet-700">Purchase linked</p>
+              <p className="mt-1 text-xl font-bold text-slate-900">{summary.purchase}</p>
             </div>
-
             <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-3">
-              <p className="text-xs font-semibold text-slate-700">
-                Unlinked
-              </p>
-              <p className="mt-1 text-xl font-bold text-slate-900">
-                {summary.unlinked}
-              </p>
+              <p className="text-xs font-semibold text-slate-700">Unlinked</p>
+              <p className="mt-1 text-xl font-bold text-slate-900">{summary.unlinked}</p>
             </div>
-
             <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
-              <p className="text-xs font-semibold text-emerald-700">
-                Net movement
-              </p>
-              <p className="mt-1 text-xl font-bold text-slate-900">
-                {money(summary.net)}
-              </p>
+              <p className="text-xs font-semibold text-emerald-700">Net movement</p>
+              <p className="mt-1 text-xl font-bold text-slate-900">{money(summary.net)}</p>
             </div>
           </CardContent>
         </Card>
 
         {/* Bulk */}
-        {selected.length > 0 && (
+        {showBulkToolbar && (
           <div className="sticky top-3 z-30 rounded-2xl border border-slate-200 bg-white/95 p-2.5 shadow-lg backdrop-blur">
             <div className="flex flex-wrap items-center gap-2">
               <Badge className="rounded-lg bg-indigo-50 px-2.5 py-1 text-indigo-700 hover:bg-indigo-50">
                 {selected.length} selected
               </Badge>
-
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => bulkStatus('completed')}
-                className="h-9 rounded-lg"
-              >
-                <CheckCircle2 className="mr-1.5 h-3.5 w-3.5 text-emerald-600" />
-                Completed
-              </Button>
-
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => bulkStatus('reconciled')}
-                className="h-9 rounded-lg"
-              >
-                <BookOpen className="mr-1.5 h-3.5 w-3.5 text-indigo-600" />
-                Reconcile
-              </Button>
-
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => bulkStatus('pending')}
-                className="h-9 rounded-lg"
-              >
-                <Clock3 className="mr-1.5 h-3.5 w-3.5 text-amber-600" />
-                Pending
-              </Button>
-
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={bulkDelete}
-                className="h-9 rounded-lg !bg-rose-600 !text-white hover:!bg-rose-700"
-              >
-                <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-                Delete
-              </Button>
-
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setSelected([])}
-                className="ml-auto h-9"
-              >
-                Clear
-              </Button>
+              {canEditPayment && (
+                <>
+                  <Button size="sm" variant="outline" onClick={() => bulkStatus('completed')} className="h-9 rounded-lg">
+                    <CheckCircle2 className="mr-1.5 h-3.5 w-3.5 text-emerald-600" /> Completed
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => bulkStatus('reconciled')} className="h-9 rounded-lg">
+                    <BookOpen className="mr-1.5 h-3.5 w-3.5 text-indigo-600" /> Reconcile
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => bulkStatus('pending')} className="h-9 rounded-lg">
+                    <Clock3 className="mr-1.5 h-3.5 w-3.5 text-amber-600" /> Pending
+                  </Button>
+                </>
+              )}
+              {canDeletePayment && (
+                <Button size="sm" variant="destructive" onClick={bulkDelete}
+                  className="h-9 rounded-lg !bg-rose-600 !text-white hover:!bg-rose-700">
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Delete
+                </Button>
+              )}
+              <Button size="sm" variant="ghost" onClick={() => setSelected([])} className="ml-auto h-9">Clear</Button>
             </div>
           </div>
         )}
@@ -1734,34 +1227,18 @@ export function PaymentsPage() {
               <div className="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-slate-600">
                 <ReceiptText className="h-4 w-4" />
               </div>
-
               <div>
-                <p className="text-sm font-semibold text-slate-800">
-                  Payment records
-                </p>
+                <p className="text-sm font-semibold text-slate-800">Payment records</p>
                 <p className="text-[11px] text-slate-500">
-                  {loading
-                    ? 'Loading…'
-                    : `${filtered.length.toLocaleString('en-IN')} matching records`}
+                  {loading ? 'Loading…' : `${filtered.length.toLocaleString('en-IN')} matching records`}
                 </p>
               </div>
             </div>
-
             <div className="flex items-center gap-2">
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                Rows
-              </span>
-
-              <Select
-                value={String(perPage)}
-                onChange={(v) => setPerPage(Number(v))}
-                label="Rows per page"
-                options={PER_PAGE.map((v) => ({
-                  value: String(v),
-                  label: String(v),
-                }))}
-                className="w-[78px]"
-              />
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Rows</span>
+              <Select value={String(perPage)} onChange={(v) => setPerPage(Number(v))} label="Rows per page"
+                options={PER_PAGE.map((v) => ({ value: String(v), label: String(v) }))}
+                className="w-[78px]" />
             </div>
           </CardHeader>
 
@@ -1769,272 +1246,153 @@ export function PaymentsPage() {
             <Table className="min-w-[1220px]">
               <TableHeader>
                 <TableRow className="border-slate-100 bg-slate-50/70">
-                  <TableHead className="w-11 px-3">
-                    <input
-                      type="checkbox"
-                      checked={allSelected}
-                      onChange={toggleAll}
-                      aria-label="Select all visible payments"
-                      className="h-4 w-4 rounded border-slate-300 text-indigo-600"
-                    />
-                  </TableHead>
-
+                  {showSelectionColumn && (
+                    <TableHead className="w-11 px-3">
+                      <input type="checkbox" checked={allSelected} onChange={toggleAll}
+                        aria-label="Select all visible payments"
+                        className="h-4 w-4 rounded border-slate-300 text-indigo-600" />
+                    </TableHead>
+                  )}
                   <TableHead>
-                    <button
-                      type="button"
-                      onClick={() => setSort('reference_no')}
-                      className={HEAD}
-                    >
-                      Reference
-                    </button>
+                    <button type="button" onClick={() => setSort('reference_no')} className={HEAD}>Reference</button>
                   </TableHead>
-
                   <TableHead className="text-right">
-                    <button
-                      type="button"
-                      onClick={() => setSort('amount')}
-                      className={HEAD}
-                    >
-                      Amount
-                    </button>
+                    <button type="button" onClick={() => setSort('amount')} className={HEAD}>Amount</button>
                   </TableHead>
-
+                  <TableHead><span className={HEAD}>Method</span></TableHead>
+                  <TableHead><span className={HEAD}>Status</span></TableHead>
+                  <TableHead><span className={HEAD}>Direction</span></TableHead>
+                  <TableHead><span className={HEAD}>Bill</span></TableHead>
+                  <TableHead><span className={HEAD}>Company / Branch</span></TableHead>
                   <TableHead>
-                    <span className={HEAD}>Method</span>
+                    <button type="button" onClick={() => setSort('created_at')} className={HEAD}>Date</button>
                   </TableHead>
-
-                  <TableHead>
-                    <span className={HEAD}>Status</span>
-                  </TableHead>
-
-                  <TableHead>
-                    <span className={HEAD}>Direction</span>
-                  </TableHead>
-
-                  <TableHead>
-                    <span className={HEAD}>Bill</span>
-                  </TableHead>
-
-                  <TableHead>
-                    <span className={HEAD}>Company / Branch</span>
-                  </TableHead>
-
-                  <TableHead>
-                    <button
-                      type="button"
-                      onClick={() => setSort('created_at')}
-                      className={HEAD}
-                    >
-                      Date
-                    </button>
-                  </TableHead>
-
                   <TableHead className="w-12" />
                 </TableRow>
               </TableHeader>
 
               <TableBody>
-                {loading &&
-                  Array.from({ length: 8 }).map((_, i) => (
-                    <TableRow key={i}>
-                      {Array.from({ length: 10 }).map((__, x) => (
-                        <TableCell key={x}>
-                          <div className="h-4 animate-pulse rounded bg-slate-100" />
-                        </TableCell>
-                      ))}
-                    </TableRow>
-                  ))}
+                {loading && Array.from({ length: 8 }).map((_, i) => (
+                  <TableRow key={i}>
+                    {Array.from({ length: showSelectionColumn ? 10 : 9 }).map((__, x) => (
+                      <TableCell key={x}><div className="h-4 animate-pulse rounded bg-slate-100" /></TableCell>
+                    ))}
+                  </TableRow>
+                ))}
 
-                {!loading &&
-                  rows.map((p) => {
-                    const checked = selected.includes(p.id);
-
-                    return (
-                      <TableRow
-                        key={p.id}
-                        data-state={checked ? 'selected' : undefined}
-                        onClick={() => openView(p)}
-                        className={`cursor-pointer border-slate-100 hover:bg-slate-50/80 ${
-                          checked ? 'bg-indigo-50/40' : ''
-                        }`}
-                      >
-                        <TableCell
-                          className="px-3"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleSelection(p.id)}
+                {!loading && rows.map((p) => {
+                  const checked = selected.includes(p.id);
+                  const hasRowActions = canEditPayment || canDeletePayment;
+                  return (
+                    <TableRow key={p.id} data-state={checked ? 'selected' : undefined}
+                      onClick={() => openView(p)}
+                      className={`cursor-pointer border-slate-100 hover:bg-slate-50/80 ${checked ? 'bg-indigo-50/40' : ''}`}>
+                      {showSelectionColumn && (
+                        <TableCell className="px-3" onClick={(e) => e.stopPropagation()}>
+                          <input type="checkbox" checked={checked} onChange={() => toggleSelection(p.id)}
                             aria-label={`Select ${p.reference_no || p.id}`}
-                            className="h-4 w-4 rounded border-slate-300 text-indigo-600"
-                          />
+                            className="h-4 w-4 rounded border-slate-300 text-indigo-600" />
                         </TableCell>
+                      )}
 
-                        <TableCell>
-                          <div className="min-w-[160px]">
-                            <p className="text-sm font-semibold text-slate-900">
-                              {p.reference_no || `PAY-${p.id}`}
-                            </p>
-                            <p className="mt-0.5 text-[11px] text-slate-400">
-                              #{p.id}
-                            </p>
+                      <TableCell>
+                        <div className="min-w-[160px]">
+                          <p className="text-sm font-semibold text-slate-900">{p.reference_no || `PAY-${p.id}`}</p>
+                          <p className="mt-0.5 text-[11px] text-slate-400">#{p.id}</p>
+                        </div>
+                      </TableCell>
+
+                      <TableCell className="whitespace-nowrap text-right">
+                        <span className={`text-sm font-bold tabular-nums ${p.payment_direction === 'inward' ? 'text-emerald-700' : 'text-rose-700'}`}>
+                          {money(p.amount)}
+                        </span>
+                      </TableCell>
+
+                      {/* ✅ FIXED: use methodLabel for display */}
+                      <TableCell>
+                        <Badge variant="outline" className="rounded-full border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px]">
+                          {methodLabel(p.payment_method)}
+                        </Badge>
+                      </TableCell>
+
+                      <TableCell><StatusBadge status={p.status} /></TableCell>
+                      <TableCell><DirectionBadge direction={p.payment_direction} /></TableCell>
+
+                      <TableCell>
+                        <div className="min-w-[180px]">
+                          <BillBadge payment={p} />
+                          {billId(p) && <p className="mt-1 text-[10px] text-slate-400">Bill ID: {billId(p)}</p>}
+                          {(p.customer_name || p.supplier_name) && (
+                            <p className="mt-1 truncate text-[11px] text-slate-500">{p.customer_name || p.supplier_name}</p>
+                          )}
+                        </div>
+                      </TableCell>
+
+                      <TableCell>
+                        <div className="min-w-[210px] space-y-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <Building2 className="h-3.5 w-3.5 text-indigo-500" />
+                            <span className="text-xs font-medium text-slate-700">{getCompany(p, companies)}</span>
                           </div>
-                        </TableCell>
-
-                        <TableCell className="whitespace-nowrap text-right">
-                          <span
-                            className={`text-sm font-bold tabular-nums ${
-                              p.payment_direction === 'inward'
-                                ? 'text-emerald-700'
-                                : 'text-rose-700'
-                            }`}
-                          >
-                            {money(p.amount)}
-                          </span>
-                        </TableCell>
-
-                        <TableCell>
-                          <Badge
-                            variant="outline"
-                            className="rounded-full border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] capitalize"
-                          >
-                            {p.payment_method.replace('_', ' ')}
-                          </Badge>
-                        </TableCell>
-
-                        <TableCell>
-                          <StatusBadge status={p.status} />
-                        </TableCell>
-
-                        <TableCell>
-                          <DirectionBadge
-                            direction={p.payment_direction}
-                          />
-                        </TableCell>
-
-                        <TableCell>
-                          <div className="min-w-[180px]">
-                            <BillBadge payment={p} />
-
-                            {billId(p) && (
-                              <p className="mt-1 text-[10px] text-slate-400">
-                                Bill ID: {billId(p)}
-                              </p>
-                            )}
-
-                            {(p.customer_name || p.supplier_name) && (
-                              <p className="mt-1 truncate text-[11px] text-slate-500">
-                                {p.customer_name || p.supplier_name}
-                              </p>
-                            )}
+                          <div className="flex items-center gap-1.5">
+                            <GitBranch className="h-3.5 w-3.5 text-violet-500" />
+                            <span className="text-[11px] text-slate-500">{getBranch(p, branches)}</span>
                           </div>
-                        </TableCell>
+                        </div>
+                      </TableCell>
 
-                        <TableCell>
-                          <div className="min-w-[210px] space-y-1.5">
-                            <div className="flex items-center gap-1.5">
-                              <Building2 className="h-3.5 w-3.5 text-indigo-500" />
-                              <span className="text-xs font-medium text-slate-700">
-                                {getCompany(p, companies)}
-                              </span>
-                            </div>
+                      <TableCell className="whitespace-nowrap text-sm text-slate-600">{dateText(getDate(p))}</TableCell>
 
-                            <div className="flex items-center gap-1.5">
-                              <GitBranch className="h-3.5 w-3.5 text-violet-500" />
-                              <span className="text-[11px] text-slate-500">
-                                {getBranch(p, branches)}
-                              </span>
-                            </div>
-                          </div>
-                        </TableCell>
-
-                        <TableCell className="whitespace-nowrap text-sm text-slate-600">
-                          {dateText(getDate(p))}
-                        </TableCell>
-
-                        <TableCell
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-right"
-                        >
+                      <TableCell onClick={(e) => e.stopPropagation()} className="text-right">
+                        {hasRowActions ? (
                           <div className="relative">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setMenuId((id) =>
-                                  id === p.id ? null : p.id,
-                                )
-                              }
-                              className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-                            >
+                            <button type="button"
+                              onClick={() => setMenuId((id) => (id === p.id ? null : p.id))}
+                              className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700">
                               <MoreHorizontal className="h-4 w-4" />
                             </button>
-
                             {menuId === p.id && (
                               <div className="absolute right-0 top-9 z-50 w-44 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 text-left shadow-xl">
-                                <button
-                                  type="button"
-                                  onClick={() => openView(p)}
-                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                                >
-                                  <Eye className="h-4 w-4 text-slate-400" />
-                                  View details
+                                <button type="button" onClick={() => openView(p)}
+                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                                  <Eye className="h-4 w-4 text-slate-400" /> View details
                                 </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => openEdit(p)}
-                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                                >
-                                  <Pencil className="h-4 w-4 text-slate-400" />
-                                  Edit payment
-                                </button>
-
-                                <Separator className="my-1" />
-
-                                <button
-                                  type="button"
-                                  onClick={() => deletePayment(p)}
-                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold !text-rose-600 hover:!bg-rose-50"
-                                >
-                                  <Trash2 className="h-4 w-4 !text-rose-600" />
-                                  Delete payment
-                                </button>
+                                {canEditPayment && (
+                                  <button type="button" onClick={() => openEdit(p)}
+                                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                                    <Pencil className="h-4 w-4 text-slate-400" /> Edit payment
+                                  </button>
+                                )}
+                                {canDeletePayment && (
+                                  <>
+                                    <Separator className="my-1" />
+                                    <button type="button" onClick={() => deletePayment(p)}
+                                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold !text-rose-600 hover:!bg-rose-50">
+                                      <Trash2 className="h-4 w-4 !text-rose-600" /> Delete payment
+                                    </button>
+                                  </>
+                                )}
                               </div>
                             )}
                           </div>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
+                        ) : (
+                          <span className="text-[11px] text-slate-400">Read-only</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
 
                 {!loading && rows.length === 0 && (
                   <TableRow>
-                    <TableCell
-                      colSpan={10}
-                      className="py-20 text-center"
-                    >
+                    <TableCell colSpan={showSelectionColumn ? 10 : 9} className="py-20 text-center">
                       <div className="mx-auto max-w-md">
                         <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-slate-100">
                           <Search className="h-6 w-6 text-slate-400" />
                         </div>
-
-                        <p className="mt-4 text-base font-semibold text-slate-800">
-                          No payments found
-                        </p>
-
-                        <p className="mt-1 text-sm text-slate-500">
-                          Try changing the date, company, branch, direction,
-                          bill type or search.
-                        </p>
-
-                        <Button
-                          variant="outline"
-                          className="mt-5 rounded-lg"
-                          onClick={clearFilters}
-                        >
-                          Reset filters
-                        </Button>
+                        <p className="mt-4 text-base font-semibold text-slate-800">No payments found</p>
+                        <p className="mt-1 text-sm text-slate-500">Try changing the date, company, branch, direction, bill type or search.</p>
+                        <Button variant="outline" className="mt-5 rounded-lg" onClick={clearFilters}>Reset filters</Button>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -2045,64 +1403,26 @@ export function PaymentsPage() {
 
           <div className="flex flex-col gap-3 border-t border-slate-100 px-4 py-3.5 sm:px-5 md:flex-row md:items-center md:justify-between">
             <p className="text-xs text-slate-500">
-              Showing{' '}
-              <span className="font-semibold text-slate-700">
-                {filtered.length ? (page - 1) * perPage + 1 : 0}
-              </span>{' '}
-              –{' '}
-              <span className="font-semibold text-slate-700">
-                {Math.min(page * perPage, filtered.length)}
-              </span>{' '}
-              of{' '}
-              <span className="font-semibold text-slate-700">
-                {filtered.length.toLocaleString('en-IN')}
-              </span>
+              Showing <span className="font-semibold text-slate-700">{filtered.length ? (page - 1) * perPage + 1 : 0}</span>
+              {' '}–{' '}
+              <span className="font-semibold text-slate-700">{Math.min(page * perPage, filtered.length)}</span>
+              {' '}of{' '}
+              <span className="font-semibold text-slate-700">{filtered.length.toLocaleString('en-IN')}</span>
             </p>
-
             <div className="flex items-center justify-end gap-1.5">
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9 rounded-lg"
-                disabled={page === 1}
-                onClick={() => setPage(1)}
-              >
+              <Button variant="outline" size="icon" className="h-9 w-9 rounded-lg" disabled={page === 1} onClick={() => setPage(1)}>
                 <ChevronsLeft className="h-4 w-4" />
               </Button>
-
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9 rounded-lg"
-                disabled={page === 1}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-              >
+              <Button variant="outline" size="icon" className="h-9 w-9 rounded-lg" disabled={page === 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>
                 <ChevronLeft className="h-4 w-4" />
               </Button>
-
               <div className="mx-1 min-w-[70px] rounded-lg bg-slate-100 px-3 py-1.5 text-center text-xs font-semibold">
                 {page} / {totalPages}
               </div>
-
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9 rounded-lg"
-                disabled={page === totalPages}
-                onClick={() =>
-                  setPage((p) => Math.min(totalPages, p + 1))
-                }
-              >
+              <Button variant="outline" size="icon" className="h-9 w-9 rounded-lg" disabled={page === totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>
                 <ChevronRight className="h-4 w-4" />
               </Button>
-
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9 rounded-lg"
-                disabled={page === totalPages}
-                onClick={() => setPage(totalPages)}
-              >
+              <Button variant="outline" size="icon" className="h-9 w-9 rounded-lg" disabled={page === totalPages} onClick={() => setPage(totalPages)}>
                 <ChevronsRight className="h-4 w-4" />
               </Button>
             </div>
@@ -2111,17 +1431,8 @@ export function PaymentsPage() {
       </div>
 
       {/* View */}
-      <Sheet
-        open={viewOpen}
-        onOpenChange={(open) => {
-          setViewOpen(open);
-          if (!open) setViewPayment(null);
-        }}
-      >
-        <SheetContent
-          side="right"
-          className="w-full overflow-y-auto p-0 sm:max-w-lg"
-        >
+      <Sheet open={viewOpen} onOpenChange={(open) => { setViewOpen(open); if (!open) setViewPayment(null); }}>
+        <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-lg">
           {viewPayment && (
             <>
               <div className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
@@ -2131,24 +1442,17 @@ export function PaymentsPage() {
                       <div className="grid h-9 w-9 place-items-center rounded-xl bg-indigo-50 text-indigo-600">
                         <CreditCard className="h-4 w-4" />
                       </div>
-
                       <div className="min-w-0">
                         <p className="truncate text-base font-bold text-slate-900">
-                          {viewPayment.reference_no ||
-                            `PAY-${viewPayment.id}`}
+                          {viewPayment.reference_no || `PAY-${viewPayment.id}`}
                         </p>
-                        <p className="text-[11px] text-slate-400">
-                          Payment #{viewPayment.id}
-                        </p>
+                        <p className="text-[11px] text-slate-400">Payment #{viewPayment.id}</p>
                       </div>
                     </div>
                   </SheetTitle>
-
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     <StatusBadge status={viewPayment.status} />
-                    <DirectionBadge
-                      direction={viewPayment.payment_direction}
-                    />
+                    <DirectionBadge direction={viewPayment.payment_direction} />
                     <BillBadge payment={viewPayment} />
                   </div>
                 </SheetHeader>
@@ -2156,71 +1460,37 @@ export function PaymentsPage() {
 
               <div className="space-y-4 px-5 py-5">
                 <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-400">
-                    Payment amount
-                  </p>
-
-                  <p
-                    className={`mt-1 text-3xl font-bold ${
-                      viewPayment.payment_direction === 'inward'
-                        ? 'text-emerald-700'
-                        : 'text-rose-700'
-                    }`}
-                  >
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-slate-400">Payment amount</p>
+                  <p className={`mt-1 text-3xl font-bold ${viewPayment.payment_direction === 'inward' ? 'text-emerald-700' : 'text-rose-700'}`}>
                     {money(viewPayment.amount)}
                   </p>
                 </div>
 
                 <div className="rounded-xl border border-slate-200 bg-white">
                   <div className="border-b border-slate-100 bg-slate-50/70 px-3.5 py-3">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
-                      Bill-wise tracking
-                    </p>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Bill-wise tracking</p>
                   </div>
-
                   <div className="space-y-3 p-3.5">
                     <div>
-                      <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                        Bill
-                      </p>
-                      <p className="mt-1 text-sm font-semibold text-slate-800">
-                        {billNo(viewPayment) || 'Not linked'}
-                      </p>
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Bill</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-800">{billNo(viewPayment) || 'Not linked'}</p>
                     </div>
-
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                          Type
-                        </p>
-                        <p className="mt-1 text-xs font-semibold capitalize">
-                          {billType(viewPayment)}
-                        </p>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Type</p>
+                        <p className="mt-1 text-xs font-semibold capitalize">{billType(viewPayment)}</p>
                       </div>
-
                       <div>
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                          Bill ID
-                        </p>
-                        <p className="mt-1 text-xs font-semibold">
-                          {billId(viewPayment) || '—'}
-                        </p>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Bill ID</p>
+                        <p className="mt-1 text-xs font-semibold">{billId(viewPayment) || '—'}</p>
                       </div>
                     </div>
-
-                    {(viewPayment.customer_name ||
-                      viewPayment.supplier_name) && (
+                    {(viewPayment.customer_name || viewPayment.supplier_name) && (
                       <>
                         <Separator />
-
                         <div>
-                          <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                            Party
-                          </p>
-                          <p className="mt-1 text-sm font-semibold">
-                            {viewPayment.customer_name ||
-                              viewPayment.supplier_name}
-                          </p>
+                          <p className="text-[10px] uppercase tracking-wide text-slate-400">Party</p>
+                          <p className="mt-1 text-sm font-semibold">{viewPayment.customer_name || viewPayment.supplier_name}</p>
                         </div>
                       </>
                     )}
@@ -2230,58 +1500,33 @@ export function PaymentsPage() {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="rounded-xl border border-slate-200 bg-white p-3">
                     <Building2 className="h-4 w-4 text-indigo-500" />
-                    <p className="mt-2 text-[10px] uppercase tracking-wide text-slate-400">
-                      Company
-                    </p>
-                    <p className="mt-1 text-xs font-semibold">
-                      {getCompany(viewPayment, companies)}
-                    </p>
+                    <p className="mt-2 text-[10px] uppercase tracking-wide text-slate-400">Company</p>
+                    <p className="mt-1 text-xs font-semibold">{getCompany(viewPayment, companies)}</p>
                   </div>
-
                   <div className="rounded-xl border border-slate-200 bg-white p-3">
                     <GitBranch className="h-4 w-4 text-violet-500" />
-                    <p className="mt-2 text-[10px] uppercase tracking-wide text-slate-400">
-                      Branch
-                    </p>
-                    <p className="mt-1 text-xs font-semibold">
-                      {getBranch(viewPayment, branches)}
-                    </p>
+                    <p className="mt-2 text-[10px] uppercase tracking-wide text-slate-400">Branch</p>
+                    <p className="mt-1 text-xs font-semibold">{getBranch(viewPayment, branches)}</p>
                   </div>
                 </div>
 
                 <div className="rounded-xl border border-slate-200 bg-white">
                   <div className="border-b border-slate-100 bg-slate-50/70 px-3.5 py-3">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
-                      Payment information
-                    </p>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Payment information</p>
                   </div>
-
                   <div className="divide-y divide-slate-100">
                     <div className="flex justify-between gap-3 px-3.5 py-3">
-                      <span className="text-[11px] text-slate-400">
-                        Method
-                      </span>
-                      <span className="text-xs font-semibold capitalize">
-                        {viewPayment.payment_method.replace('_', ' ')}
-                      </span>
+                      <span className="text-[11px] text-slate-400">Method</span>
+                      {/* ✅ FIXED: uses methodLabel */}
+                      <span className="text-xs font-semibold">{methodLabel(viewPayment.payment_method)}</span>
                     </div>
-
                     <div className="flex justify-between gap-3 px-3.5 py-3">
-                      <span className="text-[11px] text-slate-400">
-                        Payment date
-                      </span>
-                      <span className="text-xs font-semibold">
-                        {dateText(getDate(viewPayment))}
-                      </span>
+                      <span className="text-[11px] text-slate-400">Payment date</span>
+                      <span className="text-xs font-semibold">{dateText(getDate(viewPayment))}</span>
                     </div>
-
                     <div className="flex justify-between gap-3 px-3.5 py-3">
-                      <span className="text-[11px] text-slate-400">
-                        Created
-                      </span>
-                      <span className="text-xs font-semibold">
-                        {dateTimeText(viewPayment.created_at)}
-                      </span>
+                      <span className="text-[11px] text-slate-400">Created</span>
+                      <span className="text-xs font-semibold">{dateTimeText(viewPayment.created_at)}</span>
                     </div>
                   </div>
                 </div>
@@ -2289,72 +1534,49 @@ export function PaymentsPage() {
                 <div className="rounded-xl border border-slate-200 bg-white p-3.5">
                   <div className="mb-3 flex items-center gap-2">
                     <Landmark className="h-4 w-4 text-indigo-500" />
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
-                      Bank & ledger
-                    </p>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Bank & ledger</p>
                   </div>
-
                   <div className="grid gap-3 sm:grid-cols-2">
                     <div>
-                      <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                        Bank
-                      </p>
-                      <p className="mt-1 text-xs font-semibold">
-                        {viewPayment.bank_name || '—'}
-                      </p>
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Bank</p>
+                      <p className="mt-1 text-xs font-semibold">{viewPayment.bank_name || '—'}</p>
                     </div>
-
                     <div>
-                      <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                        Account
-                      </p>
-                      <p className="mt-1 text-xs font-semibold">
-                        {viewPayment.account_number || '—'}
-                      </p>
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Account</p>
+                      <p className="mt-1 text-xs font-semibold">{viewPayment.account_number || '—'}</p>
                     </div>
-
                     <div className="sm:col-span-2">
-                      <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                        Ledger reference
-                      </p>
-                      <p className="mt-1 text-xs font-semibold">
-                        {viewPayment.ledger_reference || '—'}
-                      </p>
+                      <p className="text-[10px] uppercase tracking-wide text-slate-400">Ledger reference</p>
+                      <p className="mt-1 text-xs font-semibold">{viewPayment.ledger_reference || '—'}</p>
                     </div>
                   </div>
                 </div>
 
                 <div className="rounded-xl border border-slate-200 bg-white p-3.5">
-                  <p className="text-[10px] uppercase tracking-wide text-slate-400">
-                    Remarks
-                  </p>
+                  <p className="text-[10px] uppercase tracking-wide text-slate-400">Remarks</p>
                   <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">
                     {viewPayment.remarks || 'No remarks.'}
                   </p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 pb-4">
-                  <Button
-                    variant="outline"
-                    className="h-10 rounded-xl"
-                    onClick={() => {
-                      setViewOpen(false);
-                      openEdit(viewPayment);
-                    }}
-                  >
-                    <Pencil className="mr-2 h-4 w-4" />
-                    Edit
-                  </Button>
-
-                  <Button
-                    variant="destructive"
-                    className="h-10 rounded-xl !bg-rose-600 !text-white hover:!bg-rose-700"
-                    onClick={() => deletePayment(viewPayment)}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete
-                  </Button>
-                </div>
+                {(canEditPayment || canDeletePayment) && (
+                  <div className="grid grid-cols-2 gap-2 pb-4">
+                    {canEditPayment && (
+                      <Button variant="outline" className="h-10 rounded-xl"
+                        onClick={() => { setViewOpen(false); openEdit(viewPayment); }}>
+                        <Pencil className="mr-2 h-4 w-4" />
+                        Edit
+                      </Button>
+                    )}
+                    {canDeletePayment && (
+                      <Button variant="destructive" className="h-10 rounded-xl !bg-rose-600 !text-white hover:!bg-rose-700"
+                        onClick={() => deletePayment(viewPayment)}>
+                        <Trash2 className="mr-2 h-4 w-4" />
+                        Delete
+                      </Button>
+                    )}
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -2362,649 +1584,313 @@ export function PaymentsPage() {
       </Sheet>
 
       {/* Create/Edit */}
-      <Sheet open={editOpen} onOpenChange={setEditOpen}>
-        <SheetContent
-          side="right"
-          className="w-full overflow-y-auto p-0 sm:max-w-xl"
-        >
-          <div className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
-            <SheetHeader>
-              <SheetTitle className="flex items-center gap-2 pr-8">
-                <span className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                  {editingId ? (
-                    <Pencil className="h-4 w-4" />
-                  ) : (
-                    <Plus className="h-4 w-4" />
-                  )}
-                </span>
-                {editingId ? 'Edit payment' : 'Create payment'}
-              </SheetTitle>
-            </SheetHeader>
-          </div>
-
-          <div className="space-y-4 px-5 py-5 pb-24">
-            {/* Payment */}
-            <div className="rounded-2xl border border-slate-200 bg-white">
-              <button
-                type="button"
-                onClick={() =>
-                  setSections((s) => ({
-                    ...s,
-                    payment: !s.payment,
-                  }))
-                }
-                className="flex w-full items-center justify-between px-4 py-3 text-left"
-              >
-                <div className="flex items-center gap-2">
+      {editOpen && (editingId ? canEditPayment : canCreatePayment) && (
+        <Sheet open={editOpen} onOpenChange={setEditOpen}>
+          <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-xl">
+            <div className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 px-5 py-4 backdrop-blur">
+              <SheetHeader>
+                <SheetTitle className="flex items-center gap-2 pr-8">
                   <span className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                    <WalletCards className="h-4 w-4" />
+                    {editingId ? <Pencil className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
                   </span>
-                  <div>
-                    <p className="text-sm font-semibold">
-                      Payment details
-                    </p>
-                    <p className="text-[11px] text-slate-500">
-                      Core transaction data
-                    </p>
-                  </div>
-                </div>
-
-                <ChevronDown
-                  className={`h-4 w-4 transition ${
-                    sections.payment ? '' : '-rotate-90'
-                  }`}
-                />
-              </button>
-
-              {sections.payment && (
-                <div className="grid gap-4 border-t border-slate-100 p-4 sm:grid-cols-2">
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold">
-                      Company *
-                    </label>
-
-                    <select
-                      value={form.company_id}
-                      onChange={(e) =>
-                        setForm((x) => ({
-                          ...x,
-                          company_id: Number(e.target.value),
-                          branch_id: undefined,
-                          // Invoice belongs to the previous company — reset it.
-                          invoice_id: null,
-                        }))
-                      }
-                      className={`h-10 w-full rounded-xl border bg-white px-3 text-sm outline-none ${
-                        formErrors.company_id
-                          ? 'border-rose-400 ring-4 ring-rose-100'
-                          : 'border-slate-200'
-                      }`}
-                    >
-                      <option value={0}>Select company</option>
-
-                      {companies.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold">
-                      Branch
-                    </label>
-
-                    <select
-                      value={form.branch_id || ''}
-                      disabled={!form.company_id}
-                      onChange={(e) =>
-                        setForm((x) => ({
-                          ...x,
-                          branch_id: e.target.value
-                            ? Number(e.target.value)
-                            : undefined,
-                          // Invoice might belong to a different branch too.
-                          invoice_id: null,
-                        }))
-                      }
-                      className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm disabled:bg-slate-50"
-                    >
-                      <option value="">
-                        {form.company_id
-                          ? 'Select branch'
-                          : 'Select company first'}
-                      </option>
-
-                      {formBranches.map((b) => (
-                        <option key={b.id} value={b.id}>
-                          {b.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold">
-                      Reference number
-                    </label>
-
-                    <Input
-                      value={form.reference_no}
-                      onChange={(e) =>
-                        setForm((x) => ({
-                          ...x,
-                          reference_no: e.target.value,
-                        }))
-                      }
-                      placeholder="Leave blank for auto-generated"
-                    />
-
-                    <p className="mt-1 text-[10px] text-slate-400">
-                      Blank = a unique PAY reference is generated automatically.
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold">
-                      Amount *
-                    </label>
-
-                    <Input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={form.amount}
-                      onChange={(e) =>
-                        setForm((x) => ({
-                          ...x,
-                          amount: e.target.value,
-                        }))
-                      }
-                      className={
-                        formErrors.amount
-                          ? 'border-rose-400 ring-4 ring-rose-100'
-                          : ''
-                      }
-                      placeholder="0.00"
-                    />
-
-                    {selectedInvoice && (
-                      <p className="mt-1 text-[10px] text-slate-500">
-                        Due on {selectedInvoice.invoice_no}:{' '}
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setForm((x) => ({
-                              ...x,
-                              amount: invoiceOutstanding(selectedInvoice),
-                            }))
-                          }
-                          className="font-semibold text-indigo-600 underline decoration-dotted hover:text-indigo-700"
-                        >
-                          use {money(invoiceOutstanding(selectedInvoice))}
-                        </button>
-                      </p>
-                    )}
-                  </div>
-
-                  <Select
-                    label="Payment method"
-                    value={form.payment_method}
-                    onChange={(v) =>
-                      setForm((x) => ({
-                        ...x,
-                        payment_method: v as PaymentMethod,
-                      }))
-                    }
-                    options={[
-                      { value: 'qr', label: 'QR' },
-                      { value: 'upi', label: 'UPI' },
-                      {
-                        value: 'bank_transfer',
-                        label: 'Bank transfer',
-                      },
-                      { value: 'cash', label: 'Cash' },
-                      { value: 'card', label: 'Card' },
-                    ]}
-                  />
-
-                  <Select
-                    label="Status"
-                    value={form.status}
-                    onChange={(v) =>
-                      setForm((x) => ({
-                        ...x,
-                        status: v as PaymentStatus,
-                      }))
-                    }
-                    options={[
-                      { value: 'pending', label: 'Pending' },
-                      {
-                        value: 'completed',
-                        label: 'Completed',
-                      },
-                      { value: 'failed', label: 'Failed' },
-                      {
-                        value: 'reconciled',
-                        label: 'Reconciled',
-                      },
-                    ]}
-                  />
-
-                  <div className="sm:col-span-2">
-                    <label className="mb-1.5 block text-xs font-semibold">
-                      Direction
-                    </label>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setForm((x) => ({
-                            ...x,
-                            payment_direction: 'inward',
-                          }))
-                        }
-                        className={`rounded-xl border p-3 text-left ${
-                          form.payment_direction === 'inward'
-                            ? 'border-emerald-300 bg-emerald-50 ring-4 ring-emerald-500/10'
-                            : 'border-slate-200'
-                        }`}
-                      >
-                        <span className="flex items-center gap-2 text-sm font-semibold">
-                          <ArrowDown className="h-4 w-4 text-emerald-600" />
-                          INWARD
-                        </span>
-                        <span className="mt-1 block text-[11px] text-slate-500">
-                          Money received
-                        </span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setForm((x) => ({
-                            ...x,
-                            payment_direction: 'outward',
-                          }))
-                        }
-                        className={`rounded-xl border p-3 text-left ${
-                          form.payment_direction === 'outward'
-                            ? 'border-rose-300 bg-rose-50 ring-4 ring-rose-500/10'
-                            : 'border-slate-200'
-                        }`}
-                      >
-                        <span className="flex items-center gap-2 text-sm font-semibold">
-                          <ArrowUp className="h-4 w-4 text-rose-600" />
-                          OUTWARD
-                        </span>
-                        <span className="mt-1 block text-[11px] text-slate-500">
-                          Money paid
-                        </span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
+                  {editingId ? 'Edit payment' : 'Create payment'}
+                </SheetTitle>
+              </SheetHeader>
             </div>
 
-            {/* Apply to invoice */}
-            <div className="rounded-2xl border border-slate-200 bg-white">
-              <button
-                type="button"
-                onClick={() =>
-                  setSections((s) => ({
-                    ...s,
-                    invoice: !s.invoice,
-                  }))
-                }
-                className="flex w-full items-center justify-between px-4 py-3 text-left"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="grid h-8 w-8 place-items-center rounded-lg bg-sky-50 text-sky-600">
-                    <FileText className="h-4 w-4" />
-                  </span>
-                  <div>
-                    <p className="text-sm font-semibold">
-                      Apply to invoice
-                    </p>
-                    <p className="text-[11px] text-slate-500">
-                      {selectedInvoice
-                        ? `Linked to ${selectedInvoice.invoice_no}`
-                        : form.invoice_id
-                          ? `Linked to invoice #${form.invoice_id}`
-                          : 'Link this payment to an outstanding invoice'}
-                    </p>
+            <div className="space-y-4 px-5 py-5 pb-24">
+              {/* Payment */}
+              <div className="rounded-2xl border border-slate-200 bg-white">
+                <button type="button"
+                  onClick={() => setSections((s) => ({ ...s, payment: !s.payment }))}
+                  className="flex w-full items-center justify-between px-4 py-3 text-left">
+                  <div className="flex items-center gap-2">
+                    <span className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                      <WalletCards className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <p className="text-sm font-semibold">Payment details</p>
+                      <p className="text-[11px] text-slate-500">Core transaction data</p>
+                    </div>
                   </div>
-                </div>
+                  <ChevronDown className={`h-4 w-4 transition ${sections.payment ? '' : '-rotate-90'}`} />
+                </button>
 
-                <ChevronDown
-                  className={`h-4 w-4 transition ${
-                    sections.invoice ? '' : '-rotate-90'
-                  }`}
-                />
-              </button>
+                {sections.payment && (
+                  <div className="grid gap-4 border-t border-slate-100 p-4 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1.5 block text-xs font-semibold">Company *</label>
+                      <select value={form.company_id}
+                        onChange={(e) => setForm((x) => ({ ...x, company_id: Number(e.target.value), branch_id: undefined, invoice_id: null }))}
+                        className={`h-10 w-full rounded-xl border bg-white px-3 text-sm outline-none ${formErrors.company_id ? 'border-rose-400 ring-4 ring-rose-100' : 'border-slate-200'}`}>
+                        <option value={0}>Select company</option>
+                        {companies.map((c) => (<option key={c.id} value={c.id}>{c.name}</option>))}
+                      </select>
+                    </div>
 
-              {sections.invoice && (
-                <div className="space-y-3 border-t border-slate-100 p-4">
-                  {!form.company_id ? (
-                    <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-6 text-center">
-                      <p className="text-xs font-medium text-slate-600">
-                        Select a company to see outstanding invoices.
+                    <div>
+                      <label className="mb-1.5 block text-xs font-semibold">Branch</label>
+                      <select value={form.branch_id || ''} disabled={!form.company_id}
+                        onChange={(e) => setForm((x) => ({ ...x, branch_id: e.target.value ? Number(e.target.value) : undefined, invoice_id: null }))}
+                        className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm disabled:bg-slate-50">
+                        <option value="">{form.company_id ? 'Select branch' : 'Select company first'}</option>
+                        {formBranches.map((b) => (<option key={b.id} value={b.id}>{b.name}</option>))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="mb-1.5 block text-xs font-semibold">Reference number</label>
+                      <Input value={form.reference_no} onChange={(e) => setForm((x) => ({ ...x, reference_no: e.target.value }))} placeholder="Leave blank for auto-generated" />
+                      <p className="mt-1 text-[10px] text-slate-400">Blank = a unique PAY reference is generated automatically.</p>
+                    </div>
+
+                    <div>
+                      <label className="mb-1.5 block text-xs font-semibold">Amount *</label>
+                      <Input type="number" min="0" step="0.01" value={form.amount}
+                        onChange={(e) => setForm((x) => ({ ...x, amount: e.target.value }))}
+                        className={formErrors.amount ? 'border-rose-400 ring-4 ring-rose-100' : ''}
+                        placeholder="0.00" />
+                      {selectedInvoice && (
+                        <p className="mt-1 text-[10px] text-slate-500">
+                          Due on {selectedInvoice.invoice_no}:{' '}
+                          <button type="button"
+                            onClick={() => setForm((x) => ({ ...x, amount: invoiceOutstanding(selectedInvoice) }))}
+                            className="font-semibold text-indigo-600 underline decoration-dotted hover:text-indigo-700">
+                            use {money(invoiceOutstanding(selectedInvoice))}
+                          </button>
+                        </p>
+                      )}
+                    </div>
+
+                    {/* ✅ FIXED: form select uses canonical + dynamic list, labels via methodLabel */}
+                    <Select label="Payment method" value={methodKey(form.payment_method) || 'qr'}
+                      onChange={(v) => setForm((x) => ({ ...x, payment_method: v }))}
+                      options={availableMethods.map((m) => ({ value: m, label: methodLabel(m) }))} />
+
+                    <Select label="Status" value={form.status}
+                      onChange={(v) => setForm((x) => ({ ...x, status: v as PaymentStatus }))}
+                      options={[
+                        { value: 'pending', label: 'Pending' },
+                        { value: 'completed', label: 'Completed' },
+                        { value: 'failed', label: 'Failed' },
+                        { value: 'reconciled', label: 'Reconciled' },
+                      ]} />
+
+                    <div className="sm:col-span-2">
+                      <label className="mb-1.5 block text-xs font-semibold">Direction</label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button type="button" onClick={() => setForm((x) => ({ ...x, payment_direction: 'inward' }))}
+                          className={`rounded-xl border p-3 text-left ${form.payment_direction === 'inward' ? 'border-emerald-300 bg-emerald-50 ring-4 ring-emerald-500/10' : 'border-slate-200'}`}>
+                          <span className="flex items-center gap-2 text-sm font-semibold">
+                            <ArrowDown className="h-4 w-4 text-emerald-600" /> INWARD
+                          </span>
+                          <span className="mt-1 block text-[11px] text-slate-500">Money received</span>
+                        </button>
+                        <button type="button" onClick={() => setForm((x) => ({ ...x, payment_direction: 'outward' }))}
+                          className={`rounded-xl border p-3 text-left ${form.payment_direction === 'outward' ? 'border-rose-300 bg-rose-50 ring-4 ring-rose-500/10' : 'border-slate-200'}`}>
+                          <span className="flex items-center gap-2 text-sm font-semibold">
+                            <ArrowUp className="h-4 w-4 text-rose-600" /> OUTWARD
+                          </span>
+                          <span className="mt-1 block text-[11px] text-slate-500">Money paid</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Apply to invoice */}
+              <div className="rounded-2xl border border-slate-200 bg-white">
+                <button type="button"
+                  onClick={() => setSections((s) => ({ ...s, invoice: !s.invoice }))}
+                  className="flex w-full items-center justify-between px-4 py-3 text-left">
+                  <div className="flex items-center gap-2">
+                    <span className="grid h-8 w-8 place-items-center rounded-lg bg-sky-50 text-sky-600">
+                      <FileText className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <p className="text-sm font-semibold">Apply to invoice</p>
+                      <p className="text-[11px] text-slate-500">
+                        {selectedInvoice ? `Linked to ${selectedInvoice.invoice_no}` : form.invoice_id ? `Linked to invoice #${form.invoice_id}` : 'Link this payment to an outstanding invoice'}
                       </p>
                     </div>
-                  ) : (
-                    <>
-                      {/* Currently-linked invoice that is not in the
-                          due list (e.g. already fully paid). */}
-                      {hasLinkedInvoiceOutsideList && (
-                        <div className="flex items-center justify-between gap-3 rounded-xl border border-sky-200 bg-sky-50 px-3.5 py-2.5">
-                          <div className="min-w-0">
-                            <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-700">
-                              Currently linked
-                            </p>
-                            <p className="truncate text-xs font-semibold text-slate-800">
-                              Invoice #{form.invoice_id}
-                            </p>
-                          </div>
+                  </div>
+                  <ChevronDown className={`h-4 w-4 transition ${sections.invoice ? '' : '-rotate-90'}`} />
+                </button>
 
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="ghost"
-                            className="h-8 rounded-lg text-slate-500 hover:text-slate-800"
-                            onClick={clearInvoiceLink}
-                          >
-                            <X className="mr-1 h-3.5 w-3.5" />
-                            Unlink
-                          </Button>
-                        </div>
-                      )}
-
-                      <div className="relative">
-                        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
-                        <Input
-                          value={dueInvoiceSearch}
-                          onChange={(e) =>
-                            setDueInvoiceSearch(e.target.value)
-                          }
-                          placeholder="Search invoice # or customer…"
-                          className="h-9 rounded-xl pl-9 text-sm"
-                        />
+                {sections.invoice && (
+                  <div className="space-y-3 border-t border-slate-100 p-4">
+                    {!form.company_id ? (
+                      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-4 py-6 text-center">
+                        <p className="text-xs font-medium text-slate-600">Select a company to see outstanding invoices.</p>
                       </div>
-
-                      {dueInvoicesError && (
-                        <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
-                          {dueInvoicesError}
-                        </div>
-                      )}
-
-                      <div className="max-h-[320px] overflow-y-auto rounded-xl border border-slate-100 bg-slate-50/40 p-1.5">
-                        {dueInvoicesLoading ? (
-                          <div className="space-y-1.5 p-1">
-                            {Array.from({ length: 4 }).map((_, i) => (
-                              <div
-                                key={i}
-                                className="h-14 animate-pulse rounded-lg bg-white"
-                              />
-                            ))}
-                          </div>
-                        ) : filteredDueInvoices.length === 0 ? (
-                          <div className="px-4 py-8 text-center">
-                            <p className="text-xs font-semibold text-slate-600">
-                              {dueInvoiceSearch
-                                ? 'No matching invoices'
-                                : 'No outstanding invoices'}
-                            </p>
-                            <p className="mt-1 text-[11px] text-slate-400">
-                              {dueInvoiceSearch
-                                ? 'Try a different search term.'
-                                : 'Every invoice for this company is fully paid.'}
-                            </p>
-                          </div>
-                        ) : (
-                          <div className="space-y-1.5">
-                            {filteredDueInvoices.map((inv) => {
-                              const outstanding =
-                                invoiceOutstanding(inv);
-                              const isSelected =
-                                form.invoice_id === inv.id;
-
-                              return (
-                                <button
-                                  key={inv.id}
-                                  type="button"
-                                  onClick={() => applyInvoice(inv)}
-                                  className={`flex w-full items-start gap-3 rounded-lg border p-2.5 text-left transition ${
-                                    isSelected
-                                      ? 'border-indigo-300 bg-indigo-50 ring-2 ring-indigo-500/15'
-                                      : 'border-transparent bg-white hover:border-slate-200 hover:bg-slate-50'
-                                  }`}
-                                >
-                                  <span
-                                    className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full border ${
-                                      isSelected
-                                        ? 'border-indigo-500 bg-indigo-500'
-                                        : 'border-slate-300 bg-white'
-                                    }`}
-                                  >
-                                    {isSelected && (
-                                      <span className="h-1.5 w-1.5 rounded-full bg-white" />
-                                    )}
-                                  </span>
-
-                                  <div className="min-w-0 flex-1">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="truncate text-xs font-semibold text-slate-900">
-                                        {inv.invoice_no}
-                                      </span>
-                                      <span className="whitespace-nowrap text-xs font-bold tabular-nums text-rose-600">
-                                        {money(outstanding)}
-                                      </span>
-                                    </div>
-
-                                    <div className="mt-0.5 flex items-center justify-between gap-2">
-                                      <span className="truncate text-[11px] text-slate-500">
-                                        {invoiceCustomer(inv)}
-                                      </span>
-                                      {inv.due_date && (
-                                        <span className="whitespace-nowrap text-[10px] text-slate-400">
-                                          Due {dateText(inv.due_date)}
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                </button>
-                              );
-                            })}
+                    ) : (
+                      <>
+                        {hasLinkedInvoiceOutsideList && (
+                          <div className="flex items-center justify-between gap-3 rounded-xl border border-sky-200 bg-sky-50 px-3.5 py-2.5">
+                            <div className="min-w-0">
+                              <p className="text-[10px] font-semibold uppercase tracking-wide text-sky-700">Currently linked</p>
+                              <p className="truncate text-xs font-semibold text-slate-800">Invoice #{form.invoice_id}</p>
+                            </div>
+                            <Button type="button" size="sm" variant="ghost"
+                              className="h-8 rounded-lg text-slate-500 hover:text-slate-800" onClick={clearInvoiceLink}>
+                              <X className="mr-1 h-3.5 w-3.5" /> Unlink
+                            </Button>
                           </div>
                         )}
-                      </div>
 
-                      {form.invoice_id && selectedInvoice && (
-                        <div className="flex items-center justify-between gap-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] text-emerald-800">
-                          <span className="truncate">
-                            Linked to <b>{selectedInvoice.invoice_no}</b> — due{' '}
-                            {money(invoiceOutstanding(selectedInvoice))}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={clearInvoiceLink}
-                            className="shrink-0 font-semibold text-emerald-700 underline decoration-dotted hover:text-emerald-900"
-                          >
-                            Clear
-                          </button>
+                        <div className="relative">
+                          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                          <Input value={dueInvoiceSearch} onChange={(e) => setDueInvoiceSearch(e.target.value)}
+                            placeholder="Search invoice # or customer…"
+                            className="h-9 rounded-xl pl-9 text-sm" />
                         </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
 
-            {/* Bank */}
-            <div className="rounded-2xl border border-slate-200 bg-white">
-              <button
-                type="button"
-                onClick={() =>
-                  setSections((s) => ({
-                    ...s,
-                    bank: !s.bank,
-                  }))
-                }
-                className="flex w-full items-center justify-between px-4 py-3 text-left"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="grid h-8 w-8 place-items-center rounded-lg bg-violet-50 text-violet-600">
-                    <Landmark className="h-4 w-4" />
-                  </span>
-                  <div>
-                    <p className="text-sm font-semibold">
-                      Bank & ledger
-                    </p>
-                    <p className="text-[11px] text-slate-500">
-                      Reconciliation details
-                    </p>
+                        {dueInvoicesError && (
+                          <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">{dueInvoicesError}</div>
+                        )}
+
+                        <div className="max-h-[320px] overflow-y-auto rounded-xl border border-slate-100 bg-slate-50/40 p-1.5">
+                          {dueInvoicesLoading ? (
+                            <div className="space-y-1.5 p-1">
+                              {Array.from({ length: 4 }).map((_, i) => (<div key={i} className="h-14 animate-pulse rounded-lg bg-white" />))}
+                            </div>
+                          ) : filteredDueInvoices.length === 0 ? (
+                            <div className="px-4 py-8 text-center">
+                              <p className="text-xs font-semibold text-slate-600">
+                                {dueInvoiceSearch ? 'No matching invoices' : 'No outstanding invoices'}
+                              </p>
+                              <p className="mt-1 text-[11px] text-slate-400">
+                                {dueInvoiceSearch ? 'Try a different search term.' : 'Every invoice for this company is fully paid.'}
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="space-y-1.5">
+                              {filteredDueInvoices.map((inv) => {
+                                const outstanding = invoiceOutstanding(inv);
+                                const isSelected = form.invoice_id === inv.id;
+                                return (
+                                  <button key={inv.id} type="button" onClick={() => applyInvoice(inv)}
+                                    className={`flex w-full items-start gap-3 rounded-lg border p-2.5 text-left transition ${
+                                      isSelected ? 'border-indigo-300 bg-indigo-50 ring-2 ring-indigo-500/15'
+                                        : 'border-transparent bg-white hover:border-slate-200 hover:bg-slate-50'}`}>
+                                    <span className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full border ${
+                                      isSelected ? 'border-indigo-500 bg-indigo-500' : 'border-slate-300 bg-white'}`}>
+                                      {isSelected && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
+                                    </span>
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <span className="truncate text-xs font-semibold text-slate-900">{inv.invoice_no}</span>
+                                        <span className="whitespace-nowrap text-xs font-bold tabular-nums text-rose-600">{money(outstanding)}</span>
+                                      </div>
+                                      <div className="mt-0.5 flex items-center justify-between gap-2">
+                                        <span className="truncate text-[11px] text-slate-500">{invoiceCustomer(inv)}</span>
+                                        {inv.due_date && <span className="whitespace-nowrap text-[10px] text-slate-400">Due {dateText(inv.due_date)}</span>}
+                                      </div>
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+
+                        {form.invoice_id && selectedInvoice && (
+                          <div className="flex items-center justify-between gap-2 rounded-xl bg-emerald-50 px-3 py-2 text-[11px] text-emerald-800">
+                            <span className="truncate">
+                              Linked to <b>{selectedInvoice.invoice_no}</b> — due {money(invoiceOutstanding(selectedInvoice))}
+                            </span>
+                            <button type="button" onClick={clearInvoiceLink}
+                              className="shrink-0 font-semibold text-emerald-700 underline decoration-dotted hover:text-emerald-900">
+                              Clear
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
-                </div>
-
-                <ChevronDown
-                  className={`h-4 w-4 transition ${
-                    sections.bank ? '' : '-rotate-90'
-                  }`}
-                />
-              </button>
-
-              {sections.bank && (
-                <div className="grid gap-4 border-t border-slate-100 p-4 sm:grid-cols-2">
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold">
-                      Bank name
-                    </label>
-                    <Input
-                      value={form.bank_name}
-                      onChange={(e) =>
-                        setForm((x) => ({
-                          ...x,
-                          bank_name: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold">
-                      Account number
-                    </label>
-                    <Input
-                      value={form.account_number}
-                      onChange={(e) =>
-                        setForm((x) => ({
-                          ...x,
-                          account_number: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-
-                  <div className="sm:col-span-2">
-                    <label className="mb-1.5 block text-xs font-semibold">
-                      Ledger reference
-                    </label>
-                    <Input
-                      value={form.ledger_reference}
-                      onChange={(e) =>
-                        setForm((x) => ({
-                          ...x,
-                          ledger_reference: e.target.value,
-                        }))
-                      }
-                      placeholder="UTR / transaction / ledger reference"
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Remarks */}
-            <div className="rounded-2xl border border-slate-200 bg-white">
-              <button
-                type="button"
-                onClick={() =>
-                  setSections((s) => ({
-                    ...s,
-                    remarks: !s.remarks,
-                  }))
-                }
-                className="flex w-full items-center justify-between px-4 py-3 text-left"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-50 text-emerald-600">
-                    <BookOpen className="h-4 w-4" />
-                  </span>
-                  <p className="text-sm font-semibold">Remarks</p>
-                </div>
-
-                <ChevronDown
-                  className={`h-4 w-4 transition ${
-                    sections.remarks ? '' : '-rotate-90'
-                  }`}
-                />
-              </button>
-
-              {sections.remarks && (
-                <div className="border-t border-slate-100 p-4">
-                  <textarea
-                    rows={4}
-                    value={form.remarks}
-                    onChange={(e) =>
-                      setForm((x) => ({
-                        ...x,
-                        remarks: e.target.value,
-                      }))
-                    }
-                    placeholder="Payment notes..."
-                    className="w-full resize-none rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                  />
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="fixed bottom-0 right-0 z-30 w-full border-t border-slate-200 bg-white/95 px-5 py-3 backdrop-blur sm:max-w-xl">
-            <div className="flex justify-between gap-2">
-              <Button
-                variant="outline"
-                disabled={saving}
-                onClick={() => setEditOpen(false)}
-                className="h-10 rounded-xl"
-              >
-                <X className="mr-2 h-4 w-4" />
-                Cancel
-              </Button>
-
-              <Button
-                disabled={saving}
-                onClick={save}
-                className="h-10 rounded-xl bg-slate-900 px-5 hover:bg-slate-800"
-              >
-                {saving ? (
-                  <>
-                    <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                    Saving…
-                  </>
-                ) : (
-                  <>
-                    <CheckCircle2 className="mr-2 h-4 w-4" />
-                    {editingId ? 'Update payment' : 'Save payment'}
-                  </>
                 )}
-              </Button>
+              </div>
+
+              {/* Bank */}
+              <div className="rounded-2xl border border-slate-200 bg-white">
+                <button type="button"
+                  onClick={() => setSections((s) => ({ ...s, bank: !s.bank }))}
+                  className="flex w-full items-center justify-between px-4 py-3 text-left">
+                  <div className="flex items-center gap-2">
+                    <span className="grid h-8 w-8 place-items-center rounded-lg bg-violet-50 text-violet-600">
+                      <Landmark className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <p className="text-sm font-semibold">Bank & ledger</p>
+                      <p className="text-[11px] text-slate-500">Reconciliation details</p>
+                    </div>
+                  </div>
+                  <ChevronDown className={`h-4 w-4 transition ${sections.bank ? '' : '-rotate-90'}`} />
+                </button>
+
+                {sections.bank && (
+                  <div className="grid gap-4 border-t border-slate-100 p-4 sm:grid-cols-2">
+                    <div>
+                      <label className="mb-1.5 block text-xs font-semibold">Bank name</label>
+                      <Input value={form.bank_name} onChange={(e) => setForm((x) => ({ ...x, bank_name: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label className="mb-1.5 block text-xs font-semibold">Account number</label>
+                      <Input value={form.account_number} onChange={(e) => setForm((x) => ({ ...x, account_number: e.target.value }))} />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="mb-1.5 block text-xs font-semibold">Ledger reference</label>
+                      <Input value={form.ledger_reference} onChange={(e) => setForm((x) => ({ ...x, ledger_reference: e.target.value }))}
+                        placeholder="UTR / transaction / ledger reference" />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Remarks */}
+              <div className="rounded-2xl border border-slate-200 bg-white">
+                <button type="button"
+                  onClick={() => setSections((s) => ({ ...s, remarks: !s.remarks }))}
+                  className="flex w-full items-center justify-between px-4 py-3 text-left">
+                  <div className="flex items-center gap-2">
+                    <span className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-50 text-emerald-600">
+                      <BookOpen className="h-4 w-4" />
+                    </span>
+                    <p className="text-sm font-semibold">Remarks</p>
+                  </div>
+                  <ChevronDown className={`h-4 w-4 transition ${sections.remarks ? '' : '-rotate-90'}`} />
+                </button>
+
+                {sections.remarks && (
+                  <div className="border-t border-slate-100 p-4">
+                    <textarea rows={4} value={form.remarks} onChange={(e) => setForm((x) => ({ ...x, remarks: e.target.value }))}
+                      placeholder="Payment notes..."
+                      className="w-full resize-none rounded-xl border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10" />
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        </SheetContent>
-      </Sheet>
+
+            <div className="fixed bottom-0 right-0 z-30 w-full border-t border-slate-200 bg-white/95 px-5 py-3 backdrop-blur sm:max-w-xl">
+              <div className="flex justify-between gap-2">
+                <Button variant="outline" disabled={saving} onClick={() => setEditOpen(false)} className="h-10 rounded-xl">
+                  <X className="mr-2 h-4 w-4" />
+                  Cancel
+                </Button>
+                <Button disabled={saving} onClick={save}
+                  className="h-10 rounded-xl bg-slate-900 px-5 hover:bg-slate-800">
+                  {saving ? (
+                    <><RefreshCw className="mr-2 h-4 w-4 animate-spin" /> Saving…</>
+                  ) : (
+                    <><CheckCircle2 className="mr-2 h-4 w-4" /> {editingId ? 'Update payment' : 'Save payment'}</>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </SheetContent>
+        </Sheet>
+      )}
     </div>
   );
 }

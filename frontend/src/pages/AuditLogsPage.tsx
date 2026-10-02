@@ -25,11 +25,14 @@ import {
   FiCopy,
   FiCheck,
   FiCalendar,
+  FiLock,
 } from 'react-icons/fi';
 
 import { useNotification } from '../components/NotificationContext';
-import { getAppLogs } from '../services/appLogger';
+import { clearAppLogs, getAppLogs } from '../services/appLogger';
 import type { AppLogEntry } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -63,7 +66,6 @@ interface LogUser {
 }
 
 interface ExtendedLogEntry extends Omit<AppLogEntry, 'id'> {
-  // Possible user fields the backend might attach. All optional.
   user?: LogUser | null;
   user_name?: string;
   user_email?: string;
@@ -327,6 +329,24 @@ StatCard.displayName = 'StatCard';
 
 export function AuditLogsPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ---- Capability flags ---- */
+  // Any of these grants read access to the audit trail.
+  const canViewLogs =
+    isSuperAdmin ||
+    can('view dashboard login activity') ||
+    can('view admin login activity') ||
+    can('view users');
+
+  // Clearing audit logs is destructive. No dedicated audit permission exists
+  // in the seed, so restrict to super-admin only.
+  const canClearLogs = isSuperAdmin;
+
+  // Export is a read-only operation — same gate as viewing.
+  const canExportLogs = canViewLogs;
 
   const [logs, setLogs] = useState<ExtendedLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -346,11 +366,16 @@ export function AuditLogsPage() {
 
   /* -------------------- Load logs -------------------- */
 
-  const loadLogs = useCallback(() => {
+  const loadLogs = useCallback(async () => {
+    if (!canViewLogs) {
+      setLogs([]);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      const data = getAppLogs() as ExtendedLogEntry[];
+      const data = await getAppLogs() as ExtendedLogEntry[];
       setLogs(data);
       setLastUpdated(new Date());
     } catch (err: unknown) {
@@ -360,14 +385,15 @@ export function AuditLogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [showError]);
+  }, [canViewLogs, showError]);
 
   useEffect(() => {
-    loadLogs();
-    const listener = () => loadLogs();
+    if (loadingUser && !hasUser) return;
+    void loadLogs();
+    const listener = () => { void loadLogs(); };
     window.addEventListener('app-log-updated', listener);
     return () => window.removeEventListener('app-log-updated', listener);
-  }, [loadLogs]);
+  }, [loadLogs, loadingUser, hasUser]);
 
   /* -------------------- Derived: filter options -------------------- */
 
@@ -476,11 +502,15 @@ export function AuditLogsPage() {
 
   /* -------------------- Actions -------------------- */
 
-  const handleClearLogs = () => {
+  const handleClearLogs = async () => {
+    if (!canClearLogs) {
+      showError('Permission denied', 'Only a super-admin can clear the audit trail.');
+      return;
+    }
     if (!window.confirm('Clear all audit logs? This cannot be undone.')) return;
     try {
-      localStorage.removeItem('business_os_audit_logs');
-      loadLogs();
+      await clearAppLogs();
+      await loadLogs();
       showSuccess('Logs cleared', 'Audit logs have been cleared.');
     } catch (err: unknown) {
       showError('Clear failed', getErrorMessage(err, 'Could not clear logs.'));
@@ -488,31 +518,39 @@ export function AuditLogsPage() {
   };
 
   const handleExport = () => {
+    if (!canExportLogs) {
+      showError('Permission denied', 'You do not have permission to export audit logs.');
+      return;
+    }
     if (filteredLogs.length === 0) {
       showError('Export failed', 'No logs to export.');
       return;
     }
-    const headers = ['Timestamp', 'User', 'Email', 'Module', 'Action', 'Status', 'Message'];
-    const rows = filteredLogs.map((log) =>
-      [
-        escapeCsvField(new Date(log.timestamp).toISOString()),
-        escapeCsvField(getUserName(log)),
-        escapeCsvField(getUserEmail(log) || ''),
-        escapeCsvField(log.module),
-        escapeCsvField(log.action),
-        escapeCsvField(log.status),
-        escapeCsvField(log.message),
-      ].join(','),
-    );
-    const csv = [headers.join(','), ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `audit-logs-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showSuccess('Export', 'Audit logs exported.');
+    try {
+      const headers = ['Timestamp', 'Performed by', 'Email', 'Module', 'Action', 'Status', 'Message'];
+      const rows = filteredLogs.map((log) =>
+        [
+          escapeCsvField(new Date(log.timestamp).toISOString()),
+          escapeCsvField(getUserName(log)),
+          escapeCsvField(getUserEmail(log) || ''),
+          escapeCsvField(log.module),
+          escapeCsvField(log.action),
+          escapeCsvField(log.status),
+          escapeCsvField(log.message),
+        ].join(','),
+      );
+      const csv = [headers.join(','), ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `audit-logs-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showSuccess('Export', 'Audit logs exported.');
+    } catch (err: unknown) {
+      showError('Export failed', getErrorMessage(err, 'Could not export audit logs.'));
+    }
   };
 
   const handleCopy = useCallback(
@@ -527,6 +565,36 @@ export function AuditLogsPage() {
     },
     [showError],
   );
+
+  /* -------------------- Loading guard -------------------- */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------- No access panel -------------------- */
+
+  if (!canViewLogs) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to view the audit trail.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   /* -------------------- Render -------------------- */
 
@@ -564,15 +632,17 @@ export function AuditLogsPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  variant="outline"
-                  onClick={handleExport}
-                  disabled={loading || filteredLogs.length === 0}
-                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
-                >
-                  <FiDownload className="mr-2" size={14} />
-                  Export
-                </Button>
+                {canExportLogs && (
+                  <Button
+                    variant="outline"
+                    onClick={handleExport}
+                    disabled={loading || filteredLogs.length === 0}
+                    className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50"
+                  >
+                    <FiDownload className="mr-2" size={14} />
+                    Export
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   onClick={loadLogs}
@@ -582,14 +652,16 @@ export function AuditLogsPage() {
                   <FiRefreshCw className={`mr-2 ${loading ? 'animate-spin' : ''}`} size={14} />
                   Refresh
                 </Button>
-                <Button
-                  onClick={handleClearLogs}
-                  disabled={logs.length === 0}
-                  className="h-10 rounded-xl bg-red-600 font-semibold text-white shadow-lg shadow-red-500/20 transition hover:bg-red-700 disabled:opacity-50"
-                >
-                  <FiTrash2 className="mr-2" size={14} />
-                  Clear logs
-                </Button>
+                {canClearLogs && (
+                  <Button
+                    onClick={handleClearLogs}
+                    disabled={logs.length === 0}
+                    className="h-10 rounded-xl bg-red-600 font-semibold text-white shadow-lg shadow-red-500/20 transition hover:bg-red-700 disabled:opacity-50"
+                  >
+                    <FiTrash2 className="mr-2" size={14} />
+                    Clear logs
+                  </Button>
+                )}
               </div>
             </div>
           </section>
@@ -817,7 +889,7 @@ export function AuditLogsPage() {
                       <TableHeadLabel>Timestamp</TableHeadLabel>
                     </TableHead>
                     <TableHead>
-                      <TableHeadLabel>User</TableHeadLabel>
+                      <TableHeadLabel>Performed by</TableHeadLabel>
                     </TableHead>
                     <TableHead>
                       <TableHeadLabel>Module</TableHeadLabel>

@@ -10,13 +10,15 @@ use Tests\TestCase;
 class DealerApiTest extends TestCase
 {
     use RefreshDatabase;
+    use InteractsWithPermissions;
 
     public function test_user_can_create_a_dealer(): void
     {
         $user = User::factory()->create();
         $company = Company::factory()->create();
 
-        $response = $this->actingAs($user, 'sanctum')->postJson('/api/dealers', [
+        $response = $this->actingAsWithPermissions($user, ['create dealers'])
+            ->postJson('/api/dealers', [
             'company_id' => $company->id,
             'name' => 'ABC Traders',
             'code' => 'ABC001',

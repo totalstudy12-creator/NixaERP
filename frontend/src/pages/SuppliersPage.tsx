@@ -1,16 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  AlertCircle, ArrowDown, ArrowUp, Building2, CalendarDays, CheckCircle2,
+  AlertCircle, Building2, CalendarDays, CheckCircle2,
   ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
-  CreditCard, Download, Eye, FileText, Filter, GitBranch, IndianRupee,
-  Landmark, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2, UserCheck,
-  UserX, Users, WalletCards, X, MapPin, ShieldCheck, Ban, Phone, Mail,
+  CreditCard, Download, Eye, Filter, GitBranch, IndianRupee,
+  Landmark, MoreHorizontal, Pencil, Plus, RefreshCw, Search, Trash2,
+  UserCheck, UserX, Users, X, MapPin, ShieldCheck, Phone, Mail, Lock,
 } from 'lucide-react';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
+import { useAuthStore } from '../store/auth';
 import { addAppLog } from '../services/appLogger';
-import { formatDate, formatDateTime } from '../utils/date';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -23,6 +23,49 @@ import {
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
+
+/* ============================================================================
+ * RBAC – Role Based Access Control
+ * ----------------------------------------------------------------------------
+ * Frontend gating is UX only. The backend MUST enforce identical rules on
+ * getSuppliers / createSupplier / updateSupplier / deleteSupplier /
+ * createSupplierGroup / lookupGst.
+ * ==========================================================================*/
+
+export type SupplierPermission =
+  | 'suppliers:view'
+  | 'suppliers:create'
+  | 'suppliers:edit'
+  | 'suppliers:delete'
+  | 'suppliers:export'
+  | 'suppliers:manage_groups'
+  | 'suppliers:lookup_gst';
+
+interface SupplierPermissionsApi {
+  role: string;
+  can: (permission: SupplierPermission) => boolean;
+}
+
+const useSupplierPermissions = (): SupplierPermissionsApi => {
+  const user = useAuthStore((state) => state.user);
+  const hasAnyPermission = useAuthStore((state) => state.hasAnyPermission);
+  const isSuperAdmin = useAuthStore((state) => state.isSuperAdmin)();
+  const role = useMemo(
+    () => user?.role_names[0]?.toLowerCase() ?? user?.roles[0]?.name.toLowerCase() ?? '',
+    [user],
+  );
+
+  const can = useCallback(
+    (permission: SupplierPermission): boolean => isSuperAdmin || hasAnyPermission([permission]),
+    [hasAnyPermission, isSuperAdmin],
+  );
+
+  return { role, can };
+};
+
+/* ============================================================================
+ * Domain types
+ * ==========================================================================*/
 
 type Supplier = {
   id: number;
@@ -120,6 +163,10 @@ const csvSafe = (v: unknown) => {
   const safe = /^[=+\-@\t\r]/.test(s) ? `\t${s}` : s;
   return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 };
+
+/* ============================================================================
+ * Small presentational components
+ * ==========================================================================*/
 
 function StatusBadge({ status }: { status?: string | null }) {
   const value = String(status || 'active').toLowerCase();
@@ -253,8 +300,21 @@ const emptyForm = (): Form => ({
   same_as_billing: true,
 });
 
+/* ============================================================================
+ * Page
+ * ==========================================================================*/
+
 export function SuppliersPage() {
   const { showSuccess, showError } = useNotification();
+  const { role, can } = useSupplierPermissions();
+
+  const canView = can('suppliers:view');
+  const canCreate = can('suppliers:create');
+  const canEdit = can('suppliers:edit');
+  const canDelete = can('suppliers:delete');
+  const canExport = can('suppliers:export');
+  const canManageGroups = can('suppliers:manage_groups');
+  const canLookupGst = can('suppliers:lookup_gst');
 
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -262,6 +322,7 @@ export function SuppliersPage() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [apiDenied, setApiDenied] = useState(false);
 
   const [search, setSearch] = useState('');
   const [company, setCompany] = useState('all');
@@ -292,9 +353,37 @@ export function SuppliersPage() {
 
   const [menuId, setMenuId] = useState<number | null>(null);
 
+  const permissionDenied = !canView || apiDenied;
+
+  /* -------------------- Audit logging (never throws) -------------------- */
+  const audit = useCallback((action: string, message: string) => {
+    try {
+      if (typeof addAppLog !== 'function') return;
+      const result = addAppLog({
+        module: 'Suppliers',
+        action,
+        status: 'success',
+        message,
+      }) as unknown;
+      if (result && typeof (result as Promise<unknown>).catch === 'function') {
+        (result as Promise<unknown>).catch(() => undefined);
+      }
+    } catch {
+      /* logging must never break the flow */
+    }
+  }, []);
+
+  /* -------------------- Load -------------------- */
   const load = useCallback(async () => {
+    if (!canView) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
+    setApiDenied(false);
+
     try {
       const [s, c, b, g] = await Promise.all([
         apiClient.getSuppliers(),
@@ -307,12 +396,24 @@ export function SuppliersPage() {
       setCompanies(normalize<Company>(c));
       setBranches(normalize<Branch>(b));
       setGroups(normalize<Group>(g));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to load suppliers.');
+    } catch (e: any) {
+      const statusCode = e?.response?.status;
+      const message = e instanceof Error ? e.message : 'Unable to load suppliers.';
+
+      audit('Load error', message);
+
+      if (statusCode === 401 || statusCode === 403) {
+        setApiDenied(true);
+        setError('You do not have permission to view suppliers.');
+        showError('Permission Denied', 'You are not authorized to access suppliers.');
+      } else {
+        setError(message);
+        showError('Load failed', message);
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [canView, showError, audit]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -388,6 +489,7 @@ export function SuppliersPage() {
     [branches, form.company_id],
   );
 
+  /* -------------------- Validation -------------------- */
   const validate = () => {
     const e: Record<string, boolean> = {};
     if (!form.name?.trim()) e.name = true;
@@ -405,13 +507,19 @@ export function SuppliersPage() {
     return true;
   };
 
+  /* -------------------- Handlers -------------------- */
   const saveSupplier = async () => {
+    if (editingId && !canEdit) {
+      showError('Permission Denied', 'You are not allowed to edit suppliers.');
+      return;
+    }
+    if (!editingId && !canCreate) {
+      showError('Permission Denied', 'You are not allowed to create suppliers.');
+      return;
+    }
     if (!validate()) return;
 
-    const {
-      same_as_billing,
-      ...raw
-    } = form;
+    const { same_as_billing: _ignored, ...raw } = form;
 
     const payload = {
       ...raw,
@@ -433,23 +541,29 @@ export function SuppliersPage() {
       if (editingId) {
         await apiClient.updateSupplier(editingId, payload);
         showSuccess('Supplier updated', `${form.name} updated successfully.`);
-        addAppLog({ module: 'Suppliers', action: 'Update', status: 'success', message: form.name || '' });
+        audit('Update', form.name || '');
       } else {
         await apiClient.createSupplier(payload);
         showSuccess('Supplier created', `${form.name} added successfully.`);
-        addAppLog({ module: 'Suppliers', action: 'Create', status: 'success', message: form.name || '' });
+        audit('Create', form.name || '');
       }
 
       setEditOpen(false);
       await load();
     } catch (e) {
-      showError('Save failed', e instanceof Error ? e.message : 'Unable to save supplier.');
+      const msg = e instanceof Error ? e.message : 'Unable to save supplier.';
+      audit('Save error', msg);
+      showError('Save failed', msg);
     } finally {
       setSaving(false);
     }
   };
 
   const openCreate = () => {
+    if (!canCreate) {
+      showError('Permission Denied', 'You are not allowed to create suppliers.');
+      return;
+    }
     setEditingId(null);
     setForm(emptyForm());
     setFormErrors({});
@@ -457,6 +571,10 @@ export function SuppliersPage() {
   };
 
   const openEdit = (s: Supplier) => {
+    if (!canEdit) {
+      showError('Permission Denied', 'You are not allowed to edit suppliers.');
+      return;
+    }
     setMenuId(null);
     setEditingId(s.id);
     setForm({
@@ -474,12 +592,17 @@ export function SuppliersPage() {
   };
 
   const openView = (s: Supplier) => {
+    if (!canView) return;
     setMenuId(null);
     setViewing(s);
     setViewOpen(true);
   };
 
   const deleteSupplier = async (s: Supplier) => {
+    if (!canDelete) {
+      showError('Permission Denied', 'You are not allowed to delete suppliers.');
+      return;
+    }
     setMenuId(null);
 
     if (!window.confirm(`Delete supplier "${s.name}"? This action cannot be undone.`)) {
@@ -489,18 +612,24 @@ export function SuppliersPage() {
     try {
       await apiClient.deleteSupplier(s.id);
       showSuccess('Supplier deleted', `${s.name} removed successfully.`);
-      addAppLog({ module: 'Suppliers', action: 'Delete', status: 'success', message: s.name });
+      audit('Delete', s.name);
       if (viewing?.id === s.id) {
         setViewing(null);
         setViewOpen(false);
       }
       await load();
     } catch (e) {
-      showError('Delete failed', e instanceof Error ? e.message : 'Unable to delete supplier.');
+      const msg = e instanceof Error ? e.message : 'Unable to delete supplier.';
+      audit('Delete error', msg);
+      showError('Delete failed', msg);
     }
   };
 
   const lookupGst = async () => {
+    if (!canLookupGst) {
+      showError('Permission Denied', 'You are not allowed to lookup GSTIN.');
+      return;
+    }
     const gst = String(form.gst_number || '').trim().toUpperCase();
     if (gst.length < 10) {
       showError('GSTIN', 'Enter a valid GSTIN first.');
@@ -531,13 +660,19 @@ export function SuppliersPage() {
 
       showSuccess('GSTIN updated', 'Available GSTIN details were filled.');
     } catch (e) {
-      showError('GSTIN lookup failed', e instanceof Error ? e.message : 'Unable to fetch GSTIN details.');
+      const msg = e instanceof Error ? e.message : 'Unable to fetch GSTIN details.';
+      audit('GSTIN lookup error', msg);
+      showError('GSTIN lookup failed', msg);
     } finally {
       setGstLoading(false);
     }
   };
 
   const addGroup = async () => {
+    if (!canManageGroups) {
+      showError('Permission Denied', 'You are not allowed to create supplier groups.');
+      return;
+    }
     const name = newGroup.trim();
     if (!name) return;
 
@@ -549,14 +684,21 @@ export function SuppliersPage() {
       setNewGroup('');
       setGroupOpen(false);
       showSuccess('Group added', `${name} created successfully.`);
+      audit('Create group', name);
     } catch (e) {
-      showError('Group creation failed', e instanceof Error ? e.message : 'Unable to create group.');
+      const msg = e instanceof Error ? e.message : 'Unable to create group.';
+      audit('Group create error', msg);
+      showError('Group creation failed', msg);
     } finally {
       setGroupSaving(false);
     }
   };
 
   const exportCsv = () => {
+    if (!canExport) {
+      showError('Permission Denied', 'You are not allowed to export suppliers.');
+      return;
+    }
     if (!filtered.length) {
       showError('Nothing to export', 'No suppliers match the current filters.');
       return;
@@ -604,6 +746,7 @@ export function SuppliersPage() {
     URL.revokeObjectURL(url);
 
     showSuccess('Export complete', `${filtered.length} supplier(s) exported.`);
+    audit('Export', `${filtered.length} rows`);
   };
 
   const activeFilters = [
@@ -649,6 +792,29 @@ export function SuppliersPage() {
     );
   };
 
+  /* -------------------- Access denied -------------------- */
+  if (!canView) {
+    return (
+      <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
+        <div className="mx-auto w-full max-w-[1900px] p-3 sm:p-4 lg:p-6">
+          <Card className="rounded-2xl border-rose-200 bg-white">
+            <CardContent className="p-10 text-center text-slate-500">
+              <Lock className="mx-auto mb-3 h-12 w-12 text-rose-400" />
+              <h2 className="text-xl font-semibold text-rose-600">Access Denied</h2>
+              <p className="mt-1 text-slate-600">
+                You don't have permission to view suppliers.
+              </p>
+              <p className="mt-2 text-sm text-slate-400">
+                Please contact your administrator.
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------- Render -------------------- */
   return (
     <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
       <div className="mx-auto w-full max-w-[1900px] space-y-5 p-3 sm:p-4 lg:space-y-6 lg:p-6">
@@ -673,26 +839,37 @@ export function SuppliersPage() {
                 Manage suppliers, GSTIN, branches, groups, credit, outstanding,
                 KYC and contact information.
               </p>
+
+              {role && (
+                <div className="mt-2 inline-flex items-center gap-1 text-[11px] text-slate-300/80">
+                  <ShieldCheck className="h-3 w-3" />
+                  Role: <span className="font-medium capitalize">{role.replace(/_/g, ' ')}</span>
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <Button
-                variant="outline"
-                onClick={exportCsv}
-                disabled={loading || !filtered.length}
-                className="h-10 rounded-xl border-white/10 bg-white/5 text-white hover:bg-white/10 hover:text-white"
-              >
-                <Download className="mr-2 h-4 w-4" />
-                Export
-              </Button>
+              {canExport && (
+                <Button
+                  variant="outline"
+                  onClick={exportCsv}
+                  disabled={loading || !filtered.length}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white hover:bg-white/10 hover:text-white"
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  Export
+                </Button>
+              )}
 
-              <Button
-                onClick={openCreate}
-                className="h-10 rounded-xl bg-emerald-400 font-semibold text-slate-950 hover:bg-emerald-300"
-              >
-                <Plus className="mr-2 h-4 w-4" />
-                Add supplier
-              </Button>
+              {canCreate && (
+                <Button
+                  onClick={openCreate}
+                  className="h-10 rounded-xl bg-emerald-400 font-semibold text-slate-950 hover:bg-emerald-300"
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  Add supplier
+                </Button>
+              )}
             </div>
           </div>
         </section>
@@ -1032,25 +1209,30 @@ export function SuppliersPage() {
                               View details
                             </button>
 
-                            <button
-                              type="button"
-                              onClick={() => openEdit(s)}
-                              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                            >
-                              <Pencil className="h-4 w-4 text-slate-400" />
-                              Edit supplier
-                            </button>
+                            {canEdit && (
+                              <button
+                                type="button"
+                                onClick={() => openEdit(s)}
+                                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                              >
+                                <Pencil className="h-4 w-4 text-slate-400" />
+                                Edit supplier
+                              </button>
+                            )}
 
-                            <Separator className="my-1" />
-
-                            <button
-                              type="button"
-                              onClick={() => deleteSupplier(s)}
-                              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                              Delete supplier
-                            </button>
+                            {canDelete && (
+                              <>
+                                <Separator className="my-1" />
+                                <button
+                                  type="button"
+                                  onClick={() => deleteSupplier(s)}
+                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                  Delete supplier
+                                </button>
+                              </>
+                            )}
                           </div>
                         )}
                       </div>
@@ -1245,23 +1427,29 @@ export function SuppliersPage() {
                   </p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 pb-4">
-                  <Button variant="outline" className="h-10 rounded-xl" onClick={() => {
-                    setViewOpen(false);
-                    openEdit(viewing);
-                  }}>
-                    <Pencil className="mr-2 h-4 w-4" />
-                    Edit
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    className="h-10 rounded-xl !bg-rose-600 !text-white hover:!bg-rose-700"
-                    onClick={() => deleteSupplier(viewing)}
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete
-                  </Button>
-                </div>
+                {(canEdit || canDelete) && (
+                  <div className="grid grid-cols-2 gap-2 pb-4">
+                    {canEdit && (
+                      <Button variant="outline" className="h-10 rounded-xl" onClick={() => {
+                        setViewOpen(false);
+                        openEdit(viewing);
+                      }}>
+                        <Pencil className="mr-2 h-4 w-4" />
+                        Edit
+                      </Button>
+                    )}
+                    {canDelete && (
+                      <Button
+                        variant="destructive"
+                        className={`h-10 rounded-xl !bg-rose-600 !text-white hover:!bg-rose-700 ${canEdit ? '' : 'col-span-2'}`}
+                        onClick={() => deleteSupplier(viewing)}
+                      >
+                        <Trash2 className="mr-2 h-4 w-4" />
+                        Delete
+                      </Button>
+                    )}
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -1337,14 +1525,16 @@ export function SuppliersPage() {
                       }))}
                       placeholder="GSTIN"
                     />
-                    <Button
-                      type="button"
-                      disabled={gstLoading || !form.gst_number}
-                      onClick={lookupGst}
-                      className="shrink-0 bg-indigo-600 hover:bg-indigo-700"
-                    >
-                      {gstLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : 'Auto fill'}
-                    </Button>
+                    {canLookupGst && (
+                      <Button
+                        type="button"
+                        disabled={gstLoading || !form.gst_number}
+                        onClick={lookupGst}
+                        className="shrink-0 bg-indigo-600 hover:bg-indigo-700"
+                      >
+                        {gstLoading ? <RefreshCw className="h-4 w-4 animate-spin" /> : 'Auto fill'}
+                      </Button>
+                    )}
                   </div>
                 </div>
 
@@ -1429,13 +1619,15 @@ export function SuppliersPage() {
             <section className="rounded-2xl border bg-white p-4">
               <div className="mb-3 flex items-center justify-between">
                 <p className="text-sm font-semibold">Group & balances</p>
-                <button
-                  type="button"
-                  onClick={() => setGroupOpen(true)}
-                  className="text-xs font-semibold text-indigo-600 hover:underline"
-                >
-                  + Add group
-                </button>
+                {canManageGroups && (
+                  <button
+                    type="button"
+                    onClick={() => setGroupOpen(true)}
+                    className="text-xs font-semibold text-indigo-600 hover:underline"
+                  >
+                    + Add group
+                  </button>
+                )}
               </div>
 
               <div className="grid gap-4 sm:grid-cols-2">
@@ -1537,7 +1729,7 @@ export function SuppliersPage() {
               </Button>
 
               <Button
-                disabled={saving}
+                disabled={saving || (editingId ? !canEdit : !canCreate)}
                 onClick={saveSupplier}
                 className="h-10 rounded-xl bg-emerald-600 hover:bg-emerald-700"
               >
@@ -1559,7 +1751,7 @@ export function SuppliersPage() {
       </Sheet>
 
       {/* Group modal */}
-      {groupOpen && (
+      {groupOpen && canManageGroups && (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl">
             <div className="flex items-center justify-between">

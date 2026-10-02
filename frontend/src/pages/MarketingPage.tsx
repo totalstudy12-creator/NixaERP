@@ -1,3 +1,4 @@
+// src/pages/MarketingPage.tsx
 import type { ChangeEvent, ReactNode } from 'react';
 import type { IconType } from 'react-icons';
 
@@ -22,6 +23,7 @@ import {
   FiExternalLink,
   FiFileText,
   FiLink2,
+  FiLock,
   FiMapPin,
   FiMessageSquare,
   FiPlus,
@@ -36,6 +38,7 @@ import {
 } from 'react-icons/fi';
 
 import { useNotification } from '../components/NotificationContext';
+import { useAuthStore } from '../store/auth';
 import {
   getMarketingAccounts,
   getMarketingAnalytics,
@@ -55,6 +58,129 @@ import {
   type SocialPost,
   type InboxMessage,
 } from '../services/marketingService';
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Permission keys                                              */
+/* ------------------------------------------------------------------ */
+
+const PERMISSIONS = {
+  MARKETING_VIEW: 'marketing.view',
+  MARKETING_DASHBOARD_VIEW: 'marketing.dashboard.view',
+  MARKETING_POSTS_VIEW: 'marketing.posts.view',
+  MARKETING_POSTS_CREATE: 'marketing.posts.create',
+  MARKETING_POSTS_EDIT: 'marketing.posts.edit',
+  MARKETING_POSTS_DELETE: 'marketing.posts.delete',
+  MARKETING_POSTS_SCHEDULE: 'marketing.posts.schedule',
+  MARKETING_POSTS_PUBLISH: 'marketing.posts.publish',
+  MARKETING_CALENDAR_VIEW: 'marketing.calendar.view',
+  MARKETING_INBOX_VIEW: 'marketing.inbox.view',
+  MARKETING_INBOX_REPLY: 'marketing.inbox.reply',
+  MARKETING_ANALYTICS_VIEW: 'marketing.analytics.view',
+  MARKETING_ACCOUNTS_VIEW: 'marketing.accounts.view',
+  MARKETING_ACCOUNTS_CONNECT: 'marketing.accounts.connect',
+  MARKETING_ACCOUNTS_DISCONNECT: 'marketing.accounts.disconnect',
+} as const;
+
+type PermissionKey = typeof PERMISSIONS[keyof typeof PERMISSIONS];
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Store-backed permissions (admin-aware + notation-insensitive) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Collapse a permission key so that the different notations used across the
+ * codebase all match each other:
+ *
+ *   "marketing.posts.create"     → "create marketing posts"
+ *   "create marketing posts"     → "create marketing posts"
+ *   "marketing:posts:create"     → "create marketing posts"
+ */
+function normalisePermission(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[.:_/\-]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+interface UsePagePermissionsResult {
+  can: (permission: string | string[]) => boolean;
+  isAuthenticated: boolean;
+  isSuperAdmin: boolean;
+  loadingUser: boolean;
+}
+
+function usePagePermissions(): UsePagePermissionsResult {
+  const user = useAuthStore((s) => s.user);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const storeIsSuperAdmin = useAuthStore((s) => s.isSuperAdmin);
+  const storeHasAnyPermission = useAuthStore((s) => s.hasAnyPermission);
+
+  const isSuperAdmin = useMemo(() => storeIsSuperAdmin(), [storeIsSuperAdmin, user]);
+
+  const can = useCallback(
+    (permission: string | string[]): boolean => {
+      if (!isAuthenticated) return false;
+      if (isSuperAdmin) return true;
+
+      const keys = Array.isArray(permission) ? permission : [permission];
+
+      if (storeHasAnyPermission(keys)) return true;
+
+      const hasMetadata =
+        (user?.permission_names?.length ?? 0) > 0 ||
+        (user?.permissions?.length ?? 0) > 0 ||
+        (user?.roles?.length ?? 0) > 0 ||
+        (user?.role_names?.length ?? 0) > 0;
+      if (!hasMetadata) return false;
+
+      const normalised = new Set<string>();
+      (user?.permission_names ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p)),
+      );
+      (user?.permissions ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p.name)),
+      );
+
+      return keys.some((k) => normalised.has(normalisePermission(k)));
+    },
+    [isAuthenticated, isSuperAdmin, storeHasAnyPermission, user],
+  );
+
+  return { can, isAuthenticated, isSuperAdmin, loadingUser };
+}
+
+/* ------------------------------------------------------------------ */
+/* Access-restricted screen                                            */
+/* ------------------------------------------------------------------ */
+
+function AccessRestricted() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-rose-50 text-rose-500">
+          <FiLock size={26} />
+        </div>
+        <h1 className="mt-4 text-lg font-bold text-slate-900">Access restricted</h1>
+        <p className="mt-2 text-sm leading-6 text-slate-500">
+          Your account does not have permission to view Marketing. Contact your
+          administrator to request the{' '}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px]">
+            marketing.view
+          </code>{' '}
+          permission.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Local constants                                                     */
+/* ------------------------------------------------------------------ */
 
 const MAX_MEDIA_FILES = 10;
 const MAX_FILE_SIZE_MB = 100;
@@ -135,6 +261,10 @@ type ApiError = {
   response?: { data?: { message?: string; errors?: Record<string, string[] | string> } };
 };
 
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+
 function getErrorMessage(error: unknown, fallback = 'The operation could not be completed.') {
   const e = error as ApiError | undefined;
   const nested = e?.response?.data;
@@ -166,7 +296,6 @@ function getGbpLocationsFromAccounts(accounts: SocialAccount[]): GbpLocation[] {
 
     for (const item of raw) {
       if (!item || typeof item !== 'object') continue;
-      // ✅ Fix: cast to unknown first
       const value = item as unknown as Record<string, unknown>;
       const id = String(value.id ?? value.location_id ?? '');
       const name = String(value.name ?? value.title ?? '');
@@ -230,9 +359,34 @@ function StatusBadge({ status }: { status?: string }) {
   return <span className={clsx('inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold capitalize', styles)}>{value}</span>;
 }
 
+/* ------------------------------------------------------------------ */
+/* Page                                                                */
+/* ------------------------------------------------------------------ */
+
+type ActiveTab = 'overview' | 'compose' | 'content' | 'calendar' | 'inbox' | 'analytics' | 'accounts';
+
 export function MarketingPage() {
   const { showSuccess, showError } = useNotification();
-  const [activeTab, setActiveTab] = useState<'overview' | 'compose' | 'content' | 'calendar' | 'inbox' | 'analytics' | 'accounts'>('overview');
+  const { can, isAuthenticated, loadingUser } = usePagePermissions();
+
+  /* ---------------- RBAC flags ---------------- */
+  const canView             = can(PERMISSIONS.MARKETING_VIEW);
+  const canViewDashboard    = can(PERMISSIONS.MARKETING_DASHBOARD_VIEW);
+  const canViewPosts        = can(PERMISSIONS.MARKETING_POSTS_VIEW);
+  const canCreatePost       = can(PERMISSIONS.MARKETING_POSTS_CREATE);
+  const canEditPost         = can(PERMISSIONS.MARKETING_POSTS_EDIT);
+  const canDeletePost       = can(PERMISSIONS.MARKETING_POSTS_DELETE);
+  const canSchedulePost     = can(PERMISSIONS.MARKETING_POSTS_SCHEDULE);
+  const canPublishPost      = can(PERMISSIONS.MARKETING_POSTS_PUBLISH);
+  const canViewCalendar     = can(PERMISSIONS.MARKETING_CALENDAR_VIEW);
+  const canViewInbox        = can(PERMISSIONS.MARKETING_INBOX_VIEW);
+  const canReplyInbox       = can(PERMISSIONS.MARKETING_INBOX_REPLY);
+  const canViewAnalytics    = can(PERMISSIONS.MARKETING_ANALYTICS_VIEW);
+  const canViewAccounts     = can(PERMISSIONS.MARKETING_ACCOUNTS_VIEW);
+  const canConnectAccount   = can(PERMISSIONS.MARKETING_ACCOUNTS_CONNECT);
+  const canDisconnectAccount = can(PERMISSIONS.MARKETING_ACCOUNTS_DISCONNECT);
+
+  const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [posts, setPosts] = useState<MarketingPost[]>([]);
   const [analytics, setAnalytics] = useState<Analytics>({});
@@ -272,17 +426,21 @@ export function MarketingPage() {
   }, [showError]);
 
   const refreshData = useCallback(async (notify = false) => {
+    if (!canView) {
+      setLoading(false);
+      return;
+    }
     setRefreshing(true);
     if (!notify) setLoading(true);
     setPageError(null);
 
     try {
       const results = await Promise.allSettled([
-        getMarketingDashboard(),
-        getMarketingAccounts(),
-        getMarketingPosts(),
-        getMarketingAnalytics(),
-        getMarketingInbox(),
+        canViewDashboard ? getMarketingDashboard() : Promise.resolve(null),
+        canViewAccounts ? getMarketingAccounts() : Promise.resolve([]),
+        canViewPosts ? getMarketingPosts() : Promise.resolve([]),
+        canViewAnalytics ? getMarketingAnalytics() : Promise.resolve({}),
+        canViewInbox ? getMarketingInbox() : Promise.resolve([]),
       ]);
 
       const labels = ['dashboard', 'accounts', 'posts', 'analytics', 'inbox'] as const;
@@ -290,12 +448,21 @@ export function MarketingPage() {
         result.status === 'rejected' ? [`${labels[index]}: ${getErrorMessage(result.reason)}`] : []
       );
 
-      // ✅ Fix: cast to unknown first
-      if (results[0].status === 'fulfilled') setDashboard((results[0].value as unknown as Record<string, unknown>) || {});
-      if (results[1].status === 'fulfilled') setAccounts(Array.isArray(results[1].value) ? results[1].value : []);
-      if (results[2].status === 'fulfilled') setPosts(Array.isArray(results[2].value) ? results[2].value as MarketingPost[] : []);
-      if (results[3].status === 'fulfilled') setAnalytics((results[3].value as Analytics) || {});
-      if (results[4].status === 'fulfilled') setInbox(Array.isArray(results[4].value) ? results[4].value : []);
+      if (results[0].status === 'fulfilled' && results[0].value) {
+        setDashboard((results[0].value as unknown as Record<string, unknown>) || {});
+      }
+      if (results[1].status === 'fulfilled') {
+        setAccounts(Array.isArray(results[1].value) ? (results[1].value as SocialAccount[]) : []);
+      }
+      if (results[2].status === 'fulfilled') {
+        setPosts(Array.isArray(results[2].value) ? (results[2].value as MarketingPost[]) : []);
+      }
+      if (results[3].status === 'fulfilled' && results[3].value) {
+        setAnalytics((results[3].value as Analytics) || {});
+      }
+      if (results[4].status === 'fulfilled') {
+        setInbox(Array.isArray(results[4].value) ? (results[4].value as InboxMessage[]) : []);
+      }
 
       if (failures.length) {
         const message = `Some marketing data could not be loaded: ${failures.join(' • ')}`;
@@ -310,11 +477,42 @@ export function MarketingPage() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [showApiErrors, showError, showSuccess]);
+  }, [
+    showApiErrors,
+    showError,
+    showSuccess,
+    canView,
+    canViewDashboard,
+    canViewAccounts,
+    canViewPosts,
+    canViewAnalytics,
+    canViewInbox,
+  ]);
 
   useEffect(() => {
+    if (!canView) return;
     void refreshData(false);
-  }, [refreshData]);
+  }, [refreshData, canView]);
+
+  /* ---------------- Tab availability (RBAC) ---------------- */
+  const availableTabs = useMemo<ActiveTab[]>(() => {
+    const tabs: ActiveTab[] = [];
+    if (canViewDashboard) tabs.push('overview');
+    if (canCreatePost || canEditPost) tabs.push('compose');
+    if (canViewPosts) tabs.push('content');
+    if (canViewCalendar) tabs.push('calendar');
+    if (canViewInbox) tabs.push('inbox');
+    if (canViewAnalytics) tabs.push('analytics');
+    if (canViewAccounts) tabs.push('accounts');
+    return tabs;
+  }, [canViewDashboard, canCreatePost, canEditPost, canViewPosts, canViewCalendar, canViewInbox, canViewAnalytics, canViewAccounts]);
+
+  useEffect(() => {
+    if (availableTabs.length === 0) return;
+    if (!availableTabs.includes(activeTab)) {
+      setActiveTab(availableTabs[0]);
+    }
+  }, [availableTabs, activeTab]);
 
   const filteredPosts = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
@@ -339,7 +537,11 @@ export function MarketingPage() {
     impressions: analytics.impressions,
   }), [analytics, connectedAccounts.length, posts]);
 
-  const openCreate = () => {
+  const openCreate = useCallback(() => {
+    if (!canCreatePost) {
+      showError('Permission denied', 'You do not have permission to create marketing posts.');
+      return;
+    }
     setEditingPost(null);
     setPostContent('');
     setPostType('text');
@@ -352,9 +554,13 @@ export function MarketingPage() {
     setMediaPreviews([]);
     setExistingMedia([]);
     setActiveTab('compose');
-  };
+  }, [canCreatePost, showError]);
 
-  const openEdit = (post: MarketingPost) => {
+  const openEdit = useCallback((post: MarketingPost) => {
+    if (!canEditPost) {
+      showError('Permission denied', 'You do not have permission to edit marketing posts.');
+      return;
+    }
     setEditingPost(post);
     setPostContent(String(post.content || ''));
     setPostType((post.type || 'text') as PostType);
@@ -367,9 +573,9 @@ export function MarketingPage() {
     setMediaPreviews([]);
     setExistingMedia(Array.isArray(post.media) ? post.media : []);
     setActiveTab('compose');
-  };
+  }, [canEditPost, showError]);
 
-  const closeComposer = () => {
+  const closeComposer = useCallback(() => {
     setActiveTab('content');
     setEditingPost(null);
     for (const preview of mediaPreviews) {
@@ -378,9 +584,9 @@ export function MarketingPage() {
     setMediaFiles([]);
     setMediaPreviews([]);
     setExistingMedia([]);
-  };
+  }, [mediaPreviews]);
 
-  const togglePlatform = (platform: string) => {
+  const togglePlatform = useCallback((platform: string) => {
     setSelectedPlatforms((current) => {
       const next = current.includes(platform)
         ? current.filter((p) => p !== platform)
@@ -388,13 +594,13 @@ export function MarketingPage() {
       if (!next.includes('google')) setSelectedLocations([]);
       return next;
     });
-  };
+  }, []);
 
-  const toggleLocation = (id: string) => {
+  const toggleLocation = useCallback((id: string) => {
     setSelectedLocations((current) => current.includes(id) ? current.filter((v) => v !== id) : [...current, id]);
-  };
+  }, []);
 
-  const handleMediaUpload = (event: ChangeEvent<HTMLInputElement>) => {
+  const handleMediaUpload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const incoming = Array.from(event.target.files || []);
     if (!incoming.length) return;
 
@@ -421,16 +627,16 @@ export function MarketingPage() {
     setMediaFiles(combined);
     setMediaPreviews((current) => [...current, ...acceptedPreviews]);
     event.target.value = '';
-  };
+  }, [mediaFiles, showError]);
 
-  const removeMedia = (index: number) => {
+  const removeMedia = useCallback((index: number) => {
     const preview = mediaPreviews[index];
     if (preview?.startsWith('blob:')) URL.revokeObjectURL(preview);
     setMediaFiles((current) => current.filter((_, i) => i !== index));
     setMediaPreviews((current) => current.filter((_, i) => i !== index));
-  };
+  }, [mediaPreviews]);
 
-  const validateComposer = (action: 'draft' | 'schedule' | 'publish') => {
+  const validateComposer = useCallback((action: 'draft' | 'schedule' | 'publish') => {
     if (!selectedPlatforms.length) return 'Select at least one connected platform.';
     const selectedConnected = connectedAccounts.filter((account) => selectedPlatforms.includes(account.platform));
     if (selectedConnected.length !== selectedPlatforms.length) return 'One or more selected platforms are not connected.';
@@ -444,9 +650,9 @@ export function MarketingPage() {
       if (date.getTime() <= Date.now()) return 'Scheduled time must be in the future.';
     }
     return null;
-  };
+  }, [selectedPlatforms, connectedAccounts, postContent, mediaFiles.length, mediaPreviews.length, existingMedia.length, linkUrl, selectedLocations, postType, scheduledAt]);
 
-  const buildPayload = (status: 'draft' | 'scheduled' | 'published') => ({
+  const buildPayload = useCallback((status: 'draft' | 'scheduled' | 'published') => ({
     content: postContent.trim(),
     platforms: selectedPlatforms,
     type: postType,
@@ -456,9 +662,30 @@ export function MarketingPage() {
     status,
     scheduled_at: status === 'scheduled' ? new Date(scheduledAt).toISOString() : null,
     mediaFiles: mediaFiles.length ? mediaFiles : undefined,
-  });
+  }), [postContent, selectedPlatforms, postType, linkUrl, ctaButton, selectedLocations, scheduledAt, mediaFiles]);
 
-  const savePost = async (action: 'draft' | 'schedule' | 'publish') => {
+  const savePost = useCallback(async (action: 'draft' | 'schedule' | 'publish') => {
+    if (action === 'draft' && !(canCreatePost || canEditPost)) {
+      showError('Permission denied', 'You do not have permission to save drafts.');
+      return;
+    }
+    if (action === 'schedule' && !canSchedulePost) {
+      showError('Permission denied', 'You do not have permission to schedule posts.');
+      return;
+    }
+    if (action === 'publish' && !canPublishPost) {
+      showError('Permission denied', 'You do not have permission to publish posts.');
+      return;
+    }
+    if (editingPost && !canEditPost) {
+      showError('Permission denied', 'You do not have permission to edit marketing posts.');
+      return;
+    }
+    if (!editingPost && !canCreatePost) {
+      showError('Permission denied', 'You do not have permission to create marketing posts.');
+      return;
+    }
+
     const validation = validateComposer(action);
     if (validation) {
       showError('Check post details', validation);
@@ -488,9 +715,26 @@ export function MarketingPage() {
     } finally {
       setSubmitting(false);
     }
-  };
+  }, [
+    canCreatePost,
+    canEditPost,
+    canSchedulePost,
+    canPublishPost,
+    editingPost,
+    validateComposer,
+    buildPayload,
+    showSuccess,
+    closeComposer,
+    refreshData,
+    showApiErrors,
+    showError,
+  ]);
 
-  const handleConnect = async (platform: string) => {
+  const handleConnect = useCallback(async (platform: string) => {
+    if (!canConnectAccount) {
+      showError('Permission denied', 'You do not have permission to connect marketing accounts.');
+      return;
+    }
     try {
       const url = await getSocialAuthUrl(platform);
       if (!url) throw new Error(`No OAuth URL was returned for ${PLATFORM_META[platform]?.label || platform}.`);
@@ -498,9 +742,13 @@ export function MarketingPage() {
     } catch (error) {
       showApiErrors(error, `Connect ${PLATFORM_META[platform]?.label || platform} failed`);
     }
-  };
+  }, [canConnectAccount, showError, showApiErrors]);
 
-  const handleDisconnect = async (platform: string) => {
+  const handleDisconnect = useCallback(async (platform: string) => {
+    if (!canDisconnectAccount) {
+      showError('Permission denied', 'You do not have permission to disconnect marketing accounts.');
+      return;
+    }
     const label = PLATFORM_META[platform]?.label || platform;
     if (!window.confirm(`Disconnect ${label}? Existing published content will not be deleted.`)) return;
     try {
@@ -510,9 +758,13 @@ export function MarketingPage() {
     } catch (error) {
       showApiErrors(error, `Disconnect ${label} failed`);
     }
-  };
+  }, [canDisconnectAccount, showError, showApiErrors, refreshData, showSuccess]);
 
-  const handleDelete = async (post: MarketingPost) => {
+  const handleDelete = useCallback(async (post: MarketingPost) => {
+    if (!canDeletePost) {
+      showError('Permission denied', 'You do not have permission to delete marketing posts.');
+      return;
+    }
     if (!window.confirm('Delete this marketing post? This only deletes the NixaERP record unless your backend explicitly removes the platform content.')) return;
     try {
       await deleteMarketingPost(post.id);
@@ -521,9 +773,13 @@ export function MarketingPage() {
     } catch (error) {
       showApiErrors(error, 'Delete failed');
     }
-  };
+  }, [canDeletePost, showError, showApiErrors, showSuccess]);
 
-  const handleCancelSchedule = async (post: MarketingPost) => {
+  const handleCancelSchedule = useCallback(async (post: MarketingPost) => {
+    if (!canSchedulePost) {
+      showError('Permission denied', 'You do not have permission to cancel scheduled posts.');
+      return;
+    }
     if (!window.confirm('Cancel this scheduled post?')) return;
     try {
       await updateMarketingPost(post.id, { status: 'cancelled' });
@@ -532,18 +788,23 @@ export function MarketingPage() {
     } catch (error) {
       showApiErrors(error, 'Cancel failed');
     }
-  };
+  }, [canSchedulePost, showError, showApiErrors, refreshData, showSuccess]);
 
-  const handleMarkRead = async (messageId: number) => {
+  const handleMarkRead = useCallback(async (messageId: number) => {
+    if (!canViewInbox) return;
     try {
       await markInboxMessageRead(messageId);
       setInbox((current) => current.map((message) => message.id === messageId ? { ...message, is_read: true } : message));
     } catch (error) {
       showApiErrors(error, 'Mark read failed');
     }
-  };
+  }, [canViewInbox, showApiErrors]);
 
-  const handleEmailReply = async (message: InboxMessage) => {
+  const handleEmailReply = useCallback(async (message: InboxMessage) => {
+    if (!canReplyInbox) {
+      showError('Permission denied', 'You do not have permission to reply to inbox messages.');
+      return;
+    }
     const subject = window.prompt('Reply subject');
     const body = window.prompt('Reply message');
     if (!subject || !body) return;
@@ -553,9 +814,13 @@ export function MarketingPage() {
     } catch (error) {
       showApiErrors(error, 'Email reply failed');
     }
-  };
+  }, [canReplyInbox, showError, showApiErrors, showSuccess]);
 
-  const handleWhatsAppReply = async (message: InboxMessage) => {
+  const handleWhatsAppReply = useCallback(async (message: InboxMessage) => {
+    if (!canReplyInbox) {
+      showError('Permission denied', 'You do not have permission to reply to inbox messages.');
+      return;
+    }
     const body = window.prompt('Reply message');
     if (!body) return;
     try {
@@ -564,7 +829,7 @@ export function MarketingPage() {
     } catch (error) {
       showApiErrors(error, 'WhatsApp reply failed');
     }
-  };
+  }, [canReplyInbox, showError, showApiErrors, showSuccess]);
 
   const calendarDays = useMemo(() => {
     const first = new Date(currentYear, currentMonth, 1).getDay();
@@ -588,16 +853,33 @@ export function MarketingPage() {
 
   const dashboardLabel = typeof dashboard?.['message'] === 'string' ? String(dashboard['message']) : null;
 
-  // ✅ Fix: typed navigation array with IconType
-  const navItems: Array<[string, string, IconType]> = [
-    ['overview', 'Overview', FiBarChart2],
-    ['compose', 'Compose', FiEdit3],
-    ['content', 'Content', FiFileText],
-    ['calendar', 'Calendar', FiCalendar],
-    ['inbox', 'Inbox', FiMessageSquare],
-    ['analytics', 'Analytics', FiBarChart2],
-    ['accounts', 'Accounts', FiUsers],
-  ];
+  /* ---------------- RBAC: navigation items ---------------- */
+  const navItems = useMemo<Array<[ActiveTab, string, IconType]>>(() => {
+    const items: Array<[ActiveTab, string, IconType]> = [];
+    if (canViewDashboard)  items.push(['overview',  'Overview',  FiBarChart2]);
+    if (canCreatePost || canEditPost) items.push(['compose', 'Compose', FiEdit3]);
+    if (canViewPosts)      items.push(['content',   'Content',   FiFileText]);
+    if (canViewCalendar)   items.push(['calendar',  'Calendar',  FiCalendar]);
+    if (canViewInbox)      items.push(['inbox',     'Inbox',     FiMessageSquare]);
+    if (canViewAnalytics)  items.push(['analytics', 'Analytics', FiBarChart2]);
+    if (canViewAccounts)   items.push(['accounts',  'Accounts',  FiUsers]);
+    return items;
+  }, [canViewDashboard, canCreatePost, canEditPost, canViewPosts, canViewCalendar, canViewInbox, canViewAnalytics, canViewAccounts]);
+
+  /* ---------------- RBAC page gate ---------------- */
+  if (loadingUser && !isAuthenticated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated || !canView || availableTabs.length === 0) {
+    return <AccessRestricted />;
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 p-4 md:p-6 text-slate-900">
@@ -619,13 +901,15 @@ export function MarketingPage() {
             >
               <FiRefreshCw className={clsx(refreshing && 'animate-spin')} size={15} /> Refresh
             </button>
-            <button
-              type="button"
-              onClick={openCreate}
-              className="inline-flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2.5 text-sm font-bold text-slate-950 hover:bg-cyan-300"
-            >
-              <FiPlus size={15} /> Create post
-            </button>
+            {canCreatePost && (
+              <button
+                type="button"
+                onClick={openCreate}
+                className="inline-flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2.5 text-sm font-bold text-slate-950 hover:bg-cyan-300"
+              >
+                <FiPlus size={15} /> Create post
+              </button>
+            )}
           </div>
         </div>
         {dashboardLabel && <div className="border-t border-white/10 bg-white/5 px-5 py-3 text-xs text-slate-300">{dashboardLabel}</div>}
@@ -654,7 +938,7 @@ export function MarketingPage() {
           <button
             key={key}
             type="button"
-            onClick={() => setActiveTab(key as typeof activeTab)}
+            onClick={() => setActiveTab(key)}
             className={clsx(
               'inline-flex shrink-0 items-center gap-2 rounded-xl px-3.5 py-2.5 text-sm font-semibold',
               activeTab === key ? 'bg-slate-950 text-white' : 'text-slate-600 hover:bg-slate-100'
@@ -691,7 +975,9 @@ export function MarketingPage() {
                   <h2 className="font-bold text-slate-950">Connected channels</h2>
                   <p className="text-sm text-slate-500">Only accounts reported as connected by your backend are available for publishing.</p>
                 </div>
-                <button type="button" onClick={() => setActiveTab('accounts')} className="text-sm font-semibold text-cyan-700 hover:underline">Manage accounts</button>
+                {canViewAccounts && (
+                  <button type="button" onClick={() => setActiveTab('accounts')} className="text-sm font-semibold text-cyan-700 hover:underline">Manage accounts</button>
+                )}
               </div>
               {connectedAccounts.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">No connected marketing accounts.</div>
@@ -834,9 +1120,15 @@ export function MarketingPage() {
                   </div>
 
                   <div className="mt-4 grid gap-2">
-                    <button type="button" disabled={submitting} onClick={() => void savePost('draft')} className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold hover:bg-slate-100 disabled:opacity-50"><FiFileText /> Save draft</button>
-                    <button type="button" disabled={submitting} onClick={() => void savePost('schedule')} className="inline-flex items-center justify-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50"><FiClock /> Schedule</button>
-                    <button type="button" disabled={submitting} onClick={() => void savePost('publish')} className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><FiSend /> {submitting ? 'Submitting…' : 'Publish now'}</button>
+                    {(canCreatePost || canEditPost) && (
+                      <button type="button" disabled={submitting} onClick={() => void savePost('draft')} className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-semibold hover:bg-slate-100 disabled:opacity-50"><FiFileText /> Save draft</button>
+                    )}
+                    {canSchedulePost && (
+                      <button type="button" disabled={submitting} onClick={() => void savePost('schedule')} className="inline-flex items-center justify-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50"><FiClock /> Schedule</button>
+                    )}
+                    {canPublishPost && (
+                      <button type="button" disabled={submitting} onClick={() => void savePost('publish')} className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"><FiSend /> {submitting ? 'Submitting…' : 'Publish now'}</button>
+                    )}
                     <button type="button" disabled={submitting} onClick={closeComposer} className="rounded-xl px-4 py-2 text-sm font-semibold text-slate-500 hover:bg-slate-100">Close</button>
                   </div>
                 </div>
@@ -847,7 +1139,9 @@ export function MarketingPage() {
           <div className="p-5">
             <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div><h2 className="text-xl font-bold">Content</h2><p className="text-sm text-slate-500">Real records returned by the marketing backend.</p></div>
-              <button type="button" onClick={openCreate} className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white"><FiPlus /> Create post</button>
+              {canCreatePost && (
+                <button type="button" onClick={openCreate} className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-sm font-semibold text-white"><FiPlus /> Create post</button>
+              )}
             </div>
             <div className="mb-4 grid gap-3 md:grid-cols-[1fr_auto_auto]">
               <div className="relative"><FiSearch className="absolute left-3 top-3 text-slate-400" /><input value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder="Search content…" className="w-full rounded-xl border border-slate-200 py-2.5 pl-10 pr-3 text-sm outline-none focus:border-cyan-500" /></div>
@@ -855,39 +1149,49 @@ export function MarketingPage() {
               <select value={filterPlatform} onChange={(e) => setFilterPlatform(e.target.value)} className="rounded-xl border border-slate-200 px-3 py-2.5 text-sm"><option value="all">All platforms</option>{SUPPORTED_PLATFORMS.map((platform) => <option key={platform} value={platform}>{PLATFORM_META[platform]?.label || platform}</option>)}</select>
             </div>
 
-            {filteredPosts.length === 0 ? <div className="rounded-2xl border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500">No posts match the current filters.</div> : <div className="overflow-x-auto rounded-2xl border border-slate-200"><table className="min-w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Content</th><th className="px-4 py-3">Platforms</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Schedule / publish</th><th className="px-4 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{filteredPosts.map((post) => <tr key={post.id} className="align-top hover:bg-slate-50"><td className="max-w-md px-4 py-4"><div className="line-clamp-3 font-medium">{String(post.content || 'Untitled post')}</div>{post.failure_reason && <div className="mt-2 rounded-lg bg-rose-50 p-2 text-xs text-rose-700">{post.failure_reason}</div>}</td><td className="px-4 py-4"><div className="flex flex-wrap gap-1.5">{(post.platforms || []).map((platform) => <span key={platform} className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-medium">{PLATFORM_META[platform]?.label || platform}</span>)}</div></td><td className="px-4 py-4"><StatusBadge status={post.status} /></td><td className="whitespace-nowrap px-4 py-4 text-xs text-slate-500">{formatDate(post.scheduled_at || post.published_at)}</td><td className="px-4 py-4"><div className="flex justify-end gap-1"><button type="button" onClick={() => openEdit(post)} title="Edit" className="rounded-lg p-2 text-blue-700 hover:bg-blue-50"><FiEdit3 /></button><button type="button" onClick={() => { setEditingPost(null); setPostContent(String(post.content || '')); setPostType((post.type || 'text') as PostType); setSelectedPlatforms(post.platforms || []); setSelectedLocations(post.locations || []); setLinkUrl(post.link || ''); setCtaButton(post.cta || 'Learn More'); setScheduledAt(''); setMediaFiles([]); setMediaPreviews(post.media || []); setActiveTab('compose'); }} title="Duplicate" className="rounded-lg p-2 text-violet-700 hover:bg-violet-50"><FiCopy /></button>{post.status === 'scheduled' && <button type="button" onClick={() => void handleCancelSchedule(post)} title="Cancel schedule" className="rounded-lg p-2 text-amber-700 hover:bg-amber-50"><FiXCircle /></button>}<button type="button" onClick={() => void handleDelete(post)} title="Delete" className="rounded-lg p-2 text-rose-700 hover:bg-rose-50"><FiTrash2 /></button></div></td></tr>)}</tbody></table></div>}
+            {filteredPosts.length === 0 ? <div className="rounded-2xl border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500">No posts match the current filters.</div> : <div className="overflow-x-auto rounded-2xl border border-slate-200"><table className="min-w-full text-left text-sm"><thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500"><tr><th className="px-4 py-3">Content</th><th className="px-4 py-3">Platforms</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Schedule / publish</th><th className="px-4 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{filteredPosts.map((post) => <tr key={post.id} className="align-top hover:bg-slate-50"><td className="max-w-md px-4 py-4"><div className="line-clamp-3 font-medium">{String(post.content || 'Untitled post')}</div>{post.failure_reason && <div className="mt-2 rounded-lg bg-rose-50 p-2 text-xs text-rose-700">{post.failure_reason}</div>}</td><td className="px-4 py-4"><div className="flex flex-wrap gap-1.5">{(post.platforms || []).map((platform) => <span key={platform} className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-medium">{PLATFORM_META[platform]?.label || platform}</span>)}</div></td><td className="px-4 py-4"><StatusBadge status={post.status} /></td><td className="whitespace-nowrap px-4 py-4 text-xs text-slate-500">{formatDate(post.scheduled_at || post.published_at)}</td><td className="px-4 py-4"><div className="flex justify-end gap-1">
+                  {canEditPost && (
+                    <button type="button" onClick={() => openEdit(post)} title="Edit" className="rounded-lg p-2 text-blue-700 hover:bg-blue-50"><FiEdit3 /></button>
+                  )}
+                  {canCreatePost && (
+                    <button type="button" onClick={() => { setEditingPost(null); setPostContent(String(post.content || '')); setPostType((post.type || 'text') as PostType); setSelectedPlatforms(post.platforms || []); setSelectedLocations(post.locations || []); setLinkUrl(post.link || ''); setCtaButton(post.cta || 'Learn More'); setScheduledAt(''); setMediaFiles([]); setMediaPreviews(post.media || []); setActiveTab('compose'); }} title="Duplicate" className="rounded-lg p-2 text-violet-700 hover:bg-violet-50"><FiCopy /></button>
+                  )}
+                  {canSchedulePost && post.status === 'scheduled' && (
+                    <button type="button" onClick={() => void handleCancelSchedule(post)} title="Cancel schedule" className="rounded-lg p-2 text-amber-700 hover:bg-amber-50"><FiXCircle /></button>
+                  )}
+                  {canDeletePost && (
+                    <button type="button" onClick={() => void handleDelete(post)} title="Delete" className="rounded-lg p-2 text-rose-700 hover:bg-rose-50"><FiTrash2 /></button>
+                  )}
+                </div></td></tr>)}</tbody></table></div>}
           </div>
         ) : activeTab === 'calendar' ? (
           <div className="p-5">
             <div className="mb-5 flex items-center justify-between"><button type="button" onClick={() => { if (currentMonth === 0) { setCurrentMonth(11); setCurrentYear((y) => y - 1); } else setCurrentMonth((m) => m - 1); }} className="rounded-xl border border-slate-200 p-2 hover:bg-slate-50"><FiChevronLeft /></button><h2 className="font-bold">{new Date(currentYear, currentMonth, 1).toLocaleString(undefined, { month: 'long', year: 'numeric' })}</h2><button type="button" onClick={() => { if (currentMonth === 11) { setCurrentMonth(0); setCurrentYear((y) => y + 1); } else setCurrentMonth((m) => m + 1); }} className="rounded-xl border border-slate-200 p-2 hover:bg-slate-50"><FiChevronRight /></button></div>
             <div className="grid grid-cols-7 gap-2 text-center text-xs font-semibold text-slate-500">{['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((day) => <div key={day} className="py-2">{day}</div>)}</div>
             <div className="grid grid-cols-7 gap-2">{calendarDays.map((cell, index) => <div key={index} className={clsx('min-h-28 rounded-xl border p-2', cell.day ? 'border-slate-200 bg-white' : 'border-transparent bg-slate-50')}>
-              {cell.day > 0 && <><div className="mb-2 text-right text-xs font-semibold text-slate-500">{cell.day}</div><div className="space-y-1">{cell.posts.slice(0, 4).map((post) => <button key={post.id} type="button" onClick={() => openEdit(post)} className="block w-full truncate rounded-lg bg-slate-100 px-2 py-1 text-left text-[11px] hover:bg-slate-200"><span className="font-semibold">{(post.platforms || []).map((p) => PLATFORM_META[p]?.label || p).join(', ')}</span><span className="ml-1">{String(post.content || '').slice(0, 25)}</span></button>)}</div></>}
+              {cell.day > 0 && <><div className="mb-2 text-right text-xs font-semibold text-slate-500">{cell.day}</div><div className="space-y-1">{cell.posts.slice(0, 4).map((post) => <button key={post.id} type="button" onClick={() => canEditPost ? openEdit(post) : undefined} className="block w-full truncate rounded-lg bg-slate-100 px-2 py-1 text-left text-[11px] hover:bg-slate-200"><span className="font-semibold">{(post.platforms || []).map((p) => PLATFORM_META[p]?.label || p).join(', ')}</span><span className="ml-1">{String(post.content || '').slice(0, 25)}</span></button>)}</div></>}
             </div>)}</div>
           </div>
         ) : activeTab === 'inbox' ? (
           <div className="p-5">
             <div className="mb-5"><h2 className="text-xl font-bold">Unified Inbox</h2><p className="text-sm text-slate-500">Real inbox messages returned by the backend.</p></div>
-            {inbox.length === 0 ? <div className="rounded-2xl border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500">No inbox messages returned.</div> : <div className="space-y-3">{inbox.map((message) => <div key={message.id} className={clsx('rounded-2xl border p-4', message.is_read ? 'border-slate-200 bg-white' : 'border-cyan-200 bg-cyan-50')}><div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between"><div><div className="flex items-center gap-2"><span className="text-xs font-bold uppercase text-slate-500">{message.channel}</span><span className="font-semibold">{message.sender}</span></div><div className="mt-1 text-xs text-slate-400">{formatDate(message.received_at)}</div></div>{!message.is_read && <button type="button" onClick={() => void handleMarkRead(message.id)} className="text-xs font-semibold text-cyan-700 hover:underline">Mark read</button>}</div><p className="mt-3 whitespace-pre-wrap text-sm text-slate-700">{message.body}</p><div className="mt-3 flex gap-3">{message.channel === 'email' && <button type="button" onClick={() => void handleEmailReply(message)} className="text-xs font-semibold text-blue-700 hover:underline">Reply email</button>}{message.channel === 'whatsapp' && <button type="button" onClick={() => void handleWhatsAppReply(message)} className="text-xs font-semibold text-emerald-700 hover:underline">Reply WhatsApp</button>}</div></div>)}</div>}
+            {inbox.length === 0 ? <div className="rounded-2xl border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500">No inbox messages returned.</div> : <div className="space-y-3">{inbox.map((message) => <div key={message.id} className={clsx('rounded-2xl border p-4', message.is_read ? 'border-slate-200 bg-white' : 'border-cyan-200 bg-cyan-50')}><div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between"><div><div className="flex items-center gap-2"><span className="text-xs font-bold uppercase text-slate-500">{message.channel}</span><span className="font-semibold">{message.sender}</span></div><div className="mt-1 text-xs text-slate-400">{formatDate(message.received_at)}</div></div>{!message.is_read && <button type="button" onClick={() => void handleMarkRead(message.id)} className="text-xs font-semibold text-cyan-700 hover:underline">Mark read</button>}</div><p className="mt-3 whitespace-pre-wrap text-sm text-slate-700">{message.body}</p>{canReplyInbox && <div className="mt-3 flex gap-3">{message.channel === 'email' && <button type="button" onClick={() => void handleEmailReply(message)} className="text-xs font-semibold text-blue-700 hover:underline">Reply email</button>}{message.channel === 'whatsapp' && <button type="button" onClick={() => void handleWhatsAppReply(message)} className="text-xs font-semibold text-emerald-700 hover:underline">Reply WhatsApp</button>}</div>}</div>)}</div>}
           </div>
         ) : activeTab === 'analytics' ? (
           <div className="p-5">
             <div className="mb-5"><h2 className="text-xl font-bold">Analytics</h2><p className="text-sm text-slate-500">Only values returned by your analytics integration are displayed. No fallback numbers are injected.</p></div>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><StatCard label="Followers" value={formatCount(stats.followers)} icon={<FiUsers />} /><StatCard label="Engagement" value={formatCount(stats.engagement)} icon={<FiBarChart2 />} /><StatCard label="Reach" value={formatCount(stats.reach)} icon={<FiUsers />} /><StatCard label="Impressions" value={formatCount(stats.impressions)} icon={<FiEyeSafe />} /></div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><StatCard label="Followers" value={formatCount(stats.followers)} icon={<FiUsers />} /><StatCard label="Engagement" value={formatCount(stats.engagement)} icon={<FiBarChart2 />} /><StatCard label="Reach" value={formatCount(stats.reach)} icon={<FiUsers />} /><StatCard label="Impressions" value={formatCount(stats.impressions)} icon={<FiBarChart2 />} /></div>
             <div className="mt-5 rounded-2xl border border-slate-200 p-5"><h3 className="font-semibold">Raw analytics fields</h3><pre className="mt-3 overflow-auto rounded-xl bg-slate-950 p-4 text-xs text-slate-200">{JSON.stringify(analytics, null, 2)}</pre></div>
           </div>
         ) : (
           <div className="p-5">
             <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-xl font-bold">Connected accounts</h2><p className="text-sm text-slate-500">OAuth and account status come from the marketing backend.</p></div></div>
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{SUPPORTED_PLATFORMS.map((platform) => { const account = accounts.find((a) => a.platform === platform && a.status === 'connected'); return <div key={platform} className="rounded-2xl border border-slate-200 p-4"><div className="flex items-center gap-3"><span className="grid h-11 w-11 place-items-center rounded-xl bg-slate-100 font-bold">{PLATFORM_META[platform]?.icon || '?'}</span><div className="min-w-0 flex-1"><div className="font-semibold">{PLATFORM_META[platform]?.label || platform}</div><div className="truncate text-xs text-slate-500">{account ? (getAccountLabel(account)) : 'Not connected'}</div></div></div><div className="mt-4 flex items-center justify-between"><StatusBadge status={account ? 'connected' : 'disconnected'} />{account ? <button type="button" onClick={() => void handleDisconnect(platform)} className="text-xs font-semibold text-rose-700 hover:underline">Disconnect</button> : <button type="button" onClick={() => void handleConnect(platform)} className="text-xs font-semibold text-cyan-700 hover:underline">Connect</button>}</div></div>; })}</div>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{SUPPORTED_PLATFORMS.map((platform) => { const account = accounts.find((a) => a.platform === platform && a.status === 'connected'); return <div key={platform} className="rounded-2xl border border-slate-200 p-4"><div className="flex items-center gap-3"><span className="grid h-11 w-11 place-items-center rounded-xl bg-slate-100 font-bold">{PLATFORM_META[platform]?.icon || '?'}</span><div className="min-w-0 flex-1"><div className="font-semibold">{PLATFORM_META[platform]?.label || platform}</div><div className="truncate text-xs text-slate-500">{account ? (getAccountLabel(account)) : 'Not connected'}</div></div></div><div className="mt-4 flex items-center justify-between"><StatusBadge status={account ? 'connected' : 'disconnected'} />{account ? (canDisconnectAccount && <button type="button" onClick={() => void handleDisconnect(platform)} className="text-xs font-semibold text-rose-700 hover:underline">Disconnect</button>) : (canConnectAccount && <button type="button" onClick={() => void handleConnect(platform)} className="text-xs font-semibold text-cyan-700 hover:underline">Connect</button>)}</div></div>; })}</div>
           </div>
         )}
       </main>
-
     </div>
   );
 }
 
-function FiEyeSafe() {
-  return <span aria-hidden="true">◎</span>;
-}
+export default MarketingPage;

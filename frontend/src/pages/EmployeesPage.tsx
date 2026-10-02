@@ -32,11 +32,14 @@ import {
   FiMail,
   FiPhone,
   FiHash,
+  FiLock,
 } from 'react-icons/fi';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -485,11 +488,43 @@ const ToggleSwitch = memo(
 ToggleSwitch.displayName = 'ToggleSwitch';
 
 /* ------------------------------------------------------------------ */
+/* No-access fallback                                                  */
+/* ------------------------------------------------------------------ */
+
+const NoAccessCard = ({
+  title = 'Restricted',
+  message = 'You do not have permission to view this section.',
+}: { title?: string; message?: string }) => (
+  <div className="flex items-center gap-3 rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 p-6">
+    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white text-slate-400 ring-1 ring-slate-200">
+      <FiLock size={16} />
+    </div>
+    <div className="min-w-0">
+      <p className="text-xs font-semibold text-slate-700">{title}</p>
+      <p className="text-[11px] text-slate-500">{message}</p>
+    </div>
+  </div>
+);
+
+/* ------------------------------------------------------------------ */
 /* Main component                                                      */
 /* ------------------------------------------------------------------ */
 
 export function EmployeesPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ── RBAC flags ── */
+  const canViewEmployees        = isSuperAdmin || can('view employees');
+  const canCreateEmployee       = isSuperAdmin || can('create employees');
+  const canEditEmployee         = isSuperAdmin || can('edit employees');
+  const canDeleteEmployee       = isSuperAdmin || can('delete employees');
+  const canExportEmployees      = isSuperAdmin || can('export employees') || can('export data');
+  const canViewCompensation     = isSuperAdmin || can('view employee compensation') || can('view payroll');
+  const canViewSensitivePII     = isSuperAdmin || can('view employee documents') || can('view sensitive employee data');
+  const canViewAttendanceFlags  = isSuperAdmin || can('view attendance settings') || can('view employees');
 
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
@@ -666,9 +701,13 @@ export function EmployeesPage() {
   /* -------------------- Detail view -------------------- */
 
   const handleView = useCallback((employee: Employee) => {
+    if (!canViewEmployees) {
+      showError('Permission denied', 'You do not have permission to view employee details.');
+      return;
+    }
     setViewingEmployee(employee);
     setIsViewPanelOpen(true);
-  }, []);
+  }, [canViewEmployees, showError]);
 
   /* -------------------- CRUD -------------------- */
 
@@ -744,14 +783,22 @@ export function EmployeesPage() {
   }, []);
 
   const handleCreate = useCallback(() => {
+    if (!canCreateEmployee) {
+      showError('Permission denied', 'You do not have permission to create employees.');
+      return;
+    }
     setEditingId(null);
     resetForm();
     const newCode = `EMP-${String((employees?.length ?? 0) + 1).padStart(3, '0')}`;
     setFormData((prev) => ({ ...prev, employee_code: newCode }));
     setIsPanelOpen(true);
-  }, [employees, resetForm]);
+  }, [employees, resetForm, canCreateEmployee, showError]);
 
   const handleEdit = useCallback((employee: Employee) => {
+    if (!canEditEmployee) {
+      showError('Permission denied', 'You do not have permission to edit employees.');
+      return;
+    }
     setEditingId(employee.id);
     setFormData({
       employee_code: employee.employee_code,
@@ -822,10 +869,14 @@ export function EmployeesPage() {
       status: employee.status,
     });
     setIsPanelOpen(true);
-  }, []);
+  }, [canEditEmployee, showError]);
 
   const handleDelete = useCallback(
     async (employee: Employee) => {
+      if (!canDeleteEmployee) {
+        showError('Permission denied', 'You do not have permission to delete employees.');
+        return;
+      }
       if (!window.confirm(`Delete ${employee.first_name} ${employee.last_name}?`)) return;
       try {
         await apiClient.deleteEmployee(employee.id);
@@ -841,7 +892,7 @@ export function EmployeesPage() {
         showError('Delete failed', getApiErrorMessage(err, 'Delete failed.'));
       }
     },
-    [refreshEmps, showError, showSuccess]
+    [refreshEmps, canDeleteEmployee, showError, showSuccess]
   );
 
   /* -------------------- Validation -------------------- */
@@ -875,6 +926,14 @@ export function EmployeesPage() {
   };
 
   const handleSubmit = useCallback(async () => {
+    if (editingId && !canEditEmployee) {
+      showError('Permission denied', 'You do not have permission to edit employees.');
+      return;
+    }
+    if (!editingId && !canCreateEmployee) {
+      showError('Permission denied', 'You do not have permission to create employees.');
+      return;
+    }
     if (!validateForm()) return;
     const payload = {
       ...formData,
@@ -927,11 +986,15 @@ export function EmployeesPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [formData, editingId, refreshEmps, showSuccess, showError]);
+  }, [formData, editingId, refreshEmps, canEditEmployee, canCreateEmployee, showSuccess, showError]);
 
   /* -------------------- Export -------------------- */
 
   const handleExport = useCallback(() => {
+    if (!canExportEmployees) {
+      showError('Permission denied', 'You do not have permission to export employees.');
+      return;
+    }
     if (filteredEmployees.length === 0) {
       showError('Export failed', 'No employees to export.');
       return;
@@ -973,7 +1036,7 @@ export function EmployeesPage() {
     a.click();
     URL.revokeObjectURL(url);
     showSuccess('Export', 'Employee data exported.');
-  }, [filteredEmployees, showSuccess, showError]);
+  }, [filteredEmployees, canExportEmployees, showSuccess, showError]);
 
   /* -------------------- Render field helpers -------------------- */
 
@@ -986,7 +1049,7 @@ export function EmployeesPage() {
     const value = formData[field] ?? '';
     const id = `field-${field}`;
     const base =
-      'h-10 w-full min-w-0 rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10';
+      'h-10 w-full min-w-0 rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400';
     return (
       <div className="min-w-0">
         <label
@@ -1019,7 +1082,6 @@ export function EmployeesPage() {
     );
   };
 
-  // ✅ FIX: accept ReadonlyArray so `as const` tuples (GENDER_OPTIONS etc.) are assignable
   const renderSelect = (
     label: string,
     field: keyof EmployeeFormData,
@@ -1074,6 +1136,40 @@ export function EmployeesPage() {
       />
     );
   };
+
+  /* ------------------------------------------------------------------ */
+  /* Loading guard                                                       */
+  /* ------------------------------------------------------------------ */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* No-access panel                                                     */
+  /* ------------------------------------------------------------------ */
+
+  if (!canViewEmployees) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to view the employee directory.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   /* -------------------- Error state -------------------- */
 
@@ -1164,22 +1260,26 @@ export function EmployeesPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  variant="outline"
-                  onClick={handleExport}
-                  disabled={empLoading || filteredEmployees.length === 0}
-                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
-                >
-                  <FiDownload className="mr-2" size={14} />
-                  Export
-                </Button>
-                <Button
-                  onClick={handleCreate}
-                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
-                >
-                  <FiPlus className="mr-2" size={14} />
-                  Add employee
-                </Button>
+                {canExportEmployees && (
+                  <Button
+                    variant="outline"
+                    onClick={handleExport}
+                    disabled={empLoading || filteredEmployees.length === 0}
+                    className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50"
+                  >
+                    <FiDownload className="mr-2" size={14} />
+                    Export
+                  </Button>
+                )}
+                {canCreateEmployee && (
+                  <Button
+                    onClick={handleCreate}
+                    className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                  >
+                    <FiPlus className="mr-2" size={14} />
+                    Add employee
+                  </Button>
+                )}
               </div>
             </div>
           </section>
@@ -1466,22 +1566,30 @@ export function EmployeesPage() {
                           </TableCell>
 
                           <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                            <div className="flex items-center justify-end gap-1">
-                              <button
-                                onClick={() => handleEdit(employee)}
-                                className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
-                                title="Edit"
-                              >
-                                <FiEdit size={15} />
-                              </button>
-                              <button
-                                onClick={() => handleDelete(employee)}
-                                className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
-                                title="Delete"
-                              >
-                                <FiTrash2 size={15} />
-                              </button>
-                            </div>
+                            {canEditEmployee || canDeleteEmployee ? (
+                              <div className="flex items-center justify-end gap-1">
+                                {canEditEmployee && (
+                                  <button
+                                    onClick={() => handleEdit(employee)}
+                                    className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
+                                    title="Edit"
+                                  >
+                                    <FiEdit size={15} />
+                                  </button>
+                                )}
+                                {canDeleteEmployee && (
+                                  <button
+                                    onClick={() => handleDelete(employee)}
+                                    className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
+                                    title="Delete"
+                                  >
+                                    <FiTrash2 size={15} />
+                                  </button>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-400">—</span>
+                            )}
                           </TableCell>
                         </TableRow>
                       );
@@ -1546,15 +1654,17 @@ export function EmployeesPage() {
                 >
                   <FiX className="mr-2" size={14} /> Close
                 </Button>
-                <Button
-                  onClick={() => {
-                    setIsViewPanelOpen(false);
-                    handleEdit(viewingEmployee);
-                  }}
-                  className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
-                >
-                  <FiEdit className="mr-2" size={14} /> Edit
-                </Button>
+                {canEditEmployee && (
+                  <Button
+                    onClick={() => {
+                      setIsViewPanelOpen(false);
+                      handleEdit(viewingEmployee);
+                    }}
+                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                  >
+                    <FiEdit className="mr-2" size={14} /> Edit
+                  </Button>
+                )}
               </div>
             }
           >
@@ -1690,40 +1800,47 @@ export function EmployeesPage() {
                 </div>
               </div>
 
-              {/* Compensation */}
-              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                <div className="border-b border-slate-100 px-3.5 py-2.5">
-                  <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                    <FiDollarSign size={12} /> Compensation
-                  </p>
+              {/* Compensation — gated by canViewCompensation */}
+              {canViewCompensation ? (
+                <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                  <div className="border-b border-slate-100 px-3.5 py-2.5">
+                    <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      <FiDollarSign size={12} /> Compensation
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 p-3.5">
+                    {[
+                      { label: 'CTC', value: viewingEmployee.ctc },
+                      { label: 'Gross', value: viewingEmployee.gross },
+                      { label: 'Basic', value: viewingEmployee.basic },
+                      { label: 'HRA', value: viewingEmployee.hra },
+                      { label: 'DA', value: viewingEmployee.da },
+                      { label: 'Allowances', value: viewingEmployee.allowances },
+                      { label: 'PF', value: viewingEmployee.pf },
+                      { label: 'ESI', value: viewingEmployee.esi },
+                      { label: 'Professional tax', value: viewingEmployee.professional_tax },
+                      { label: 'TDS', value: viewingEmployee.tds },
+                    ].map((row) => (
+                      <div
+                        key={row.label}
+                        className="rounded-lg border border-slate-200 bg-slate-50/60 p-2.5"
+                      >
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                          {row.label}
+                        </p>
+                        <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">
+                          {safeCurrency(row.value)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="grid grid-cols-2 gap-2 p-3.5">
-                  {[
-                    { label: 'CTC', value: viewingEmployee.ctc },
-                    { label: 'Gross', value: viewingEmployee.gross },
-                    { label: 'Basic', value: viewingEmployee.basic },
-                    { label: 'HRA', value: viewingEmployee.hra },
-                    { label: 'DA', value: viewingEmployee.da },
-                    { label: 'Allowances', value: viewingEmployee.allowances },
-                    { label: 'PF', value: viewingEmployee.pf },
-                    { label: 'ESI', value: viewingEmployee.esi },
-                    { label: 'Professional tax', value: viewingEmployee.professional_tax },
-                    { label: 'TDS', value: viewingEmployee.tds },
-                  ].map((row) => (
-                    <div
-                      key={row.label}
-                      className="rounded-lg border border-slate-200 bg-slate-50/60 p-2.5"
-                    >
-                      <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                        {row.label}
-                      </p>
-                      <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">
-                        {safeCurrency(row.value)}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              ) : (
+                <NoAccessCard
+                  title="Compensation restricted"
+                  message="You do not have permission to view salary information."
+                />
+              )}
 
               {/* Lifecycle */}
               <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
@@ -1763,63 +1880,70 @@ export function EmployeesPage() {
                 </div>
               </div>
 
-              {/* Attendance flags */}
-              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                <div className="border-b border-slate-100 px-3.5 py-2.5">
-                  <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                    <FiClock size={12} /> Attendance flags
-                  </p>
+              {/* Attendance flags — gated by canViewAttendanceFlags */}
+              {canViewAttendanceFlags ? (
+                <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                  <div className="border-b border-slate-100 px-3.5 py-2.5">
+                    <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                      <FiClock size={12} /> Attendance flags
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 p-3.5">
+                    {[
+                      { label: 'GPS', value: viewingEmployee.gps_attendance },
+                      { label: 'Mobile', value: viewingEmployee.mobile_attendance },
+                      { label: 'Web', value: viewingEmployee.web_attendance },
+                      { label: 'Shift', value: viewingEmployee.shift_attendance },
+                      { label: 'Late mark', value: viewingEmployee.late_mark },
+                      { label: 'Early exit', value: viewingEmployee.early_exit },
+                      { label: 'Half day', value: viewingEmployee.half_day },
+                      { label: 'Overtime', value: viewingEmployee.overtime },
+                      { label: 'Missed punch', value: viewingEmployee.missed_punch },
+                      {
+                        label: 'Biometric pending',
+                        value: viewingEmployee.pending_biometric_scan,
+                      },
+                    ]
+                      .filter((flag) => flag.value)
+                      .map((flag) => (
+                        <span
+                          key={flag.label}
+                          className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] font-medium text-slate-700"
+                        >
+                          {flag.label}
+                        </span>
+                      ))}
+                    {[
+                      viewingEmployee.gps_attendance,
+                      viewingEmployee.mobile_attendance,
+                      viewingEmployee.web_attendance,
+                      viewingEmployee.shift_attendance,
+                      viewingEmployee.late_mark,
+                      viewingEmployee.early_exit,
+                      viewingEmployee.half_day,
+                      viewingEmployee.overtime,
+                      viewingEmployee.missed_punch,
+                      viewingEmployee.pending_biometric_scan,
+                    ].every((v) => !v) && (
+                      <span className="text-xs text-slate-400">No attendance flags</span>
+                    )}
+                  </div>
                 </div>
-                <div className="flex flex-wrap gap-1.5 p-3.5">
-                  {[
-                    { label: 'GPS', value: viewingEmployee.gps_attendance },
-                    { label: 'Mobile', value: viewingEmployee.mobile_attendance },
-                    { label: 'Web', value: viewingEmployee.web_attendance },
-                    { label: 'Shift', value: viewingEmployee.shift_attendance },
-                    { label: 'Late mark', value: viewingEmployee.late_mark },
-                    { label: 'Early exit', value: viewingEmployee.early_exit },
-                    { label: 'Half day', value: viewingEmployee.half_day },
-                    { label: 'Overtime', value: viewingEmployee.overtime },
-                    { label: 'Missed punch', value: viewingEmployee.missed_punch },
-                    {
-                      label: 'Biometric pending',
-                      value: viewingEmployee.pending_biometric_scan,
-                    },
-                  ]
-                    .filter((flag) => flag.value)
-                    .map((flag) => (
-                      <span
-                        key={flag.label}
-                        className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] font-medium text-slate-700"
-                      >
-                        {flag.label}
-                      </span>
-                    ))}
-                  {[
-                    viewingEmployee.gps_attendance,
-                    viewingEmployee.mobile_attendance,
-                    viewingEmployee.web_attendance,
-                    viewingEmployee.shift_attendance,
-                    viewingEmployee.late_mark,
-                    viewingEmployee.early_exit,
-                    viewingEmployee.half_day,
-                    viewingEmployee.overtime,
-                    viewingEmployee.missed_punch,
-                    viewingEmployee.pending_biometric_scan,
-                  ].every((v) => !v) && (
-                    <span className="text-xs text-slate-400">No attendance flags</span>
-                  )}
-                </div>
-              </div>
+              ) : (
+                <NoAccessCard
+                  title="Attendance flags restricted"
+                  message="You do not have permission to view attendance settings."
+                />
+              )}
             </div>
           </Offcanvas>
         </Suspense>
       )}
 
       {/* ══════════════════════════════════════════════════════════ */}
-      {/* Form offcanvas (Create / Edit)                            */}
+      {/* Form offcanvas (Create / Edit) — only if user can create/edit */}
       {/* ══════════════════════════════════════════════════════════ */}
-      {isPanelOpen && (
+      {isPanelOpen && (canCreateEmployee || canEditEmployee) && (
         <Suspense
           fallback={
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
@@ -1946,30 +2070,37 @@ export function EmployeesPage() {
                 </div>
               </fieldset>
 
-              {/* Compensation */}
-              <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
-                <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
-                  <span className="h-2 w-2 rounded-full bg-emerald-500" /> Compensation
-                </legend>
-                <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {renderSelect('Salary type', 'salary_type', SALARY_TYPE_OPTIONS)}
-                  {renderField('CTC (₹)', 'ctc', 'number')}
-                  {renderField('Gross (₹)', 'gross', 'number')}
-                  {renderField('Basic (₹)', 'basic', 'number')}
-                  {renderField('HRA (₹)', 'hra', 'number')}
-                  {renderField('DA (₹)', 'da', 'number')}
-                  {renderField('Allowances (₹)', 'allowances', 'number')}
-                  {renderField('PF (₹)', 'pf', 'number')}
-                  {renderField('ESI (₹)', 'esi', 'number')}
-                  {renderField('Professional tax (₹)', 'professional_tax', 'number')}
-                  {renderField('TDS (₹)', 'tds', 'number')}
-                  {renderField('UAN', 'uan')}
-                  {renderField('ESIC number', 'esic_number')}
-                  <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                    {renderField('Bank details', 'bank_details', 'textarea')}
+              {/* Compensation — gated by canViewCompensation */}
+              {canViewCompensation ? (
+                <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
+                  <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
+                    <span className="h-2 w-2 rounded-full bg-emerald-500" /> Compensation
+                  </legend>
+                  <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    {renderSelect('Salary type', 'salary_type', SALARY_TYPE_OPTIONS)}
+                    {renderField('CTC (₹)', 'ctc', 'number')}
+                    {renderField('Gross (₹)', 'gross', 'number')}
+                    {renderField('Basic (₹)', 'basic', 'number')}
+                    {renderField('HRA (₹)', 'hra', 'number')}
+                    {renderField('DA (₹)', 'da', 'number')}
+                    {renderField('Allowances (₹)', 'allowances', 'number')}
+                    {renderField('PF (₹)', 'pf', 'number')}
+                    {renderField('ESI (₹)', 'esi', 'number')}
+                    {renderField('Professional tax (₹)', 'professional_tax', 'number')}
+                    {renderField('TDS (₹)', 'tds', 'number')}
+                    {renderField('UAN', 'uan')}
+                    {renderField('ESIC number', 'esic_number')}
+                    <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                      {renderField('Bank details', 'bank_details', 'textarea')}
+                    </div>
                   </div>
-                </div>
-              </fieldset>
+                </fieldset>
+              ) : (
+                <NoAccessCard
+                  title="Compensation section restricted"
+                  message="You do not have permission to view or edit salary information."
+                />
+              )}
 
               {/* Attendance flags */}
               <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
@@ -1992,56 +2123,65 @@ export function EmployeesPage() {
                 </div>
               </fieldset>
 
-              {/* Personal information */}
-              <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
-                <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
-                  <span className="h-2 w-2 rounded-full bg-teal-500" /> Personal information
-                </legend>
-                <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                    {renderField('Address', 'address', 'textarea')}
+              {/* Personal information — PII section gated by canViewSensitivePII */}
+              {canViewSensitivePII ? (
+                <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
+                  <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
+                    <span className="h-2 w-2 rounded-full bg-teal-500" /> Personal information
+                  </legend>
+                  <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                      {renderField('Address', 'address', 'textarea')}
+                    </div>
+                    <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                      {renderField('Emergency contact', 'emergency_contact', 'textarea')}
+                    </div>
+                    <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                      {renderField('Family details', 'family_details', 'textarea')}
+                    </div>
+                    <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                      {renderField('References', 'references', 'textarea')}
+                    </div>
+                    <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                      {renderField('Education', 'education', 'textarea')}
+                    </div>
+                    <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                      {renderField('Experience', 'experience', 'textarea')}
+                    </div>
+                    <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                      {renderField('Skills', 'skills', 'textarea')}
+                    </div>
+                    <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                      {renderField('Languages', 'languages', 'textarea')}
+                    </div>
+                    {renderField('Passport', 'passport')}
+                    {renderField('Driving license', 'driving_license')}
+                    {renderField('Aadhaar', 'aadhaar')}
+                    {renderField('PAN', 'pan')}
+                    {renderField('Voter ID', 'voter_id')}
                   </div>
-                  <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                    {renderField('Emergency contact', 'emergency_contact', 'textarea')}
-                  </div>
-                  <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                    {renderField('Family details', 'family_details', 'textarea')}
-                  </div>
-                  <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                    {renderField('References', 'references', 'textarea')}
-                  </div>
-                  <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                    {renderField('Education', 'education', 'textarea')}
-                  </div>
-                  <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                    {renderField('Experience', 'experience', 'textarea')}
-                  </div>
-                  <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                    {renderField('Skills', 'skills', 'textarea')}
-                  </div>
-                  <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                    {renderField('Languages', 'languages', 'textarea')}
-                  </div>
-                  {renderField('Passport', 'passport')}
-                  {renderField('Driving license', 'driving_license')}
-                  {renderField('Aadhaar', 'aadhaar')}
-                  {renderField('PAN', 'pan')}
-                  {renderField('Voter ID', 'voter_id')}
-                </div>
-              </fieldset>
+                </fieldset>
+              ) : (
+                <NoAccessCard
+                  title="Personal information restricted"
+                  message="You do not have permission to view or edit employee PII (Aadhaar, PAN, passport, etc.)."
+                />
+              )}
 
-              {/* Documents */}
-              <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
-                <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
-                  <span className="h-2 w-2 rounded-full bg-violet-500" /> Documents
-                </legend>
-                <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div className="min-w-0 sm:col-span-2">
-                    {renderField('Documents (URLs or IDs)', 'documents', 'textarea')}
+              {/* Documents — gated by canViewSensitivePII */}
+              {canViewSensitivePII && (
+                <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
+                  <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
+                    <span className="h-2 w-2 rounded-full bg-violet-500" /> Documents
+                  </legend>
+                  <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <div className="min-w-0 sm:col-span-2">
+                      {renderField('Documents (URLs or IDs)', 'documents', 'textarea')}
+                    </div>
+                    {renderField('Document expiry date', 'document_expiry', 'date')}
                   </div>
-                  {renderField('Document expiry date', 'document_expiry', 'date')}
-                </div>
-              </fieldset>
+                </fieldset>
+              )}
 
               {/* Lifecycle */}
               <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">

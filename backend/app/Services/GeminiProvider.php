@@ -34,7 +34,7 @@ class GeminiProvider implements AiProviderInterface
             throw new \Exception('Gemini API key not configured for provider ' . $this->provider->name);
         }
 
-        $model = $this->provider->config['model'] ?? ($options['model'] ?? 'gemini-2.0');
+        $model = $this->provider->config['model'] ?? ($options['model'] ?? 'gemini-3.8-flash');
 
         $client = null;
         if (class_exists('\\Gemini\\Factory')) {

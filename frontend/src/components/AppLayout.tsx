@@ -3,6 +3,7 @@ import { Outlet } from 'react-router-dom';
 import clsx from 'clsx';
 import { Navbar } from './Navbar';
 import { Sidebar } from './Sidebar';
+import { FloatingVoiceAgent } from './FloatingVoiceAgent';
 
 export function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(
@@ -41,6 +42,8 @@ export function AppLayout() {
           <p>© 2026 Business OS. ERP dashboard, order, payment, catalog, attendance and payroll management.</p>
         </div>
       </footer>
+
+      <FloatingVoiceAgent />
     </div>
   );
 }

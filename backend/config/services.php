@@ -35,6 +35,11 @@ return [
         ],
     ],
 
+    'twilio' => [
+        'auth_token' => env('TWILIO_AUTH_TOKEN'),
+        'webhook_url' => env('TWILIO_WEBHOOK_URL'),
+    ],
+
     
 
     /*
@@ -74,6 +79,6 @@ return [
     ],
     'gemini' => [
     'api_key' => env('GEMINI_API_KEY'),
-    'model' => env('GEMINI_MODEL', 'gemini-1.5-flash'),
+    'model' => env('GEMINI_MODEL', 'gemini-3.5-flash'),
     ],
 ];

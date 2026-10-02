@@ -9,6 +9,7 @@ use Tests\TestCase;
 class HealthCronApiTest extends TestCase
 {
     use RefreshDatabase;
+    use InteractsWithPermissions;
 
     public function test_health_cron_endpoint_returns_scheduler_status(): void
     {
@@ -18,7 +19,8 @@ class HealthCronApiTest extends TestCase
             'password' => bcrypt('password123'),
         ]);
 
-        $response = $this->actingAs($user, 'sanctum')->getJson('/api/health/cron');
+        $response = $this->actingAsWithPermissions($user, ['view health cron'])
+            ->getJson('/api/health/cron');
 
         $response->assertOk()
             ->assertJsonStructure([

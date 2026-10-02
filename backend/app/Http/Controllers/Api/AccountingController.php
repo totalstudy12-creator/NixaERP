@@ -75,19 +75,27 @@ class AccountingController extends Controller
 
     public function statements()
     {
+        $revenue = (float) \App\Models\Invoice::whereNotIn('status', ['draft', 'cancelled'])->sum('total_amount');
+        $expenses = (float) \App\Models\PurchaseInvoice::whereNotIn('status', ['draft', 'cancelled'])->sum('grand_total');
         return [
-            'profit_loss' => ['revenue' => 125000, 'expenses' => 95000, 'net' => 30000],
-            'balance_sheet' => ['assets' => 220000, 'liabilities' => 90000, 'equity' => 130000],
+            'profit_loss' => ['revenue' => $revenue, 'expenses' => $expenses, 'net' => $revenue - $expenses],
+            'balance_sheet' => null,
         ];
     }
 
     public function summary()
     {
+        $inward = (float) \App\Models\Payment::where('payment_direction', 'inward')->whereNotIn('status', ['cancelled', 'failed', 'rejected'])->sum('amount');
+        $outward = (float) \App\Models\Payment::where('payment_direction', 'outward')->whereNotIn('status', ['cancelled', 'failed', 'rejected'])->sum('amount');
+        $receivables = (float) \App\Models\Invoice::whereNotIn('status', ['draft', 'cancelled'])->selectRaw('COALESCE(SUM(total_amount - paid_amount), 0) as outstanding')->value('outstanding');
+        $payables = (float) \App\Models\PurchaseInvoice::selectRaw('COALESCE(SUM(grand_total - paid_amount), 0) as outstanding')->value('outstanding');
+        $revenue = (float) \App\Models\Invoice::whereNotIn('status', ['draft', 'cancelled'])->sum('total_amount');
+        $purchases = (float) \App\Models\PurchaseInvoice::whereNotIn('status', ['draft', 'cancelled'])->sum('grand_total');
         return [
-            'receivables' => 48000,
-            'payables' => 22000,
-            'cash' => 176000,
-            'profit' => 30000,
+            'receivables' => $receivables,
+            'payables' => $payables,
+            'cash' => $inward - $outward,
+            'profit' => $revenue - $purchases,
         ];
     }
 }

@@ -88,7 +88,11 @@ interface ApiErrorLike {
 
 interface OCRLineItem {
   description: string; hsn_sac?: string; quantity: number; unit?: string;
-  unit_price: number; discount?: number; tax_rate?: number; total: number; confidence?: number;
+  unit_price: number; discount?: number;
+  discount_type?: 'percent' | 'amount';
+  discount_percent?: number;
+  discount_amount?: number;
+  tax_rate?: number; total: number; confidence?: number;
 }
 interface OCRSupplierInfo {
   name: string; gstin?: string; email?: string; phone?: string; address?: string; confidence?: number;
@@ -98,6 +102,20 @@ interface OCRInvoiceData {
   supplier: OCRSupplierInfo; items: OCRLineItem[];
   subtotal: number; tax_amount: number; discount_amount: number; grand_total: number;
   currency?: string; notes?: string; overall_confidence?: number; is_interstate?: boolean;
+
+  // New bill-format fields
+  packing_charges?: number;
+  packing_tax?: number;
+  packing_apply_type?: 'before_tax' | 'after_tax';
+  tcs_percent?: number;
+  tcs_amount?: number;
+  round_off?: number;
+  bill_discount_type?: 'percent' | 'amount';
+  bill_discount_value?: number;
+  bill_discount_apply_type?: 'before_tax' | 'after_tax';
+  cgst_total?: number;
+  sgst_total?: number;
+  igst_total?: number;
 }
 interface LineItemDraft {
   id: string; description: string; hsn_sac?: string; quantity: number; unit?: string;
@@ -161,69 +179,168 @@ const PAYMENT_METHOD_OPTIONS = [
 const GST_SLABS = [0, 5, 12, 18, 28] as const;
 
 /* ------------------------------------------------------------------ */
-/* Learning / mapping memory (localStorage)                            */
+/* Cookie helpers (alias memory)                                       */
 /* ------------------------------------------------------------------ */
 
-const LEARN_KEY = 'ocr_mappings_v1';
+const COOKIE_ALIAS_KEY = 'purchase_ocr_aliases_v2';
+const COOKIE_MAX_AGE_DAYS = 400;
 
-interface LearnedMappings {
-  suppliers: Record<string, number>;
+function setCookie(name: string, value: string, days = COOKIE_MAX_AGE_DAYS): void {
+  try {
+    const expires = new Date(Date.now() + days * 864e5).toUTCString();
+    const secure = typeof window !== 'undefined' && window.location.protocol === 'https:' ? '; Secure' : '';
+    document.cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax${secure}`;
+  } catch { /* ignore */ }
+}
+
+function getCookie(name: string): string | null {
+  try {
+    const key = encodeURIComponent(name);
+    const parts = document.cookie ? document.cookie.split(/;\s*/) : [];
+    for (const part of parts) {
+      const [k, ...rest] = part.split('=');
+      if (decodeURIComponent(k) === name) return decodeURIComponent(rest.join('='));
+      if (k === key) return decodeURIComponent(rest.join('='));
+    }
+    return null;
+  } catch { return null; }
+}
+
+/* ------------------------------------------------------------------ */
+/* Alias memory (cookies) — product / supplier / unit / hsn mapping    */
+/* ------------------------------------------------------------------ */
+
+interface AliasBundle {
+  /** normalized OCR description → product id */
   products: Record<string, number>;
+  /** normalized OCR description + hsn → product id */
+  productHsn: Record<string, number>;
+  /** normalized supplier name → supplier id */
+  suppliers: Record<string, number>;
+  /** normalized supplier gstin → supplier id */
+  supplierGstin: Record<string, number>;
+  /** unit aliases: raw unit string → canonical unit (e.g. "pcs." → "PCS") */
+  units: Record<string, string>;
+  /** description → hsn */
+  hsn: Record<string, string>;
   updatedAt: number;
 }
 
-function loadLearnedMappings(): LearnedMappings {
+const EMPTY_ALIASES: AliasBundle = {
+  products: {}, productHsn: {}, suppliers: {}, supplierGstin: {}, units: {}, hsn: {}, updatedAt: 0,
+};
+
+function normalizeName(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function loadAliases(): AliasBundle {
+  const raw = getCookie(COOKIE_ALIAS_KEY);
+  if (!raw) return { ...EMPTY_ALIASES };
   try {
-    const raw = window.localStorage.getItem(LEARN_KEY);
-    if (!raw) return { suppliers: {}, products: {}, updatedAt: 0 };
-    const parsed = JSON.parse(raw) as Partial<LearnedMappings>;
+    const parsed = JSON.parse(raw) as Partial<AliasBundle>;
     return {
-      suppliers: parsed.suppliers ?? {},
-      products: parsed.products ?? {},
+      products:      { ...(parsed.products || {}) },
+      productHsn:    { ...(parsed.productHsn || {}) },
+      suppliers:     { ...(parsed.suppliers || {}) },
+      supplierGstin: { ...(parsed.supplierGstin || {}) },
+      units:         { ...(parsed.units || {}) },
+      hsn:           { ...(parsed.hsn || {}) },
       updatedAt: parsed.updatedAt ?? 0,
     };
-  } catch {
-    return { suppliers: {}, products: {}, updatedAt: 0 };
-  }
+  } catch { return { ...EMPTY_ALIASES }; }
 }
 
-function persistLearnedMappings(next: LearnedMappings): void {
-  try { window.localStorage.setItem(LEARN_KEY, JSON.stringify(next)); } catch { /* quota */ }
+function saveAliases(next: AliasBundle): void {
+  next.updatedAt = Date.now();
+  // Trim to avoid cookie bloat; cap each map
+  const cap = (m: Record<string, unknown>, limit = 220): Record<string, unknown> => {
+    const entries = Object.entries(m);
+    if (entries.length <= limit) return m;
+    return Object.fromEntries(entries.slice(entries.length - limit));
+  };
+  const compact: AliasBundle = {
+    products: cap(next.products) as Record<string, number>,
+    productHsn: cap(next.productHsn) as Record<string, number>,
+    suppliers: cap(next.suppliers) as Record<string, number>,
+    supplierGstin: cap(next.supplierGstin) as Record<string, number>,
+    units: cap(next.units, 120) as Record<string, string>,
+    hsn: cap(next.hsn) as Record<string, string>,
+    updatedAt: next.updatedAt,
+  };
+  try {
+    setCookie(COOKIE_ALIAS_KEY, JSON.stringify(compact));
+  } catch { /* ignore */ }
 }
 
-function rememberSupplier(name: string, id: number): void {
-  const key = normalizeName(name);
-  if (!key || !id) return;
-  const current = loadLearnedMappings();
-  current.suppliers[key] = id;
-  current.updatedAt = Date.now();
-  persistLearnedMappings(current);
-}
-
-function rememberProduct(name: string, hsn: string | undefined, id: number): void {
+function rememberSupplierAlias(name: string, gstin: string | undefined, id: number): void {
   if (!id) return;
-  const key = normalizeName(name);
-  if (!key) return;
-  const current = loadLearnedMappings();
-  current.products[key] = id;
-  if (hsn) current.products[`${key}|${hsn}`] = id;
-  current.updatedAt = Date.now();
-  persistLearnedMappings(current);
+  const a = loadAliases();
+  const key = normalizeName(name || '');
+  if (key) a.suppliers[key] = id;
+  if (gstin) {
+    const g = gstin.trim().toUpperCase();
+    if (g) a.supplierGstin[g] = id;
+  }
+  saveAliases(a);
 }
 
-function recallSupplierId(name: string): number | null {
-  const key = normalizeName(name);
-  if (!key) return null;
-  const map = loadLearnedMappings();
-  return map.suppliers[key] ?? null;
+function rememberProductAlias(
+  description: string, hsn: string | undefined, unit: string | undefined, id: number,
+): void {
+  if (!id) return;
+  const a = loadAliases();
+  const key = normalizeName(description || '');
+  if (key) a.products[key] = id;
+  if (key && hsn) a.productHsn[`${key}|${hsn.trim().toUpperCase()}`] = id;
+  if (key && hsn && !a.hsn[key]) a.hsn[key] = hsn.trim().toUpperCase();
+  if (unit) {
+    const u = unit.trim().toUpperCase();
+    if (u && !a.units[u]) a.units[u] = u;
+  }
+  saveAliases(a);
 }
 
-function recallProductId(name: string, hsn: string | undefined): number | null {
-  const key = normalizeName(name);
+function rememberUnitAlias(rawUnit: string, canonical: string): void {
+  const raw = rawUnit.trim().toUpperCase();
+  const canon = canonical.trim().toUpperCase();
+  if (!raw || !canon) return;
+  const a = loadAliases();
+  a.units[raw] = canon;
+  saveAliases(a);
+}
+
+function recallSupplierId(name: string, gstin?: string): number | null {
+  const a = loadAliases();
+  if (gstin) {
+    const g = gstin.trim().toUpperCase();
+    if (g && a.supplierGstin[g]) return a.supplierGstin[g];
+  }
+  const key = normalizeName(name || '');
+  return key && a.suppliers[key] ? a.suppliers[key] : null;
+}
+
+function recallProductId(description: string, hsn?: string): number | null {
+  const a = loadAliases();
+  const key = normalizeName(description || '');
   if (!key) return null;
-  const map = loadLearnedMappings();
-  if (hsn && map.products[`${key}|${hsn}`]) return map.products[`${key}|${hsn}`];
-  return map.products[key] ?? null;
+  if (hsn) {
+    const composite = `${key}|${hsn.trim().toUpperCase()}`;
+    if (a.productHsn[composite]) return a.productHsn[composite];
+  }
+  return a.products[key] ?? null;
+}
+
+function recallHsn(description: string): string | null {
+  const a = loadAliases();
+  const key = normalizeName(description || '');
+  return key && a.hsn[key] ? a.hsn[key] : null;
+}
+
+function recallUnit(rawUnit: string): string | null {
+  const a = loadAliases();
+  const u = (rawUnit || '').trim().toUpperCase();
+  return u && a.units[u] ? a.units[u] : null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -236,7 +353,6 @@ const IS_PROD = (() => {
   } catch { return false; }
 })();
 
-/** Strip anything that leaks PHP/Laravel internals into the UI. */
 function sanitizeMessage(raw: unknown): string {
   const str = typeof raw === 'string' ? raw : raw == null ? '' : String(raw);
   if (!str) return '';
@@ -924,15 +1040,11 @@ async function createPurchaseWithVerification(
 }
 
 /* ==================================================================
- * Gemini Vision OCR
+ * Gemini Vision OCR — enhanced for all Indian bill formats
  * ================================================================== */
 
 const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash';
 
-/**
- * Ordered list of models tried automatically. If one returns 404 (retired,
- * unavailable on v1beta, or not accessible), the next is attempted.
- */
 const GEMINI_MODEL_FALLBACKS = [
   'gemini-2.5-flash',
   'gemini-2.0-flash',
@@ -944,27 +1056,14 @@ const GEMINI_MODEL_FALLBACKS = [
 
 const FALLBACK_GEMINI_MODEL = GEMINI_MODEL_FALLBACKS[1];
 
-/**
- * Google now issues TWO formats of API keys for the Generative Language API:
- *
- *   1. Legacy / classic format  →  AIzaSy…  (~39 chars)   [AI Studio + GCP]
- *   2. New format               →  AQ.Ab8RN6…             [AI Studio, 2024+]
- *
- * BOTH are API keys, BOTH are sent via the `?key=` query parameter.
- *
- * The only credential that goes in `Authorization: Bearer` is a Google OAuth
- * access token (used by some server-side flows) — those start with `ya29.`
- * and are NOT what a normal AI Studio user has.
- */
 function isGeminiApiKey(key: string): boolean {
   const k = (key || '').trim();
   if (!k) return false;
-  if (/^AIza[0-9A-Za-z_\-]{30,}$/.test(k)) return true;   // legacy format
-  if (/^AQ\.[0-9A-Za-z_\-]{20,}$/.test(k))   return true; // new format
+  if (/^AIza[0-9A-Za-z_\-]{30,}$/.test(k)) return true;
+  if (/^AQ\.[0-9A-Za-z_\-]{20,}$/.test(k))   return true;
   return false;
 }
 
-/** Real Google OAuth access tokens (server-side flows). Start with "ya29.". */
 function isGeminiOAuthToken(key: string): boolean {
   return /^ya29\.[0-9A-Za-z_\-]+$/.test((key || '').trim());
 }
@@ -978,17 +1077,85 @@ function detectAuthKind(key: string): GeminiAuthKind {
   return 'unknown';
 }
 
-const GEMINI_OCR_PROMPT = `You are an expert Indian GST Accounting AI system. Extract structured financial data from handwritten or printed Indian bills, cash receipts, and GST invoices.
-The documents often contain mixed Hindi + English (Hinglish), handwritten amounts, Rupee symbols (₹, Rs, रुपये), GSTIN numbers, HSN/SAC codes, CGST/SGST/IGST breakdowns, and handwritten totals.
+/**
+ * Enhanced prompt — learns packing charges, discounts, TCS, round-off,
+ * line-level discounts, GST split, and works on any Indian bill format.
+ */
+const GEMINI_OCR_PROMPT = `You are an expert Indian GST Accounting AI system specialized in extracting structured financial data from ANY Indian supplier bill format.
 
-CRITICAL INSTRUCTION FOR GST & TAX EXTRACTION:
-- Extract GSTIN numbers for Vendor and Customer (15-character alphanumeric, e.g., 10ABCDE1234F1Z5).
-- Detect if bill is Intrastate (CGST + SGST apply) or Interstate (IGST applies).
-- Extract or compute: HSN/SAC Code, Taxable Amount, GST Rate % (0, 5, 12, 18, 28), CGST Amount, SGST Amount, IGST Amount, and Total Line Item Amount.
-- DO NOT HALLUCINATE. If text is illegible, set value to null and provide low confidence (<0.60).
-- Check Math: Verify Taxable Amount = Qty * Rate; GST Amount = Taxable * (GST% / 100); Grand Total = Taxable Subtotal + Total Tax - Discount.
-- invoice_date and due_date must be ISO YYYY-MM-DD. If the invoice shows DD/MM/YYYY, convert it.
-- Return ONLY valid JSON. No prose, no markdown, no code fences.`;
+SUPPORTED DOCUMENT TYPES:
+- Tax invoices (GST, with CGST/SGST or IGST breakdown)
+- Kaccha bills / cash memos / handwritten receipts (Hinglish, Devanagari, mixed)
+- Packing slips and delivery challans with amounts
+- Purchase orders with prices
+- Hotel / restaurant bills, transport receipts, courier bills
+- Wholesale / retail invoices with line-level discount columns
+- Bills with "Packing Charges", "Packing & Forwarding", "Freight", "Cartage", "Labour", "Loading"
+- Bills with bill-level discount (Cash Discount / Special Discount / CD%)
+- Bills with TCS (Tax Collected at Source)
+- Bills with Round Off lines (₹ +0.45 / -0.30)
+
+CRITICAL EXTRACTION RULES:
+
+1. SUPPLIER / VENDOR
+   - Extract name, GSTIN (15-char alphanumeric), phone, email, full address.
+   - Supplier name is usually the letterhead / top of bill.
+
+2. INVOICE IDENTITY
+   - invoice_number: bill/invoice number (also "Bill No", "Inv No", "Vch No", "Receipt No").
+   - invoice_date & due_date: return ISO YYYY-MM-DD. Convert DD/MM/YYYY or DD-MM-YY correctly (India uses day-first).
+   - If a date is illegible, set it to null.
+
+3. LINE ITEMS
+   For EACH line, extract:
+   - description (raw text, keep abbreviations like "PCS", "NOS", "KG", "BOX")
+   - product_name (cleaned, if different)
+   - hsn_sac (HSN for goods, SAC for services)
+   - quantity, unit, rate (unit_price)
+   - taxable_amount = qty × rate (before line discount)
+   - discount (if any): set discount_type = "percent" OR "amount" and discount_value accordingly
+   - gst_rate (0 / 5 / 12 / 18 / 28). If a bill has separate CGST%+SGST%, the GST rate is their sum.
+   - cgst_amount, sgst_amount, igst_amount if printed
+   - amount / total = taxable - discount + gst (final line total)
+   - confidence (0-1)
+
+4. BILL-LEVEL CHARGES (VERY IMPORTANT)
+   - packing_charges: any "Packing", "P&F", "Forwarding", "Cartage", "Freight", "Loading", "Labour", "Coolie" amount
+   - packing_tax: GST on those charges if billed separately (else 0)
+   - packing_apply_type: "before_tax" if packing is part of taxable value, else "after_tax"
+   - tcs_percent / tcs_amount: TCS if shown (usually 0.1% or 1%)
+   - round_off: signed round-off value (e.g. +0.45 or -0.30). If the bill shows a "Round Off" line, capture it.
+   - shipping_charges: separate from packing if shown distinctly
+
+5. BILL-LEVEL DISCOUNT
+   - bill_discount_type: "percent" or "amount"
+   - bill_discount_value: numeric value
+   - bill_discount_apply_type: "before_tax" if discount applied to taxable value, else "after_tax"
+
+6. GST TOTALS
+   - taxable_subtotal: sum of taxable line values (before bill discount, after line discount)
+   - total_cgst, total_sgst, total_igst: printed totals
+   - tax_amount / total_tax: sum of all tax
+   - grand_total: final amount payable (after discount, packing, TCS, round off)
+
+7. INTRASTATE vs INTERSTATE
+   - If the bill has CGST + SGST → is_interstate = false
+   - If the bill has IGST → is_interstate = true
+   - If unsure, look at supplier GSTIN state code vs customer GSTIN state code.
+
+8. MATH VALIDATION (CRITICAL)
+   - taxable_amount ≈ qty × rate
+   - line total ≈ taxable − line discount + line gst
+   - subtotal = Σ line taxable
+   - tax = Σ line gst
+   - grand_total ≈ subtotal − bill discount + tax + packing + packing_tax + TCS + round_off
+   - If math doesn't match, trust the PRINTED grand total and adjust the largest uncertain field.
+
+9. DO NOT HALLUCINATE
+   - If a value is illegible or missing, set it to null.
+   - Provide confidence < 0.60 for guessed fields.
+
+Return ONLY valid JSON matching the schema. No prose. No markdown. No code fences.`;
 
 const GEMINI_OCR_SCHEMA = {
   type: 'OBJECT',
@@ -1018,6 +1185,9 @@ const GEMINI_OCR_SCHEMA = {
           unit_price: { type: 'NUMBER', nullable: true },
           rate: { type: 'NUMBER', nullable: true },
           taxable_amount: { type: 'NUMBER', nullable: true },
+          discount_type: { type: 'STRING', nullable: true },
+          discount_value: { type: 'NUMBER', nullable: true },
+          discount: { type: 'NUMBER', nullable: true },
           gst_rate: { type: 'NUMBER', nullable: true },
           cgst_amount: { type: 'NUMBER', nullable: true },
           sgst_amount: { type: 'NUMBER', nullable: true },
@@ -1037,6 +1207,15 @@ const GEMINI_OCR_SCHEMA = {
     total_tax: { type: 'NUMBER', nullable: true },
     discount_amount: { type: 'NUMBER', nullable: true },
     discount: { type: 'NUMBER', nullable: true },
+    bill_discount_type: { type: 'STRING', nullable: true },
+    bill_discount_value: { type: 'NUMBER', nullable: true },
+    bill_discount_apply_type: { type: 'STRING', nullable: true },
+    packing_charges: { type: 'NUMBER', nullable: true },
+    packing_tax: { type: 'NUMBER', nullable: true },
+    packing_apply_type: { type: 'STRING', nullable: true },
+    shipping_charges: { type: 'NUMBER', nullable: true },
+    tcs_percent: { type: 'NUMBER', nullable: true },
+    tcs_amount: { type: 'NUMBER', nullable: true },
     round_off: { type: 'NUMBER', nullable: true },
     grand_total: { type: 'NUMBER', nullable: true },
     total_confidence: { type: 'NUMBER' },
@@ -1046,11 +1225,6 @@ const GEMINI_OCR_SCHEMA = {
   },
 };
 
-/**
- * Reads the Gemini credential from localStorage only.
- * No .env / build-time variable is consulted — this makes dev and live
- * servers behave identically.
- */
 function readGeminiConfig(): {
   apiKey: string;
   model: string;
@@ -1167,8 +1341,6 @@ async function extractWithGemini(file: File, modelOverride?: string): Promise<OC
 
   const base64 = await fileToBase64(file);
 
-  // Both Google API key formats (AIza… AND AQ.…) go in the query string.
-  // Only true OAuth tokens (ya29.…) use the Authorization: Bearer header.
   const baseUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const url = authKind === 'oauth' ? baseUrl : `${baseUrl}?key=${encodeURIComponent(apiKey)}`;
 
@@ -1212,17 +1384,13 @@ async function extractWithGemini(file: File, modelOverride?: string): Promise<OC
       throw new Error('Invalid API payload or unsupported image format. Please verify the image file.');
     }
     if (response.status === 401 || response.status === 403) {
-      throw new Error(
-        'Gemini rejected the credential. Please verify your API key in Settings → AI.'
-      );
+      throw new Error('Gemini rejected the credential. Please verify your API key in Settings → AI.');
     }
     if (response.status === 429) {
       throw new Error('API quota or rate limit reached. Please wait a moment and try again.');
     }
     if (response.status === 404) {
-      throw new Error(
-        `Model "${model}" was not found on the Gemini API (v1beta), or the credential was rejected.`
-      );
+      throw new Error(`Model "${model}" was not found on the Gemini API (v1beta), or the credential was rejected.`);
     }
     if (response.status >= 500) {
       throw new Error(`Server returned HTTP Error ${response.status}. This is temporary — please retry.`);
@@ -1263,19 +1431,47 @@ function normalizeOCRResponse(raw: unknown): OCRInvoiceData {
     const qty = safeNum(it.quantity) || 1;
     const unitPrice = safeNum(it.unit_price ?? it.rate ?? it.price);
     const total = safeNum(it.total ?? it.amount);
-    const taxRate = safeNum(it.gst_rate ?? it.tax_rate) || undefined;
+
+    const rawDiscType = safeStr(it.discount_type).toLowerCase();
+    const discType: 'percent' | 'amount' | undefined =
+      rawDiscType === 'percent' || rawDiscType === '%' ? 'percent'
+      : rawDiscType === 'amount' || rawDiscType === 'value' ? 'amount'
+      : undefined;
+    const discVal = safeNum(it.discount_value ?? it.discount);
+
     return {
       description: safeStr(it.description || it.name || it.product_name, ''),
       hsn_sac: safeStr(it.hsn_sac || it.hsn || it.sac, '') || undefined,
       quantity: qty,
       unit: safeStr(it.unit || it.uom, '') || undefined,
       unit_price: unitPrice,
-      discount: safeNum(it.discount) || undefined,
-      tax_rate: taxRate,
+      discount: discVal || undefined,
+      discount_type: discType,
+      discount_percent: discType === 'percent' ? discVal : undefined,
+      discount_amount: discType === 'amount' ? discVal : undefined,
+      tax_rate: safeNum(it.gst_rate ?? it.tax_rate) || undefined,
       total,
       confidence: safeNum(it.confidence) || undefined,
     };
   });
+
+  const billDiscTypeRaw = safeStr(root.bill_discount_type).toLowerCase();
+  const billDiscType: 'percent' | 'amount' | undefined =
+    billDiscTypeRaw === 'percent' || billDiscTypeRaw === '%' ? 'percent'
+    : billDiscTypeRaw === 'amount' ? 'amount'
+    : undefined;
+
+  const packApplyRaw = safeStr(root.packing_apply_type).toLowerCase();
+  const packApply: 'before_tax' | 'after_tax' | undefined =
+    packApplyRaw === 'before_tax' ? 'before_tax'
+    : packApplyRaw === 'after_tax' ? 'after_tax'
+    : undefined;
+
+  const billDiscApplyRaw = safeStr(root.bill_discount_apply_type).toLowerCase();
+  const billDiscApply: 'before_tax' | 'after_tax' | undefined =
+    billDiscApplyRaw === 'before_tax' ? 'before_tax'
+    : billDiscApplyRaw === 'after_tax' ? 'after_tax'
+    : undefined;
 
   return {
     invoice_number: safeStr(root.invoice_number || root.bill_number || root.invoice_no),
@@ -1298,12 +1494,23 @@ function normalizeOCRResponse(raw: unknown): OCRInvoiceData {
     notes: safeStr(root.notes) || undefined,
     overall_confidence: safeNum(root.total_confidence ?? root.confidence) || undefined,
     is_interstate: typeof root.is_interstate === 'boolean' ? (root.is_interstate as boolean) : undefined,
+
+    // enhanced bill-format fields
+    packing_charges: safeNum(root.packing_charges) || undefined,
+    packing_tax: safeNum(root.packing_tax) || undefined,
+    packing_apply_type: packApply,
+    tcs_percent: safeNum(root.tcs_percent) || undefined,
+    tcs_amount: safeNum(root.tcs_amount) || undefined,
+    round_off: typeof root.round_off === 'number' ? (root.round_off as number) : (safeNum(root.round_off) || undefined),
+    bill_discount_type: billDiscType,
+    bill_discount_value: safeNum(root.bill_discount_value) || undefined,
+    bill_discount_apply_type: billDiscApply,
+    cgst_total: safeNum(root.total_cgst) || undefined,
+    sgst_total: safeNum(root.total_sgst) || undefined,
+    igst_total: safeNum(root.total_igst) || undefined,
   };
 }
 
-function normalizeName(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
-}
 function scoreSupplierMatch(name: string, gstin: string | undefined, s: Supplier): number {
   let score = 0;
   const n1 = normalizeName(name); const n2 = normalizeName(s.name);
@@ -1316,9 +1523,11 @@ function scoreSupplierMatch(name: string, gstin: string | undefined, s: Supplier
       score += Math.min(30, overlap * 10);
     }
   }
-  if (gstin && s.gstin && gstin.toUpperCase() === s.gstin.toUpperCase()) score += 100;
+  const sGst = (s.gstin || s.gst_number || '').toUpperCase();
+  if (gstin && sGst && gstin.toUpperCase() === sGst) score += 100;
   return score;
 }
+
 function scoreProductMatch(item: OCRLineItem, p: ProductLite): number {
   let score = 0;
   const n1 = normalizeName(item.description); const n2 = normalizeName(p.name);
@@ -1662,7 +1871,7 @@ const PurchaseImportModal = memo(({ isOpen, onClose, onImported }: ImportModalPr
 PurchaseImportModal.displayName = 'PurchaseImportModal';
 
 /* ==================================================================
- * Purchase OCR Wizard
+ * Purchase OCR Wizard — with cookie-backed alias learning
  * ================================================================== */
 
 interface PurchaseOCRModalProps { isOpen: boolean; onClose: () => void; onImported: () => void }
@@ -1736,9 +1945,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
     setGeminiSource(source);
 
     if (!apiKey) {
-      setEnvWarning(
-        'Gemini credential not found. Open Settings → AI and paste your Gemini API key.'
-      );
+      setEnvWarning('Gemini credential not found. Open Settings → AI and paste your Gemini API key.');
     } else if (authKind === 'unknown') {
       setEnvWarning(
         `The saved credential (starts with "${apiKey.slice(0, 6)}…") is not a recognized Google API key. ` +
@@ -1782,6 +1989,30 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
     return () => { active = false; };
   }, [companyId]);
 
+  /** Apply extracted bill-level fields to wizard state */
+  const hydrateFromExtracted = useCallback((data: OCRInvoiceData) => {
+    // Packing
+    if (typeof data.packing_charges === 'number' && data.packing_charges > 0) {
+      setPackingCharges(data.packing_charges);
+    }
+    if (data.packing_apply_type) setPackingApplyType(data.packing_apply_type);
+
+    // TCS
+    if (typeof data.tcs_percent === 'number' && data.tcs_percent > 0) setTcsPercent(data.tcs_percent);
+
+    // Bill discount
+    if (typeof data.bill_discount_value === 'number' && data.bill_discount_value > 0) {
+      const t = data.bill_discount_type || (data.bill_discount_value <= 100 ? 'percent' : 'amount');
+      setGeneralDiscountType(t);
+      if (t === 'percent') setGeneralDiscountPercent(data.bill_discount_value);
+      else setGeneralDiscountAmountInput(data.bill_discount_value);
+    }
+    if (data.bill_discount_apply_type) setGeneralDiscountApplyType(data.bill_discount_apply_type);
+
+    // Round-off
+    setAutoRoundOff(true);
+  }, []);
+
   const runOCR = useCallback(async (f: File, modelOverride?: string) => {
     setOcrLoading(true);
     setOcrError(null);
@@ -1798,22 +2029,46 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
         const data = await extractWithGemini(f, model);
 
         setExtracted(data);
-        setItems(data.items.map((it) => ({
-          id: uid('item'),
-          description: it.description,
-          hsn_sac: it.hsn_sac,
-          quantity: it.quantity,
-          unit: it.unit,
-          unit_price: it.unit_price,
-          tax_rate: it.tax_rate ?? 0,
-          discount_type: 'percent' as const,
-          discount_percent: 0,
-          discount_amount: 0,
-          total: it.total,
-          action: 'new' as const,
-          matched_product_id: null,
-          matched_product_name: null,
-        })));
+
+        // Build drafts — apply aliases so product mapping is instant
+        setItems(data.items.map((it) => {
+          const aliasUnit = recallUnit(it.unit || '');
+          const aliasHsn = !it.hsn_sac ? recallHsn(it.description) : null;
+
+          // Discount normalization
+          let discType: 'percent' | 'amount' = 'percent';
+          let discPct = 0;
+          let discAmt = 0;
+          if (it.discount_type === 'amount') {
+            discType = 'amount'; discAmt = it.discount_amount ?? it.discount ?? 0;
+          } else if (it.discount_type === 'percent') {
+            discType = 'percent'; discPct = it.discount_percent ?? it.discount ?? 0;
+          } else if (typeof it.discount === 'number' && it.discount > 0) {
+            // Heuristic: <=100 and not a currency-looking number → percent
+            if (it.discount <= 100) { discType = 'percent'; discPct = it.discount; }
+            else { discType = 'amount'; discAmt = it.discount; }
+          }
+
+          return {
+            id: uid('item'),
+            description: it.description,
+            hsn_sac: it.hsn_sac || aliasHsn || undefined,
+            quantity: it.quantity,
+            unit: it.unit || aliasUnit || undefined,
+            unit_price: it.unit_price,
+            tax_rate: it.tax_rate ?? 0,
+            discount_type: discType,
+            discount_percent: discPct,
+            discount_amount: discAmt,
+            total: it.total,
+            action: 'new' as const,
+            matched_product_id: null,
+            matched_product_name: null,
+          };
+        }));
+
+        hydrateFromExtracted(data);
+
         setGeminiModel(model);
         setStep('verify');
         showSuccess('Scan complete', `Extracted ${data.items.length} line item(s) via ${model}.`);
@@ -1823,8 +2078,6 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
         lastError = err;
         const info = classifyOCRError(err);
 
-        // Only cascade to the next model when the failure is per-model.
-        // Auth / quota / network / parse failures won't be fixed by swapping models.
         if (info.kind !== 'model') {
           setOcrError(info);
           setOcrLoading(false);
@@ -1836,7 +2089,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
 
     setOcrError(classifyOCRError(lastError));
     setOcrLoading(false);
-  }, [showSuccess]);
+  }, [showSuccess, hydrateFromExtracted]);
 
   const handleFile = useCallback((f: File) => {
     if (!f) return;
@@ -1910,13 +2163,14 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
     return () => { active = false; };
   }, [step, suppliers.length, products.length]);
 
+  // Supplier matching using cookie aliases first
   useEffect(() => {
     if (!extracted) return;
     if (suppliers.length === 0) return;
     const supplierName = extracted.supplier.name;
     const supplierGstin = extracted.supplier.gstin;
 
-    const remembered = recallSupplierId(supplierName);
+    const remembered = recallSupplierId(supplierName, supplierGstin);
     if (remembered && suppliers.some((s) => s.id === remembered)) {
       setMatchedSupplierId(remembered);
       setSupplierMode('existing');
@@ -1931,13 +2185,14 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
       }
       if (best && best.score >= 50) {
         setMatchedSupplierId(best.id); setSupplierMode('existing');
-        if (supplierName) rememberSupplier(supplierName, best.id);
+        if (supplierName) rememberSupplierAlias(supplierName, supplierGstin, best.id);
       } else {
         setMatchedSupplierId(null); setSupplierMode('new');
       }
     }
   }, [extracted, suppliers]);
 
+  // Product matching using cookie aliases first
   useEffect(() => {
     if (!extracted) return;
     if (products.length === 0) return;
@@ -1959,6 +2214,8 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
             action: 'existing' as const,
             matched_product_id: product.id,
             matched_product_name: product.name,
+            hsn_sac: draft.hsn_sac || product.hsn_sac_code || undefined,
+            unit: draft.unit || product.unit || undefined,
           };
         }
       }
@@ -1969,7 +2226,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
         if (!best || score > best.score) best = { id: p.id, name: p.name, score };
       }
       const matched = best && best.score >= 40 ? best : null;
-      if (matched && it.description) rememberProduct(it.description, it.hsn_sac, matched.id);
+      if (matched && it.description) rememberProductAlias(it.description, it.hsn_sac, it.unit, matched.id);
 
       return {
         ...draft,
@@ -2070,12 +2327,20 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
   }, [step]);
 
   const updateItemField = useCallback((id: string, patch: Partial<LineItemDraft>) => {
-    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
-    if (patch.matched_product_id && patch.action === 'existing') {
-      const it = items.find((x) => x.id === id);
-      if (it?.description) rememberProduct(it.description, it.hsn_sac, patch.matched_product_id);
-    }
-  }, [items]);
+    setItems((prev) => prev.map((it) => {
+      if (it.id !== id) return it;
+      const next = { ...it, ...patch };
+      // Remember alias when a product is matched manually
+      if (patch.matched_product_id && (patch.action === 'existing' || next.action === 'existing')) {
+        rememberProductAlias(next.description, next.hsn_sac, next.unit, patch.matched_product_id);
+      }
+      // Remember unit alias when manually edited
+      if (patch.unit && patch.unit.trim()) {
+        rememberUnitAlias(patch.unit, patch.unit);
+      }
+      return next;
+    }));
+  }, []);
 
   const removeItem = useCallback((id: string) => { setItems((prev) => prev.filter((it) => it.id !== id)); }, []);
 
@@ -2125,7 +2390,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
 
       if (supplierMode === 'existing' && matchedSupplierId) {
         supplierId = matchedSupplierId;
-        if (extracted.supplier.name) rememberSupplier(extracted.supplier.name, matchedSupplierId);
+        if (extracted.supplier.name) rememberSupplierAlias(extracted.supplier.name, extracted.supplier.gstin, matchedSupplierId);
       } else {
         const supplierPayload = buildSupplierPayload({
           name: extracted.supplier.name,
@@ -2142,7 +2407,9 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
           const createdSupplier = await apiClient.request('POST', '/suppliers', supplierPayload);
           supplierId = extractId(createdSupplier);
           diagnostics.supplierCreated = { id: supplierId };
-          if (supplierId && extracted.supplier.name) rememberSupplier(extracted.supplier.name, supplierId);
+          if (supplierId && extracted.supplier.name) {
+            rememberSupplierAlias(extracted.supplier.name, extracted.supplier.gstin, supplierId);
+          }
         } catch (supErr) {
           diagnostics.supplierError = getDetailedError(supErr);
 
@@ -2164,6 +2431,13 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
 
       if (!supplierId) throw new Error('Could not resolve a supplier ID.');
       diagnostics.resolvedSupplierId = supplierId;
+
+      // Persist alias for all mapped products
+      for (const it of items) {
+        if (it.action === 'existing' && it.matched_product_id) {
+          rememberProductAlias(it.description, it.hsn_sac, it.unit, it.matched_product_id);
+        }
+      }
 
       const paymentStatus = totalPaid >= draftGrandTotal ? 'Paid' : totalPaid > 0 ? 'Partial' : 'Unpaid';
 
@@ -2385,7 +2659,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
                       <FiZap className="animate-pulse text-indigo-600" size={18} />
                       <div className="min-w-0">
                         <p className="text-sm font-semibold text-indigo-900">Gemini is reading your invoice…</p>
-                        <p className="text-xs text-indigo-700/80">This usually takes 3–10 seconds.</p>
+                        <p className="text-xs text-indigo-700/80">Extracting line items, GST, packing, discounts &amp; round-off.</p>
                       </div>
                     </div>
                     <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-indigo-100">
@@ -2427,7 +2701,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
 
                 <div className="flex items-start gap-2 rounded-xl border border-slate-200 bg-slate-50/60 p-3 text-xs text-slate-600">
                   <FiInfo className="mt-0.5 shrink-0 text-slate-400" size={14} />
-                  <span>Tip: The more you use this wizard, the smarter it gets — supplier &amp; product matches are remembered automatically.</span>
+                  <span>Tip: Supplier &amp; product aliases are saved in cookies for 400 days — future scans from the same supplier auto-map instantly.</span>
                 </div>
               </div>
             )}
@@ -2443,6 +2717,36 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
                     <FiZap size={14} />
                     <span className="font-semibold">OCR confidence: {(extracted.overall_confidence * 100).toFixed(0)}%</span>
                     <span className="opacity-70">· Please review and map all fields before continuing</span>
+                  </div>
+                )}
+
+                {(extracted.packing_charges || extracted.tcs_amount || extracted.round_off || extracted.bill_discount_value) && (
+                  <div className="rounded-xl border border-violet-200 bg-violet-50/70 p-3 text-xs text-violet-800">
+                    <p className="mb-1 flex items-center gap-1.5 font-semibold">
+                      <FiZap size={12} /> Auto-detected extras
+                    </p>
+                    <div className="flex flex-wrap gap-2 text-[11px]">
+                      {extracted.packing_charges ? (
+                        <span className="rounded-md bg-white px-2 py-0.5 font-medium">
+                          Packing: {formatCurrency(extracted.packing_charges)}
+                          {extracted.packing_apply_type ? ` · ${extracted.packing_apply_type.replace('_', ' ')}` : ''}
+                        </span>
+                      ) : null}
+                      {extracted.tcs_percent ? (
+                        <span className="rounded-md bg-white px-2 py-0.5 font-medium">TCS {extracted.tcs_percent}%</span>
+                      ) : null}
+                      {extracted.bill_discount_value ? (
+                        <span className="rounded-md bg-white px-2 py-0.5 font-medium">
+                          Bill discount {extracted.bill_discount_value}
+                          {extracted.bill_discount_type === 'percent' ? '%' : ''}
+                        </span>
+                      ) : null}
+                      {typeof extracted.round_off === 'number' && extracted.round_off !== 0 ? (
+                        <span className="rounded-md bg-white px-2 py-0.5 font-medium">
+                          Round off {extracted.round_off > 0 ? '+' : ''}{extracted.round_off}
+                        </span>
+                      ) : null}
+                    </div>
                   </div>
                 )}
 
@@ -2497,7 +2801,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
                           onChange={(e) => {
                             const id = e.target.value ? Number(e.target.value) : null;
                             setMatchedSupplierId(id);
-                            if (id && extracted.supplier.name) rememberSupplier(extracted.supplier.name, id);
+                            if (id && extracted.supplier.name) rememberSupplierAlias(extracted.supplier.name, extracted.supplier.gstin, id);
                           }}
                           className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
                           <option value="">Select supplier…</option>
@@ -2509,7 +2813,7 @@ const PurchaseOCRModal = memo(({ isOpen, onClose, onImported }: PurchaseOCRModal
                       </div>
                       {matchedSupplierId && (
                         <p className="flex items-center gap-1 text-[11px] text-emerald-600">
-                          <FiCheckCircle size={11} /> Match remembered for future scans.
+                          <FiCheckCircle size={11} /> Alias saved in cookie for future scans.
                         </p>
                       )}
                     </div>

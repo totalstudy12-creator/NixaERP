@@ -7,7 +7,8 @@ import {
   FiCalendar, FiAlertTriangle, FiActivity, FiTrendingDown,
   FiCheckCircle, FiPackage, FiAlertCircle, FiMic, FiMicOff,
   FiX, FiSend, FiMessageSquare, FiCpu, FiFilter, FiXCircle,
-  FiChevronDown, FiChevronUp, FiAward, FiTarget, FiStar, FiZap, FiSave,
+  FiChevronDown, FiAward, FiTarget, FiStar, FiZap, FiSave,
+  FiLock, FiDownload,
 } from 'react-icons/fi';
 import {
   BarChart, Bar, PieChart, Pie, Cell,
@@ -18,6 +19,8 @@ import {
 } from 'recharts';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 import { ComposableMap, Geographies, Geography } from 'react-simple-maps';
 import { Tooltip } from 'react-tooltip';
 import 'react-tooltip/dist/react-tooltip.css';
@@ -168,6 +171,12 @@ const parseDateSafe = (raw: any): Date | null => {
   const s = String(raw).trim();
   if (!s) return null;
 
+  const dateOnly = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (dateOnly) {
+    const d = new Date(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3]));
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+
   let d = new Date(s);
   if (!Number.isNaN(d.getTime())) return d;
 
@@ -274,14 +283,9 @@ const normalizeStatus = (s: any): string =>
   String(s ?? 'unknown').toLowerCase().trim();
 
 /* ══════════════════════════════════════════════════════════════════ */
-/* SHAPE GUARDS — reject records that don't belong to the collection  */
+/* SHAPE GUARDS                                                       */
 /* ══════════════════════════════════════════════════════════════════ */
 
-/**
- * A record counts as a purchase bill ONLY when it carries at least 2
- * purchase-specific signals. This is what stops sales invoices or
- * unrelated records from being counted as purchases.
- */
 const isLikelyPurchaseBill = (p: any): boolean => {
   if (!p || typeof p !== 'object') return false;
 
@@ -292,8 +296,6 @@ const isLikelyPurchaseBill = (p: any): boolean => {
   if (p.purchase_date) signals++;
   if (p.grand_total != null && p.grand_total !== '') signals++;
 
-  // Explicit negative signal: a record with only customer_id/invoice_number
-  // is a SALES invoice, never a purchase bill.
   if ((p.customer_id != null || p.invoice_number) && (p.supplier_id == null && p.vendor_id == null && !p.purchase_number)) {
     return false;
   }
@@ -301,24 +303,16 @@ const isLikelyPurchaseBill = (p: any): boolean => {
   return signals >= 2;
 };
 
-/**
- * Same idea for invoices — must have a customer or invoice_number.
- */
 const isLikelySalesInvoice = (i: any): boolean => {
   if (!i || typeof i !== 'object') return false;
+  if (i.supplier_id != null || i.vendor_id != null) return false;
+  if (i.purchase_number || i.purchase_no) return false;
   if (i.customer_id != null || i.customer_name != null) return true;
   if (i.invoice_number || i.invoice_no) return true;
   if (i.invoice_date) return true;
   return false;
 };
 
-/**
- * Extract an array of rows from any of the response envelopes we've seen:
- *   [...]                 → array
- *   { data: [...] }       → paginated envelope
- *   { data: { data: [] } }→ nested
- *   { rows: [...] }       → legacy
- */
 const extractRows = (payload: unknown): any[] => {
   if (!payload) return [];
   if (Array.isArray(payload)) return payload;
@@ -364,19 +358,8 @@ const deepFindName = (obj: any, depth = 0): string => {
   return '';
 };
 
-/**
- * Return the display name for a purchase's vendor.
- * Returns '' when truly unknown — NO fake fallback strings.
- */
-const extractVendorName = (p: any): string => {
-  if (!p || typeof p !== 'object') return '';
-  return deepFindName(p);
-};
-
-const extractCustomerName = (p: any): string => {
-  if (!p || typeof p !== 'object') return '';
-  return deepFindName(p);
-};
+const extractVendorName = (p: any): string => (p && typeof p === 'object' ? deepFindName(p) : '');
+const extractCustomerName = (p: any): string => (p && typeof p === 'object' ? deepFindName(p) : '');
 
 /* ────────────────────────────────────────────────────────────────── */
 /* Payment direction / method classifiers                             */
@@ -489,9 +472,7 @@ const cache = new Map<string, { data: unknown; timestamp: number }>();
 const inFlight = new Map<string, Promise<unknown>>();
 
 const unwrap = <T,>(payload: unknown): T => {
-  if (payload === null || payload === undefined) return [] as unknown as T;
-  if (Array.isArray(payload)) return payload as T;
-  if (typeof payload === 'object' && payload !== null && 'data' in payload) {
+  if (payload && typeof payload === 'object' && 'data' in payload) {
     return unwrap<T>((payload as { data?: unknown }).data);
   }
   return payload as T;
@@ -516,18 +497,25 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = 300_000)
         return entry.data as T;
       }
     }
+
     let request = inFlight.get(key) as Promise<T> | undefined;
     if (!request || skipCache) {
-      request = (async () => {
+      let runPromise: Promise<T>;
+      const run = async (): Promise<T> => {
         try {
           const res = await fetcherRef.current();
           const result = unwrap<T>(res);
           cache.set(key, { data: result, timestamp: Date.now() });
           return result;
-        } finally { inFlight.delete(key); }
-      })();
+        } finally {
+          if (inFlight.get(key) === runPromise) inFlight.delete(key);
+        }
+      };
+      runPromise = run();
+      request = runPromise;
       inFlight.set(key, request);
     }
+
     if (mountedRef.current) { setLoading(true); setError(null); }
     try {
       const result = await request;
@@ -546,6 +534,13 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = 300_000)
     void fetchData();
     return () => { mountedRef.current = false; };
   }, [fetchData]);
+
+  const firstFetcherRef = useRef(fetcher);
+  useEffect(() => {
+    if (firstFetcherRef.current === fetcher) return;
+    firstFetcherRef.current = fetcher;
+    if (mountedRef.current) void fetchData(true);
+  }, [fetcher, fetchData]);
 
   return { data, loading, error, refresh: () => fetchData(true) };
 }
@@ -673,7 +668,31 @@ const RupeeTooltip = ({ active, payload, label }: any) => {
 };
 
 /* ────────────────────────────────────────────────────────────────── */
-/* Gemini AI Assistant                                                */
+/* Permission-aware fallbacks                                         */
+/* ────────────────────────────────────────────────────────────────── */
+
+const NoAccessCard = ({
+  title = 'Restricted',
+  message = 'You do not have permission to view this section.',
+  compact = false,
+}: { title?: string; message?: string; compact?: boolean }) => (
+  <div
+    className={`flex items-center gap-3 rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 ${
+      compact ? 'p-4' : 'p-6'
+    }`}
+  >
+    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white text-slate-400 ring-1 ring-slate-200">
+      <FiLock size={16} />
+    </div>
+    <div className="min-w-0">
+      <p className="text-xs font-semibold text-slate-700">{title}</p>
+      <p className="text-[11px] text-slate-500">{message}</p>
+    </div>
+  </div>
+);
+
+/* ────────────────────────────────────────────────────────────────── */
+/* Gemini AI Assistant — EMERALD / TEAL THEME                         */
 /* ────────────────────────────────────────────────────────────────── */
 
 interface ChatMessage { id: string; sender: 'user' | 'gemini'; text: string; }
@@ -693,6 +712,7 @@ const GeminiAIAssistant = memo(() => {
 
   const recognitionRef = useRef<any>(null);
   const synthesisRef = useRef<SpeechSynthesis | null>(null);
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const pickBestVoice = useCallback((): SpeechSynthesisVoice | null => {
@@ -710,40 +730,17 @@ const GeminiAIAssistant = memo(() => {
     );
   }, []);
 
-  useEffect(() => {
-    const w = window as any;
-    const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
-    if (SR) {
-      const rec = new SR();
-      rec.continuous = false;
-      rec.interimResults = false;
-      rec.lang = 'en-US';
-      rec.onresult = (event: any) => {
-        const text = event.results[0][0].transcript;
-        setIsListening(false);
-        void handleSendMessage(text);
-      };
-      rec.onerror = () => setIsListening(false);
-      rec.onend = () => setIsListening(false);
-      recognitionRef.current = rec;
-    }
-    if ('speechSynthesis' in window) {
-      synthesisRef.current = window.speechSynthesis;
-      const loadVoices = () => { if (window.speechSynthesis.getVoices().length > 0) pickBestVoice(); };
-      loadVoices();
-      window.speechSynthesis.onvoiceschanged = loadVoices;
-    }
-    return () => {
-      recognitionRef.current?.abort();
-      synthesisRef.current?.cancel();
-      if ('speechSynthesis' in window) window.speechSynthesis.onvoiceschanged = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pickBestVoice]);
+  const stopSpeaking = useCallback(() => {
+    try { synthesisRef.current?.cancel(); } catch { /* ignore */ }
+    try {
+      const a = activeAudioRef.current;
+      if (a) { a.pause(); a.currentTime = 0; }
+    } catch { /* ignore */ }
+    activeAudioRef.current = null;
+    setIsSpeaking(false);
+  }, []);
 
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, isLoading]);
-
-  const speakResponse = async (text: string) => {
+  const speakResponse = useCallback(async (text: string) => {
     if (!text) return;
     try {
       const res = await apiClient.generateAiSpeech(text, voiceProvider, voiceLanguage);
@@ -751,9 +748,16 @@ const GeminiAIAssistant = memo(() => {
       if (voicePayload?.source === 'cloud' && voicePayload?.audio_base64) {
         setTtsSource('cloud');
         const audio = new Audio(`data:audio/mpeg;base64,${voicePayload.audio_base64}`);
+        activeAudioRef.current = audio;
         audio.onplay = () => setIsSpeaking(true);
-        audio.onended = () => setIsSpeaking(false);
-        audio.onerror = () => setIsSpeaking(false);
+        audio.onended = () => {
+          if (activeAudioRef.current === audio) activeAudioRef.current = null;
+          setIsSpeaking(false);
+        };
+        audio.onerror = () => {
+          if (activeAudioRef.current === audio) activeAudioRef.current = null;
+          setIsSpeaking(false);
+        };
         void audio.play();
         return;
       }
@@ -773,79 +777,173 @@ const GeminiAIAssistant = memo(() => {
     utterance.onend = () => setIsSpeaking(false);
     utterance.onerror = () => setIsSpeaking(false);
     synthesisRef.current.speak(utterance);
-  };
+  }, [voiceProvider, voiceLanguage, voiceSpeed, pickBestVoice]);
 
-  const handleSendMessage = async (textToSend: string = inputText) => {
-    if (!textToSend.trim()) return;
-    const userMessage: ChatMessage = { id: Date.now().toString(), sender: 'user', text: textToSend };
+  const handleSendMessage = useCallback(async (textToSend: string = inputText) => {
+    const trimmed = textToSend.trim();
+    if (!trimmed || isLoading) return;
+
+    const userMessage: ChatMessage = { id: `${Date.now()}-u`, sender: 'user', text: trimmed };
     setMessages((prev) => [...prev, userMessage]);
     setInputText('');
     setIsLoading(true);
+
     try {
-      const history = messages.map((m) => ({ role: m.sender === 'user' ? 'user' : 'assistant', text: m.text }));
-      const res = await apiClient.geminiChat(textToSend, history);
-      const aiResponse = (res as any)?.response || (res as any)?.data?.response || 'I processed your request.';
-      const geminiMessage: ChatMessage = { id: (Date.now() + 1).toString(), sender: 'gemini', text: aiResponse };
+      const history = messages.map((m) => ({
+        role: m.sender === 'user' ? 'user' : 'assistant',
+        text: m.text,
+      }));
+      const res = await apiClient.geminiChat(trimmed, history);
+      const aiResponse =
+        (res as any)?.response ||
+        (res as any)?.data?.response ||
+        'I processed your request.';
+      const geminiMessage: ChatMessage = { id: `${Date.now()}-a`, sender: 'gemini', text: aiResponse };
       setMessages((prev) => [...prev, geminiMessage]);
       await speakResponse(aiResponse);
     } catch {
-      setMessages((prev) => [...prev, { id: (Date.now() + 1).toString(), sender: 'gemini', text: 'Sorry, I could not connect to the AI service. Please try again.' }]);
-    } finally { setIsLoading(false); }
-  };
+      setMessages((prev) => [
+        ...prev,
+        { id: `${Date.now()}-e`, sender: 'gemini', text: 'Sorry, I could not connect to the AI service. Please try again.' },
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [inputText, isLoading, messages, speakResponse]);
+
+  const sendRef = useRef(handleSendMessage);
+  useEffect(() => { sendRef.current = handleSendMessage; }, [handleSendMessage]);
+
+  useEffect(() => {
+    const w = window as any;
+    const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
+    if (SR) {
+      const rec = new SR();
+      rec.continuous = false;
+      rec.interimResults = false;
+      rec.lang = voiceLanguage;
+      rec.onresult = (event: any) => {
+        try {
+          const text = event?.results?.[0]?.[0]?.transcript ?? '';
+          setIsListening(false);
+          if (text.trim()) void sendRef.current(text);
+        } catch { setIsListening(false); }
+      };
+      rec.onerror = () => setIsListening(false);
+      rec.onend = () => setIsListening(false);
+      recognitionRef.current = rec;
+    }
+    if ('speechSynthesis' in window) {
+      synthesisRef.current = window.speechSynthesis;
+      const loadVoices = () => { if (window.speechSynthesis.getVoices().length > 0) pickBestVoice(); };
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    return () => {
+      try { recognitionRef.current?.abort(); } catch { /* ignore */ }
+      try { synthesisRef.current?.cancel(); } catch { /* ignore */ }
+      try { activeAudioRef.current?.pause(); } catch { /* ignore */ }
+      activeAudioRef.current = null;
+      if ('speechSynthesis' in window) window.speechSynthesis.onvoiceschanged = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, isLoading]);
 
   const toggleVoice = () => {
     if (!recognitionRef.current) { window.alert('Voice recognition is not supported in your browser.'); return; }
     if (isListening) { recognitionRef.current.stop(); setIsListening(false); }
     else {
-      synthesisRef.current?.cancel();
-      setIsSpeaking(false);
+      stopSpeaking();
       try { recognitionRef.current.start(); setIsListening(true); } catch { setIsListening(false); }
     }
   };
 
   return (
     <>
+      {/* Floating launcher — emerald/teal gradient */}
       <button
         onClick={() => setIsOpen(true)}
-        className="fixed bottom-6 right-6 z-40 flex items-center gap-2 rounded-full bg-gradient-to-r from-violet-600 to-indigo-500 px-5 py-3 text-white shadow-xl shadow-indigo-500/30 transition-all hover:-translate-y-1 hover:shadow-indigo-500/50"
+        className="fixed bottom-6 right-6 z-40 flex items-center gap-2 rounded-full bg-gradient-to-r from-emerald-500 to-teal-600 px-5 py-3 text-white shadow-xl shadow-emerald-500/30 transition-all hover:-translate-y-1 hover:from-emerald-400 hover:to-teal-500 hover:shadow-emerald-500/50"
       >
         <FiCpu size={20} />
         <span className="font-medium">Ask Gemini</span>
+        {isSpeaking && (
+          <span className="h-2 w-2 animate-pulse rounded-full bg-white/90" aria-label="Agent speaking" />
+        )}
       </button>
 
       {isOpen && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/40 backdrop-blur-sm sm:items-center sm:p-4">
           <div className="flex h-[80vh] w-full flex-col overflow-hidden bg-white shadow-2xl sm:h-[600px] sm:max-w-md sm:rounded-2xl">
-            <div className="flex items-center justify-between bg-gradient-to-r from-violet-600 to-indigo-600 px-4 py-4">
+
+            {/* Header — emerald/teal */}
+            <div className="flex items-center justify-between bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-4">
               <div className="flex items-center gap-2 text-white">
-                <FiCpu className="text-violet-200" size={24} />
+                <FiCpu className="text-emerald-100" size={24} />
                 <div>
                   <h3 className="text-lg font-bold leading-tight">Gemini Workspace</h3>
-                  <p className="text-xs text-violet-200">Powered by Google AI</p>
+                  <p className="text-xs text-emerald-100">Powered by Google AI</p>
                 </div>
               </div>
               <div className="flex items-center gap-2 text-white">
-                <select value={voiceProvider} onChange={(e) => setVoiceProvider(e.target.value as 'browser' | 'cloud')} className="rounded-lg border border-white/20 bg-white/10 px-2 py-1 text-[10px] text-white outline-none">
+                <select
+                  value={voiceProvider}
+                  onChange={(e) => setVoiceProvider(e.target.value as 'browser' | 'cloud')}
+                  className="rounded-lg border border-white/20 bg-white/10 px-2 py-1 text-[10px] text-white outline-none"
+                >
                   <option value="cloud" className="text-slate-800">Premium voice</option>
                   <option value="browser" className="text-slate-800">Browser voice</option>
                 </select>
-                <select value={voiceLanguage} onChange={(e) => setVoiceLanguage(e.target.value as 'en-US' | 'hi-IN')} className="rounded-lg border border-white/20 bg-white/10 px-2 py-1 text-[10px] text-white outline-none">
+                <select
+                  value={voiceLanguage}
+                  onChange={(e) => setVoiceLanguage(e.target.value as 'en-US' | 'hi-IN')}
+                  className="rounded-lg border border-white/20 bg-white/10 px-2 py-1 text-[10px] text-white outline-none"
+                >
                   <option value="en-US" className="text-slate-800">English</option>
                   <option value="hi-IN" className="text-slate-800">Hindi</option>
                 </select>
               </div>
-              <button onClick={() => { setIsOpen(false); synthesisRef.current?.cancel(); }} className="rounded-full p-2 text-white transition-colors hover:bg-white/20">
+              <button
+                onClick={() => { setIsOpen(false); stopSpeaking(); }}
+                className="rounded-full p-2 text-white transition-colors hover:bg-white/20"
+              >
                 <FiX size={20} />
               </button>
             </div>
 
+            {/* Body */}
             <div className="flex-1 space-y-4 overflow-y-auto bg-slate-50 p-4">
               <div className="flex items-center justify-between gap-2 pb-2">
                 <div className="flex items-center gap-2">
-                  <button type="button" onClick={() => setShowVoiceSettings((p) => !p)} className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-100">Voice settings</button>
-                  <button type="button" onClick={() => void speakResponse('Hello! This is a preview of my voice.')} className="rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[10px] font-medium text-violet-700 hover:bg-violet-100">Preview voice</button>
+                  <button
+                    type="button"
+                    onClick={() => setShowVoiceSettings((p) => !p)}
+                    className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    Voice settings
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void speakResponse('Hello! This is a preview of my voice.')}
+                    className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-100"
+                  >
+                    Preview voice
+                  </button>
+                  {isSpeaking && (
+                    <button
+                      type="button"
+                      onClick={stopSpeaking}
+                      className="rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-100"
+                    >
+                      Stop
+                    </button>
+                  )}
                 </div>
-                <span className="text-[10px] uppercase tracking-[0.16em] text-slate-400">{ttsSource === 'cloud' ? 'Premium' : 'Browser'}</span>
+                <span className="text-[10px] uppercase tracking-[0.16em] text-slate-400">
+                  {ttsSource === 'cloud' ? 'Premium' : 'Browser'}
+                </span>
               </div>
 
               {showVoiceSettings && (
@@ -854,7 +952,15 @@ const GeminiAIAssistant = memo(() => {
                     <span>Voice speed</span>
                     <span>{voiceSpeed.toFixed(2)}x</span>
                   </div>
-                  <input type="range" min="0.75" max="1.4" step="0.05" value={voiceSpeed} onChange={(e) => setVoiceSpeed(Number(e.target.value))} className="w-full accent-violet-600" />
+                  <input
+                    type="range"
+                    min="0.75"
+                    max="1.4"
+                    step="0.05"
+                    value={voiceSpeed}
+                    onChange={(e) => setVoiceSpeed(Number(e.target.value))}
+                    className="w-full accent-emerald-600"
+                  />
                 </div>
               )}
 
@@ -867,7 +973,13 @@ const GeminiAIAssistant = memo(() => {
 
               {messages.map((msg) => (
                 <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm shadow-sm ${msg.sender === 'user' ? 'rounded-tr-sm bg-violet-600 text-white' : 'rounded-tl-sm border border-slate-100 bg-white text-slate-700'}`}>
+                  <div
+                    className={`max-w-[85%] rounded-2xl px-4 py-2 text-sm shadow-sm ${
+                      msg.sender === 'user'
+                        ? 'rounded-tr-sm bg-emerald-600 text-white'
+                        : 'rounded-tl-sm border border-slate-100 bg-white text-slate-700'
+                    }`}
+                  >
                     {msg.text}
                   </div>
                 </div>
@@ -876,32 +988,58 @@ const GeminiAIAssistant = memo(() => {
               {isLoading && (
                 <div className="flex justify-start">
                   <div className="flex items-center gap-2 rounded-2xl rounded-tl-sm border border-slate-100 bg-white px-4 py-3 shadow-sm">
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-violet-400" />
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-violet-400" style={{ animationDelay: '0.15s' }} />
-                    <span className="h-2 w-2 animate-bounce rounded-full bg-violet-400" style={{ animationDelay: '0.3s' }} />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-emerald-400" />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-emerald-400" style={{ animationDelay: '0.15s' }} />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-emerald-400" style={{ animationDelay: '0.3s' }} />
                   </div>
                 </div>
               )}
               <div ref={messagesEndRef} />
             </div>
 
+            {/* Composer */}
             <div className="flex items-center gap-2 border-t border-slate-100 bg-white p-3">
-              <button onClick={toggleVoice} className={`shrink-0 rounded-full p-3 transition-colors ${isListening ? 'animate-pulse bg-rose-100 text-rose-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+              <button
+                onClick={toggleVoice}
+                className={`shrink-0 rounded-full p-3 transition-colors ${
+                  isListening
+                    ? 'animate-pulse bg-rose-100 text-rose-600'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+                title={isListening ? 'Stop listening' : 'Start voice input'}
+                aria-label={isListening ? 'Stop listening' : 'Start voice input'}
+              >
                 {isListening ? <FiMic size={20} /> : <FiMicOff size={20} />}
               </button>
-              <input type="text" value={inputText} onChange={(e) => setInputText(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void handleSendMessage()} placeholder={isListening ? 'Listening...' : 'Ask Gemini anything...'} className="flex-1 rounded-full bg-slate-100 px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-violet-500/50" />
-              <button onClick={() => void handleSendMessage()} disabled={!inputText.trim() || isLoading} className="shrink-0 rounded-full bg-violet-600 p-3 text-white transition-colors hover:bg-violet-700 disabled:opacity-50">
+              <input
+                type="text"
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && void handleSendMessage()}
+                placeholder={isListening ? 'Listening...' : 'Ask Gemini anything...'}
+                className="flex-1 rounded-full bg-slate-100 px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-500/50"
+              />
+              <button
+                onClick={() => void handleSendMessage()}
+                disabled={!inputText.trim() || isLoading}
+                className="shrink-0 rounded-full bg-emerald-600 p-3 text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+              >
                 <FiSend size={18} className="translate-x-[1px]" />
               </button>
             </div>
 
+            {/* Quick prompts */}
             <div className="flex gap-2 overflow-x-auto bg-white px-4 pb-3 text-xs whitespace-nowrap">
               {[
                 { l: 'Summarize revenue', p: "Summarize today's revenue." },
                 { l: 'Check inventory', p: 'Which products have low stock?' },
                 { l: 'Top customers', p: 'Who are our top customers?' },
               ].map((q) => (
-                <button key={q.l} onClick={() => void handleSendMessage(q.p)} className="rounded-full border border-slate-200 px-3 py-1.5 text-slate-600 hover:bg-slate-50">
+                <button
+                  key={q.l}
+                  onClick={() => void handleSendMessage(q.p)}
+                  className="rounded-full border border-slate-200 px-3 py-1.5 text-slate-600 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700"
+                >
                   {q.l}
                 </button>
               ))}
@@ -940,7 +1078,25 @@ const ScoreGauge = ({ name, score, detail, fill }: { name: string; score: number
 /* ────────────────────────────────────────────────────────────────── */
 
 export function DashboardPage() {
-  const { showError: _showError } = useNotification();
+  const { showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ── RBAC flags ── */
+  const canViewDashboard    = isSuperAdmin || can('view dashboard');
+  const canViewFinancials   = isSuperAdmin || can('view financial reports') || can('view revenue');
+  const canViewProfit       = isSuperAdmin || can('view profit') || can('view financial reports');
+  const canViewPurchases    = isSuperAdmin || can('view purchases');
+  const canViewPayments     = isSuperAdmin || can('view payments');
+  const canViewEmployees    = isSuperAdmin || can('view employees');
+  const canViewInventory    = isSuperAdmin || can('view inventory') || can('view products');
+  const canViewCustomers    = isSuperAdmin || can('view customers');
+  const canUseAIAssistant   = isSuperAdmin || can('use ai assistant');
+  const canManageTarget     = isSuperAdmin || can('manage sales target') || can('view dashboard');
+  const canExportDashboard  = isSuperAdmin || can('export dashboard') || can('export data');
+  const canViewCompanies    = isSuperAdmin || can('view companies');
+
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [geoData, setGeoData] = useState<any>(null);
   const [geoLoading, setGeoLoading] = useState(true);
@@ -976,11 +1132,12 @@ export function DashboardPage() {
 
   /* -------------------- Geo -------------------- */
   useEffect(() => {
+    if (!canViewFinancials) { setGeoLoading(false); return; }
     fetch('/data/bihar-districts.json')
       .then((res) => { if (!res.ok) throw new Error('Failed to load map data'); return res.json(); })
       .then((data) => { setGeoData(data); setGeoLoading(false); })
       .catch(() => setGeoLoading(false));
-  }, []);
+  }, [canViewFinancials]);
 
   /* -------------------- Fetchers -------------------- */
 
@@ -990,33 +1147,31 @@ export function DashboardPage() {
   }, []);
 
   const fetchInvoices = useCallback(async () => {
+    if (!canViewFinancials) return [];
     const rows = await fetchList(() => apiClient.getInvoices());
-    // Strict shape guard: reject anything that isn't a sales invoice
     const onlyInvoices = rows.filter(isLikelySalesInvoice);
     if (DEV && rows.length !== onlyInvoices.length) {
       // eslint-disable-next-line no-console
       console.warn(`[Dashboard] Invoices: rejected ${rows.length - onlyInvoices.length} non-invoice rows`);
     }
     return onlyInvoices;
-  }, [fetchList]);
+  }, [fetchList, canViewFinancials]);
 
   const fetchOrders = useCallback(() => fetchList(() => apiClient.getOrders()), [fetchList]);
-  const fetchCustomers = useCallback(() => fetchList(() => apiClient.getCustomers()), [fetchList]);
-  const fetchEmployees = useCallback(() => fetchList(() => apiClient.getEmployees()), [fetchList]);
+  const fetchCustomers = useCallback(async () => {
+    if (!canViewCustomers) return [];
+    return fetchList(() => apiClient.getCustomers());
+  }, [fetchList, canViewCustomers]);
+  const fetchEmployees = useCallback(async () => {
+    if (!canViewEmployees) return [];
+    return fetchList(() => apiClient.getEmployees());
+  }, [fetchList, canViewEmployees]);
 
-  /**
-   * Purchase fetcher — tries the CORRECT endpoints first, then applies a
-   * strict shape guard. Prevents sales invoices from leaking into
-   * "Total Purchases".
-   */
   const fetchPurchases = useCallback(async () => {
+    if (!canViewPurchases) return [];
     const client: any = apiClient;
 
-    // 1) Prefer the dedicated purchase-invoice resource endpoint.
-    const candidates = [
-      'getPurchaseInvoices',
-      'getPurchaseInvoice',
-    ];
+    const candidates = ['getPurchaseInvoices', 'getPurchaseInvoice'];
     for (const name of candidates) {
       if (typeof client[name] === 'function') {
         try {
@@ -1031,7 +1186,6 @@ export function DashboardPage() {
       }
     }
 
-    // 2) Fallback: /purchases/bills via SalesController (still gated).
     try {
       const rows = await fetchList(() => apiClient.getPurchaseBills());
       const onlyBills = rows.filter(isLikelyPurchaseBill);
@@ -1043,9 +1197,10 @@ export function DashboardPage() {
     } catch {
       return [];
     }
-  }, [fetchList]);
+  }, [fetchList, canViewPurchases]);
 
   const fetchPaymentsList = useCallback(async () => {
+    if (!canViewPayments) return [];
     const client: any = apiClient;
     const candidates = ['getPayments', 'getAllPayments', 'listPayments'];
     for (const name of candidates) {
@@ -1054,17 +1209,38 @@ export function DashboardPage() {
       }
     }
     return [];
-  }, [fetchList]);
+  }, [fetchList, canViewPayments]);
 
   const fetchCompanies = useCallback(() => apiClient.getCompanies(), []);
-  const fetchProducts = useCallback(() => apiClient.getProducts(), []);
+  const fetchProducts = useCallback(async () => {
+    if (!canViewInventory) return [];
+    return apiClient.getProducts();
+  }, [canViewInventory]);
   const fetchBranches = useCallback(() => apiClient.getBranches(), []);
-  const fetchProfitSummary = useCallback(() => apiClient.getProfitSummary(), []);
-  const fetchPaymentSummary = useCallback(() => apiClient.getPaymentSummary(), []);
-  const fetchInventorySummary = useCallback(() => apiClient.getInventorySummary(), []);
-  const fetchLowStockProducts = useCallback(() => apiClient.getLowStockProducts(), []);
-  const fetchPurchaseDueInvoices = useCallback(() => apiClient.getPurchaseDueInvoices(), []);
-  const fetchBiharDistrictSales = useCallback(() => apiClient.getDistrictSales('Bihar'), []);
+  const fetchProfitSummary = useCallback(async () => {
+    if (!canViewProfit) return null;
+    return apiClient.getProfitSummary();
+  }, [canViewProfit]);
+  const fetchPaymentSummary = useCallback(async () => {
+    if (!canViewPayments) return null;
+    return apiClient.getPaymentSummary();
+  }, [canViewPayments]);
+  const fetchInventorySummary = useCallback(async () => {
+    if (!canViewInventory) return null;
+    return apiClient.getInventorySummary();
+  }, [canViewInventory]);
+  const fetchLowStockProducts = useCallback(async () => {
+    if (!canViewInventory) return [];
+    return apiClient.getLowStockProducts();
+  }, [canViewInventory]);
+  const fetchPurchaseDueInvoices = useCallback(async () => {
+    if (!canViewPurchases) return [];
+    return apiClient.getPurchaseDueInvoices();
+  }, [canViewPurchases]);
+  const fetchBiharDistrictSales = useCallback(async () => {
+    if (!canViewFinancials) return [];
+    return apiClient.getDistrictSales('Bihar');
+  }, [canViewFinancials]);
 
   /* -------------------- Hooks -------------------- */
   const { data: companies, loading: compsLoading, refresh: refreshComps } = useApiCache<any[]>('companies', fetchCompanies);
@@ -1119,7 +1295,7 @@ export function DashboardPage() {
     const cb = applyCompanyBranch(deduped, companyFilter, branchFilter);
     return cb
       .filter(isNotDeleted)
-      .filter(isLikelyPurchaseBill)   // ← re-check after any transformations
+      .filter(isLikelyPurchaseBill)
       .filter((r) => withinRangeUsing(getPurchaseDateField(r), resolvedRange));
   }, [purchases, companyFilter, branchFilter, resolvedRange]);
 
@@ -1324,6 +1500,15 @@ export function DashboardPage() {
     }));
   }, [filteredOrders]);
 
+  const pendingOrdersCount = useMemo(
+    () => filteredOrders.filter((o: any) => /pending/i.test(String(o.status || ''))).length,
+    [filteredOrders],
+  );
+  const overdueInvoicesCount = useMemo(
+    () => filteredInvoices.filter((i: any) => /overdue/i.test(String(i.status || ''))).length,
+    [filteredInvoices],
+  );
+
   /* -------------------- Employee Status -------------------- */
   const employeeStatusBuckets = useMemo(() => {
     let active = 0, onLeave = 0, inactive = 0, other = 0;
@@ -1410,7 +1595,10 @@ export function DashboardPage() {
   const inventorySummary = useMemo<InventorySummary>(() => {
     const list = applyCompanyBranch(products, companyFilter, branchFilter) as any[];
     const usingFilter = companyFilter !== 'all' || branchFilter !== 'all';
-    if (!usingFilter && inventory) return inventory;
+
+    if (!usingFilter && inventory && typeof (inventory as any).totalProducts === 'number') {
+      return inventory;
+    }
 
     if (list.length === 0) {
       return { totalProducts: 0, totalQuantity: 0, inStock: 0, lowStock: 0, zeroStock: 0, negativeStock: 0 };
@@ -1439,7 +1627,7 @@ export function DashboardPage() {
     const map = new Map<string, number>();
     filteredInvoices.forEach((inv: any) => {
       const name = extractCustomerName(inv);
-      if (!name) return;   // skip records without a name — no fake "Unknown"
+      if (!name) return;
       const amt = getInvoiceTotal(inv);
       map.set(name, (map.get(name) || 0) + amt);
     });
@@ -1454,7 +1642,7 @@ export function DashboardPage() {
     const map = new Map<string, number>();
     filteredPurchases.forEach((pur: any) => {
       const name = extractVendorName(pur);
-      if (!name) return;   // skip unknown vendors — no fake "Unknown"
+      if (!name) return;
       const amt = getPurchaseTotal(pur);
       map.set(name, (map.get(name) || 0) + amt);
     });
@@ -1522,10 +1710,11 @@ export function DashboardPage() {
   }, [profitData]);
 
   const totalProfit = useMemo(() => {
+    if (!canViewProfit) return 0;
     if (profitData?.total_profit != null) return Number(profitData.total_profit) || 0;
     if (profitData?.totalProfit != null) return Number(profitData.totalProfit) || 0;
     return monthlyProfit.reduce((s, m) => s + m.profit, 0);
-  }, [profitData, monthlyProfit]);
+  }, [profitData, monthlyProfit, canViewProfit]);
 
   /* -------------------- Sales Target -------------------- */
   const targetProgress = useMemo(() => {
@@ -1539,6 +1728,10 @@ export function DashboardPage() {
   }, [salesTarget, totalRevenue]);
 
   const handleSaveTarget = () => {
+    if (!canManageTarget) {
+      showError('Permission denied', 'You do not have permission to manage sales targets.');
+      return;
+    }
     setTargetError(null);
     const trimmed = targetInput.trim();
     if (!trimmed) { setTargetError('Please enter a target amount.'); return; }
@@ -1552,11 +1745,49 @@ export function DashboardPage() {
   };
 
   const handleClearTarget = () => {
+    if (!canManageTarget) return;
     setSalesTarget(0);
     setTargetInput('');
     setTargetError(null);
     try { localStorage.removeItem('dashboard_sales_target'); } catch { /* ignore */ }
   };
+
+  const handleExportSnapshot = useCallback(() => {
+    if (!canExportDashboard) {
+      showError('Permission denied', 'You do not have permission to export dashboard data.');
+      return;
+    }
+    const esc = (v: string | number) => {
+      const s = String(v ?? '');
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const rows: string[] = [];
+    rows.push(['Metric', 'Value'].map(esc).join(','));
+    rows.push(['Date Range', resolvedRange.label].map(esc).join(','));
+    rows.push(['Companies', String(companies?.length || 0)].map(esc).join(','));
+    rows.push(['Customers', String(filteredCustomers.length)].map(esc).join(','));
+    rows.push(['Orders', String(filteredOrders.length)].map(esc).join(','));
+    if (canViewFinancials) rows.push(['Revenue', totalRevenue.toFixed(2)].map(esc).join(','));
+    if (canViewPurchases) rows.push(['Purchases', totalPurchases.toFixed(2)].map(esc).join(','));
+    if (canViewProfit) rows.push(['Net Profit', totalProfit.toFixed(2)].map(esc).join(','));
+    if (canViewPayments) {
+      rows.push(['Inward', paymentBreakdown.inward.total.toFixed(2)].map(esc).join(','));
+      rows.push(['Outward', paymentBreakdown.outward.total.toFixed(2)].map(esc).join(','));
+    }
+    const csv = rows.join('\n');
+    const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dashboard-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }, [
+    canExportDashboard, resolvedRange.label, companies, filteredCustomers.length,
+    filteredOrders.length, canViewFinancials, totalRevenue, canViewPurchases,
+    totalPurchases, canViewProfit, totalProfit, canViewPayments, paymentBreakdown,
+    showError,
+  ]);
 
   /* -------------------- Custom date range validation -------------------- */
   useEffect(() => {
@@ -1639,7 +1870,8 @@ export function DashboardPage() {
   const filterBranchesGlobal = useMemo(() => {
     if (!branches) return [];
     if (companyFilter === 'all') return branches;
-    return branches.filter((b) => b.company_id === parseInt(companyFilter));
+    const cid = Number(companyFilter);
+    return branches.filter((b) => Number(b.company_id) === cid);
   }, [branches, companyFilter]);
 
   const activeFilterChips = useMemo(() => {
@@ -1680,7 +1912,7 @@ export function DashboardPage() {
 
   useEffect(() => { if (!isLoading) setLastUpdated(new Date()); }, [isLoading]);
 
-  /* Debug log — shows you the raw purchases shape in dev */
+  /* Debug log */
   useEffect(() => {
     if (!DEV) return;
     // eslint-disable-next-line no-console
@@ -1690,8 +1922,6 @@ export function DashboardPage() {
       invoicesRaw: invoices?.length ?? 0,
       invoicesAfterFilter: filteredInvoices.length,
       ordersRaw: orders?.length ?? 0,
-      samplePurchase: purchases?.[0],
-      sampleInvoice: invoices?.[0],
       totalPurchases,
       totalRevenue,
     });
@@ -1703,7 +1933,41 @@ export function DashboardPage() {
     return `hsl(210, 70%, ${90 - 60 * intensity}%)`;
   };
 
-  const showMap = !biharDistrictError && geoData && !geoLoading;
+  const showMap = canViewFinancials && !biharDistrictError && geoData && !geoLoading;
+
+  /* ────────────────────────────────────────────────────────────────────
+   * Loading guard
+   * ──────────────────────────────────────────────────────────────────── */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* ────────────────────────────────────────────────────────────────────
+   * No-access panel
+   * ──────────────────────────────────────────────────────────────────── */
+
+  if (!canViewDashboard) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to view the dashboard.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   /* -------------------- Render -------------------- */
   return (
@@ -1725,13 +1989,23 @@ export function DashboardPage() {
             <p className="mt-1 text-sm text-slate-300">Live business metrics across companies and branches</p>
             {lastUpdated && <p className="mt-1 text-[11px] text-slate-400">Last updated: {lastUpdated.toLocaleString('en-IN')}</p>}
           </div>
-          <button
-            onClick={refreshAll}
-            disabled={isLoading}
-            className="self-start rounded-xl bg-white/10 px-4 py-2 text-sm font-semibold text-white ring-1 ring-white/15 backdrop-blur transition hover:bg-white/20 disabled:opacity-60 sm:self-auto"
-          >
-            <FiRefreshCw className={isLoading ? 'mr-1 inline animate-spin' : 'mr-1 inline'} size={14} /> Refresh
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            {canExportDashboard && (
+              <button
+                onClick={handleExportSnapshot}
+                className="rounded-xl bg-white/10 px-4 py-2 text-sm font-semibold text-white ring-1 ring-white/15 backdrop-blur transition hover:bg-white/20"
+              >
+                <FiDownload className="mr-1 inline" size={14} /> Export
+              </button>
+            )}
+            <button
+              onClick={refreshAll}
+              disabled={isLoading}
+              className="rounded-xl bg-white/10 px-4 py-2 text-sm font-semibold text-white ring-1 ring-white/15 backdrop-blur transition hover:bg-white/20 disabled:opacity-60"
+            >
+              <FiRefreshCw className={isLoading ? 'mr-1 inline animate-spin' : 'mr-1 inline'} size={14} /> Refresh
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1896,13 +2170,13 @@ export function DashboardPage() {
           [...Array(7)].map((_, i) => <StatCardSkeleton key={i} />)
         ) : (
           <>
-            <StatCard icon={FiBox} label="Companies" value={companies?.length || 0} tone="blue" />
-            <StatCard icon={FiUsers} label="Customers" value={filteredCustomers.length} tone="emerald" />
-            <StatCard icon={FiBarChart2} label="Products" value={products?.length || 0} tone="purple" />
+            {canViewCompanies && <StatCard icon={FiBox} label="Companies" value={companies?.length || 0} tone="blue" />}
+            {canViewCustomers && <StatCard icon={FiUsers} label="Customers" value={filteredCustomers.length} tone="emerald" />}
+            {canViewInventory && <StatCard icon={FiBarChart2} label="Products" value={products?.length || 0} tone="purple" />}
             <StatCard icon={FiShoppingCart} label="Orders" value={filteredOrders.length} tone="amber" delta={ordersDelta} />
-            <StatCard icon={FiDollarSign} label="Invoices" value={filteredInvoices.length} tone="rose" delta={invoicesDelta} />
-            <StatCard icon={FiTrendingUp} label="Revenue" value={compactNumber(totalRevenue)} tone="teal" hint={resolvedRange.label} delta={revenueDelta} />
-            <StatCard icon={FiAward} label="Net Profit" value={compactNumber(totalProfit)} tone="emerald" />
+            {canViewFinancials && <StatCard icon={FiDollarSign} label="Invoices" value={filteredInvoices.length} tone="rose" delta={invoicesDelta} />}
+            {canViewFinancials && <StatCard icon={FiTrendingUp} label="Revenue" value={compactNumber(totalRevenue)} tone="teal" hint={resolvedRange.label} delta={revenueDelta} />}
+            {canViewProfit && <StatCard icon={FiAward} label="Net Profit" value={compactNumber(totalProfit)} tone="emerald" />}
           </>
         )}
       </div>
@@ -1911,612 +2185,668 @@ export function DashboardPage() {
       <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
         <FiTarget className="text-indigo-600" /> Sales Target
       </h2>
-      <div className="mb-8 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-        <div className="grid gap-5 p-5 md:grid-cols-3">
-          <div>
-            <label htmlFor="sales-target-input" className="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-              Target Amount (₹)
-            </label>
-            <div className="flex gap-2">
-              <input
-                id="sales-target-input"
-                type="text"
-                inputMode="decimal"
-                value={targetInput}
-                onChange={(e) => { setTargetInput(e.target.value); if (targetError) setTargetError(null); }}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleSaveTarget(); }}
-                placeholder={salesTarget > 0 ? `Current: ₹${salesTarget.toLocaleString('en-IN')}` : 'e.g. 5000000'}
-                className={`h-10 flex-1 rounded-xl border bg-white px-3 text-sm font-medium text-slate-700 shadow-sm outline-none transition focus:ring-4 ${targetError ? 'border-rose-300 focus:border-rose-400 focus:ring-rose-500/10' : 'border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/10'}`}
-                aria-invalid={!!targetError}
-                aria-describedby={targetError ? 'sales-target-error' : undefined}
-              />
-              <button
-                onClick={handleSaveTarget}
-                className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 px-3 text-sm font-semibold text-white shadow-sm transition hover:from-indigo-700 hover:to-blue-700"
-              >
-                <FiSave size={13} /> Save
-              </button>
-            </div>
-            {targetError && (
-              <p id="sales-target-error" className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-rose-600">
-                <FiAlertCircle size={11} /> {targetError}
-              </p>
-            )}
-            {!targetError && salesTarget > 0 && (
-              <p className="mt-1.5 text-[11px] text-slate-500">
-                Saved target:{' '}
-                <span className="font-semibold text-slate-700">₹{salesTarget.toLocaleString('en-IN')}</span>
-                <button onClick={handleClearTarget} className="ml-2 text-rose-600 underline hover:text-rose-700">clear</button>
-              </p>
-            )}
-          </div>
-
-          <div className="md:col-span-2">
-            {!targetProgress.hasTarget ? (
-              <div className="flex h-full min-h-[80px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-xs text-slate-400">
-                Set a sales target to track progress against your current filter.
+      {canManageTarget ? (
+        <div className="mb-8 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="grid gap-5 p-5 md:grid-cols-3">
+            <div>
+              <label htmlFor="sales-target-input" className="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                Target Amount (₹)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  id="sales-target-input"
+                  type="text"
+                  inputMode="decimal"
+                  value={targetInput}
+                  onChange={(e) => { setTargetInput(e.target.value); if (targetError) setTargetError(null); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleSaveTarget(); }}
+                  placeholder={salesTarget > 0 ? `Current: ₹${salesTarget.toLocaleString('en-IN')}` : 'e.g. 5000000'}
+                  className={`h-10 flex-1 rounded-xl border bg-white px-3 text-sm font-medium text-slate-700 shadow-sm outline-none transition focus:ring-4 ${targetError ? 'border-rose-300 focus:border-rose-400 focus:ring-rose-500/10' : 'border-slate-200 focus:border-indigo-400 focus:ring-indigo-500/10'}`}
+                  aria-invalid={!!targetError}
+                  aria-describedby={targetError ? 'sales-target-error' : undefined}
+                />
+                <button
+                  onClick={handleSaveTarget}
+                  className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-blue-600 px-3 text-sm font-semibold text-white shadow-sm transition hover:from-indigo-700 hover:to-blue-700"
+                >
+                  <FiSave size={13} /> Save
+                </button>
               </div>
-            ) : (
-              <>
-                <div className="mb-2 flex items-baseline justify-between">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                    Progress · {resolvedRange.label}
-                  </span>
-                  <span className={`text-sm font-bold ${targetProgress.achieved ? 'text-emerald-600' : 'text-slate-700'}`}>
-                    {targetProgress.pct.toFixed(1)}%
-                  </span>
+              {targetError && (
+                <p id="sales-target-error" className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-rose-600">
+                  <FiAlertCircle size={11} /> {targetError}
+                </p>
+              )}
+              {!targetError && salesTarget > 0 && (
+                <p className="mt-1.5 text-[11px] text-slate-500">
+                  Saved target:{' '}
+                  <span className="font-semibold text-slate-700">₹{salesTarget.toLocaleString('en-IN')}</span>
+                  <button onClick={handleClearTarget} className="ml-2 text-rose-600 underline hover:text-rose-700">clear</button>
+                </p>
+              )}
+            </div>
+
+            <div className="md:col-span-2">
+              {!targetProgress.hasTarget ? (
+                <div className="flex h-full min-h-[80px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-xs text-slate-400">
+                  Set a sales target to track progress against your current filter.
                 </div>
-                <div className="h-3 w-full overflow-hidden rounded-full bg-slate-100">
-                  <div
-                    className={`h-full rounded-full transition-all ${targetProgress.achieved ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-indigo-500 to-blue-500'}`}
-                    style={{ width: `${targetProgress.pct}%` }}
-                  />
-                </div>
-                <div className="mt-3 grid grid-cols-3 gap-3 text-xs">
-                  <div>
-                    <p className="text-slate-500">Actual</p>
-                    <p className="font-semibold text-slate-800">{compactNumber(totalRevenue)}</p>
+              ) : (
+                <>
+                  <div className="mb-2 flex items-baseline justify-between">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+                      Progress · {resolvedRange.label}
+                    </span>
+                    <span className={`text-sm font-bold ${targetProgress.achieved ? 'text-emerald-600' : 'text-slate-700'}`}>
+                      {targetProgress.pct.toFixed(1)}%
+                    </span>
                   </div>
-                  <div>
-                    <p className="text-slate-500">Target</p>
-                    <p className="font-semibold text-slate-800">{compactNumber(salesTarget)}</p>
+                  <div className="h-3 w-full overflow-hidden rounded-full bg-slate-100">
+                    <div
+                      className={`h-full rounded-full transition-all ${targetProgress.achieved ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-indigo-500 to-blue-500'}`}
+                      style={{ width: `${targetProgress.pct}%` }}
+                    />
                   </div>
-                  <div>
-                    <p className="text-slate-500">{targetProgress.achieved ? 'Surplus' : 'Remaining'}</p>
-                    <p className={`font-semibold ${targetProgress.achieved ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {compactNumber(targetProgress.achieved ? totalRevenue - salesTarget : targetProgress.remaining)}
-                    </p>
+                  <div className="mt-3 grid grid-cols-3 gap-3 text-xs">
+                    <div>
+                      <p className="text-slate-500">Actual</p>
+                      <p className="font-semibold text-slate-800">{compactNumber(totalRevenue)}</p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">Target</p>
+                      <p className="font-semibold text-slate-800">{compactNumber(salesTarget)}</p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500">{targetProgress.achieved ? 'Surplus' : 'Remaining'}</p>
+                      <p className={`font-semibold ${targetProgress.achieved ? 'text-emerald-600' : 'text-rose-600'}`}>
+                        {compactNumber(targetProgress.achieved ? totalRevenue - salesTarget : targetProgress.remaining)}
+                      </p>
+                    </div>
                   </div>
-                </div>
-              </>
-            )}
+                </>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      ) : (
+        <div className="mb-8"><NoAccessCard title="Sales Target restricted" message="You do not have permission to view or manage sales targets." /></div>
+      )}
 
       {/* Business Score Performance */}
-      <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
-        <FiStar className="text-amber-500" /> Business Score Performance
-      </h2>
-      <div className="mb-8 grid grid-cols-1 gap-5 xl:grid-cols-3">
-        <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-200/80 bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-900 p-6 text-white shadow-[0_12px_30px_-12px_rgba(15,23,42,0.4)]">
-          <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200 backdrop-blur">
-            <FiZap size={10} /> Composite
+      {canViewFinancials ? (
+        <>
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
+            <FiStar className="text-amber-500" /> Business Score Performance
+          </h2>
+          <div className="mb-8 grid grid-cols-1 gap-5 xl:grid-cols-3">
+            <div className="flex flex-col items-center justify-center rounded-2xl border border-slate-200/80 bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-900 p-6 text-white shadow-[0_12px_30px_-12px_rgba(15,23,42,0.4)]">
+              <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200 backdrop-blur">
+                <FiZap size={10} /> Composite
+              </div>
+              <p className="mt-1 text-[11px] uppercase tracking-[0.14em] text-slate-300">Overall Health</p>
+              <p className="mt-2 text-6xl font-extrabold tracking-tight">{businessScore.overall}</p>
+              <p className="mt-1 text-sm text-slate-300">out of 100</p>
+              <div className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1 text-xs font-semibold ring-1 ring-white/15">
+                <span className={`h-2 w-2 rounded-full ${businessScore.overall >= 70 ? 'bg-emerald-400' : businessScore.overall >= 55 ? 'bg-amber-400' : 'bg-rose-400'}`} />
+                {overallLabel.label}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:col-span-2">
+              {businessScore.factors.map((f) => (<ScoreGauge key={f.name} {...f} />))}
+            </div>
           </div>
-          <p className="mt-1 text-[11px] uppercase tracking-[0.14em] text-slate-300">Overall Health</p>
-          <p className="mt-2 text-6xl font-extrabold tracking-tight">{businessScore.overall}</p>
-          <p className="mt-1 text-sm text-slate-300">out of 100</p>
-          <div className={`mt-3 inline-flex items-center gap-1.5 rounded-full bg-white/10 px-3 py-1 text-xs font-semibold ring-1 ring-white/15`}>
-            <span className={`h-2 w-2 rounded-full ${businessScore.overall >= 70 ? 'bg-emerald-400' : businessScore.overall >= 55 ? 'bg-amber-400' : 'bg-rose-400'}`} />
-            {overallLabel.label}
-          </div>
-        </div>
 
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:col-span-2">
-          {businessScore.factors.map((f) => (<ScoreGauge key={f.name} {...f} />))}
-        </div>
-      </div>
-
-      <div className="mb-8 grid grid-cols-1 gap-5 xl:grid-cols-3">
-        <ChartCard title="Performance Radar" subtitle="Factor comparison" accent="violet" className="xl:col-span-2">
-          <ResponsiveContainer width="100%" height={300}>
-            <RadarChart data={businessScore.factors.map((f) => ({ name: f.name, score: f.score }))} outerRadius="80%">
-              <PolarGrid stroke="#e2e8f0" />
-              <PolarAngleAxis dataKey="name" tick={{ fill: '#64748b', fontSize: 12 }} />
-              <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fill: '#94a3b8', fontSize: 10 }} />
-              <Radar name="Score" dataKey="score" stroke="#8B5CF6" fill="#8B5CF6" fillOpacity={0.35} />
-              <RechartsTooltip />
-            </RadarChart>
-          </ResponsiveContainer>
-        </ChartCard>
-
-        <ChartCard title="Factor Breakdown" subtitle="Key drivers" accent="teal">
-          <ul className="space-y-3">
-            {businessScore.factors.map((f) => (
-              <li key={f.name} className="flex items-center gap-3">
-                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: f.fill }} />
-                <span className="w-24 text-xs font-medium text-slate-600">{f.name}</span>
-                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100">
-                  <div className="h-full rounded-full transition-all" style={{ width: `${f.score}%`, backgroundColor: f.fill }} />
-                </div>
-                <span className="w-10 text-right text-xs font-semibold text-slate-800">{f.score}</span>
-              </li>
-            ))}
-          </ul>
-        </ChartCard>
-      </div>
-
-      {/* Sales Performance */}
-      <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
-        <FiTarget className="text-indigo-600" /> Sales Performance
-      </h2>
-      <div className="mb-5 grid grid-cols-2 gap-4 md:grid-cols-4">
-        <StatCard icon={FiTrendingUp} label="Revenue" value={compactNumber(totalRevenue)} tone="teal" hint={resolvedRange.label} delta={revenueDelta} />
-        <StatCard icon={FiDollarSign} label="Invoices" value={filteredInvoices.length} tone="rose" delta={invoicesDelta} />
-        <StatCard icon={FiShoppingCart} label="Orders" value={filteredOrders.length} tone="amber" delta={ordersDelta} />
-        <StatCard
-          icon={FiCheckCircle}
-          label="Avg. Invoice"
-          value={filteredInvoices.length > 0 ? compactNumber(totalRevenue / filteredInvoices.length) : compactNumber(0)}
-          tone="emerald"
-        />
-      </div>
-
-      <div className="mb-8 grid grid-cols-1 gap-5 xl:grid-cols-3">
-        <ChartCard title="Monthly Sales" subtitle={`Filtered range: ${resolvedRange.label}`} className="xl:col-span-2" accent="indigo">
-          {isLoading ? (
-            <div className="h-72 animate-pulse rounded-xl bg-slate-100" />
-          ) : monthlySales.length === 0 || monthlySales.every((m) => m.sales === 0) ? (
-            <div className="grid h-72 place-items-center text-sm text-slate-400">No sales data in the selected range</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={monthlySales} margin={{ top: 28, right: 16, left: 0, bottom: 8 }}>
-                <defs>
-                  <linearGradient id="barMonthly" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#6366F1" stopOpacity={0.95} />
-                    <stop offset="100%" stopColor="#8B5CF6" stopOpacity={0.65} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
-                <RechartsTooltip content={<RupeeTooltip />} cursor={{ fill: 'rgba(99,102,241,0.06)' }} />
-                <Bar dataKey="sales" name="Sales" fill="url(#barMonthly)" radius={[10, 10, 4, 4]} maxBarSize={56}>
-                  <LabelList
-                    dataKey="sales"
-                    position="top"
-                    content={(props: any) => {
-                      const { x, y, width, value } = props;
-                      if (!value) return null;
-                      return (
-                        <text x={x + width / 2} y={y - 8} fill="#4f46e5" textAnchor="middle" fontSize={11} fontWeight={600}>
-                          {compactNumber(Number(value))}
-                        </text>
-                      );
-                    }}
-                  />
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </ChartCard>
-
-        <ChartCard title="Order Pipeline" subtitle="Distribution by status" accent="violet">
-          {isLoading ? (
-            <div className="h-72 animate-pulse rounded-xl bg-slate-100" />
-          ) : filteredOrders.length === 0 ? (
-            <div className="grid h-72 place-items-center text-sm text-slate-400">No orders in the selected range</div>
-          ) : (
-            <div className="relative">
+          <div className="mb-8 grid grid-cols-1 gap-5 xl:grid-cols-3">
+            <ChartCard title="Performance Radar" subtitle="Factor comparison" accent="violet" className="xl:col-span-2">
               <ResponsiveContainer width="100%" height={300}>
-                <RadialBarChart cx="50%" cy="50%" innerRadius="30%" outerRadius="100%" barSize={16} data={radialPipeline} startAngle={90} endAngle={-270}>
-                  <PolarAngleAxis type="number" domain={[0, 100]} tick={false} />
-                  <RadialBar dataKey="value" background={{ fill: '#f1f5f9' }} cornerRadius={10} />
-                  <RechartsTooltip
-                    content={({ active, payload }: any) => {
-                      if (!active || !payload?.length) return null;
-                      const p = payload[0].payload;
-                      return (
-                        <div className="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-lg backdrop-blur">
-                          <p className="text-[11px] font-semibold text-slate-800">{p.name}</p>
-                          <p className="text-xs text-slate-600">{p.raw} orders · {p.value}%</p>
-                        </div>
-                      );
-                    }}
-                  />
-                </RadialBarChart>
+                <RadarChart data={businessScore.factors.map((f) => ({ name: f.name, score: f.score }))} outerRadius="80%">
+                  <PolarGrid stroke="#e2e8f0" />
+                  <PolarAngleAxis dataKey="name" tick={{ fill: '#64748b', fontSize: 12 }} />
+                  <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fill: '#94a3b8', fontSize: 10 }} />
+                  <Radar name="Score" dataKey="score" stroke="#8B5CF6" fill="#8B5CF6" fillOpacity={0.35} />
+                  <RechartsTooltip />
+                </RadarChart>
               </ResponsiveContainer>
-              <ul className="mt-1 grid grid-cols-2 gap-2">
-                {radialPipeline.map((r) => (
-                  <li key={r.name} className="flex items-center gap-2 text-xs">
-                    <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: r.fill }} />
-                    <span className="text-slate-600">{r.name}</span>
-                    <span className="ml-auto font-semibold text-slate-800">{r.raw}</span>
+            </ChartCard>
+
+            <ChartCard title="Factor Breakdown" subtitle="Key drivers" accent="teal">
+              <ul className="space-y-3">
+                {businessScore.factors.map((f) => (
+                  <li key={f.name} className="flex items-center gap-3">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: f.fill }} />
+                    <span className="w-24 text-xs font-medium text-slate-600">{f.name}</span>
+                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-100">
+                      <div className="h-full rounded-full transition-all" style={{ width: `${f.score}%`, backgroundColor: f.fill }} />
+                    </div>
+                    <span className="w-10 text-right text-xs font-semibold text-slate-800">{f.score}</span>
                   </li>
                 ))}
               </ul>
-            </div>
-          )}
-        </ChartCard>
-      </div>
+            </ChartCard>
+          </div>
+        </>
+      ) : (
+        <div className="mb-8"><NoAccessCard title="Business score restricted" message="You do not have permission to view performance scores." /></div>
+      )}
 
-      {/* Purchase Performance */}
-      <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
-        <FiPackage className="text-amber-600" /> Purchase Performance
-      </h2>
-      <div className="mb-5 grid grid-cols-2 gap-4 md:grid-cols-4">
-        <StatCard icon={FiShoppingCart} label="Total Purchases" value={compactNumber(totalPurchases)} tone="amber" hint={resolvedRange.label} delta={purchasesDelta} />
-        <StatCard icon={FiBox} label="Purchase Bills" value={filteredPurchases.length} tone="blue" />
-        <StatCard icon={FiAlertTriangle} label="Outstanding" value={compactNumber(totalOutstanding)} tone="rose" hint={`${purchaseOutstandingRows.length} invoice${purchaseOutstandingRows.length === 1 ? '' : 's'}`} />
-        <StatCard
-          icon={FiDollarSign}
-          label="Avg. Purchase"
-          value={filteredPurchases.length > 0 ? compactNumber(totalPurchases / filteredPurchases.length) : compactNumber(0)}
-          tone="purple"
-        />
-      </div>
-
-      <div className="mb-8 grid grid-cols-1 gap-5 xl:grid-cols-3">
-        <ChartCard title="Monthly Purchases" subtitle={`Filtered range: ${resolvedRange.label}`} className="xl:col-span-2" accent="amber">
-          {purLoading ? (
-            <div className="h-72 animate-pulse rounded-xl bg-slate-100" />
-          ) : monthlyPurchases.length === 0 || monthlyPurchases.every((m) => m.purchases === 0) ? (
-            <div className="grid h-72 place-items-center text-sm text-slate-400">No purchase data in the selected range</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={monthlyPurchases} margin={{ top: 28, right: 16, left: 0, bottom: 8 }}>
-                <defs>
-                  <linearGradient id="barPurchase" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#F59E0B" stopOpacity={0.95} />
-                    <stop offset="100%" stopColor="#F97316" stopOpacity={0.65} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
-                <RechartsTooltip content={<RupeeTooltip />} cursor={{ fill: 'rgba(245,158,11,0.06)' }} />
-                <Bar dataKey="purchases" name="Purchases" fill="url(#barPurchase)" radius={[10, 10, 4, 4]} maxBarSize={56}>
-                  <LabelList
-                    dataKey="purchases"
-                    position="top"
-                    content={(props: any) => {
-                      const { x, y, width, value } = props;
-                      if (!value) return null;
-                      return (
-                        <text x={x + width / 2} y={y - 8} fill="#b45309" textAnchor="middle" fontSize={11} fontWeight={600}>
-                          {compactNumber(Number(value))}
-                        </text>
-                      );
-                    }}
-                  />
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </ChartCard>
-
-        <ChartCard title="Top Vendors" subtitle="Highest purchase value" accent="violet">
-          {purLoading ? (
-            <div className="h-72 animate-pulse rounded-xl bg-slate-100" />
-          ) : topVendorsComputed.length === 0 ? (
-            <div className="grid h-40 place-items-center text-sm text-slate-400">No vendors in the selected range</div>
-          ) : (
-            <MiniTable columns={['Vendor', 'Amount']} data={topVendorsComputed.map((v) => [v.name, compactNumber(v.amount)])} />
-          )}
-        </ChartCard>
-      </div>
-
-      {/* HR & Employees */}
-      <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
-        <FiUserCheck className="text-purple-600" /> HR & Employees
-      </h2>
-      <div className="mb-5 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
-        {isLoading ? (
-          [...Array(6)].map((_, i) => <StatCardSkeleton key={i} />)
-        ) : (
-          <>
-            <StatCard icon={FiUsers} label="Total" value={employeeStatusBuckets.total} tone="blue" />
-            <StatCard icon={FiUserCheck} label="Active" value={employeeStatusBuckets.active} tone="emerald" />
-            <StatCard icon={FiCalendar} label="On Leave" value={employeeStatusBuckets.onLeave} tone="amber" />
-            <StatCard icon={FiUserX} label="Inactive" value={employeeStatusBuckets.inactive} tone="rose" />
-            <StatCard icon={FiShoppingCart} label="Pending Orders" value={filteredOrders.filter((o: any) => /pending/i.test(String(o.status || ''))).length} tone="rose" />
-            <StatCard icon={FiClock} label="Overdue Invoices" value={filteredInvoices.filter((i: any) => /overdue/i.test(String(i.status || ''))).length} tone="rose" />
-          </>
-        )}
-      </div>
-
-      <div className="mb-8 grid grid-cols-1 gap-5 xl:grid-cols-3">
-        <ChartCard title="Employee Status" subtitle="By bucket" accent="emerald" className="xl:col-span-2">
-          {empsLoading ? (
-            <div className="h-64 animate-pulse rounded-xl bg-slate-100" />
-          ) : employeeStatusBuckets.total === 0 ? (
-            <div className="grid h-64 place-items-center text-sm text-slate-400">No employees</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={250}>
-              <PieChart>
-                <Pie
-                  data={activeInactive.filter((b) => b.value > 0)}
-                  dataKey="value"
-                  nameKey="name"
-                  innerRadius={50}
-                  outerRadius={85}
-                  paddingAngle={3}
-                >
-                  {activeInactive.filter((b) => b.value > 0).map((b, i) => (
-                    <Cell key={i} fill={b.fill} />
-                  ))}
-                </Pie>
-                <RechartsTooltip />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-              </PieChart>
-            </ResponsiveContainer>
-          )}
-        </ChartCard>
-
-        <ChartCard title="Employee Breakdown" accent="teal">
-          <ul className="space-y-3">
-            {activeInactive.map((b) => (
-              <li key={b.name} className="flex items-center gap-3">
-                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: b.fill }} />
-                <span className="text-xs font-medium text-slate-600">{b.name}</span>
-                <div className="ml-auto text-sm font-semibold text-slate-800">{b.value}</div>
-              </li>
-            ))}
-          </ul>
-        </ChartCard>
-      </div>
-
-      {/* Financial Overview */}
-      <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
-        <FiDollarSign className="text-emerald-600" /> Financial Overview
-      </h2>
-      <div className="mb-8 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Inward Payment</h3>
-          {payLoading ? (
-            <StatCardSkeleton />
-          ) : (
-            <>
-              <p className="text-2xl font-bold text-emerald-600">{compactNumber(paymentBreakdown.inward.total)}</p>
-              <div className="mt-3 space-y-1 text-xs">
-                <div className="flex justify-between"><span className="text-slate-500">Online</span><span className="font-semibold text-slate-800">{compactNumber(paymentBreakdown.inward.online)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">Cash</span><span className="font-semibold text-slate-800">{compactNumber(paymentBreakdown.inward.cash)}</span></div>
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Outward Payment</h3>
-          {payLoading ? (
-            <StatCardSkeleton />
-          ) : (
-            <>
-              <p className="text-2xl font-bold text-rose-600">{compactNumber(paymentBreakdown.outward.total)}</p>
-              <div className="mt-3 space-y-1 text-xs">
-                <div className="flex justify-between"><span className="text-slate-500">Online</span><span className="font-semibold text-slate-800">{compactNumber(paymentBreakdown.outward.online)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">Cash</span><span className="font-semibold text-slate-800">{compactNumber(paymentBreakdown.outward.cash)}</span></div>
-              </div>
-            </>
-          )}
-        </div>
-
-        <ChartCard title="Payment Breakdown" subtitle="Online vs Cash · filter-aware" className="md:col-span-2" accent="emerald">
-          {payLoading ? (
-            <div className="h-40 animate-pulse rounded-xl bg-slate-100" />
-          ) : (
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={paymentChartData} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
-                <RechartsTooltip content={<RupeeTooltip />} cursor={{ fill: 'rgba(16,185,129,0.06)' }} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="Online" fill="#3B82F6" radius={[8, 8, 0, 0]} maxBarSize={48} />
-                <Bar dataKey="Cash" fill="#F59E0B" radius={[8, 8, 0, 0]} maxBarSize={48} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </ChartCard>
-      </div>
-
-      {/* Inventory */}
-      <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
-        <FiPackage className="text-amber-600" /> Inventory
-      </h2>
-      <div className="mb-8 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
-        {prodsLoading ? (
-          [...Array(6)].map((_, i) => <StatCardSkeleton key={i} />)
-        ) : (
-          <>
-            <StatCard icon={FiBox} label="Products" value={inventorySummary.totalProducts} tone="blue" />
-            <StatCard icon={FiPackage} label="Quantity" value={inventorySummary.totalQuantity} tone="emerald" />
-            <StatCard icon={FiCheckCircle} label="In Stock" value={inventorySummary.inStock} tone="teal" />
-            <StatCard icon={FiAlertCircle} label="Low Stock" value={inventorySummary.lowStock} tone="amber" />
-            <StatCard icon={FiAlertTriangle} label="Zero Stock" value={inventorySummary.zeroStock} tone="rose" />
-            <StatCard icon={FiTrendingDown} label="Negative" value={inventorySummary.negativeStock} tone="rose" />
-          </>
-        )}
-      </div>
-
-      {lowStock && lowStock.length > 0 && (
+      {/* Sales Performance */}
+      {canViewFinancials ? (
         <>
           <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
-            <FiAlertTriangle className="text-rose-600" /> Low Stock Alerts
+            <FiTarget className="text-indigo-600" /> Sales Performance
+          </h2>
+          <div className="mb-5 grid grid-cols-2 gap-4 md:grid-cols-4">
+            <StatCard icon={FiTrendingUp} label="Revenue" value={compactNumber(totalRevenue)} tone="teal" hint={resolvedRange.label} delta={revenueDelta} />
+            <StatCard icon={FiDollarSign} label="Invoices" value={filteredInvoices.length} tone="rose" delta={invoicesDelta} />
+            <StatCard icon={FiShoppingCart} label="Orders" value={filteredOrders.length} tone="amber" delta={ordersDelta} />
+            <StatCard
+              icon={FiCheckCircle}
+              label="Avg. Invoice"
+              value={filteredInvoices.length > 0 ? compactNumber(totalRevenue / filteredInvoices.length) : compactNumber(0)}
+              tone="emerald"
+            />
+          </div>
+
+          <div className="mb-8 grid grid-cols-1 gap-5 xl:grid-cols-3">
+            <ChartCard title="Monthly Sales" subtitle={`Filtered range: ${resolvedRange.label}`} className="xl:col-span-2" accent="indigo">
+              {isLoading ? (
+                <div className="h-72 animate-pulse rounded-xl bg-slate-100" />
+              ) : monthlySales.length === 0 || monthlySales.every((m) => m.sales === 0) ? (
+                <div className="grid h-72 place-items-center text-sm text-slate-400">No sales data in the selected range</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={300}>
+                  <BarChart data={monthlySales} margin={{ top: 28, right: 16, left: 0, bottom: 8 }}>
+                    <defs>
+                      <linearGradient id="barMonthly" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#6366F1" stopOpacity={0.95} />
+                        <stop offset="100%" stopColor="#8B5CF6" stopOpacity={0.65} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
+                    <RechartsTooltip content={<RupeeTooltip />} cursor={{ fill: 'rgba(99,102,241,0.06)' }} />
+                    <Bar dataKey="sales" name="Sales" fill="url(#barMonthly)" radius={[10, 10, 4, 4]} maxBarSize={56}>
+                      <LabelList
+                        dataKey="sales"
+                        position="top"
+                        content={(props: any) => {
+                          const { x, y, width, value } = props;
+                          if (!value) return null;
+                          return (
+                            <text x={x + width / 2} y={y - 8} fill="#4f46e5" textAnchor="middle" fontSize={11} fontWeight={600}>
+                              {compactNumber(Number(value))}
+                            </text>
+                          );
+                        }}
+                      />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </ChartCard>
+
+            <ChartCard title="Order Pipeline" subtitle="Distribution by status" accent="violet">
+              {isLoading ? (
+                <div className="h-72 animate-pulse rounded-xl bg-slate-100" />
+              ) : filteredOrders.length === 0 ? (
+                <div className="grid h-72 place-items-center text-sm text-slate-400">No orders in the selected range</div>
+              ) : (
+                <div className="relative">
+                  <ResponsiveContainer width="100%" height={300}>
+                    <RadialBarChart cx="50%" cy="50%" innerRadius="30%" outerRadius="100%" barSize={16} data={radialPipeline} startAngle={90} endAngle={-270}>
+                      <PolarAngleAxis type="number" domain={[0, 100]} tick={false} />
+                      <RadialBar dataKey="value" background={{ fill: '#f1f5f9' }} cornerRadius={10} />
+                      <RechartsTooltip
+                        content={({ active, payload }: any) => {
+                          if (!active || !payload?.length) return null;
+                          const p = payload[0].payload;
+                          return (
+                            <div className="rounded-xl border border-slate-200 bg-white/95 px-3 py-2 shadow-lg backdrop-blur">
+                              <p className="text-[11px] font-semibold text-slate-800">{p.name}</p>
+                              <p className="text-xs text-slate-600">{p.raw} orders · {p.value}%</p>
+                            </div>
+                          );
+                        }}
+                      />
+                    </RadialBarChart>
+                  </ResponsiveContainer>
+                  <ul className="mt-1 grid grid-cols-2 gap-2">
+                    {radialPipeline.map((r) => (
+                      <li key={r.name} className="flex items-center gap-2 text-xs">
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: r.fill }} />
+                        <span className="text-slate-600">{r.name}</span>
+                        <span className="ml-auto font-semibold text-slate-800">{r.raw}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </ChartCard>
+          </div>
+        </>
+      ) : (
+        <div className="mb-8"><NoAccessCard title="Sales performance restricted" message="You do not have permission to view sales metrics." /></div>
+      )}
+
+      {/* Purchase Performance */}
+      {canViewPurchases ? (
+        <>
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
+            <FiPackage className="text-amber-600" /> Purchase Performance
+          </h2>
+          <div className="mb-5 grid grid-cols-2 gap-4 md:grid-cols-4">
+            <StatCard icon={FiShoppingCart} label="Total Purchases" value={compactNumber(totalPurchases)} tone="amber" hint={resolvedRange.label} delta={purchasesDelta} />
+            <StatCard icon={FiBox} label="Purchase Bills" value={filteredPurchases.length} tone="blue" />
+            <StatCard icon={FiAlertTriangle} label="Outstanding" value={compactNumber(totalOutstanding)} tone="rose" hint={`${purchaseOutstandingRows.length} invoice${purchaseOutstandingRows.length === 1 ? '' : 's'}`} />
+            <StatCard
+              icon={FiDollarSign}
+              label="Avg. Purchase"
+              value={filteredPurchases.length > 0 ? compactNumber(totalPurchases / filteredPurchases.length) : compactNumber(0)}
+              tone="purple"
+            />
+          </div>
+
+          <div className="mb-8 grid grid-cols-1 gap-5 xl:grid-cols-3">
+            <ChartCard title="Monthly Purchases" subtitle={`Filtered range: ${resolvedRange.label}`} className="xl:col-span-2" accent="amber">
+              {purLoading ? (
+                <div className="h-72 animate-pulse rounded-xl bg-slate-100" />
+              ) : monthlyPurchases.length === 0 || monthlyPurchases.every((m) => m.purchases === 0) ? (
+                <div className="grid h-72 place-items-center text-sm text-slate-400">No purchase data in the selected range</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={300}>
+                  <BarChart data={monthlyPurchases} margin={{ top: 28, right: 16, left: 0, bottom: 8 }}>
+                    <defs>
+                      <linearGradient id="barPurchase" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#F59E0B" stopOpacity={0.95} />
+                        <stop offset="100%" stopColor="#F97316" stopOpacity={0.65} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
+                    <RechartsTooltip content={<RupeeTooltip />} cursor={{ fill: 'rgba(245,158,11,0.06)' }} />
+                    <Bar dataKey="purchases" name="Purchases" fill="url(#barPurchase)" radius={[10, 10, 4, 4]} maxBarSize={56}>
+                      <LabelList
+                        dataKey="purchases"
+                        position="top"
+                        content={(props: any) => {
+                          const { x, y, width, value } = props;
+                          if (!value) return null;
+                          return (
+                            <text x={x + width / 2} y={y - 8} fill="#b45309" textAnchor="middle" fontSize={11} fontWeight={600}>
+                              {compactNumber(Number(value))}
+                            </text>
+                          );
+                        }}
+                      />
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </ChartCard>
+
+            <ChartCard title="Top Vendors" subtitle="Highest purchase value" accent="violet">
+              {purLoading ? (
+                <div className="h-72 animate-pulse rounded-xl bg-slate-100" />
+              ) : topVendorsComputed.length === 0 ? (
+                <div className="grid h-40 place-items-center text-sm text-slate-400">No vendors in the selected range</div>
+              ) : (
+                <MiniTable columns={['Vendor', 'Amount']} data={topVendorsComputed.map((v) => [v.name, compactNumber(v.amount)])} />
+              )}
+            </ChartCard>
+          </div>
+        </>
+      ) : (
+        <div className="mb-8"><NoAccessCard title="Purchase analytics restricted" message="You do not have permission to view purchase metrics." /></div>
+      )}
+
+      {/* HR & Employees */}
+      {canViewEmployees ? (
+        <>
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
+            <FiUserCheck className="text-purple-600" /> HR & Employees
+          </h2>
+          <div className="mb-5 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
+            {isLoading ? (
+              [...Array(6)].map((_, i) => <StatCardSkeleton key={i} />)
+            ) : (
+              <>
+                <StatCard icon={FiUsers} label="Total" value={employeeStatusBuckets.total} tone="blue" />
+                <StatCard icon={FiUserCheck} label="Active" value={employeeStatusBuckets.active} tone="emerald" />
+                <StatCard icon={FiCalendar} label="On Leave" value={employeeStatusBuckets.onLeave} tone="amber" />
+                <StatCard icon={FiUserX} label="Inactive" value={employeeStatusBuckets.inactive} tone="rose" />
+                <StatCard icon={FiShoppingCart} label="Pending Orders" value={pendingOrdersCount} tone="rose" />
+                {canViewFinancials && (
+                  <StatCard icon={FiClock} label="Overdue Invoices" value={overdueInvoicesCount} tone="rose" />
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="mb-8 grid grid-cols-1 gap-5 xl:grid-cols-3">
+            <ChartCard title="Employee Status" subtitle="By bucket" accent="emerald" className="xl:col-span-2">
+              {empsLoading ? (
+                <div className="h-64 animate-pulse rounded-xl bg-slate-100" />
+              ) : employeeStatusBuckets.total === 0 ? (
+                <div className="grid h-64 place-items-center text-sm text-slate-400">No employees</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={250}>
+                  <PieChart>
+                    <Pie
+                      data={activeInactive.filter((b) => b.value > 0)}
+                      dataKey="value"
+                      nameKey="name"
+                      innerRadius={50}
+                      outerRadius={85}
+                      paddingAngle={3}
+                    >
+                      {activeInactive.filter((b) => b.value > 0).map((b, i) => (
+                        <Cell key={i} fill={b.fill} />
+                      ))}
+                    </Pie>
+                    <RechartsTooltip />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              )}
+            </ChartCard>
+
+            <ChartCard title="Employee Breakdown" accent="teal">
+              <ul className="space-y-3">
+                {activeInactive.map((b) => (
+                  <li key={b.name} className="flex items-center gap-3">
+                    <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: b.fill }} />
+                    <span className="text-xs font-medium text-slate-600">{b.name}</span>
+                    <div className="ml-auto text-sm font-semibold text-slate-800">{b.value}</div>
+                  </li>
+                ))}
+              </ul>
+            </ChartCard>
+          </div>
+        </>
+      ) : (
+        <div className="mb-8"><NoAccessCard title="Employee analytics restricted" message="You do not have permission to view employee data." /></div>
+      )}
+
+      {/* Financial Overview */}
+      {canViewPayments ? (
+        <>
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
+            <FiDollarSign className="text-emerald-600" /> Financial Overview
+          </h2>
+          <div className="mb-8 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Inward Payment</h3>
+              {payLoading ? (
+                <StatCardSkeleton />
+              ) : (
+                <>
+                  <p className="text-2xl font-bold text-emerald-600">{compactNumber(paymentBreakdown.inward.total)}</p>
+                  <div className="mt-3 space-y-1 text-xs">
+                    <div className="flex justify-between"><span className="text-slate-500">Online</span><span className="font-semibold text-slate-800">{compactNumber(paymentBreakdown.inward.online)}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">Cash</span><span className="font-semibold text-slate-800">{compactNumber(paymentBreakdown.inward.cash)}</span></div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">Outward Payment</h3>
+              {payLoading ? (
+                <StatCardSkeleton />
+              ) : (
+                <>
+                  <p className="text-2xl font-bold text-rose-600">{compactNumber(paymentBreakdown.outward.total)}</p>
+                  <div className="mt-3 space-y-1 text-xs">
+                    <div className="flex justify-between"><span className="text-slate-500">Online</span><span className="font-semibold text-slate-800">{compactNumber(paymentBreakdown.outward.online)}</span></div>
+                    <div className="flex justify-between"><span className="text-slate-500">Cash</span><span className="font-semibold text-slate-800">{compactNumber(paymentBreakdown.outward.cash)}</span></div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <ChartCard title="Payment Breakdown" subtitle="Online vs Cash · filter-aware" className="md:col-span-2" accent="emerald">
+              {payLoading ? (
+                <div className="h-40 animate-pulse rounded-xl bg-slate-100" />
+              ) : (
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={paymentChartData} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
+                    <RechartsTooltip content={<RupeeTooltip />} cursor={{ fill: 'rgba(16,185,129,0.06)' }} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    <Bar dataKey="Online" fill="#3B82F6" radius={[8, 8, 0, 0]} maxBarSize={48} />
+                    <Bar dataKey="Cash" fill="#F59E0B" radius={[8, 8, 0, 0]} maxBarSize={48} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </ChartCard>
+          </div>
+        </>
+      ) : (
+        <div className="mb-8"><NoAccessCard title="Financial analytics restricted" message="You do not have permission to view payments." /></div>
+      )}
+
+      {/* Inventory */}
+      {canViewInventory ? (
+        <>
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
+            <FiPackage className="text-amber-600" /> Inventory
+          </h2>
+          <div className="mb-8 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
+            {prodsLoading ? (
+              [...Array(6)].map((_, i) => <StatCardSkeleton key={i} />)
+            ) : (
+              <>
+                <StatCard icon={FiBox} label="Products" value={inventorySummary.totalProducts} tone="blue" />
+                <StatCard icon={FiPackage} label="Quantity" value={inventorySummary.totalQuantity} tone="emerald" />
+                <StatCard icon={FiCheckCircle} label="In Stock" value={inventorySummary.inStock} tone="teal" />
+                <StatCard icon={FiAlertCircle} label="Low Stock" value={inventorySummary.lowStock} tone="amber" />
+                <StatCard icon={FiAlertTriangle} label="Zero Stock" value={inventorySummary.zeroStock} tone="rose" />
+                <StatCard icon={FiTrendingDown} label="Negative" value={inventorySummary.negativeStock} tone="rose" />
+              </>
+            )}
+          </div>
+
+          {lowStock && lowStock.length > 0 && (
+            <>
+              <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
+                <FiAlertTriangle className="text-rose-600" /> Low Stock Alerts
+              </h2>
+              <div className="mb-8 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+                <MiniTable columns={['Product', 'Quantity']} data={lowStock.slice(0, 10).map((p) => [p.product_name, p.qty])} />
+              </div>
+            </>
+          )}
+        </>
+      ) : (
+        <div className="mb-8"><NoAccessCard title="Inventory restricted" message="You do not have permission to view inventory." /></div>
+      )}
+
+      {/* Top Customers */}
+      {canViewCustomers && canViewFinancials && (
+        <>
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
+            <FiUsers className="text-violet-600" /> Top Customers
           </h2>
           <div className="mb-8 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-            <MiniTable columns={['Product', 'Quantity']} data={lowStock.slice(0, 10).map((p) => [p.product_name, p.qty])} />
+            {invsLoading ? (
+              <div className="h-40 animate-pulse rounded-xl bg-slate-100" />
+            ) : topCustomersComputed.length === 0 ? (
+              <div className="grid h-40 place-items-center text-sm text-slate-400">No customers in the selected range</div>
+            ) : (
+              <MiniTable columns={['Name', 'Amount']} data={topCustomersComputed.map((c) => [c.name, compactNumber(c.amount)])} />
+            )}
           </div>
         </>
       )}
 
-      {/* Top Customers */}
-      <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
-        <FiUsers className="text-violet-600" /> Top Customers
-      </h2>
-      <div className="mb-8 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-        {invsLoading ? (
-          <div className="h-40 animate-pulse rounded-xl bg-slate-100" />
-        ) : topCustomersComputed.length === 0 ? (
-          <div className="grid h-40 place-items-center text-sm text-slate-400">No customers in the selected range</div>
-        ) : (
-          <MiniTable columns={['Name', 'Amount']} data={topCustomersComputed.map((c) => [c.name, compactNumber(c.amount)])} />
-        )}
-      </div>
-
       {/* Purchase Outstanding */}
-      <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
-        <FiClock className="text-rose-600" /> Purchase Outstanding
-      </h2>
-      <div className="mb-8 grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] xl:col-span-2">
-          {purDueLoading ? (
-            <div className="h-40 animate-pulse rounded-xl bg-slate-100" />
-          ) : purchaseOutstandingRows.length === 0 ? (
-            <div className="grid h-40 place-items-center text-sm text-slate-400">No outstanding purchases 🎉</div>
-          ) : (
-            <MiniTable
-              columns={['Invoice', 'Company', 'Vendor', 'Due Date', 'Remaining']}
-              data={purchaseOutstandingRows.map((row) => [
-                row.invoice, row.company, row.name,
-                row.dueDate ? new Date(row.dueDate).toLocaleDateString('en-IN') : '—',
-                compactNumber(row.remaining),
-              ])}
-            />
-          )}
-        </div>
-        <div className="flex flex-col items-center justify-center rounded-2xl border border-rose-100 bg-gradient-to-br from-rose-50 to-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-          <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-rose-500">Total Outstanding</h3>
-          <p className="mt-3 text-4xl font-extrabold text-rose-600">{compactNumber(totalOutstanding)}</p>
-          <p className="mt-2 text-[11px] text-slate-500">
-            {purchaseOutstandingRows.length} unpaid invoice{purchaseOutstandingRows.length === 1 ? '' : 's'}
-          </p>
-        </div>
-      </div>
+      {canViewPurchases && (
+        <>
+          <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-700">
+            <FiClock className="text-rose-600" /> Purchase Outstanding
+          </h2>
+          <div className="mb-8 grid grid-cols-1 gap-6 xl:grid-cols-3">
+            <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)] xl:col-span-2">
+              {purDueLoading ? (
+                <div className="h-40 animate-pulse rounded-xl bg-slate-100" />
+              ) : purchaseOutstandingRows.length === 0 ? (
+                <div className="grid h-40 place-items-center text-sm text-slate-400">No outstanding purchases 🎉</div>
+              ) : (
+                <MiniTable
+                  columns={['Invoice', 'Company', 'Vendor', 'Due Date', 'Remaining']}
+                  data={purchaseOutstandingRows.map((row) => [
+                    row.invoice, row.company, row.name,
+                    row.dueDate ? new Date(row.dueDate).toLocaleDateString('en-IN') : '—',
+                    compactNumber(row.remaining),
+                  ])}
+                />
+              )}
+            </div>
+            <div className="flex flex-col items-center justify-center rounded-2xl border border-rose-100 bg-gradient-to-br from-rose-50 to-white p-5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+              <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-rose-500">Total Outstanding</h3>
+              <p className="mt-3 text-4xl font-extrabold text-rose-600">{compactNumber(totalOutstanding)}</p>
+              <p className="mt-2 text-[11px] text-slate-500">
+                {purchaseOutstandingRows.length} unpaid invoice{purchaseOutstandingRows.length === 1 ? '' : 's'}
+              </p>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Charts & Trends */}
-      <h2 className="mb-3 mt-8 flex items-center gap-2 text-lg font-bold text-slate-700">
-        <FiBarChart2 className="text-indigo-600" /> Charts & Trends
-      </h2>
-      <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
-        {showMap && (
-          <ChartCard title="Sales Heatmap · Bihar" subtitle="District-wise revenue" className="md:col-span-2 xl:col-span-3" accent="teal">
-            <div className="flex h-96 w-full items-center justify-center overflow-hidden rounded-xl border border-slate-100 bg-slate-50">
-              <ComposableMap projection="geoMercator" projectionConfig={{ scale: 3000, center: [85.3131, 25.0961] }} className="h-full w-full">
-                <Geographies geography={geoData}>
-                  {({ geographies }) =>
-                    geographies.map((geo) => {
-                      const dName = geo.properties?.name || geo.properties?.dtname;
-                      const dSales = biharDistrictSales?.find((s: any) => s.district === dName)?.sales || 0;
-                      const maxSales = Math.max(...(biharDistrictSales?.map((s: any) => s.sales) || [1]));
-                      return (
-                        <Geography
-                          key={geo.rsmKey}
-                          geography={geo}
-                          fill={getMapColor(dSales, maxSales)}
-                          stroke="#FFFFFF"
-                          strokeWidth={0.5}
-                          style={
-                            {
-                              default: { outline: 'none' },
-                              hover: { fill: '#3B82F6', outline: 'none', cursor: 'pointer' },
-                              pressed: { outline: 'none' },
-                            } as any
-                          }
-                          data-tooltip-id="map-tooltip"
-                          data-tooltip-content={`${dName}: ${compactNumber(dSales)}`}
-                        />
-                      );
-                    })
-                  }
-                </Geographies>
-              </ComposableMap>
-              <Tooltip id="map-tooltip" />
-            </div>
-          </ChartCard>
-        )}
+      {canViewFinancials && (
+        <>
+          <h2 className="mb-3 mt-8 flex items-center gap-2 text-lg font-bold text-slate-700">
+            <FiBarChart2 className="text-indigo-600" /> Charts & Trends
+          </h2>
+          <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
+            {showMap && (
+              <ChartCard title="Sales Heatmap · Bihar" subtitle="District-wise revenue" className="md:col-span-2 xl:col-span-3" accent="teal">
+                <div className="flex h-96 w-full items-center justify-center overflow-hidden rounded-xl border border-slate-100 bg-slate-50">
+                  <ComposableMap projection="geoMercator" projectionConfig={{ scale: 3000, center: [85.3131, 25.0961] }} className="h-full w-full">
+                    <Geographies geography={geoData}>
+                      {({ geographies }) =>
+                        geographies.map((geo) => {
+                          const dName = geo.properties?.name || geo.properties?.dtname;
+                          const dSales = biharDistrictSales?.find((s: any) => s.district === dName)?.sales || 0;
+                          const maxSales = Math.max(...(biharDistrictSales?.map((s: any) => s.sales) || [1]));
+                          return (
+                            <Geography
+                              key={geo.rsmKey}
+                              geography={geo}
+                              fill={getMapColor(dSales, maxSales)}
+                              stroke="#FFFFFF"
+                              strokeWidth={0.5}
+                              style={
+                                {
+                                  default: { outline: 'none' },
+                                  hover: { fill: '#3B82F6', outline: 'none', cursor: 'pointer' },
+                                  pressed: { outline: 'none' },
+                                } as any
+                              }
+                              data-tooltip-id="map-tooltip"
+                              data-tooltip-content={`${dName}: ${compactNumber(dSales)}`}
+                            />
+                          );
+                        })
+                      }
+                    </Geographies>
+                  </ComposableMap>
+                  <Tooltip id="map-tooltip" />
+                </div>
+              </ChartCard>
+            )}
 
-        <ChartCard title="Sales vs Purchase" subtitle={`Range: ${resolvedRange.label}`} accent="indigo">
-          {salesPurchaseTrend.length === 0 ? (
-            <div className="grid h-64 place-items-center text-sm text-slate-400">No data in the selected range</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={250}>
-              <ComposedChart data={salesPurchaseTrend} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
-                <RechartsTooltip content={<RupeeTooltip />} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                <Bar dataKey="Sales" fill="#10B981" radius={[6, 6, 0, 0]} maxBarSize={32} />
-                <Bar dataKey="Purchase" fill="#F59E0B" radius={[6, 6, 0, 0]} maxBarSize={32} />
-              </ComposedChart>
-            </ResponsiveContainer>
-          )}
-        </ChartCard>
+            <ChartCard title="Sales vs Purchase" subtitle={`Range: ${resolvedRange.label}`} accent="indigo">
+              {salesPurchaseTrend.length === 0 ? (
+                <div className="grid h-64 place-items-center text-sm text-slate-400">No data in the selected range</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={250}>
+                  <ComposedChart data={salesPurchaseTrend} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} />
+                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
+                    <RechartsTooltip content={<RupeeTooltip />} />
+                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                    <Bar dataKey="Sales" fill="#10B981" radius={[6, 6, 0, 0]} maxBarSize={32} />
+                    <Bar dataKey="Purchase" fill="#F59E0B" radius={[6, 6, 0, 0]} maxBarSize={32} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              )}
+            </ChartCard>
 
-        <ChartCard title="Net Profit" subtitle="Monthly trend" accent="violet">
-          {profitError ? (
-            <div className="py-8 text-center text-sm text-rose-600">Unavailable</div>
-          ) : monthlyProfit.length === 0 ? (
-            <div className="grid h-64 place-items-center text-sm text-slate-400">No profit data</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={250}>
-              <AreaChart data={monthlyProfit} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
-                <defs>
-                  <linearGradient id="profitFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#8B5CF6" stopOpacity={0.35} />
-                    <stop offset="100%" stopColor="#8B5CF6" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
-                <RechartsTooltip content={<RupeeTooltip />} />
-                <Area type="monotone" dataKey="profit" name="Profit" stroke="#8B5CF6" strokeWidth={2} fill="url(#profitFill)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          )}
-        </ChartCard>
+            {canViewProfit && (
+              <ChartCard title="Net Profit" subtitle="Monthly trend" accent="violet">
+                {profitError ? (
+                  <div className="py-8 text-center text-sm text-rose-600">Unavailable</div>
+                ) : monthlyProfit.length === 0 ? (
+                  <div className="grid h-64 place-items-center text-sm text-slate-400">No profit data</div>
+                ) : (
+                  <ResponsiveContainer width="100%" height={250}>
+                    <AreaChart data={monthlyProfit} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
+                      <defs>
+                        <linearGradient id="profitFill" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#8B5CF6" stopOpacity={0.35} />
+                          <stop offset="100%" stopColor="#8B5CF6" stopOpacity={0} />
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                      <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} />
+                      <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
+                      <RechartsTooltip content={<RupeeTooltip />} />
+                      <Area type="monotone" dataKey="profit" name="Profit" stroke="#8B5CF6" strokeWidth={2} fill="url(#profitFill)" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                )}
+              </ChartCard>
+            )}
 
-        <ChartCard title="Monthly Revenue" accent="emerald">
-          {monthlySales.length === 0 ? (
-            <div className="grid h-64 place-items-center text-sm text-slate-400">No revenue data</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={250}>
-              <AreaChart data={monthlySales.map((m) => ({ month: m.name, value: m.sales }))} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
-                <defs>
-                  <linearGradient id="revFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#10B981" stopOpacity={0.35} />
-                    <stop offset="100%" stopColor="#10B981" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} />
-                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
-                <RechartsTooltip content={<RupeeTooltip />} />
-                <Area type="monotone" dataKey="value" name="Revenue" stroke="#10B981" strokeWidth={2} fill="url(#revFill)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          )}
-        </ChartCard>
+            <ChartCard title="Monthly Revenue" accent="emerald">
+              {monthlySales.length === 0 ? (
+                <div className="grid h-64 place-items-center text-sm text-slate-400">No revenue data</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={250}>
+                  <AreaChart data={monthlySales.map((m) => ({ month: m.name, value: m.sales }))} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
+                    <defs>
+                      <linearGradient id="revFill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#10B981" stopOpacity={0.35} />
+                        <stop offset="100%" stopColor="#10B981" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <XAxis dataKey="month" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} />
+                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 11 }} tickFormatter={(v) => compactNumber(Number(v))} />
+                    <RechartsTooltip content={<RupeeTooltip />} />
+                    <Area type="monotone" dataKey="value" name="Revenue" stroke="#10B981" strokeWidth={2} fill="url(#revFill)" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              )}
+            </ChartCard>
 
-        <ChartCard title="Order Status" accent="rose">
-          {orderStatusDist.length === 0 ? (
-            <div className="grid h-64 place-items-center text-sm text-slate-400">No orders</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={250}>
-              <PieChart>
-                <Pie data={orderStatusDist} dataKey="value" nameKey="name" outerRadius={80} innerRadius={40} paddingAngle={3} label>
-                  {orderStatusDist.map((_, i) => (<Cell key={i} fill={COLORS[i % COLORS.length]} />))}
-                </Pie>
-                <RechartsTooltip /><Legend wrapperStyle={{ fontSize: 11 }} />
-              </PieChart>
-            </ResponsiveContainer>
-          )}
-        </ChartCard>
-      </div>
+            <ChartCard title="Order Status" accent="rose">
+              {orderStatusDist.length === 0 ? (
+                <div className="grid h-64 place-items-center text-sm text-slate-400">No orders</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={250}>
+                  <PieChart>
+                    <Pie data={orderStatusDist} dataKey="value" nameKey="name" outerRadius={80} innerRadius={40} paddingAngle={3} label>
+                      {orderStatusDist.map((_, i) => (<Cell key={i} fill={COLORS[i % COLORS.length]} />))}
+                    </Pie>
+                    <RechartsTooltip /><Legend wrapperStyle={{ fontSize: 11 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              )}
+            </ChartCard>
+          </div>
+        </>
+      )}
 
-      <GeminiAIAssistant />
+      {canUseAIAssistant && <GeminiAIAssistant />}
     </div>
   );
 }

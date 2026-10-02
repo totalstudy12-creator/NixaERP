@@ -1,28 +1,256 @@
+// src/pages/LoginPage.tsx
+
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FiMail, FiLock, FiAlertCircle, FiEye, FiEyeOff } from 'react-icons/fi';
+
 import { apiClient } from '../api';
 import { useAuthStore } from '../store/auth';
 import { useNotification } from '../components/NotificationContext';
 import { TwoFactorChallengeForm } from '../features/auth/TwoFactorChallengeForm';
 
-function getLoginErrorMessage(error: any): string {
-  const status = error?.status ?? error?.response?.status;
+/* ------------------------------------------------------------------ */
+/* RBAC — Permission extraction (works with any user shape)            */
+/* ------------------------------------------------------------------ */
 
-  if (status === 429) return 'Too many login attempts. Please wait and try again.';
-  if (status === 401) return 'Invalid email or password.';
-  if (status >= 500) return 'The service is temporarily unavailable. Please try again later.';
+const SUPER_ROLES = new Set([
+  'super_admin',
+  'super-admin',
+  'superadmin',
+  'owner',
+  'root',
+]);
+
+interface PermissionContext {
+  isAuthenticated: boolean;
+  isSuperAdmin: boolean;
+  rbacConfigured: boolean;
+  permissions: Set<string>;
+}
+
+/**
+ * Extract a permission key from an entry that may be:
+ *   - a plain string ("dashboard.view")
+ *   - an object with a recognizable name/key/slug field
+ *   - anything else → ignored
+ */
+function extractPermissionKey(entry: unknown): string | null {
+  if (typeof entry === 'string') return entry.trim() || null;
+
+  if (entry && typeof entry === 'object') {
+    const obj = entry as {
+      name?: unknown;
+      key?: unknown;
+      slug?: unknown;
+      code?: unknown;
+      permission?: unknown;
+    };
+    const candidates = [obj.name, obj.key, obj.slug, obj.code, obj.permission];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim()) return c.trim();
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Compute the RBAC context from *any* user object shape. This is intentionally
+ * permissive so it interoperates with `AuthUser` (store) and with raw API
+ * payloads during the login flow.
+ */
+function computePermissionContext(user: unknown): PermissionContext {
+  const permissions = new Set<string>();
+
+  if (!user || typeof user !== 'object') {
+    return { isAuthenticated: false, isSuperAdmin: false, rbacConfigured: false, permissions };
+  }
+
+  const u = user as {
+    is_super_admin?: unknown;
+    isSuperAdmin?: unknown;
+    is_superadmin?: unknown;
+    role?: unknown;
+    roles?: unknown;
+    permissions?: unknown;
+  };
+
+  const isSuperAdmin =
+    u.is_super_admin === true ||
+    u.isSuperAdmin === true ||
+    u.is_superadmin === true;
+
+  if (isSuperAdmin) permissions.add('*');
+
+  const roleNames: string[] = [];
+  if (typeof u.role === 'string' && u.role.trim()) {
+    roleNames.push(u.role.trim().toLowerCase());
+  }
+
+  let rolesArray: unknown[] | null = null;
+  if (Array.isArray(u.roles)) {
+    rolesArray = u.roles;
+    for (const role of u.roles) {
+      if (typeof role === 'string') {
+        roleNames.push(role.toLowerCase());
+      } else if (role && typeof role === 'object') {
+        const obj = role as {
+          name?: unknown;
+          permissions?: unknown;
+        };
+        if (typeof obj.name === 'string') roleNames.push(obj.name.toLowerCase());
+        if (Array.isArray(obj.permissions)) {
+          obj.permissions.forEach((p) => {
+            const key = extractPermissionKey(p);
+            if (key) permissions.add(key);
+          });
+        }
+      }
+    }
+  }
+
+  if (roleNames.some((name) => SUPER_ROLES.has(name))) {
+    permissions.add('*');
+  }
+
+  let permissionsArray: unknown[] | null = null;
+  if (Array.isArray(u.permissions)) {
+    permissionsArray = u.permissions;
+    u.permissions.forEach((p) => {
+      const key = extractPermissionKey(p);
+      if (key) permissions.add(key);
+    });
+  }
+
+  const rbacConfigured =
+    permissionsArray !== null ||
+    rolesArray !== null ||
+    typeof u.is_super_admin === 'boolean' ||
+    typeof u.isSuperAdmin === 'boolean' ||
+    typeof u.is_superadmin === 'boolean';
+
+  return { isAuthenticated: true, isSuperAdmin, rbacConfigured, permissions };
+}
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Post-login landing routes                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Ordered list of candidate landing routes. After login the app picks the
+ * first route the user can actually access. Ordered most-general → most-specific.
+ *
+ * `permission` may be a single key or an array (any-of semantics). A route
+ * without a `permission` is treated as a universal fallback.
+ */
+const POST_LOGIN_LANDING_ROUTES: Array<{
+  path: string;
+  permission?: string | string[];
+}> = [
+  { path: '/dashboard', permission: 'dashboard.view' },
+  { path: '/pos', permission: 'pos.view' },
+  { path: '/sales', permission: 'sales.view' },
+  { path: '/purchases', permission: 'purchases.view' },
+  { path: '/inventory', permission: 'inventory.view' },
+  { path: '/warehouses', permission: 'warehouses.view' },
+  { path: '/reports', permission: 'reports.view' },
+  { path: '/settings', permission: 'settings.view' },
+  { path: '/health', permission: 'health.view' },
+];
+
+const DEFAULT_LANDING_ROUTE = '/dashboard';
+
+function getLandingRoute(user: unknown): string {
+  const ctx = computePermissionContext(user);
+
+  // Backward-compatible: when the token carries no RBAC metadata, or the user
+  // is a super-admin, preserve the legacy landing route.
+  if (!ctx.isAuthenticated || !ctx.rbacConfigured || ctx.isSuperAdmin) {
+    return DEFAULT_LANDING_ROUTE;
+  }
+
+  if (ctx.permissions.has('*')) return DEFAULT_LANDING_ROUTE;
+
+  for (const route of POST_LOGIN_LANDING_ROUTES) {
+    if (!route.permission) return route.path;
+    const keys = Array.isArray(route.permission) ? route.permission : [route.permission];
+    if (keys.some((p) => ctx.permissions.has(p))) {
+      return route.path;
+    }
+  }
+
+  // No route matched — send the user to the default landing page. The target
+  // page renders its own access-restricted screen when the user lacks access.
+  return DEFAULT_LANDING_ROUTE;
+}
+
+/* ------------------------------------------------------------------ */
+/* Login error handling                                                */
+/* ------------------------------------------------------------------ */
+
+function getLoginErrorMessage(error: unknown): string {
+  const e = error as {
+    status?: number;
+    response?: { status?: number };
+  };
+
+  const status = e?.status ?? e?.response?.status;
+
+  if (status === 429) {
+    return 'Too many login attempts. Please wait and try again.';
+  }
+  if (status === 401 || status === 422) {
+    return 'Invalid email or password.';
+  }
+  if (typeof status === 'number' && status >= 500) {
+    return 'The service is temporarily unavailable. Please try again later.';
+  }
   return 'Unable to sign in. Please check your credentials and try again.';
 }
+
+function readRetryAfterSeconds(error: unknown): number {
+  const e = error as {
+    headers?: { get?: (name: string) => string | null };
+    response?: { headers?: { get?: (name: string) => string | null } };
+    retryAfterSeconds?: number | string;
+  };
+
+  const candidates: Array<string | number | null | undefined> = [
+    typeof e?.headers?.get === 'function' ? e.headers.get('retry-after') : null,
+    typeof e?.response?.headers?.get === 'function'
+      ? e.response.headers.get('retry-after')
+      : null,
+    e?.retryAfterSeconds ?? null,
+  ];
+
+  for (const raw of candidates) {
+    if (raw === null || raw === undefined) continue;
+    const num = Number(raw);
+    // Accept any positive value up to one hour. Malformed / hostile values are ignored.
+    if (Number.isFinite(num) && num > 0 && num <= 3600) {
+      return Math.ceil(num);
+    }
+  }
+
+  return 15;
+}
+
+/* ------------------------------------------------------------------ */
+/* Types                                                               */
+/* ------------------------------------------------------------------ */
 
 interface ChallengeState {
   token: string;
   expiresIn: number;
 }
 
+/* ------------------------------------------------------------------ */
+/* Component                                                           */
+/* ------------------------------------------------------------------ */
+
 export function LoginPage() {
   const navigate = useNavigate();
-  const { setToken, setUser, token } = useAuthStore();
+  const { setToken, setUser, token, user } = useAuthStore();
   const { showSuccess, showError } = useNotification();
 
   const [email, setEmail] = useState('');
@@ -39,12 +267,15 @@ export function LoginPage() {
     const savedEmail = sessionStorage.getItem('login_email');
     if (savedEmail) setEmail(savedEmail);
 
-    if (token) navigate('/dashboard', { replace: true });
+    if (token) {
+      // Route the already-authenticated user to the first page they can access.
+      navigate(getLandingRoute(user), { replace: true });
+    }
 
     return () => {
       if (cooldownTimer.current) window.clearTimeout(cooldownTimer.current);
     };
-  }, [token, navigate]);
+  }, [token, user, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -54,7 +285,9 @@ export function LoginPage() {
 
     if (!trimmedEmail) return setError('Email is required.');
     if (!password) return setError('Password is required.');
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) return setError('Please enter a valid email address.');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      return setError('Please enter a valid email address.');
+    }
     if (trimmedEmail.length > 254) return setError('Email is too long.');
     if (password.length > 128) return setError('Password is too long.');
 
@@ -65,7 +298,10 @@ export function LoginPage() {
 
       if ('two_factor_required' in response) {
         setPassword('');
-        setChallenge({ token: response.challenge_token, expiresIn: response.expires_in });
+        setChallenge({
+          token: response.challenge_token,
+          expiresIn: response.expires_in,
+        });
         return;
       }
 
@@ -75,21 +311,34 @@ export function LoginPage() {
       else sessionStorage.removeItem('login_email');
 
       const userData = await apiClient.getMe();
-      setUser(userData.data);
+      const profile = userData?.data;
+
+      if (!profile) {
+        throw new Error('Unable to load your account profile.');
+      }
+
+      // Let the store validate the payload against its own `AuthUser` type.
+      setUser(profile);
 
       showSuccess('Welcome back!', 'You have been successfully logged in.');
-      navigate('/dashboard', { replace: true });
-    } catch (err: any) {
+
+      // RBAC-aware landing: pick the first route the user can access.
+      navigate(getLandingRoute(profile), { replace: true });
+    } catch (err: unknown) {
       const friendly = getLoginErrorMessage(err);
       setError(friendly);
       showError('Login failed', friendly);
 
-      const status = err?.status ?? err?.response?.status;
+      const e = err as { status?: number; response?: { status?: number } };
+      const status = e?.status ?? e?.response?.status;
 
       if (status === 429) {
         setCooldown(true);
-        const retryAfter = Number(err?.headers?.get?.('retry-after') ?? err?.retryAfterSeconds ?? 15);
-        cooldownTimer.current = window.setTimeout(() => setCooldown(false), retryAfter * 1000);
+        const retryAfter = readRetryAfterSeconds(err);
+        cooldownTimer.current = window.setTimeout(
+          () => setCooldown(false),
+          retryAfter * 1000,
+        );
       }
     } finally {
       setLoading(false);
@@ -98,7 +347,30 @@ export function LoginPage() {
 
   const handleChallengeSuccess = () => {
     showSuccess('Verified', 'Two-factor authentication confirmed.');
-    navigate('/dashboard', { replace: true });
+
+    // If the 2FA flow already set the user, use their permissions for the redirect.
+    if (user) {
+      navigate(getLandingRoute(user), { replace: true });
+      return;
+    }
+
+    // Otherwise hydrate the profile before redirecting so the landing route
+    // respects the user's permissions.
+    void (async () => {
+      try {
+        const userData = await apiClient.getMe();
+        const profile = userData?.data;
+        if (profile) {
+          setUser(profile);
+          navigate(getLandingRoute(profile), { replace: true });
+          return;
+        }
+        navigate(DEFAULT_LANDING_ROUTE, { replace: true });
+      } catch {
+        // Best-effort: fall back to the default landing page.
+        navigate(DEFAULT_LANDING_ROUTE, { replace: true });
+      }
+    })();
   };
 
   const handleChallengeCancel = () => {
@@ -120,7 +392,9 @@ export function LoginPage() {
           <div className="inline-block bg-white/10 backdrop-blur-sm rounded-2xl p-4 mb-4 shadow-2xl border border-white/10">
             <span className="text-4xl">⚙️</span>
           </div>
-          <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">Business OS</h1>
+          <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">
+            Business OS
+          </h1>
           <p className="text-slate-300 text-sm">Secure Enterprise ERP System</p>
         </div>
 
@@ -147,7 +421,10 @@ export function LoginPage() {
 
             <form onSubmit={handleSubmit} className="space-y-6">
               <div>
-                <label htmlFor="email" className="block text-sm font-medium text-slate-700 mb-2">
+                <label
+                  htmlFor="email"
+                  className="block text-sm font-medium text-slate-700 mb-2"
+                >
                   Email Address
                 </label>
                 <div className="relative">
@@ -168,7 +445,10 @@ export function LoginPage() {
               </div>
 
               <div>
-                <label htmlFor="password" className="block text-sm font-medium text-slate-700 mb-2">
+                <label
+                  htmlFor="password"
+                  className="block text-sm font-medium text-slate-700 mb-2"
+                >
                   Password
                 </label>
                 <div className="relative">
@@ -211,7 +491,12 @@ export function LoginPage() {
                 <button
                   type="button"
                   className="text-sm text-blue-600 hover:text-blue-800 font-medium"
-                  onClick={() => showSuccess('Coming soon', 'Password reset will be available in the next update.')}
+                  onClick={() =>
+                    showSuccess(
+                      'Coming soon',
+                      'Password reset will be available in the next update.',
+                    )
+                  }
                 >
                   Forgot password?
                 </button>
@@ -224,8 +509,20 @@ export function LoginPage() {
               >
                 {loading ? (
                   <>
-                    <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <svg
+                      className="animate-spin h-5 w-5 text-white"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      />
                       <path
                         className="opacity-75"
                         fill="currentColor"
@@ -243,7 +540,14 @@ export function LoginPage() {
             </form>
 
             <div className="mt-6 pt-6 border-t border-slate-200 flex items-center justify-center gap-2 text-xs text-slate-500">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                 <path d="M7 11V7a5 5 0 0 1 10 0v4" />
               </svg>

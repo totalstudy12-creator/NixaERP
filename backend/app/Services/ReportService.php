@@ -386,6 +386,26 @@ class ReportService
         Carbon $fromDate,
         Carbon $toDate
     ): array {
+        if (Schema::hasTable('financial_entries')) {
+            $query = DB::table('financial_entries')
+                ->where('direction', 'expense')
+                ->whereNull('deleted_at')
+                ->where('status', 'completed')
+                ->whereBetween('entry_date', [$fromDate, $toDate])
+                ->when($companyId, fn ($q) => $q->where('company_id', $companyId))
+                ->when($branchId, fn ($q) => $q->where('branch_id', $branchId));
+            $records = $query->selectRaw('category as expense_category, description as expense_description, counterparty as expense_vendor, entry_date as expense_date, amount as expense_amount')->orderBy('entry_date')->get();
+            $grouped = [];
+            foreach ($records as $record) {
+                $category = (string) ($record->expense_category ?: 'Uncategorized');
+                $grouped[$category] = ($grouped[$category] ?? 0.0) + max(0, (float) $record->expense_amount);
+            }
+            return [
+                'total' => round(array_sum($grouped), 2),
+                'rows' => array_map(fn ($name, $amount) => ['name' => $name, 'amount' => round($amount, 2)], array_keys($grouped), array_values($grouped)),
+                'source' => 'financial_entries',
+            ];
+        }
         if (!Schema::hasTable('expenses')) {
             return [
                 'total' => 0.0,
@@ -457,6 +477,19 @@ class ReportService
             'rows' => $rows,
             'source' => 'expenses_table',
         ];
+    }
+
+    protected function getOtherIncomeTotal(?int $companyId, ?int $branchId, Carbon $fromDate, Carbon $toDate): float
+    {
+        if (!Schema::hasTable('financial_entries')) return 0.0;
+        return (float) DB::table('financial_entries')
+            ->where('direction', 'income')
+            ->where('status', 'completed')
+            ->whereNull('deleted_at')
+            ->whereBetween('entry_date', [$fromDate, $toDate])
+            ->when($companyId, fn ($q) => $q->where('company_id', $companyId))
+            ->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
+            ->sum('amount');
     }
 
     protected function calculatePnlBase(
@@ -578,18 +611,29 @@ class ReportService
             'outward', $companyId, $branchId, $fromDate, $toDate
         );
 
+        $invoiceColumns = Schema::getColumnListing('invoices');
+        $paidColumns = array_values(array_intersect(['payment_received', 'paid_amount'], $invoiceColumns));
+        $paidExpression = match (count($paidColumns)) {
+            2 => 'COALESCE(payment_received, paid_amount, 0)',
+            1 => 'COALESCE(' . $paidColumns[0] . ', 0)',
+            default => '0',
+        };
+        $invoiceTotalExpression = 'COALESCE(total_amount, 0)';
+        $receivablesExpression = "CASE WHEN {$invoiceTotalExpression} > {$paidExpression} THEN {$invoiceTotalExpression} - {$paidExpression} ELSE 0 END";
+
         $receivables = $this->baseInvoiceQuery($companyId, $branchId)
             ->whereBetween('invoice_date', [$fromDate, $toDate])
             ->whereNotIn('status', ['paid', 'cancelled', 'draft'])
-            ->sum(DB::raw('GREATEST(COALESCE(total_amount, 0) - COALESCE(payment_received, paid_amount, 0), 0)'));
+            ->sum(DB::raw($receivablesExpression));
 
         $payables = $this->basePurchaseQuery($companyId, $branchId)
             ->whereBetween('purchase_date', [$fromDate, $toDate])
             ->whereNotIn('status', ['paid', 'cancelled', 'draft'])
-            ->sum(DB::raw('GREATEST(COALESCE(grand_total, 0) - COALESCE(paid_amount, 0), 0)'));
+            ->sum(DB::raw('CASE WHEN COALESCE(grand_total, 0) > COALESCE(paid_amount, 0) THEN COALESCE(grand_total, 0) - COALESCE(paid_amount, 0) ELSE 0 END'));
 
         $expense = $this->getOperatingExpenseSummary($companyId, $branchId, $fromDate, $toDate);
-        $netProfit = $pnl['gross_profit'] - $expense['total'];
+        $otherIncome = $this->getOtherIncomeTotal($companyId, $branchId, $fromDate, $toDate);
+        $netProfit = $pnl['gross_profit'] + $otherIncome - $expense['total'];
 
         return [
             'total_sales' => (float) $pnl['net_sales'],
@@ -597,6 +641,7 @@ class ReportService
             'total_purchases' => (float) ($purchaseData->total ?? 0),
             'gross_profit' => (float) $pnl['gross_profit'],
             'net_profit' => (float) $netProfit,
+            'other_income' => (float) $otherIncome,
             'operating_expenses' => (float) $expense['total'],
             'receivables' => (float) $receivables,
             'payables' => (float) $payables,
@@ -1566,7 +1611,7 @@ class ReportService
 
         $grossProfit = $pnl['gross_profit'];
         $operatingProfit = $grossProfit - $expense['total'];
-        $otherIncome = 0.0;
+        $otherIncome = $this->getOtherIncomeTotal($companyId, $branchId, $fromDate, $toDate);
         $otherExpenses = 0.0;
         $netProfit = $operatingProfit + $otherIncome - $otherExpenses;
 
@@ -1775,7 +1820,7 @@ class ReportService
 
         $grossProfit = $pnl['gross_profit'];
         $operatingProfit = $grossProfit - $expense['total'];
-        $otherIncome = 0.0;
+        $otherIncome = $this->getOtherIncomeTotal($companyId, $branchId, $fromDate, $toDate);
         $otherExpenses = 0.0;
         $netProfit = $operatingProfit + $otherIncome - $otherExpenses;
 

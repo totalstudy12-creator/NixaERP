@@ -21,10 +21,13 @@ import {
   FiX,
   FiChevronDown,
   FiPlus,
+  FiLock,
 } from 'react-icons/fi';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -166,11 +169,43 @@ const SkeletonBox = ({ className = '' }: { className?: string }) => (
 );
 
 /* ------------------------------------------------------------------ */
+/* No-access fallback                                                  */
+/* ------------------------------------------------------------------ */
+
+function NoAccessCard({
+  title = 'Restricted',
+  message = 'You do not have permission to view this section.',
+}: { title?: string; message?: string }) {
+  return (
+    <div className="flex items-center gap-3 rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 p-6">
+      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white text-slate-400 ring-1 ring-slate-200">
+        <FiLock size={16} />
+      </div>
+      <div className="min-w-0">
+        <p className="text-xs font-semibold text-slate-700">{title}</p>
+        <p className="text-[11px] text-slate-500">{message}</p>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Main component                                                      */
 /* ------------------------------------------------------------------ */
 
 export function HrPayrollPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ── RBAC flags ── */
+  const canViewHrPayroll      = isSuperAdmin || can('view hr') || can('view payroll') || can('view employees');
+  const canEditShift          = isSuperAdmin || can('edit employees') || can('edit shift settings');
+  const canViewAdvances       = isSuperAdmin || can('view payroll') || can('view advances');
+  const canCreateAdvance      = isSuperAdmin || can('create payroll') || can('create advances');
+  const canDeleteAdvance      = isSuperAdmin || can('delete payroll') || can('delete advances');
+  const canApproveAdvance     = isSuperAdmin || can('approve payroll') || can('approve advances');
 
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -184,6 +219,10 @@ export function HrPayrollPage() {
   /* -------------------- Load employees -------------------- */
 
   const loadEmployees = useCallback(async () => {
+    if (!canViewHrPayroll) {
+      setEmployees([]);
+      return;
+    }
     try {
       const res = await apiClient.request('GET', '/employees');
       const data = unwrapArray<Record<string, unknown>>(res);
@@ -199,7 +238,7 @@ export function HrPayrollPage() {
     } catch (err: unknown) {
       showError('Error', getApiErrorMessage(err, 'Could not load employees.'));
     }
-  }, [showError]);
+  }, [canViewHrPayroll, showError]);
 
   useEffect(() => {
     void loadEmployees();
@@ -215,6 +254,10 @@ export function HrPayrollPage() {
   /* -------------------- Load advances -------------------- */
 
   const loadAdvances = useCallback(async () => {
+    if (!canViewAdvances) {
+      setAdvances([]);
+      return;
+    }
     if (!selectedEmployeeId) {
       setAdvances([]);
       return;
@@ -231,7 +274,7 @@ export function HrPayrollPage() {
     } finally {
       setLoadingAdvances(false);
     }
-  }, [selectedEmployeeId, showError]);
+  }, [selectedEmployeeId, canViewAdvances, showError]);
 
   useEffect(() => {
     if (activeTab === 'advance') void loadAdvances();
@@ -240,6 +283,10 @@ export function HrPayrollPage() {
   /* -------------------- Update employee field -------------------- */
 
   const updateEmployeeField = async (field: string, value: unknown) => {
+    if (!canEditShift) {
+      showError('Permission denied', 'You do not have permission to edit employee data.');
+      return;
+    }
     if (!selectedEmployee || !selectedEmployeeId) return;
     setSaving(true);
     try {
@@ -267,6 +314,10 @@ export function HrPayrollPage() {
   }, [selectedEmployee]);
 
   const handleSaveShift = async () => {
+    if (!canEditShift) {
+      showError('Permission denied', 'You do not have permission to edit shift settings.');
+      return;
+    }
     if (!shiftForm.start || !shiftForm.end) {
       showError('Validation', 'Both start and end time required.');
       return;
@@ -328,9 +379,24 @@ export function HrPayrollPage() {
   };
 
   const handleSaveAdvance = async () => {
+    if (!canCreateAdvance) {
+      showError('Permission denied', 'You do not have permission to create advances.');
+      return;
+    }
     if (!selectedEmployeeId) return;
     if (!advanceForm.amount || advanceForm.amount <= 0) {
       showError('Validation', 'Advance amount is required.');
+      return;
+    }
+    // Approving an advance requires the approve permission.
+    if (
+      (advanceForm.status === 'approved' || advanceForm.status === 'rejected') &&
+      !canApproveAdvance
+    ) {
+      showError(
+        'Permission denied',
+        'You do not have permission to approve or reject advances. Save as pending instead.'
+      );
       return;
     }
     setSaving(true);
@@ -389,6 +455,10 @@ export function HrPayrollPage() {
   };
 
   const handleDeleteAdvance = async (id: number) => {
+    if (!canDeleteAdvance) {
+      showError('Permission denied', 'You do not have permission to delete advances.');
+      return;
+    }
     if (!window.confirm('Delete this advance?')) return;
     setSaving(true);
     try {
@@ -428,6 +498,40 @@ export function HrPayrollPage() {
         return 'border-slate-200 bg-slate-50 text-slate-600';
     }
   };
+
+  /* ------------------------------------------------------------------ */
+  /* Loading guard                                                       */
+  /* ------------------------------------------------------------------ */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* No-access panel                                                     */
+  /* ------------------------------------------------------------------ */
+
+  if (!canViewHrPayroll) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to view HR & payroll.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   /* -------------------- Render -------------------- */
 
@@ -489,13 +593,13 @@ export function HrPayrollPage() {
             <StatCard
               icon={FiDollarSign}
               label="Advances"
-              value={summary.advancesCount}
+              value={canViewAdvances ? summary.advancesCount : '—'}
               accent="amber"
             />
             <StatCard
               icon={FiActivity}
               label="Advance total"
-              value={formatCurrency(summary.advancesTotal)}
+              value={canViewAdvances ? formatCurrency(summary.advancesTotal) : '—'}
               accent="emerald"
             />
           </section>
@@ -504,9 +608,9 @@ export function HrPayrollPage() {
           <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
             <CardContent className="bg-white p-4 sm:p-5">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                {/* Tab nav */}
+                {/* Tab nav — Advances tab hidden without permission */}
                 <div className="flex flex-wrap items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 p-1">
-                  {TABS.map((item) => {
+                  {TABS.filter((t) => t.id !== 'advance' || canViewAdvances).map((item) => {
                     const Icon = item.icon;
                     const active = activeTab === item.id;
                     return (
@@ -613,14 +717,16 @@ export function HrPayrollPage() {
                     }
                     sub="Set shift under the Shift settings tab"
                   />
-                  <OverviewTile
-                    icon={FiDollarSign}
-                    label="Advances"
-                    value={`${summary.advancesCount} record${
-                      summary.advancesCount === 1 ? '' : 's'
-                    }`}
-                    sub={formatCurrency(summary.advancesTotal)}
-                  />
+                  {canViewAdvances && (
+                    <OverviewTile
+                      icon={FiDollarSign}
+                      label="Advances"
+                      value={`${summary.advancesCount} record${
+                        summary.advancesCount === 1 ? '' : 's'
+                      }`}
+                      sub={formatCurrency(summary.advancesTotal)}
+                    />
+                  )}
                 </div>
               )}
 
@@ -637,7 +743,9 @@ export function HrPayrollPage() {
                           Shift settings
                         </CardTitle>
                         <CardDescription className="text-[11px] text-slate-500">
-                          Set working hours for {selectedEmployee.name}
+                          {canEditShift
+                            ? `Set working hours for ${selectedEmployee.name}`
+                            : `Read-only view for ${selectedEmployee.name}`}
                         </CardDescription>
                       </div>
                     </div>
@@ -655,7 +763,8 @@ export function HrPayrollPage() {
                           onChange={(e) =>
                             setShiftForm({ ...shiftForm, start: e.target.value })
                           }
-                          className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                          disabled={!canEditShift}
+                          className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
                         />
                       </div>
                       <div className="min-w-0">
@@ -666,241 +775,269 @@ export function HrPayrollPage() {
                           type="time"
                           value={shiftForm.end}
                           onChange={(e) => setShiftForm({ ...shiftForm, end: e.target.value })}
-                          className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                          disabled={!canEditShift}
+                          className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
                         />
                       </div>
                     </div>
 
-                    <div className="mt-5 flex justify-end">
-                      <Button
-                        onClick={handleSaveShift}
-                        disabled={saving}
-                        className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
-                      >
-                        <FiSave className="mr-1.5" size={14} />
-                        {saving ? 'Saving…' : 'Save shift'}
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Advances */}
-              {activeTab === 'advance' && (
-                <div className="space-y-5">
-                  {/* Request form */}
-                  <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-                    <CardHeader className="flex flex-row items-center justify-between border-b border-slate-100 bg-white px-4 py-3.5 sm:px-5">
-                      <div className="flex items-center gap-2.5">
-                        <div className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-50 text-emerald-600 ring-1 ring-emerald-500/10">
-                          <FiPlus size={14} />
-                        </div>
-                        <div>
-                          <CardTitle className="text-sm font-semibold text-slate-800">
-                            Request new advance
-                          </CardTitle>
-                          <CardDescription className="text-[11px] text-slate-500">
-                            Create a new advance record for {selectedEmployee.name}
-                          </CardDescription>
-                        </div>
-                      </div>
-                    </CardHeader>
-
-                    <CardContent className="bg-white p-4 sm:p-5">
-                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Amount <span className="text-rose-500">*</span>
-                          </label>
-                          <input
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            value={advanceForm.amount}
-                            onChange={(e) =>
-                              setAdvanceForm({
-                                ...advanceForm,
-                                amount: parseFloat(e.target.value) || 0,
-                              })
-                            }
-                            className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          />
-                        </div>
-
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Status
-                          </label>
-                          <div className="relative">
-                            <select
-                              value={advanceForm.status}
-                              onChange={(e) =>
-                                setAdvanceForm({ ...advanceForm, status: e.target.value })
-                              }
-                              className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                            >
-                              <option value="pending">Pending</option>
-                              <option value="approved">Approved</option>
-                              <option value="rejected">Rejected</option>
-                              <option value="recovered">Recovered</option>
-                            </select>
-                            <FiChevronDown
-                              className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
-                              size={14}
-                            />
-                          </div>
-                        </div>
-
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Request date
-                          </label>
-                          <input
-                            type="date"
-                            value={advanceForm.request_date}
-                            onChange={(e) =>
-                              setAdvanceForm({ ...advanceForm, request_date: e.target.value })
-                            }
-                            className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          />
-                        </div>
-
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Payment date
-                          </label>
-                          <input
-                            type="date"
-                            value={advanceForm.payment_date}
-                            onChange={(e) =>
-                              setAdvanceForm({ ...advanceForm, payment_date: e.target.value })
-                            }
-                            className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          />
-                        </div>
-
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Payment method
-                          </label>
-                          <input
-                            type="text"
-                            placeholder="e.g. Cash, Bank Transfer"
-                            value={advanceForm.payment_method}
-                            onChange={(e) =>
-                              setAdvanceForm({
-                                ...advanceForm,
-                                payment_method: e.target.value,
-                              })
-                            }
-                            className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          />
-                        </div>
-
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Transaction reference
-                          </label>
-                          <input
-                            type="text"
-                            placeholder="Ref number"
-                            value={advanceForm.transaction_reference}
-                            onChange={(e) =>
-                              setAdvanceForm({
-                                ...advanceForm,
-                                transaction_reference: e.target.value,
-                              })
-                            }
-                            className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          />
-                        </div>
-
-                        <div className="min-w-0">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Approved by (employee ID)
-                          </label>
-                          <input
-                            type="number"
-                            placeholder="Employee ID"
-                            value={advanceForm.approved_by}
-                            onChange={(e) =>
-                              setAdvanceForm({ ...advanceForm, approved_by: e.target.value })
-                            }
-                            className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          />
-                        </div>
-
-                        <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Reason
-                          </label>
-                          <textarea
-                            rows={2}
-                            value={advanceForm.reason}
-                            onChange={(e) =>
-                              setAdvanceForm({ ...advanceForm, reason: e.target.value })
-                            }
-                            className="min-h-[70px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-700 outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          />
-                        </div>
-
-                        <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Remarks
-                          </label>
-                          <textarea
-                            rows={2}
-                            value={advanceForm.remarks}
-                            onChange={(e) =>
-                              setAdvanceForm({ ...advanceForm, remarks: e.target.value })
-                            }
-                            className="min-h-[70px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-700 outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          />
-                        </div>
-
-                        <div className="min-w-0 sm:col-span-2 lg:col-span-3">
-                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                            Attachment
-                          </label>
-                          <label className="flex cursor-pointer items-center gap-3 rounded-xl border border-dashed border-slate-300 bg-slate-50/60 px-3.5 py-2.5 text-sm text-slate-600 transition hover:border-indigo-300 hover:bg-indigo-50/40">
-                            <FiFile className="shrink-0 text-slate-400" size={16} />
-                            <span className="min-w-0 flex-1 truncate">
-                              {advanceForm.attachment
-                                ? advanceForm.attachment.name
-                                : 'Choose a file (optional)'}
-                            </span>
-                            <input
-                              type="file"
-                              onChange={handleAdvanceFileChange}
-                              className="hidden"
-                            />
-                          </label>
-                          {advanceForm.attachment && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setAdvanceForm({ ...advanceForm, attachment: null })
-                              }
-                              className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-red-600 underline-offset-2 hover:underline"
-                            >
-                              <FiX size={11} /> Remove attachment
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
+                    {canEditShift ? (
                       <div className="mt-5 flex justify-end">
                         <Button
-                          onClick={handleSaveAdvance}
+                          onClick={handleSaveShift}
                           disabled={saving}
                           className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
                         >
                           <FiSave className="mr-1.5" size={14} />
-                          {saving ? 'Saving…' : 'Save advance'}
+                          {saving ? 'Saving…' : 'Save shift'}
                         </Button>
                       </div>
-                    </CardContent>
-                  </Card>
+                    ) : (
+                      <div className="mt-5">
+                        <NoAccessCard
+                          title="Read-only access"
+                          message="You do not have permission to edit shift settings."
+                        />
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Advances — only rendered when user can view advances */}
+              {activeTab === 'advance' && canViewAdvances && (
+                <div className="space-y-5">
+                  {/* Request form — only when user can create */}
+                  {canCreateAdvance ? (
+                    <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+                      <CardHeader className="flex flex-row items-center justify-between border-b border-slate-100 bg-white px-4 py-3.5 sm:px-5">
+                        <div className="flex items-center gap-2.5">
+                          <div className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-50 text-emerald-600 ring-1 ring-emerald-500/10">
+                            <FiPlus size={14} />
+                          </div>
+                          <div>
+                            <CardTitle className="text-sm font-semibold text-slate-800">
+                              Request new advance
+                            </CardTitle>
+                            <CardDescription className="text-[11px] text-slate-500">
+                              Create a new advance record for {selectedEmployee.name}
+                            </CardDescription>
+                          </div>
+                        </div>
+                      </CardHeader>
+
+                      <CardContent className="bg-white p-4 sm:p-5">
+                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                          <div className="min-w-0">
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Amount <span className="text-rose-500">*</span>
+                            </label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={advanceForm.amount}
+                              onChange={(e) =>
+                                setAdvanceForm({
+                                  ...advanceForm,
+                                  amount: parseFloat(e.target.value) || 0,
+                                })
+                              }
+                              className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                            />
+                          </div>
+
+                          <div className="min-w-0">
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Status
+                            </label>
+                            <div className="relative">
+                              <select
+                                value={advanceForm.status}
+                                onChange={(e) =>
+                                  setAdvanceForm({ ...advanceForm, status: e.target.value })
+                                }
+                                className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                              >
+                                <option value="pending">Pending</option>
+                                {canApproveAdvance && (
+                                  <>
+                                    <option value="approved">Approved</option>
+                                    <option value="rejected">Rejected</option>
+                                  </>
+                                )}
+                                <option value="recovered">Recovered</option>
+                              </select>
+                              <FiChevronDown
+                                className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+                                size={14}
+                              />
+                            </div>
+                            {!canApproveAdvance && (
+                              <p className="mt-1 text-[11px] text-slate-400">
+                                Approval options require approval permission.
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="min-w-0">
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Request date
+                            </label>
+                            <input
+                              type="date"
+                              value={advanceForm.request_date}
+                              onChange={(e) =>
+                                setAdvanceForm({ ...advanceForm, request_date: e.target.value })
+                              }
+                              className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                            />
+                          </div>
+
+                          <div className="min-w-0">
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Payment date
+                            </label>
+                            <input
+                              type="date"
+                              value={advanceForm.payment_date}
+                              onChange={(e) =>
+                                setAdvanceForm({ ...advanceForm, payment_date: e.target.value })
+                              }
+                              className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                            />
+                          </div>
+
+                          <div className="min-w-0">
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Payment method
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="e.g. Cash, Bank Transfer"
+                              value={advanceForm.payment_method}
+                              onChange={(e) =>
+                                setAdvanceForm({
+                                  ...advanceForm,
+                                  payment_method: e.target.value,
+                                })
+                              }
+                              className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                            />
+                          </div>
+
+                          <div className="min-w-0">
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Transaction reference
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="Ref number"
+                              value={advanceForm.transaction_reference}
+                              onChange={(e) =>
+                                setAdvanceForm({
+                                  ...advanceForm,
+                                  transaction_reference: e.target.value,
+                                })
+                              }
+                              className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                            />
+                          </div>
+
+                          {canApproveAdvance && (
+                            <div className="min-w-0">
+                              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                Approved by (employee ID)
+                              </label>
+                              <input
+                                type="number"
+                                placeholder="Employee ID"
+                                value={advanceForm.approved_by}
+                                onChange={(e) =>
+                                  setAdvanceForm({ ...advanceForm, approved_by: e.target.value })
+                                }
+                                className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                              />
+                            </div>
+                          )}
+
+                          <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Reason
+                            </label>
+                            <textarea
+                              rows={2}
+                              value={advanceForm.reason}
+                              onChange={(e) =>
+                                setAdvanceForm({ ...advanceForm, reason: e.target.value })
+                              }
+                              className="min-h-[70px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-700 outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                            />
+                          </div>
+
+                          <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Remarks
+                            </label>
+                            <textarea
+                              rows={2}
+                              value={advanceForm.remarks}
+                              onChange={(e) =>
+                                setAdvanceForm({ ...advanceForm, remarks: e.target.value })
+                              }
+                              className="min-h-[70px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-700 outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                            />
+                          </div>
+
+                          <div className="min-w-0 sm:col-span-2 lg:col-span-3">
+                            <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                              Attachment
+                            </label>
+                            <label className="flex cursor-pointer items-center gap-3 rounded-xl border border-dashed border-slate-300 bg-slate-50/60 px-3.5 py-2.5 text-sm text-slate-600 transition hover:border-indigo-300 hover:bg-indigo-50/40">
+                              <FiFile className="shrink-0 text-slate-400" size={16} />
+                              <span className="min-w-0 flex-1 truncate">
+                                {advanceForm.attachment
+                                  ? advanceForm.attachment.name
+                                  : 'Choose a file (optional)'}
+                              </span>
+                              <input
+                                type="file"
+                                onChange={handleAdvanceFileChange}
+                                className="hidden"
+                              />
+                            </label>
+                            {advanceForm.attachment && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setAdvanceForm({ ...advanceForm, attachment: null })
+                                }
+                                className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-medium text-red-600 underline-offset-2 hover:underline"
+                              >
+                                <FiX size={11} /> Remove attachment
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="mt-5 flex justify-end">
+                          <Button
+                            onClick={handleSaveAdvance}
+                            disabled={saving}
+                            className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                          >
+                            <FiSave className="mr-1.5" size={14} />
+                            {saving ? 'Saving…' : 'Save advance'}
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ) : (
+                    <NoAccessCard
+                      title="Create advance restricted"
+                      message="You do not have permission to create advance records. You can still review the history below."
+                    />
+                  )}
 
                   {/* Advance history */}
                   <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
@@ -1008,13 +1145,17 @@ export function HrPayrollPage() {
                                   {adv.transaction_reference || '—'}
                                 </TableCell>
                                 <TableCell className="text-right">
-                                  <button
-                                    onClick={() => handleDeleteAdvance(adv.id)}
-                                    className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
-                                    title="Delete"
-                                  >
-                                    <FiTrash2 size={15} />
-                                  </button>
+                                  {canDeleteAdvance ? (
+                                    <button
+                                      onClick={() => handleDeleteAdvance(adv.id)}
+                                      className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
+                                      title="Delete"
+                                    >
+                                      <FiTrash2 size={15} />
+                                    </button>
+                                  ) : (
+                                    <span className="text-xs text-slate-400">—</span>
+                                  )}
                                 </TableCell>
                               </TableRow>
                             ))}
@@ -1030,7 +1171,9 @@ export function HrPayrollPage() {
                                     No advances found
                                   </p>
                                   <p className="mt-1 text-sm text-slate-500">
-                                    Create a new advance request using the form above.
+                                    {canCreateAdvance
+                                      ? 'Create a new advance request using the form above.'
+                                      : 'No advance records exist for this employee.'}
                                   </p>
                                 </div>
                               </TableCell>

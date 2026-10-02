@@ -8,10 +8,12 @@ import {
   FiBarChart2, FiFilter, FiGrid, FiChevronDown, FiCalendar, FiArrowUpRight,
   FiArrowDownRight, FiActivity, FiCheckCircle, FiClock, FiXCircle, FiSearch,
   FiLayers, FiDatabase, FiChevronLeft, FiChevronRight, FiBriefcase, FiMapPin,
+  FiLock,
 } from 'react-icons/fi';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
+import { useAuthStore } from '../store/auth';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -49,17 +51,70 @@ interface Lookup {
 }
 
 /* ==================================================================
+ * RBAC — Permission keys
+ * ================================================================== */
+
+const PERMISSIONS = {
+  REPORTS_VIEW: 'reports.view',
+  REPORTS_DASHBOARD_VIEW: 'reports.dashboard.view',
+  REPORTS_SALES_VIEW: 'reports.sales.view',
+  REPORTS_PURCHASES_VIEW: 'reports.purchases.view',
+  REPORTS_ACCOUNTS_VIEW: 'reports.accounts.view',
+  REPORTS_INVENTORY_VIEW: 'reports.inventory.view',
+  REPORTS_GST_VIEW: 'reports.gst.view',
+  REPORTS_EXPENSES_VIEW: 'reports.expenses.view',
+  INCOME_EXPENSES_VIEW_REPORTS: 'income_expenses.view_reports',
+  REPORTS_EXPORT: 'reports.export',
+  REPORTS_PRINT: 'reports.print',
+} as const;
+
+/* ==================================================================
+ * RBAC — Store-backed permissions (admin-aware + notation-insensitive)
+ * ================================================================== */
+
+interface UsePagePermissionsResult {
+  can: (permission: string | string[]) => boolean;
+  isAuthenticated: boolean;
+  isSuperAdmin: boolean;
+  loadingUser: boolean;
+}
+
+function usePagePermissions(): UsePagePermissionsResult {
+  const user = useAuthStore((s) => s.user);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const storeIsSuperAdmin = useAuthStore((s) => s.isSuperAdmin);
+  const storeHasAnyPermission = useAuthStore((s) => s.hasAnyPermission);
+
+  const isSuperAdmin = useMemo(() => storeIsSuperAdmin(), [storeIsSuperAdmin, user]);
+
+  const can = useCallback(
+    (permission: string | string[]): boolean => {
+      if (!isAuthenticated) return false;
+      if (isSuperAdmin) return true;
+
+      const keys = Array.isArray(permission) ? permission : [permission];
+      return storeHasAnyPermission(keys);
+    },
+    [isAuthenticated, isSuperAdmin, storeHasAnyPermission, user],
+  );
+
+  return { can, isAuthenticated, isSuperAdmin, loadingUser };
+}
+
+/* ==================================================================
  * CONSTANTS
  * ================================================================== */
 
 const REPORT_CATEGORIES = [
-  { key: 'dashboard', label: 'Overview', description: 'Business reporting overview', icon: <FiGrid size={17} /> },
-  { key: 'sales', label: 'Sales', description: 'Sales and receivables', icon: <FiShoppingCart size={17} /> },
-  { key: 'purchases', label: 'Purchases', description: 'Purchases and payables', icon: <FiPackage size={17} /> },
-  { key: 'accounts', label: 'Accounts', description: 'Financial accounting', icon: <FiDollarSign size={17} /> },
-  { key: 'inventory', label: 'Inventory', description: 'Stock & movement', icon: <FiLayers size={17} /> },
-  { key: 'gst', label: 'GST / Tax', description: 'GST reporting', icon: <FiFileText size={17} /> },
-  { key: 'expenses', label: 'Expenses', description: 'Expense analysis', icon: <FiCreditCard size={17} /> },
+  { key: 'dashboard', label: 'Overview', description: 'Business reporting overview', icon: <FiGrid size={17} />, permission: PERMISSIONS.REPORTS_DASHBOARD_VIEW },
+  { key: 'sales', label: 'Sales', description: 'Sales and receivables', icon: <FiShoppingCart size={17} />, permission: PERMISSIONS.REPORTS_SALES_VIEW },
+  { key: 'purchases', label: 'Purchases', description: 'Purchases and payables', icon: <FiPackage size={17} />, permission: PERMISSIONS.REPORTS_PURCHASES_VIEW },
+  { key: 'accounts', label: 'Accounts', description: 'Financial accounting', icon: <FiDollarSign size={17} />, permission: PERMISSIONS.REPORTS_ACCOUNTS_VIEW },
+  { key: 'inventory', label: 'Inventory', description: 'Stock & movement', icon: <FiLayers size={17} />, permission: PERMISSIONS.REPORTS_INVENTORY_VIEW },
+  { key: 'gst', label: 'GST / Tax', description: 'GST reporting', icon: <FiFileText size={17} />, permission: PERMISSIONS.REPORTS_GST_VIEW },
+  { key: 'income', label: 'Income', description: 'Recorded income analysis', icon: <FiTrendingUp size={17} />, permission: PERMISSIONS.INCOME_EXPENSES_VIEW_REPORTS },
+  { key: 'expenses', label: 'Expenses', description: 'Expense analysis', icon: <FiCreditCard size={17} />, permission: PERMISSIONS.REPORTS_EXPENSES_VIEW },
 ] as const;
 
 type CategoryKey = (typeof REPORT_CATEGORIES)[number]['key'];
@@ -108,6 +163,9 @@ const SUB_REPORTS: Record<CategoryKey, { key: string; label: string; icon: React
     { key: 'gst-summary', label: 'GST Summary', icon: <FiFileText size={14} /> },
     { key: 'gst-rate-wise', label: 'Rate-wise GST', icon: <FiFileText size={14} /> },
   ],
+  income: [
+    { key: 'income-summary', label: 'Income Summary', icon: <FiTrendingUp size={14} /> },
+  ],
   expenses: [
     { key: 'expense-summary', label: 'Expense Summary', icon: <FiCreditCard size={14} /> },
   ],
@@ -136,7 +194,6 @@ const STATEMENT_REPORTS = new Set([
 
 const cn = (...c: Array<string | false | null | undefined>) => c.filter(Boolean).join(' ');
 
-/** Robust numeric parser (handles "₹1,234.56", "(500)", "33.37%"). */
 const safeNum = (v: unknown): number => {
   if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
   if (v === null || v === undefined) return 0;
@@ -201,7 +258,6 @@ const getByPath = (row: Row, path: string): unknown =>
     row,
   );
 
-/** Return first non-null / non-empty value for a list of candidate keys. */
 const pickFromKeys = (row: Row, keys: string[]): unknown => {
   for (const k of keys) {
     const v = getByPath(row, k);
@@ -210,11 +266,10 @@ const pickFromKeys = (row: Row, keys: string[]): unknown => {
   return undefined;
 };
 
-/** Return the first non-zero numeric value for a list of candidate keys. */
 const numFromKeys = (row: Row, keys: string[]): number => safeNum(pickFromKeys(row, keys));
 
 /* ==================================================================
- * KEY ALIAS BANKS — cover common backend naming conventions
+ * KEY ALIAS BANKS
  * ================================================================== */
 
 const ROW_KEYS = {
@@ -293,8 +348,6 @@ const S_KEY = {
   missing: ['missing_cost_lines', 'missingCostLines', 'missing_cost', 'missing_cost_count'],
 };
 
-/* ---------- Row resolver: derive missing values from each other -------- */
-
 interface ResolvedRow {
   sales: number;
   cost: number;
@@ -310,11 +363,8 @@ const resolveRow = (r: Row): ResolvedRow => {
   let margin = numFromKeys(r, ROW_KEYS.margin);
   const net = numFromKeys(r, ROW_KEYS.net);
 
-  // Derive sales from cost + gp when the sales key is missing.
   if (!sales && (cost || gp)) sales = cost + gp;
-  // Derive gp from sales - cost when the gp key is missing.
   if (!gp && (sales || cost)) gp = sales - cost;
-  // Derive margin from sales & gp.
   if (!margin && sales) margin = (gp / sales) * 100;
 
   return { sales, cost, gp, margin, net };
@@ -544,6 +594,25 @@ function LoadingBlock({ label = 'Loading report data…' }: { label?: string }) 
   );
 }
 
+function AccessRestricted() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-gradient-to-b from-slate-50 to-slate-100 p-6">
+      <div className="max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-rose-50 text-rose-500">
+          <FiLock size={26} />
+        </div>
+        <h1 className="mt-4 text-lg font-bold text-slate-800">Access restricted</h1>
+        <p className="mt-2 text-sm leading-6 text-slate-500">
+          Your account does not have permission to view the Reports module.
+          Contact your administrator to request the{' '}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px]">reports.view</code>{' '}
+          permission.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function Pagination({ meta, onPage }: { meta: PageMeta; onPage: (p: number) => void }) {
   if (!meta || meta.last_page <= 1) return null;
   const page = meta.current_page;
@@ -607,6 +676,7 @@ interface Column {
 
 function ReportTable({
   title, description, columns, rows, loading, error, meta, onPage, onRefresh, onExportCSV, emptyIcon,
+  canExport, canPrint,
 }: {
   title: string;
   description?: string;
@@ -619,6 +689,8 @@ function ReportTable({
   onRefresh?: () => void;
   onExportCSV?: () => void;
   emptyIcon?: ReactNode;
+  canExport: boolean;
+  canPrint: boolean;
 }) {
   const printRef = useRef<HTMLElement>(null);
 
@@ -639,7 +711,7 @@ function ReportTable({
           {description && <p className="mt-1 text-xs leading-5 text-slate-500">{description}</p>}
         </div>
         <div className="flex items-center gap-2 no-print">
-          {onExportCSV && (
+          {onExportCSV && canExport && (
             <button
               type="button" onClick={onExportCSV} disabled={!rows.length}
               className="inline-flex items-center gap-1.5 rounded-xl bg-cyan-600 px-3 py-2 text-[11px] font-bold text-white transition hover:bg-cyan-700 disabled:opacity-50"
@@ -647,12 +719,14 @@ function ReportTable({
               <FiDownload size={12} /> CSV
             </button>
           )}
-          <button
-            type="button" onClick={() => printReport(printRef.current)}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-600 transition hover:bg-slate-50"
-          >
-            <FiPrinter size={12} /> Print A4
-          </button>
+          {canPrint && (
+            <button
+              type="button" onClick={() => printReport(printRef.current)}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-600 transition hover:bg-slate-50"
+            >
+              <FiPrinter size={12} /> Print A4
+            </button>
+          )}
         </div>
       </div>
 
@@ -730,10 +804,8 @@ const A4_PRINT_CSS = `
   .print-header .sub { font-size: 10px; color: #64748b; margin: 2px 0 0; }
   .print-header .meta { font-size: 10px; color: #64748b; text-align: right; }
 
-  /* Hide interactive chrome */
   .no-print, button { display: none !important; }
 
-  /* Neutralize screen-only styles inside report root */
   [data-report-root] * {
     overflow: visible !important;
     max-height: none !important;
@@ -748,13 +820,11 @@ const A4_PRINT_CSS = `
     background: #fff !important;
   }
 
-  /* Cards become plain blocks in print */
   [data-report-root] .rounded-2xl,
   [data-report-root] .rounded-xl {
     border-radius: 4px !important;
   }
 
-  /* Grid collapses on paper */
   [data-report-root] .grid {
     display: grid !important;
     gap: 6px !important;
@@ -765,7 +835,6 @@ const A4_PRINT_CSS = `
     background: #fff !important;
   }
 
-  /* Tables */
   table { width: 100% !important; border-collapse: collapse !important; table-layout: auto; }
   thead { display: table-header-group; }
   tfoot { display: table-footer-group; }
@@ -791,7 +860,6 @@ const A4_PRINT_CSS = `
   h3 { font-size: 12px !important; }
   h4 { font-size: 11px !important; }
 
-  /* Color-coded values stay legible */
   .text-emerald-700, .text-emerald-600 { color: #047857 !important; }
   .text-rose-700, .text-rose-600 { color: #be123c !important; }
 
@@ -808,7 +876,6 @@ const A4_PRINT_CSS = `
   }
 `;
 
-/** Copy every stylesheet from the live document so Tailwind layout survives the popup. */
 function printReport(root: HTMLElement | null, opts?: { title?: string; subtitle?: string }) {
   if (!root) return;
   const w = window.open('', '_blank', 'width=1024,height=1280');
@@ -820,7 +887,6 @@ function printReport(root: HTMLElement | null, opts?: { title?: string; subtitle
 
   const generated = new Date().toLocaleString('en-IN');
 
-  // Try to infer the title from the report root.
   const heading = root.querySelector('h1, h2')?.textContent?.trim();
   const title = opts?.title || heading || 'Business Report';
   const subtitle = opts?.subtitle || '';
@@ -854,7 +920,6 @@ function printReport(root: HTMLElement | null, opts?: { title?: string; subtitle
   w.document.write(html);
   w.document.close();
 
-  // Tag right-aligned numeric cells so print CSS handles them properly.
   w.document.querySelectorAll('td, th').forEach((cell) => {
     const cls = cell.className || '';
     if (/text-right/.test(cls)) cell.setAttribute('data-align', 'right');
@@ -906,6 +971,7 @@ interface InvoiceProfitabilitySummary {
 
 function InvoiceProfitabilityView({
   rows, summary, meta, loading, error, onRefresh, onPage, onExportCSV,
+  canExport, canPrint,
 }: {
   rows: Row[];
   summary: Record<string, number> | null;
@@ -915,16 +981,11 @@ function InvoiceProfitabilityView({
   onRefresh: () => void;
   onPage: (p: number) => void;
   onExportCSV: () => void;
+  canExport: boolean;
+  canPrint: boolean;
 }) {
   const printRef = useRef<HTMLElement>(null);
 
-  /**
-   * Summary computation:
-   *   1. Use backend summary values when non-zero.
-   *   2. Fall back to row sums (through resolveRow so missing keys are derived).
-   *   3. Derive gross_profit / margin / net_profit as a last resort.
-   * Never computes GP from a partial row-sum that ignores backend totals.
-   */
   const s: InvoiceProfitabilitySummary = useMemo(() => {
     const src: Record<string, unknown> = summary ?? {};
 
@@ -945,7 +1006,6 @@ function InvoiceProfitabilityView({
     const missing_cost_lines = pickNonZero(S_KEY.missing);
     let gross_margin = pickNonZero(S_KEY.gm);
 
-    // Row-based fallbacks via resolveRow.
     if (rows.length) {
       let rs = 0, rc = 0, rgp = 0;
       for (const r of rows) {
@@ -959,7 +1019,6 @@ function InvoiceProfitabilityView({
       if (!gross_profit) gross_profit = rgp;
     }
 
-    // Derive what we can from totals.
     if (!gross_profit && (total_sales || total_cost)) gross_profit = total_sales - total_cost;
     if (!gross_margin && total_sales) gross_margin = (gross_profit / total_sales) * 100;
     if (!net_profit) net_profit = gross_profit - total_expenses;
@@ -981,7 +1040,6 @@ function InvoiceProfitabilityView({
 
   return (
     <section ref={printRef} data-report-root className="space-y-5">
-      {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h2 className="text-lg font-black tracking-tight text-slate-950 sm:text-xl">
@@ -992,22 +1050,25 @@ function InvoiceProfitabilityView({
           </p>
         </div>
         <div className="flex items-center gap-2 no-print">
-          <button
-            type="button" onClick={onExportCSV} disabled={!rows.length}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-cyan-600 px-3 py-2 text-[11px] font-bold text-white transition hover:bg-cyan-700 disabled:opacity-50"
-          >
-            <FiDownload size={12} /> CSV
-          </button>
-          <button
-            type="button" onClick={() => printReport(printRef.current)}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-600 transition hover:bg-slate-50"
-          >
-            <FiPrinter size={12} /> Print A4
-          </button>
+          {canExport && (
+            <button
+              type="button" onClick={onExportCSV} disabled={!rows.length}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-cyan-600 px-3 py-2 text-[11px] font-bold text-white transition hover:bg-cyan-700 disabled:opacity-50"
+            >
+              <FiDownload size={12} /> CSV
+            </button>
+          )}
+          {canPrint && (
+            <button
+              type="button" onClick={() => printReport(printRef.current)}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-600 transition hover:bg-slate-50"
+            >
+              <FiPrinter size={12} /> Print A4
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Missing-cost warning */}
       {hasMissingCost && (
         <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50/70 p-4 text-sm text-amber-800">
           <FiAlertTriangle size={16} className="mt-0.5 shrink-0" />
@@ -1022,7 +1083,6 @@ function InvoiceProfitabilityView({
         </div>
       )}
 
-      {/* Summary cards */}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <StatCard title="Total Sales" value={fmtCurrency(s.total_sales)} count="Filtered invoices" icon={<FiShoppingCart />} tone="cyan" loading={loading} />
         <StatCard title="Total Cost (COGS)" value={fmtCurrency(s.total_cost)} count="Purchase value of sold items" icon={<FiPackage />} tone="blue" loading={loading} />
@@ -1032,7 +1092,6 @@ function InvoiceProfitabilityView({
         <StatCard title="Net Profit" value={fmtCurrency(s.net_profit)} count="Gross Profit − Recorded Expenses" icon={<FiDollarSign />} tone={s.net_profit >= 0 ? 'emerald' : 'rose'} loading={loading} />
       </div>
 
-      {/* Bill-wise table */}
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1100px] text-sm">
@@ -1141,6 +1200,11 @@ function InvoiceProfitabilityView({
 
 export function ReportsPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isAuthenticated, loadingUser } = usePagePermissions();
+
+  const canViewReports = can(PERMISSIONS.REPORTS_VIEW);
+  const canExport = can(PERMISSIONS.REPORTS_EXPORT);
+  const canPrint = can(PERMISSIONS.REPORTS_PRINT);
 
   const [activeCategory, setActiveCategory] = useState<CategoryKey>('dashboard');
   const [activeSubReport, setActiveSubReport] = useState<string>('');
@@ -1153,11 +1217,22 @@ export function ReportsPage() {
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(25);
-  const [showFilters, setShowFilters] = useState(false);   // collapsed by default
+  const [showFilters, setShowFilters] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const [companies, setCompanies] = useState<Lookup[]>([]);
   const [branches, setBranches] = useState<Lookup[]>([]);
+
+  /* --------- RBAC: which categories can this user see? --------- */
+  const permittedCategories = useMemo(
+    () => REPORT_CATEGORIES.filter((c) => can(c.permission)),
+    [can]
+  );
+  const permittedCategoryKeys = useMemo(
+    () => new Set(permittedCategories.map((c) => c.key)),
+    [permittedCategories]
+  );
+  const canViewDashboard = permittedCategoryKeys.has('dashboard');
 
   useEffect(() => {
     Promise.allSettled([
@@ -1178,6 +1253,19 @@ export function ReportsPage() {
     setPage(1);
   }, [dateFrom, dateTo, companyId, branchId, activeSubReport, search, perPage]);
 
+  // If the user loses access to the currently-selected category, fall back
+  // to the first still-permitted category.
+  useEffect(() => {
+    if (!canViewReports) return;
+    if (permittedCategories.length === 0) return;
+    if (!permittedCategoryKeys.has(activeCategory)) {
+      setActiveCategory(permittedCategories[0].key);
+      setActiveSubReport('');
+      setSearch('');
+      setPage(1);
+    }
+  }, [canViewReports, permittedCategories, permittedCategoryKeys, activeCategory]);
+
   const filters: ReportFilters = useMemo(() => ({
     from: dateFrom,
     to: dateTo,
@@ -1188,7 +1276,6 @@ export function ReportsPage() {
     per_page: perPage,
   }), [dateFrom, dateTo, companyId, branchId, search, page, perPage]);
 
-  /* Summary endpoint doesn't accept pagination; send a lighter filter set. */
   const summaryFilters: ReportFilters = useMemo(() => ({
     from: dateFrom,
     to: dateTo,
@@ -1196,18 +1283,26 @@ export function ReportsPage() {
     branch_id: branchId === '' ? null : branchId,
   }), [dateFrom, dateTo, companyId, branchId]);
 
-  const dashboard = useReport({ path: '/reports/summary', filters: summaryFilters });
+  const dashboard = useReport({
+    path: '/reports/summary',
+    filters: summaryFilters,
+    enabled: canViewDashboard,
+  });
 
   const subReportPath = useMemo(() => {
     if (activeCategory === 'dashboard' || !activeSubReport) return '';
+    if (!permittedCategoryKeys.has(activeCategory)) return '';
     return ENDPOINT_MAP[activeSubReport] ?? `/reports/${activeSubReport}`;
-  }, [activeCategory, activeSubReport]);
+  }, [activeCategory, activeSubReport, permittedCategoryKeys]);
 
   const subReport = useReport({
     path: subReportPath,
     filters,
     enabled: Boolean(subReportPath),
   });
+  const isIncomeExpenseSummary = activeSubReport === 'income-summary' || activeSubReport === 'expense-summary';
+  const financialEntryTotal = safeNum(subReport.summary?.total);
+  const financialEntryCount = safeNum(subReport.summary?.count);
 
   const dashSummary = useMemo(() => {
     const outer = dashboard.raw ?? {};
@@ -1217,11 +1312,11 @@ export function ReportsPage() {
         ? (nested as Record<string, unknown>)
         : (dashboard.summary ?? {});
 
-    const sales = safeNum(s.total_sales);
-    const purchases = safeNum(s.total_purchases);
     return {
-      sales,
-      purchases,
+      sales: safeNum(s.total_sales),
+      purchases: safeNum(s.total_purchases),
+      otherIncome: safeNum(s.other_income),
+      operatingExpenses: safeNum(s.operating_expenses),
       receivables: safeNum(s.receivables),
       payables: safeNum(s.payables),
       totalPayments: safeNum(s.payments_received ?? s.payments),
@@ -1245,11 +1340,15 @@ export function ReportsPage() {
   const isLoadingAny = dashboard.loading || subReport.loading;
 
   const refreshAll = useCallback(() => {
+    if (!canViewReports) {
+      showError('Permission denied', 'You do not have permission to view reports.');
+      return;
+    }
     reportCache.clear();
-    dashboard.refresh();
+    if (canViewDashboard) dashboard.refresh();
     if (subReportPath) subReport.refresh();
     showSuccess('Refreshed', 'Latest report data loaded.');
-  }, [dashboard, subReport, subReportPath, showSuccess]);
+  }, [dashboard, subReport, subReportPath, showSuccess, showError, canViewReports, canViewDashboard]);
 
   const resetAll = () => {
     setDateFrom(fyStart());
@@ -1268,7 +1367,11 @@ export function ReportsPage() {
     setSearch('');
   };
 
-  const exportCSV = (rows: Row[], columns: Column[], filename: string) => {
+  const exportCSV = useCallback((rows: Row[], columns: Column[], filename: string) => {
+    if (!canExport) {
+      showError('Permission denied', 'You do not have permission to export report data.');
+      return;
+    }
     if (!rows.length) { showError('Export', 'No data to export.'); return; }
     const headers = columns.map((c) => c.label);
     const csv = [
@@ -1286,9 +1389,8 @@ export function ReportsPage() {
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
     showSuccess('Export complete', `${filename} downloaded.`);
-  };
+  }, [canExport, showError, showSuccess]);
 
-  /* --------- CSV columns for Bill-wise Profitability export --------- */
   const billWiseColumns: Column[] = useMemo(() => [
     { key: 'invoice_no', label: 'Invoice', value: (r) => pickFromKeys(r, ROW_KEYS.invoice_no) },
     { key: 'invoice_date', label: 'Date', value: (r) => pickFromKeys(r, ROW_KEYS.invoice_date) },
@@ -1303,9 +1405,7 @@ export function ReportsPage() {
     { key: 'calc_status', label: 'Calc Status', value: (r) => pickFromKeys(r, ROW_KEYS.calc_status) },
   ], []);
 
-  /* --------- Standard column map (all other reports) --------- */
   const columnMap: Record<string, Column[]> = useMemo(() => ({
-    // --- SALES
     'sales-summary': [
       { key: 'invoice_number', label: 'Invoice' },
       { key: 'invoice_date', label: 'Date', render: (r) => fmtDate(r.invoice_date) },
@@ -1387,7 +1487,6 @@ export function ReportsPage() {
       { key: 'outstanding_amount', label: 'Outstanding', align: 'right', render: (r) => fmtCurrency(r.outstanding_amount) },
       { key: 'overdue_days', label: 'Days', align: 'right' },
     ],
-    // --- PURCHASES
     'purchase-summary': [
       { key: 'purchase_number', label: 'Purchase' },
       { key: 'purchase_date', label: 'Date', render: (r) => fmtDate(r.purchase_date) },
@@ -1427,7 +1526,6 @@ export function ReportsPage() {
       { key: 'outstanding_amount', label: 'Outstanding', align: 'right', render: (r) => fmtCurrency(r.outstanding_amount) },
       { key: 'overdue_days', label: 'Days', align: 'right' },
     ],
-    // --- ACCOUNTS
     'general-ledger': [
       { key: 'date', label: 'Date', render: (r) => fmtDate(r.date) },
       { key: 'description', label: 'Description' },
@@ -1483,7 +1581,6 @@ export function ReportsPage() {
       { key: 'over_90', label: '90+', align: 'right', render: (r) => fmtCurrency(r.over_90) },
       { key: 'total', label: 'Total', align: 'right', render: (r) => <span className="font-bold">{fmtCurrency(r.total)}</span> },
     ],
-    // --- INVENTORY
     'stock-summary': [
       { key: 'product', label: 'Product' },
       { key: 'sku', label: 'SKU' },
@@ -1504,7 +1601,6 @@ export function ReportsPage() {
       { key: 'quantity', label: 'Qty', align: 'right' },
       { key: 'reference', label: 'Reference' },
     ],
-    // --- GST
     'gstr-1': [
       { key: 'invoice_no', label: 'Invoice' },
       { key: 'invoice_date', label: 'Date', render: (r) => fmtDate(r.invoice_date) },
@@ -1533,12 +1629,22 @@ export function ReportsPage() {
       { key: 'igst', label: 'IGST', align: 'right', render: (r) => fmtCurrency(r.igst) },
       { key: 'total_tax', label: 'Total Tax', align: 'right', render: (r) => fmtCurrency(r.total_tax) },
     ],
-    // --- EXPENSES
-    'expense-summary': [
-      { key: 'date', label: 'Date', render: (r) => fmtDate(r.date) },
+    'income-summary': [
+      { key: 'entry_date', label: 'Date', render: (r) => fmtDate(r.entry_date) },
       { key: 'category', label: 'Category' },
-      { key: 'vendor', label: 'Vendor' },
-      { key: 'description', label: 'Description' },
+      { key: 'counterparty', label: 'Source' },
+      { key: 'reference_no', label: 'Reference' },
+      { key: 'payment_method', label: 'Payment' },
+      { key: 'description', label: 'Description', render: (r) => String(r.description ?? r.notes ?? '-') },
+      { key: 'amount', label: 'Amount', align: 'right', render: (r) => fmtCurrency(r.amount) },
+    ],
+    'expense-summary': [
+      { key: 'entry_date', label: 'Date', render: (r) => fmtDate(r.entry_date) },
+      { key: 'category', label: 'Category' },
+      { key: 'counterparty', label: 'Payee' },
+      { key: 'reference_no', label: 'Reference' },
+      { key: 'payment_method', label: 'Payment' },
+      { key: 'description', label: 'Description', render: (r) => String(r.description ?? r.notes ?? '-') },
       { key: 'amount', label: 'Amount', align: 'right', render: (r) => fmtCurrency(r.amount) },
     ],
   }), []);
@@ -1547,11 +1653,11 @@ export function ReportsPage() {
     if (activeSubReport !== 'gst-summary') return subReport.rows;
     const node = subReport.raw?.data;
     if (!node || typeof node !== 'object' || Array.isArray(node)) return subReport.rows;
-    const root = node as Record<string, any>;
-    const outward = root.outward ?? {};
-    const inward = root.inward ?? {};
-    const itc = root.input_tax_credit ?? {};
-    const liability = root.net_liability ?? {};
+    const root = node as Record<string, Record<string, unknown>>;
+    const outward = (root.outward ?? {}) as Record<string, unknown>;
+    const inward = (root.inward ?? {}) as Record<string, unknown>;
+    const itc = (root.input_tax_credit ?? {}) as Record<string, unknown>;
+    const liability = (root.net_liability ?? {}) as Record<string, unknown>;
     return [
       {
         period: `${dateFrom} to ${dateTo} — Outward`,
@@ -1595,6 +1701,24 @@ export function ReportsPage() {
   const companyName = companies.find((c) => c.id === companyId)?.name;
   const branchName = branches.find((b) => b.id === branchId)?.name;
 
+  /* ---------------------------------------------------------------
+   * RBAC page gate
+   * --------------------------------------------------------------- */
+
+  if (loadingUser && !isAuthenticated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated || !canViewReports || permittedCategories.length === 0) {
+    return <AccessRestricted />;
+  }
+
   return (
     <>
       <style>{`
@@ -1635,9 +1759,9 @@ export function ReportsPage() {
             </div>
           </section>
 
-          {/* Category grid */}
-          <section className="no-print grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-7">
-            {REPORT_CATEGORIES.map((c) => {
+          {/* Category grid — only permitted categories render */}
+          <section className="no-print grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-8">
+            {permittedCategories.map((c) => {
               const active = activeCategory === c.key;
               return (
                 <button
@@ -1865,7 +1989,7 @@ export function ReportsPage() {
 
           {/* ============== REPORT SURFACE ============== */}
           <Card className="overflow-hidden rounded-2xl border-slate-200/80">
-            {SUB_REPORTS[activeCategory].length > 0 && (
+            {SUB_REPORTS[activeCategory].length > 0 && permittedCategoryKeys.has(activeCategory) && (
               <div className="no-print border-b border-slate-100 bg-slate-50/70 px-3 py-3 sm:px-4">
                 <div className="flex gap-1.5 overflow-x-auto pb-0.5">
                   {SUB_REPORTS[activeCategory].map((r) => {
@@ -1890,7 +2014,28 @@ export function ReportsPage() {
             )}
 
             <CardContent className="bg-white p-4 sm:p-6">
-              {activeCategory === 'dashboard' && (
+              {isIncomeExpenseSummary && (
+                <div className="mb-5 grid gap-3 sm:grid-cols-2">
+                  <StatCard
+                    title={activeSubReport === 'income-summary' ? 'Total Recorded Income' : 'Total Recorded Expenses'}
+                    value={fmtCurrency(financialEntryTotal)}
+                    count="Completed financial entries in selected filters"
+                    icon={activeSubReport === 'income-summary' ? <FiTrendingUp /> : <FiCreditCard />}
+                    tone={activeSubReport === 'income-summary' ? 'emerald' : 'amber'}
+                    loading={subReport.loading}
+                  />
+                  <StatCard
+                    title="Entries"
+                    value={fmtNumber(financialEntryCount)}
+                    count="Records in selected filters"
+                    icon={<FiFileText />}
+                    tone="blue"
+                    loading={subReport.loading}
+                  />
+                </div>
+              )}
+
+              {activeCategory === 'dashboard' && canViewDashboard && (
                 <DashboardView
                   summary={dashSummary}
                   loading={dashboard.loading}
@@ -1898,6 +2043,7 @@ export function ReportsPage() {
                   onRefresh={dashboard.refresh}
                   dateFrom={dateFrom}
                   dateTo={dateTo}
+                  canPrint={canPrint}
                 />
               )}
 
@@ -1918,6 +2064,7 @@ export function ReportsPage() {
                     loading={subReport.loading}
                     error={subReport.error}
                     onRefresh={subReport.refresh}
+                    canPrint={canPrint}
                   />
                 </div>
               )}
@@ -1935,6 +2082,8 @@ export function ReportsPage() {
                     onExportCSV={() =>
                       exportCSV(subReport.rows, billWiseColumns, `bill-wise-profitability-${dateFrom}-${dateTo}.csv`)
                     }
+                    canExport={canExport}
+                    canPrint={canPrint}
                   />
                 </div>
               )}
@@ -1952,6 +2101,8 @@ export function ReportsPage() {
                     onPage={setPage}
                     onRefresh={subReport.refresh}
                     onExportCSV={() => exportCSV(normalizedRows, activeColumns, `${activeSubReport}-${dateFrom}-${dateTo}.csv`)}
+                    canExport={canExport}
+                    canPrint={canPrint}
                   />
                 </div>
               )}
@@ -1976,15 +2127,17 @@ export function ReportsPage() {
  * ================================================================== */
 
 function DashboardView({
-  summary, loading, error, onRefresh, dateFrom, dateTo,
+  summary, loading, error, onRefresh, dateFrom, dateTo, canPrint,
 }: {
   summary: {
     sales: number; purchases: number; receivables: number; payables: number;
+    otherIncome: number; operatingExpenses: number;
     totalPayments: number; profit: number; invoiceCount: number;
     purchaseCount: number; paymentCount: number; stockValue: number; stockQty: number;
   };
   loading: boolean; error: string | null; onRefresh: () => void;
   dateFrom: string; dateTo: string;
+  canPrint: boolean;
 }) {
   const printRef = useRef<HTMLDivElement>(null);
 
@@ -2000,27 +2153,31 @@ function DashboardView({
           <h2 className="text-2xl font-black tracking-tight text-slate-950">Financial snapshot</h2>
           <p className="mt-1 text-sm text-slate-500">{dateFrom} — {dateTo}</p>
         </div>
-        <button
-          type="button"
-          onClick={() => printReport(printRef.current, { title: 'Financial Snapshot', subtitle: `${dateFrom} — ${dateTo}` })}
-          className="no-print inline-flex items-center gap-1.5 self-start rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-600 transition hover:bg-slate-50"
-        >
-          <FiPrinter size={12} /> Print A4
-        </button>
+        {canPrint && (
+          <button
+            type="button"
+            onClick={() => printReport(printRef.current, { title: 'Financial Snapshot', subtitle: `${dateFrom} — ${dateTo}` })}
+            className="no-print inline-flex items-center gap-1.5 self-start rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-600 transition hover:bg-slate-50"
+          >
+            <FiPrinter size={12} /> Print A4
+          </button>
+        )}
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard title="Total Sales" value={fmtCurrency(summary.sales)} count={`${fmtNumber(summary.invoiceCount)} invoices`} icon={<FiShoppingCart />} tone="cyan" loading={loading} />
         <StatCard title="Total Purchases" value={fmtCurrency(summary.purchases)} count={`${fmtNumber(summary.purchaseCount)} purchases`} icon={<FiPackage />} tone="blue" loading={loading} />
+        <StatCard title="Other Income" value={fmtCurrency(summary.otherIncome)} count="Recorded income entries" icon={<FiTrendingUp />} tone="emerald" loading={loading} />
+        <StatCard title="Operating Expenses" value={fmtCurrency(summary.operatingExpenses)} count="Recorded expense entries" icon={<FiCreditCard />} tone="amber" loading={loading} />
         <StatCard title="Receivables" value={fmtCurrency(summary.receivables)} count="Unpaid sales" icon={<FiArrowDownRight />} tone="amber" loading={loading} />
         <StatCard title="Payables" value={fmtCurrency(summary.payables)} count="Unpaid purchases" icon={<FiArrowUpRight />} tone="rose" loading={loading} />
         <StatCard title="Payments" value={fmtCurrency(summary.totalPayments)} count={`${fmtNumber(summary.paymentCount)} payments`} icon={<FiDollarSign />} tone="violet" loading={loading} />
-        <StatCard title="Net Difference" value={fmtCurrency(summary.profit)} count="Sales minus purchases" icon={<FiTrendingUp />} tone={summary.profit >= 0 ? 'emerald' : 'rose'} loading={loading} />
+        <StatCard title="Net Profit" value={fmtCurrency(summary.profit)} count="Gross profit + other income − operating expenses" icon={<FiTrendingUp />} tone={summary.profit >= 0 ? 'emerald' : 'rose'} loading={loading} />
         <StatCard title="Stock Value" value={fmtCurrency(summary.stockValue)} count={`${fmtNumber(summary.stockQty)} units on hand`} icon={<FiPackage />} tone="emerald" loading={loading} />
         <StatCard title="Cash Position" value={fmtCurrency(summary.totalPayments)} count="Total recorded payments" icon={<FiDollarSign />} tone="slate" loading={loading} />
       </div>
 
-      <div className="mt-6 grid gap-5 lg:grid-cols-2">
+      <div className="mt-6 grid gap-5 lg:grid-cols-2 xl:grid-cols-3">
         <div className="rounded-2xl border border-slate-200 bg-white p-5">
           <h3 className="mb-4 text-sm font-bold text-slate-900">Sales vs Purchases</h3>
           <Bar label="Sales" value={summary.sales} max={Math.max(summary.sales, summary.purchases, 1)} tone="cyan" />
@@ -2030,6 +2187,11 @@ function DashboardView({
           <h3 className="mb-4 text-sm font-bold text-slate-900">Receivables vs Payables</h3>
           <Bar label="Receivables" value={summary.receivables} max={Math.max(summary.receivables, summary.payables, 1)} tone="amber" />
           <Bar label="Payables" value={summary.payables} max={Math.max(summary.receivables, summary.payables, 1)} tone="rose" />
+        </div>
+        <div className="rounded-2xl border border-slate-200 bg-white p-5">
+          <h3 className="mb-4 text-sm font-bold text-slate-900">Recorded Income vs Expenses</h3>
+          <Bar label="Other Income" value={summary.otherIncome} max={Math.max(summary.otherIncome, summary.operatingExpenses, 1)} tone="cyan" />
+          <Bar label="Operating Expenses" value={summary.operatingExpenses} max={Math.max(summary.otherIncome, summary.operatingExpenses, 1)} tone="rose" />
         </div>
       </div>
     </div>
@@ -2122,7 +2284,7 @@ function extractStatementPayload(raw: Record<string, unknown> | null): Record<st
 }
 
 function StatementView({
-  kind, raw, summary, loading, error, onRefresh,
+  kind, raw, summary, loading, error, onRefresh, canPrint,
 }: {
   kind: string;
   raw: Record<string, unknown> | null;
@@ -2130,6 +2292,7 @@ function StatementView({
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
+  canPrint: boolean;
 }) {
   const printRef = useRef<HTMLElement>(null);
 
@@ -2161,12 +2324,14 @@ function StatementView({
             Actual figures returned from the reporting API — deleted records excluded
           </p>
         </div>
-        <button
-          type="button" onClick={() => printReport(printRef.current, { title: headerTitle })}
-          className="no-print inline-flex items-center gap-1.5 self-start rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-600 transition hover:bg-slate-50"
-        >
-          <FiPrinter size={12} /> Print A4
-        </button>
+        {canPrint && (
+          <button
+            type="button" onClick={() => printReport(printRef.current, { title: headerTitle })}
+            className="no-print inline-flex items-center gap-1.5 self-start rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-600 transition hover:bg-slate-50"
+          >
+            <FiPrinter size={12} /> Print A4
+          </button>
+        )}
       </div>
 
       {(kind === 'profit-loss' || kind === 'pl-overview') && (
@@ -2264,9 +2429,7 @@ function PLDetailedView({ data }: { data: PLDetailed }) {
 
         <div className={cn(
           'rounded-xl p-4',
-          safeNum(data.net_profit) >= 0
-            ? 'bg-emerald-50'
-            : 'bg-rose-50',
+          safeNum(data.net_profit) >= 0 ? 'bg-emerald-50' : 'bg-rose-50',
         )}>
           <div className="flex items-center justify-between text-lg font-black text-slate-900">
             <span>Net Profit</span>

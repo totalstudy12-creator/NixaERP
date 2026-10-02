@@ -10,12 +10,14 @@ import {
   FiTruck, FiPackage, FiAlertCircle, FiFilter, FiX, FiFile, FiCheck,
   FiAlertTriangle, FiChevronDown, FiEye, FiEyeOff, FiMoreVertical,
   FiBookOpen, FiFileText, FiCreditCard, FiActivity, FiExternalLink,
-  FiMail, FiPhone, FiMapPin, FiCalendar, FiPrinter, FiDollarSign,
+  FiMail, FiPhone, FiMapPin, FiCalendar, FiPrinter, FiDollarSign, FiLock,
 } from 'react-icons/fi';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -208,7 +210,6 @@ function formatDate(value?: string | null): string {
   return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
 }
 
-/** Authoritative outstanding. Prefers server-computed value. */
 function getOutstanding(customer: Customer | null | undefined): number {
   if (!customer) return 0;
   const raw = customer.computed_outstanding ?? customer.outstanding_amount;
@@ -714,8 +715,15 @@ const StatCard = memo(function StatCard({
 
 const MENU_WIDTH = 210, MENU_HEIGHT = 200, MENU_MARGIN = 8;
 
+interface ActionDropdownPermissions {
+  canEdit: boolean;
+  canDelete: boolean;
+  canViewLedger: boolean;
+  canPrintLedger: boolean;
+}
+
 const ActionDropdown = memo(function ActionDropdown({
-  customer, onEdit, onLedger, onLedgerA4, onDelete, ledgerLoading,
+  customer, onEdit, onLedger, onLedgerA4, onDelete, ledgerLoading, permissions,
 }: {
   customer: Customer;
   onEdit: (c: Customer) => void;
@@ -723,11 +731,18 @@ const ActionDropdown = memo(function ActionDropdown({
   onLedgerA4: (c: Customer) => void;
   onDelete: (c: Customer) => void;
   ledgerLoading?: boolean;
+  permissions: ActionDropdownPermissions;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const hasAnyAction =
+    permissions.canEdit ||
+    permissions.canDelete ||
+    permissions.canViewLedger ||
+    permissions.canPrintLedger;
 
   const toggle = useCallback(() => {
     if (isOpen) { setIsOpen(false); return; }
@@ -759,6 +774,10 @@ const ActionDropdown = memo(function ActionDropdown({
     };
   }, [isOpen]);
 
+  if (!hasAnyAction) return null;
+
+  const showLedgerGroup = permissions.canViewLedger || permissions.canPrintLedger;
+
   return (
     <>
       <button ref={buttonRef} type="button"
@@ -771,28 +790,36 @@ const ActionDropdown = memo(function ActionDropdown({
       {isOpen && createPortal(
         <div ref={menuRef} role="menu" style={menuStyle} onClick={(e) => e.stopPropagation()}
           className="animate-fadeIn overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10">
-          <button type="button" role="menuitem"
-            onClick={() => { setIsOpen(false); onEdit(customer); }}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
-            <FiEdit size={14} className="text-indigo-500" /> Edit
-          </button>
-          <button type="button" role="menuitem"
-            onClick={() => { setIsOpen(false); onLedger(customer); }}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
-            <FiBookOpen size={14} className="text-emerald-500" /> Ledger
-          </button>
-          <button type="button" role="menuitem" disabled={ledgerLoading}
-            onClick={() => { if (ledgerLoading) return; setIsOpen(false); onLedgerA4(customer); }}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">
-            <FiPrinter size={14} className="text-sky-500" />
-            {ledgerLoading ? 'Preparing…' : 'Ledger (A4)'}
-          </button>
-          <div className="my-1 border-t border-slate-100" />
-          <button type="button" role="menuitem"
-            onClick={() => { setIsOpen(false); onDelete(customer); }}
-            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-red-600 transition hover:bg-red-50">
-            <FiTrash2 size={14} /> Delete
-          </button>
+          {permissions.canEdit && (
+            <button type="button" role="menuitem"
+              onClick={() => { setIsOpen(false); onEdit(customer); }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
+              <FiEdit size={14} className="text-indigo-500" /> Edit
+            </button>
+          )}
+          {permissions.canViewLedger && (
+            <button type="button" role="menuitem"
+              onClick={() => { setIsOpen(false); onLedger(customer); }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
+              <FiBookOpen size={14} className="text-emerald-500" /> Ledger
+            </button>
+          )}
+          {permissions.canPrintLedger && (
+            <button type="button" role="menuitem" disabled={ledgerLoading}
+              onClick={() => { if (ledgerLoading) return; setIsOpen(false); onLedgerA4(customer); }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50 disabled:cursor-wait disabled:opacity-60">
+              <FiPrinter size={14} className="text-sky-500" />
+              {ledgerLoading ? 'Preparing…' : 'Ledger (A4)'}
+            </button>
+          )}
+          {showLedgerGroup && permissions.canDelete && <div className="my-1 border-t border-slate-100" />}
+          {permissions.canDelete && (
+            <button type="button" role="menuitem"
+              onClick={() => { setIsOpen(false); onDelete(customer); }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-red-600 transition hover:bg-red-50">
+              <FiTrash2 size={14} /> Delete
+            </button>
+          )}
         </div>,
         document.body,
       )}
@@ -811,11 +838,12 @@ interface FormTextFieldProps {
   onChange: (field: string, value: string) => void;
   placeholder?: string;
   maxLength?: number;
+  disabled?: boolean;
 }
 
 const FormTextField = memo(function FormTextField({
   label, field, type = 'text', required = false, value, hasError = false,
-  onChange, placeholder, maxLength,
+  onChange, placeholder, maxLength, disabled = false,
 }: FormTextFieldProps) {
   const id = `field-${field}`;
   const stateClass = hasError
@@ -828,7 +856,8 @@ const FormTextField = memo(function FormTextField({
       </label>
       <input id={id} type={type} value={value as string | number}
         onChange={(e) => onChange(field, e.target.value)}
-        className={`h-10 w-full min-w-0 rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition ${stateClass}`}
+        disabled={disabled}
+        className={`h-10 w-full min-w-0 rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500 ${stateClass}`}
         placeholder={placeholder ?? `Enter ${label}`}
         step={type === 'number' ? '0.01' : undefined}
         maxLength={maxLength} />
@@ -868,6 +897,23 @@ const createEmptyForm = (): CustomerFormData => ({
 export function CustomersPage() {
   const navigate = useNavigate();
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ── RBAC ── */
+  const canViewCustomers    = isSuperAdmin || can('view customers');
+  const canCreateCustomer   = isSuperAdmin || can('create customers');
+  const canEditCustomer     = isSuperAdmin || can('edit customers');
+  const canDeleteCustomer   = isSuperAdmin || can('delete customers');
+  const canImportCustomers  = isSuperAdmin || can('import customers');
+  const canExportCustomers  = isSuperAdmin || can('export customers');
+  const canViewLedger       = isSuperAdmin || can('view customer ledger') || can('view customers');
+  const canPrintLedger      = isSuperAdmin || can('print customer ledger') || can('view customer ledger');
+  const canManageGroups     = isSuperAdmin || can('manage customer groups') || can('create customers');
+  const canBulkUpdateType   = isSuperAdmin || can('edit customers');
+  const canBulkDelete       = isSuperAdmin || can('delete customers');
+  const canAutoFillGst      = isSuperAdmin || can('create customers') || can('edit customers');
 
   const [filterType, setFilterType] = useState('all');
   const [filterCompany, setFilterCompany] = useState('all');
@@ -991,6 +1037,7 @@ export function CustomersPage() {
   }, [filterCompany, branches]);
 
   const handleViewCustomer = useCallback(async (customer: Customer) => {
+    if (!canViewCustomers) return;
     const reqId = ++detailRequestRef.current;
     setViewingCustomer(customer);
     setDetailTab('overview');
@@ -1019,7 +1066,7 @@ export function CustomersPage() {
     } finally {
       if (reqId === detailRequestRef.current) setDetailLoading(false);
     }
-  }, []);
+  }, [canViewCustomers]);
 
   const closeDetailView = useCallback(() => {
     detailRequestRef.current += 1;
@@ -1060,6 +1107,10 @@ export function CustomersPage() {
   }, []);
 
   const handleAutoFill = useCallback(async () => {
+    if (!canAutoFillGst) {
+      showError('Permission denied', 'You do not have permission to auto-fill GST details.');
+      return;
+    }
     const gst = formData.gst_number.trim();
     if (!gst || gst.length < 10) {
       showError('Invalid GSTIN', 'Please enter a valid GSTIN (min 10 characters).');
@@ -1089,7 +1140,7 @@ export function CustomersPage() {
     } finally {
       setLookingUp(false);
     }
-  }, [formData.gst_number, showSuccess, showError]);
+  }, [formData.gst_number, canAutoFillGst, showSuccess, showError]);
 
   const handleSameAsBillingToggle = useCallback((checked: boolean) => {
     setFormData((p) => ({
@@ -1107,6 +1158,10 @@ export function CustomersPage() {
   }, []);
 
   const handleAddGroup = useCallback(async () => {
+    if (!canManageGroups) {
+      showError('Permission denied', 'You do not have permission to manage customer groups.');
+      return;
+    }
     const name = newGroupName.trim();
     if (!name) return;
     setAddingGroup(true);
@@ -1121,9 +1176,13 @@ export function CustomersPage() {
     } finally {
       setAddingGroup(false);
     }
-  }, [newGroupName, refreshGroups, showSuccess, showError]);
+  }, [newGroupName, refreshGroups, canManageGroups, showSuccess, showError]);
 
   const handleBulkDelete = useCallback(async () => {
+    if (!canBulkDelete) {
+      showError('Permission denied', 'You do not have permission to delete customers.');
+      return;
+    }
     if (!selectedIds.length) return;
     if (!window.confirm(`Delete ${selectedIds.length} customer(s)?`)) return;
     try {
@@ -1135,9 +1194,13 @@ export function CustomersPage() {
     } catch (err) {
       showError('Bulk delete failed', getErrorMessage(err, 'Bulk delete failed.'));
     }
-  }, [selectedIds, refreshCustomers, showSuccess, showError]);
+  }, [selectedIds, refreshCustomers, canBulkDelete, showSuccess, showError]);
 
   const handleBulkTypeChange = useCallback(async (type: CustomerType) => {
+    if (!canBulkUpdateType) {
+      showError('Permission denied', 'You do not have permission to change customer types.');
+      return;
+    }
     if (!selectedIds.length) return;
     if (!window.confirm(`Change type to "${type}" for ${selectedIds.length} record(s)?`)) return;
     try {
@@ -1149,16 +1212,24 @@ export function CustomersPage() {
     } catch (err) {
       showError('Bulk update failed', getErrorMessage(err, 'Bulk update failed.'));
     }
-  }, [selectedIds, refreshCustomers, showSuccess, showError]);
+  }, [selectedIds, refreshCustomers, canBulkUpdateType, showSuccess, showError]);
 
   const handleCreate = useCallback(() => {
+    if (!canCreateCustomer) {
+      showError('Permission denied', 'You do not have permission to create customers.');
+      return;
+    }
     setEditingId(null);
     setFormData(createEmptyForm());
     setFormErrors({});
     setIsPanelOpen(true);
-  }, []);
+  }, [canCreateCustomer, showError]);
 
   const handleEdit = useCallback((customer: Customer) => {
+    if (!canEditCustomer) {
+      showError('Permission denied', 'You do not have permission to edit customers.');
+      return;
+    }
     setEditingId(customer.id);
     const sameShip =
       (customer.shipping_street ?? '') === (customer.billing_street ?? '') &&
@@ -1194,13 +1265,21 @@ export function CustomersPage() {
     });
     setFormErrors({});
     setIsPanelOpen(true);
-  }, []);
+  }, [canEditCustomer, showError]);
 
   const handleLedger = useCallback((customer: Customer) => {
+    if (!canViewLedger) {
+      showError('Permission denied', 'You do not have permission to view customer ledgers.');
+      return;
+    }
     navigate(`/customers/${customer.id}/ledger`);
-  }, [navigate]);
+  }, [navigate, canViewLedger, showError]);
 
   const handleLedgerA4 = useCallback(async (customer: Customer) => {
+    if (!canPrintLedger) {
+      showError('Permission denied', 'You do not have permission to print customer ledgers.');
+      return;
+    }
     setLedgerLoadingId(customer.id);
     try {
       const { entries, summary: serverSummary } = await fetchLedger(customer.id);
@@ -1214,9 +1293,13 @@ export function CustomersPage() {
     } finally {
       setLedgerLoadingId(null);
     }
-  }, [showSuccess, showError]);
+  }, [canPrintLedger, showSuccess, showError]);
 
   const handleDelete = useCallback(async (customer: Customer) => {
+    if (!canDeleteCustomer) {
+      showError('Permission denied', 'You do not have permission to delete customers.');
+      return;
+    }
     if (!window.confirm(`Delete "${customer.name}"?`)) return;
     try {
       await apiClient.deleteCustomer(customer.id);
@@ -1226,7 +1309,7 @@ export function CustomersPage() {
     } catch (err) {
       showError('Delete failed', getErrorMessage(err, 'Delete failed.'));
     }
-  }, [refreshCustomers, showSuccess, showError]);
+  }, [refreshCustomers, canDeleteCustomer, showSuccess, showError]);
 
   const validateForm = useCallback((): boolean => {
     const errors: Record<string, boolean> = {};
@@ -1245,6 +1328,14 @@ export function CustomersPage() {
   }, [formData, showError]);
 
   const handleSubmit = useCallback(async () => {
+    if (editingId && !canEditCustomer) {
+      showError('Permission denied', 'You do not have permission to edit customers.');
+      return;
+    }
+    if (!editingId && !canCreateCustomer) {
+      showError('Permission denied', 'You do not have permission to create customers.');
+      return;
+    }
     if (!validateForm()) return;
     const { same_as_billing: _x, ...rest } = formData;
     const payload = {
@@ -1280,9 +1371,13 @@ export function CustomersPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [formData, editingId, refreshCustomers, showSuccess, showError, validateForm]);
+  }, [formData, editingId, refreshCustomers, canEditCustomer, canCreateCustomer, showSuccess, showError, validateForm]);
 
   const handleExport = useCallback(() => {
+    if (!canExportCustomers) {
+      showError('Permission denied', 'You do not have permission to export customers.');
+      return;
+    }
     if (!filteredCustomers.length) {
       showError('Export failed', 'No customers to export.');
       return;
@@ -1306,9 +1401,13 @@ export function CustomersPage() {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
     showSuccess('Export', 'Data exported.');
-  }, [filteredCustomers, showSuccess, showError]);
+  }, [filteredCustomers, canExportCustomers, showSuccess, showError]);
 
   const handleImportOpen = useCallback(() => {
+    if (!canImportCustomers) {
+      showError('Permission denied', 'You do not have permission to import customers.');
+      return;
+    }
     setIsImportOpen(true);
     setImportStep('select');
     setImportFile(null);
@@ -1319,7 +1418,7 @@ export function CustomersPage() {
     setImportSuccess(false);
     setDragOver(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, []);
+  }, [canImportCustomers, showError]);
 
   const handlePreview = useCallback(async (file: File) => {
     setImportLoading(true);
@@ -1339,13 +1438,17 @@ export function CustomersPage() {
 
   const handleFileChange = useCallback((file: File | null) => {
     if (!file) return;
+    if (!canImportCustomers) {
+      showError('Permission denied', 'You do not have permission to import customers.');
+      return;
+    }
     const ext = file.name.split('.').pop()?.toLowerCase();
     const okTypes = ['text/csv', 'application/vnd.ms-excel', 'application/octet-stream'];
     if (!okTypes.includes(file.type) && ext !== 'csv') { showError('Invalid file', 'Please select a CSV file.'); return; }
     if (file.size > MAX_IMPORT_FILE_BYTES) { showError('File too large', 'Maximum size is 10MB.'); return; }
     setImportFile(file);
     void handlePreview(file);
-  }, [handlePreview, showError]);
+  }, [handlePreview, canImportCustomers, showError]);
 
   const handleDrop = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault(); setDragOver(false);
@@ -1356,6 +1459,10 @@ export function CustomersPage() {
   const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragOver(false); }, []);
 
   const handleImport = useCallback(async () => {
+    if (!canImportCustomers) {
+      showError('Permission denied', 'You do not have permission to import customers.');
+      return;
+    }
     if (!importFile) return;
     setImportLoading(true);
     try {
@@ -1381,9 +1488,13 @@ export function CustomersPage() {
     } finally {
       setImportLoading(false);
     }
-  }, [importFile, duplicateAction, refreshCustomers, showSuccess, showError]);
+  }, [importFile, duplicateAction, refreshCustomers, canImportCustomers, showSuccess, showError]);
 
   const handleDownloadTemplate = useCallback(async () => {
+    if (!canImportCustomers) {
+      showError('Permission denied', 'You do not have permission to download the import template.');
+      return;
+    }
     try {
       const blob = await apiClient.downloadCustomerTemplate();
       const url = URL.createObjectURL(blob);
@@ -1396,7 +1507,7 @@ export function CustomersPage() {
     } catch (err) {
       showError('Template download failed', getErrorMessage(err, 'Download failed.'));
     }
-  }, [showSuccess, showError]);
+  }, [canImportCustomers, showSuccess, showError]);
 
   const handleDownloadErrorReport = useCallback(() => {
     if (!importErrors.length) return;
@@ -1419,6 +1530,43 @@ export function CustomersPage() {
       return next;
     });
   }, []);
+
+  /* ────────────────────────────────────────────────────────────────────────
+   * Loading guard
+   * ──────────────────────────────────────────────────────────────────────── */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* ────────────────────────────────────────────────────────────────────────
+   * No-access panel
+   * ──────────────────────────────────────────────────────────────────────── */
+
+  if (!canViewCustomers) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to view the customer directory.
+          </p>
+          <Button onClick={() => navigate('/')} className="mt-5 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800">
+            Back to dashboard
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   if (custError) {
     return (
@@ -1480,19 +1628,25 @@ export function CustomersPage() {
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <Button type="button" variant="outline" onClick={handleImportOpen}
-                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white">
-                  <FiUpload className="mr-2" size={14} /> Import
-                </Button>
-                <Button type="button" variant="outline" onClick={handleExport}
-                  disabled={custLoading || !filteredCustomers.length}
-                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white">
-                  <FiDownload className="mr-2" size={14} /> Export
-                </Button>
-                <Button type="button" onClick={handleCreate}
-                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300">
-                  <FiPlus className="mr-2" size={14} /> Add customer
-                </Button>
+                {canImportCustomers && (
+                  <Button type="button" variant="outline" onClick={handleImportOpen}
+                    className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white">
+                    <FiUpload className="mr-2" size={14} /> Import
+                  </Button>
+                )}
+                {canExportCustomers && (
+                  <Button type="button" variant="outline" onClick={handleExport}
+                    disabled={custLoading || !filteredCustomers.length}
+                    className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50">
+                    <FiDownload className="mr-2" size={14} /> Export
+                  </Button>
+                )}
+                {canCreateCustomer && (
+                  <Button type="button" onClick={handleCreate}
+                    className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300">
+                    <FiPlus className="mr-2" size={14} /> Add customer
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -1602,27 +1756,33 @@ export function CustomersPage() {
           </Card>
 
           {/* Bulk toolbar */}
-          {selectedIds.length > 0 && (
+          {selectedIds.length > 0 && (canBulkUpdateType || canBulkDelete) && (
             <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
                 <div className="mr-1 flex items-center gap-2 rounded-lg bg-indigo-50 px-2.5 py-1 text-indigo-700 ring-1 ring-indigo-500/10">
                   <span className="text-sm font-bold">{selectedIds.length}</span>
                   <span className="text-xs font-medium">selected</span>
                 </div>
-                <Button type="button" size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => handleBulkTypeChange('customer')}>
-                  <FiShoppingBag className="mr-1.5 text-emerald-600" size={14} /> Set customer
-                </Button>
-                <Button type="button" size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => handleBulkTypeChange('dealer')}>
-                  <FiTruck className="mr-1.5 text-violet-600" size={14} /> Set dealer
-                </Button>
-                <Button type="button" size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => handleBulkTypeChange('distributor')}>
-                  <FiPackage className="mr-1.5 text-teal-600" size={14} /> Set distributor
-                </Button>
-                <Button type="button" size="sm"
-                  className="h-9 rounded-lg border border-red-600 bg-red-600 font-semibold text-white shadow-none hover:border-red-700 hover:bg-red-700"
-                  onClick={handleBulkDelete}>
-                  <FiTrash2 className="mr-1.5" size={14} /> Delete
-                </Button>
+                {canBulkUpdateType && (
+                  <>
+                    <Button type="button" size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => handleBulkTypeChange('customer')}>
+                      <FiShoppingBag className="mr-1.5 text-emerald-600" size={14} /> Set customer
+                    </Button>
+                    <Button type="button" size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => handleBulkTypeChange('dealer')}>
+                      <FiTruck className="mr-1.5 text-violet-600" size={14} /> Set dealer
+                    </Button>
+                    <Button type="button" size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => handleBulkTypeChange('distributor')}>
+                      <FiPackage className="mr-1.5 text-teal-600" size={14} /> Set distributor
+                    </Button>
+                  </>
+                )}
+                {canBulkDelete && (
+                  <Button type="button" size="sm"
+                    className="h-9 rounded-lg border border-red-600 bg-red-600 font-semibold text-white shadow-none hover:border-red-700 hover:bg-red-700"
+                    onClick={handleBulkDelete}>
+                    <FiTrash2 className="mr-1.5" size={14} /> Delete
+                  </Button>
+                )}
                 <Button type="button" size="sm" variant="ghost"
                   className="ml-auto h-9 rounded-lg text-slate-500 hover:text-slate-800" onClick={() => setSelectedIds([])}>
                   Clear
@@ -1746,7 +1906,13 @@ export function CustomersPage() {
                         <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                           <ActionDropdown customer={customer} onEdit={handleEdit}
                             onLedger={handleLedger} onLedgerA4={handleLedgerA4}
-                            onDelete={handleDelete} ledgerLoading={isLedgerLoading} />
+                            onDelete={handleDelete} ledgerLoading={isLedgerLoading}
+                            permissions={{
+                              canEdit: canEditCustomer,
+                              canDelete: canDeleteCustomer,
+                              canViewLedger,
+                              canPrintLedger,
+                            }} />
                         </TableCell>
                       </TableRow>
                     );
@@ -1790,21 +1956,27 @@ export function CustomersPage() {
                   <FiX className="mr-2" size={14} /> Close
                 </Button>
                 <div className="flex flex-wrap gap-2">
-                  <Button type="button" variant="outline" onClick={() => handleLedger(viewingCustomer)} className="rounded-xl text-emerald-600">
-                    <FiBookOpen className="mr-2" size={14} /> Ledger
-                  </Button>
-                  <Button type="button" variant="outline"
-                    disabled={ledgerLoadingId === viewingCustomer.id}
-                    onClick={() => handleLedgerA4(viewingCustomer)}
-                    className="rounded-xl text-sky-600">
-                    <FiPrinter className="mr-2" size={14} />
-                    {ledgerLoadingId === viewingCustomer.id ? 'Preparing…' : 'Download A4'}
-                  </Button>
-                  <Button type="button"
-                    onClick={() => { const t = viewingCustomer; closeDetailView(); handleEdit(t); }}
-                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700">
-                    <FiEdit className="mr-2" size={14} /> Edit
-                  </Button>
+                  {canViewLedger && (
+                    <Button type="button" variant="outline" onClick={() => handleLedger(viewingCustomer)} className="rounded-xl text-emerald-600">
+                      <FiBookOpen className="mr-2" size={14} /> Ledger
+                    </Button>
+                  )}
+                  {canPrintLedger && (
+                    <Button type="button" variant="outline"
+                      disabled={ledgerLoadingId === viewingCustomer.id}
+                      onClick={() => handleLedgerA4(viewingCustomer)}
+                      className="rounded-xl text-sky-600">
+                      <FiPrinter className="mr-2" size={14} />
+                      {ledgerLoadingId === viewingCustomer.id ? 'Preparing…' : 'Download A4'}
+                    </Button>
+                  )}
+                  {canEditCustomer && (
+                    <Button type="button"
+                      onClick={() => { const t = viewingCustomer; closeDetailView(); handleEdit(t); }}
+                      className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700">
+                      <FiEdit className="mr-2" size={14} /> Edit
+                    </Button>
+                  )}
                 </div>
               </div>
             }>
@@ -2148,11 +2320,13 @@ export function CustomersPage() {
                         onChange={handleGstChange}
                         className="h-10 flex-1 rounded-xl border-slate-200 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
                         placeholder="Enter GSTIN" maxLength={15} />
-                      <Button type="button" onClick={handleAutoFill}
-                        disabled={lookingUp || !formData.gst_number}
-                        className="h-10 shrink-0 rounded-xl bg-slate-900 px-4 text-xs font-semibold text-white hover:bg-slate-800">
-                        {lookingUp ? 'Fetching…' : 'Auto fill'}
-                      </Button>
+                      {canAutoFillGst && (
+                        <Button type="button" onClick={handleAutoFill}
+                          disabled={lookingUp || !formData.gst_number}
+                          className="h-10 shrink-0 rounded-xl bg-slate-900 px-4 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50">
+                          {lookingUp ? 'Fetching…' : 'Auto fill'}
+                        </Button>
+                      )}
                     </div>
                   </div>
 
@@ -2271,9 +2445,11 @@ export function CustomersPage() {
                         <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
                       </div>
                     </div>
-                    <Button type="button" variant="outline" onClick={() => setShowGroupModal(true)} className="h-10 shrink-0 rounded-xl">
-                      <FiPlus className="mr-1.5" size={14} /> Add
-                    </Button>
+                    {canManageGroups && (
+                      <Button type="button" variant="outline" onClick={() => setShowGroupModal(true)} className="h-10 shrink-0 rounded-xl">
+                        <FiPlus className="mr-1.5" size={14} /> Add
+                      </Button>
+                    )}
                   </div>
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
                     <FormTextField label="Opening balance" field="opening_balance" type="number" value={formData.opening_balance} onChange={handleFieldChange} />
@@ -2347,7 +2523,7 @@ export function CustomersPage() {
       )}
 
       {/* Add group modal */}
-      {showGroupModal && (
+      {showGroupModal && canManageGroups && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm"
             onClick={() => !addingGroup && setShowGroupModal(false)} />
@@ -2382,7 +2558,7 @@ export function CustomersPage() {
       )}
 
       {/* Import offcanvas */}
-      {isImportOpen && (
+      {isImportOpen && canImportCustomers && (
         <Suspense fallback={
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
             <div className="rounded-2xl bg-white p-8 text-sm text-slate-600 shadow-xl">Loading…</div>

@@ -4,28 +4,22 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Role extends Model
 {
     use HasFactory;
 
-    protected $fillable = [
-        'name',
-        'group',
-        'description',
-        'active',
-    ];
+    protected $fillable = ['name', 'group', 'description', 'active'];
 
-    protected $casts = [
-        'active' => 'boolean',
-    ];
+    protected $casts = ['active' => 'boolean'];
 
-    public function permissions()
+    public function permissions(): BelongsToMany
     {
         return $this->belongsToMany(Permission::class, 'role_permissions');
     }
 
-    public function users()
+    public function users(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'role_user');
     }
@@ -33,19 +27,15 @@ class Role extends Model
     public function givePermissionTo(array|string $permissions): void
     {
         $names = is_array($permissions) ? $permissions : [$permissions];
-        $permissionIds = Permission::whereIn('name', $names)->pluck('id')->all();
-        if (!empty($permissionIds)) {
-            $this->permissions()->syncWithoutDetaching($permissionIds);
-        }
+        $ids = Permission::whereIn('name', $names)->pluck('id')->all();
+        if (! empty($ids)) $this->permissions()->syncWithoutDetaching($ids);
     }
 
     public function revokePermissionTo(array|string $permissions): void
     {
         $names = is_array($permissions) ? $permissions : [$permissions];
-        $permissionIds = Permission::whereIn('name', $names)->pluck('id')->all();
-        if (!empty($permissionIds)) {
-            $this->permissions()->detach($permissionIds);
-        }
+        $ids = Permission::whereIn('name', $names)->pluck('id')->all();
+        if (! empty($ids)) $this->permissions()->detach($ids);
     }
 
     public function syncPermissions(array $permissions): void
@@ -55,8 +45,22 @@ class Role extends Model
 
     public function hasPermission(string|int $permission): bool
     {
-        return $this->permissions->contains(function ($item) use ($permission) {
-            return $item->id === $permission || $item->name === $permission;
-        });
+        return $this->permissions->contains(
+            fn ($item) => $item->id === $permission || $item->name === $permission
+        );
+    }
+
+    public function hasAnyPermission(array $permissions): bool
+    {
+        return $this->permissions->contains(
+            fn ($item) => in_array($item->id, $permissions, true)
+                       || in_array($item->name, $permissions, true)
+        );
+    }
+
+    public function hasAllPermissions(array $permissions): bool
+    {
+        foreach ($permissions as $p) { if (! $this->hasPermission($p)) return false; }
+        return true;
     }
 }

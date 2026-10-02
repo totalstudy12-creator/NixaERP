@@ -8,7 +8,6 @@ import React, {
   lazy,
   Suspense,
   memo,
-  startTransition,
 } from 'react';
 import {
   FiPlus,
@@ -26,11 +25,14 @@ import {
   FiHash,
   FiBriefcase,
   FiX,
+  FiLock,
+  FiEye,
 } from 'react-icons/fi';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { useAuthStore } from '../store/auth';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -54,6 +56,88 @@ import {
 const Offcanvas = lazy(() =>
   import('../components/Offcanvas').then((m) => ({ default: m.Offcanvas }))
 );
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Permission keys                                              */
+/* ------------------------------------------------------------------ */
+
+const PERMISSIONS = {
+  WAREHOUSES_VIEW: 'warehouses.view',
+  WAREHOUSES_CREATE: 'warehouses.create',
+  WAREHOUSES_UPDATE: 'warehouses.update',
+  WAREHOUSES_DELETE: 'warehouses.delete',
+  WAREHOUSES_EXPORT: 'warehouses.export',
+} as const;
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Store-backed permissions (admin-aware + notation-insensitive) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Collapse a permission key so that the different notations used across the
+ * codebase all match each other:
+ *
+ *   "warehouses.view"       → "view warehouses"
+ *   "view warehouses"       → "view warehouses"
+ *   "warehouses:view"       → "view warehouses"
+ */
+function normalisePermission(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[.:_/\-]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+interface UsePagePermissionsResult {
+  can: (permission: string | string[]) => boolean;
+  isAuthenticated: boolean;
+  isSuperAdmin: boolean;
+  loadingUser: boolean;
+}
+
+function usePagePermissions(): UsePagePermissionsResult {
+  const user = useAuthStore((s) => s.user);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const storeIsSuperAdmin = useAuthStore((s) => s.isSuperAdmin);
+  const storeHasAnyPermission = useAuthStore((s) => s.hasAnyPermission);
+
+  const isSuperAdmin = useMemo(() => storeIsSuperAdmin(), [storeIsSuperAdmin, user]);
+
+  const can = useCallback(
+    (permission: string | string[]): boolean => {
+      if (!isAuthenticated) return false;
+      if (isSuperAdmin) return true;
+
+      const keys = Array.isArray(permission) ? permission : [permission];
+
+      if (storeHasAnyPermission(keys)) return true;
+
+      const hasMetadata =
+        (user?.permission_names?.length ?? 0) > 0 ||
+        (user?.permissions?.length ?? 0) > 0 ||
+        (user?.roles?.length ?? 0) > 0 ||
+        (user?.role_names?.length ?? 0) > 0;
+      if (!hasMetadata) return false;
+
+      const normalised = new Set<string>();
+      (user?.permission_names ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p)),
+      );
+      (user?.permissions ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p.name)),
+      );
+
+      return keys.some((k) => normalised.has(normalisePermission(k)));
+    },
+    [isAuthenticated, isSuperAdmin, storeHasAnyPermission, user],
+  );
+
+  return { can, isAuthenticated, isSuperAdmin, loadingUser };
+}
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -347,11 +431,43 @@ const StatCard = memo(
 StatCard.displayName = 'StatCard';
 
 /* ------------------------------------------------------------------ */
+/* Access-restricted screen                                            */
+/* ------------------------------------------------------------------ */
+
+function AccessRestricted() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-rose-50 text-rose-500">
+          <FiLock size={26} />
+        </div>
+        <h1 className="mt-4 text-lg font-bold text-slate-900">Access restricted</h1>
+        <p className="mt-2 text-sm leading-6 text-slate-500">
+          Your account does not have permission to view Warehouses. Contact your
+          administrator to request the{' '}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px]">
+            warehouses.view
+          </code>{' '}
+          permission.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Main component                                                      */
 /* ------------------------------------------------------------------ */
 
 export function WarehousesPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isAuthenticated, loadingUser } = usePagePermissions();
+
+  const canView = can(PERMISSIONS.WAREHOUSES_VIEW);
+  const canCreate = can(PERMISSIONS.WAREHOUSES_CREATE);
+  const canUpdate = can(PERMISSIONS.WAREHOUSES_UPDATE);
+  const canDelete = can(PERMISSIONS.WAREHOUSES_DELETE);
+  const canExport = can(PERMISSIONS.WAREHOUSES_EXPORT);
 
   /* -------------------- Filter state -------------------- */
   const [filterCompany, setFilterCompany] = useState('all');
@@ -443,12 +559,15 @@ export function WarehousesPage() {
   }, [filterCompany, branches]);
 
   /* -------------------- Selection -------------------- */
+  const canMutate = canUpdate || canDelete;
+
   const allSelected = Boolean(
     filteredWarehouses.length > 0 &&
       filteredWarehouses.every((w) => selectedIds.includes(w.id))
   );
 
   const toggleSelectAll = useCallback(() => {
+    if (!canMutate) return;
     const ids = filteredWarehouses.map((w) => w.id);
     if (!ids.length) return;
     if (allSelected) {
@@ -456,13 +575,17 @@ export function WarehousesPage() {
     } else {
       setSelectedIds((current) => Array.from(new Set([...current, ...ids])));
     }
-  }, [allSelected, filteredWarehouses]);
+  }, [allSelected, filteredWarehouses, canMutate]);
 
-  const toggleSelected = useCallback((id: number) => {
-    setSelectedIds((current) =>
-      current.includes(id) ? current.filter((v) => v !== id) : [...current, id]
-    );
-  }, []);
+  const toggleSelected = useCallback(
+    (id: number) => {
+      if (!canMutate) return;
+      setSelectedIds((current) =>
+        current.includes(id) ? current.filter((v) => v !== id) : [...current, id]
+      );
+    },
+    [canMutate]
+  );
 
   /* -------------------- Detail view -------------------- */
   const handleView = useCallback((warehouse: Warehouse) => {
@@ -471,7 +594,11 @@ export function WarehousesPage() {
   }, []);
 
   /* -------------------- Bulk actions -------------------- */
-  const handleBulkDelete = async () => {
+  const handleBulkDelete = useCallback(async () => {
+    if (!canDelete) {
+      showError('Permission denied', 'You do not have permission to delete warehouses.');
+      return;
+    }
     if (selectedIds.length === 0) return;
     if (!window.confirm(`Delete ${selectedIds.length} warehouse(s)?`)) return;
     try {
@@ -488,39 +615,46 @@ export function WarehousesPage() {
     } catch (err: unknown) {
       showError('Bulk delete failed', getErrorMessage(err, 'Bulk delete failed.'));
     }
-  };
+  }, [selectedIds, canDelete, refreshWarehouses, showSuccess, showError]);
 
-  const handleBulkStatusChange = async (active: boolean) => {
-    if (selectedIds.length === 0) return;
-    const label = active ? 'activate' : 'deactivate';
-    if (
-      !window.confirm(
-        `Are you sure you want to ${label} ${selectedIds.length} warehouse(s)?`
-      )
-    )
-      return;
-    try {
-      await Promise.all(
-        selectedIds.map((id) =>
-          apiClient.updateWarehouse(id, { active } as Partial<Warehouse>)
+  const handleBulkStatusChange = useCallback(
+    async (active: boolean) => {
+      if (!canUpdate) {
+        showError('Permission denied', 'You do not have permission to update warehouses.');
+        return;
+      }
+      if (selectedIds.length === 0) return;
+      const label = active ? 'activate' : 'deactivate';
+      if (
+        !window.confirm(
+          `Are you sure you want to ${label} ${selectedIds.length} warehouse(s)?`
         )
-      );
-      showSuccess('Bulk update', `${selectedIds.length} warehouse(s) ${label}d.`);
-      safeLog({
-        module: 'Warehouses',
-        action: 'Bulk status change',
-        status: 'success',
-        message: `${label}d ${selectedIds.length} warehouses`,
-      });
-      setSelectedIds([]);
-      refreshWarehouses();
-    } catch (err: unknown) {
-      showError('Bulk update failed', getErrorMessage(err, 'Bulk update failed.'));
-    }
-  };
+      )
+        return;
+      try {
+        await Promise.all(
+          selectedIds.map((id) =>
+            apiClient.updateWarehouse(id, { active } as Partial<Warehouse>)
+          )
+        );
+        showSuccess('Bulk update', `${selectedIds.length} warehouse(s) ${label}d.`);
+        safeLog({
+          module: 'Warehouses',
+          action: 'Bulk status change',
+          status: 'success',
+          message: `${label}d ${selectedIds.length} warehouses`,
+        });
+        setSelectedIds([]);
+        refreshWarehouses();
+      } catch (err: unknown) {
+        showError('Bulk update failed', getErrorMessage(err, 'Bulk update failed.'));
+      }
+    },
+    [selectedIds, canUpdate, refreshWarehouses, showSuccess, showError]
+  );
 
   /* -------------------- CRUD -------------------- */
-  const resetForm = () => {
+  const resetForm = useCallback(() => {
     setFormData({
       company_id: '',
       branch_id: '',
@@ -530,30 +664,45 @@ export function WarehousesPage() {
       active: true,
     });
     setFormError(null);
-  };
+  }, []);
 
   const handleCreate = useCallback(() => {
+    if (!canCreate) {
+      showError('Permission denied', 'You do not have permission to create warehouses.');
+      return;
+    }
     setEditingId(null);
     resetForm();
     setIsPanelOpen(true);
-  }, []);
+  }, [canCreate, showError, resetForm]);
 
-  const handleEdit = useCallback((warehouse: Warehouse) => {
-    setEditingId(warehouse.id);
-    setFormData({
-      company_id: warehouse.company_id || '',
-      branch_id: warehouse.branch_id || '',
-      name: warehouse.name || '',
-      code: warehouse.code || '',
-      location: warehouse.location || '',
-      active: warehouse.active ?? true,
-    });
-    setFormError(null);
-    setIsPanelOpen(true);
-  }, []);
+  const handleEdit = useCallback(
+    (warehouse: Warehouse) => {
+      if (!canUpdate) {
+        showError('Permission denied', 'You do not have permission to edit warehouses.');
+        return;
+      }
+      setEditingId(warehouse.id);
+      setFormData({
+        company_id: warehouse.company_id || '',
+        branch_id: warehouse.branch_id || '',
+        name: warehouse.name || '',
+        code: warehouse.code || '',
+        location: warehouse.location || '',
+        active: warehouse.active ?? true,
+      });
+      setFormError(null);
+      setIsPanelOpen(true);
+    },
+    [canUpdate, showError]
+  );
 
   const handleDelete = useCallback(
     async (warehouse: Warehouse) => {
+      if (!canDelete) {
+        showError('Permission denied', 'You do not have permission to delete warehouses.');
+        return;
+      }
       if (!window.confirm(`Delete warehouse "${warehouse.name}"?`)) return;
       try {
         await apiClient.deleteWarehouse(warehouse.id);
@@ -569,11 +718,11 @@ export function WarehousesPage() {
         showError('Delete failed', getErrorMessage(err, 'Delete failed.'));
       }
     },
-    [refreshWarehouses, showError, showSuccess]
+    [canDelete, refreshWarehouses, showError, showSuccess]
   );
 
   /* -------------------- Validation -------------------- */
-  const validateForm = (): boolean => {
+  const validateForm = useCallback((): boolean => {
     if (!formData.company_id) {
       setFormError('Company is required.');
       return false;
@@ -588,10 +737,21 @@ export function WarehousesPage() {
     }
     setFormError(null);
     return true;
-  };
+  }, [formData]);
 
   const handleSubmit = useCallback(async () => {
+    const isEdit = Boolean(editingId);
+    if (isEdit ? !canUpdate : !canCreate) {
+      showError(
+        'Permission denied',
+        isEdit
+          ? 'You do not have permission to edit warehouses.'
+          : 'You do not have permission to create warehouses.'
+      );
+      return;
+    }
     if (!validateForm()) return;
+
     const payload = {
       ...formData,
       company_id: parseInt(String(formData.company_id)),
@@ -628,10 +788,23 @@ export function WarehousesPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [formData, editingId, refreshWarehouses, showSuccess, showError]);
+  }, [
+    formData,
+    editingId,
+    canCreate,
+    canUpdate,
+    refreshWarehouses,
+    showSuccess,
+    showError,
+    validateForm,
+  ]);
 
   /* -------------------- Export -------------------- */
   const handleExport = useCallback(() => {
+    if (!canExport) {
+      showError('Permission denied', 'You do not have permission to export warehouses.');
+      return;
+    }
     if (filteredWarehouses.length === 0) {
       showError('Export failed', 'No warehouses to export.');
       return;
@@ -656,35 +829,51 @@ export function WarehousesPage() {
     a.click();
     URL.revokeObjectURL(url);
     showSuccess('Export', 'Warehouses exported.');
-  }, [filteredWarehouses, showSuccess, showError]);
+  }, [filteredWarehouses, canExport, showSuccess, showError]);
 
   /* -------------------- Render field helpers -------------------- */
-  const renderField = (
-    label: string,
-    field: keyof WarehouseFormData,
-    required = false
-  ) => {
-    const value = formData[field] ?? '';
-    const id = `field-${field}`;
+  const renderField = useCallback(
+    (label: string, field: keyof WarehouseFormData, required = false) => {
+      const value = formData[field] ?? '';
+      const id = `field-${field}`;
+      return (
+        <div className="min-w-0">
+          <label
+            htmlFor={id}
+            className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500"
+          >
+            {label} {required && <span className="text-rose-500">*</span>}
+          </label>
+          <input
+            id={id}
+            type="text"
+            value={value as string}
+            onChange={(e) =>
+              setFormData((prev) => ({ ...prev, [field]: e.target.value }))
+            }
+            className="h-10 w-full min-w-0 rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+            placeholder={`Enter ${label}`}
+          />
+        </div>
+      );
+    },
+    [formData]
+  );
+
+  /* -------------------- RBAC page gate -------------------- */
+  if (loadingUser && !isAuthenticated) {
     return (
-      <div className="min-w-0">
-        <label
-          htmlFor={id}
-          className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500"
-        >
-          {label} {required && <span className="text-rose-500">*</span>}
-        </label>
-        <input
-          id={id}
-          type="text"
-          value={value as string}
-          onChange={(e) => setFormData((prev) => ({ ...prev, [field]: e.target.value }))}
-          className="h-10 w-full min-w-0 rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-          placeholder={`Enter ${label}`}
-        />
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
       </div>
     );
-  };
+  }
+
+  if (!isAuthenticated || !canView) {
+    return <AccessRestricted />;
+  }
 
   /* -------------------- Error state -------------------- */
   if (whError) {
@@ -773,22 +962,26 @@ export function WarehousesPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  variant="outline"
-                  onClick={handleExport}
-                  disabled={isLoading || filteredWarehouses.length === 0}
-                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
-                >
-                  <FiDownload className="mr-2" size={14} />
-                  Export
-                </Button>
-                <Button
-                  onClick={handleCreate}
-                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
-                >
-                  <FiPlus className="mr-2" size={14} />
-                  New warehouse
-                </Button>
+                {canExport && (
+                  <Button
+                    variant="outline"
+                    onClick={handleExport}
+                    disabled={isLoading || filteredWarehouses.length === 0}
+                    className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                  >
+                    <FiDownload className="mr-2" size={14} />
+                    Export
+                  </Button>
+                )}
+                {canCreate && (
+                  <Button
+                    onClick={handleCreate}
+                    className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                  >
+                    <FiPlus className="mr-2" size={14} />
+                    New warehouse
+                  </Button>
+                )}
               </div>
             </div>
           </section>
@@ -915,37 +1108,43 @@ export function WarehousesPage() {
             </CardContent>
           </Card>
 
-          {/* Bulk toolbar */}
-          {selectedIds.length > 0 && (
+          {/* Bulk toolbar — only for users with update or delete permission */}
+          {selectedIds.length > 0 && canMutate && (
             <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
                 <div className="mr-1 flex items-center gap-2 rounded-lg bg-indigo-50 px-2.5 py-1 text-indigo-700 ring-1 ring-indigo-500/10">
                   <span className="text-sm font-bold">{selectedIds.length}</span>
                   <span className="text-xs font-medium">selected</span>
                 </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-lg"
-                  onClick={() => handleBulkStatusChange(true)}
-                >
-                  <FiCheckCircle className="mr-1.5 text-emerald-600" size={14} /> Activate
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-lg"
-                  onClick={() => handleBulkStatusChange(false)}
-                >
-                  <FiXCircle className="mr-1.5 text-amber-600" size={14} /> Deactivate
-                </Button>
-                <Button
-                  size="sm"
-                  className="h-9 rounded-lg border border-red-600 bg-red-600 font-semibold text-white shadow-none hover:border-red-700 hover:bg-red-700"
-                  onClick={handleBulkDelete}
-                >
-                  <FiTrash2 className="mr-1.5" size={14} /> Delete
-                </Button>
+                {canUpdate && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-9 rounded-lg"
+                      onClick={() => handleBulkStatusChange(true)}
+                    >
+                      <FiCheckCircle className="mr-1.5 text-emerald-600" size={14} /> Activate
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-9 rounded-lg"
+                      onClick={() => handleBulkStatusChange(false)}
+                    >
+                      <FiXCircle className="mr-1.5 text-amber-600" size={14} /> Deactivate
+                    </Button>
+                  </>
+                )}
+                {canDelete && (
+                  <Button
+                    size="sm"
+                    className="h-9 rounded-lg border border-red-600 bg-red-600 font-semibold text-white shadow-none hover:border-red-700 hover:bg-red-700"
+                    onClick={handleBulkDelete}
+                  >
+                    <FiTrash2 className="mr-1.5" size={14} /> Delete
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="ghost"
@@ -984,19 +1183,21 @@ export function WarehousesPage() {
               <Table className="min-w-[1040px]">
                 <TableHeader>
                   <TableRow className="border-slate-100 bg-slate-50/70 hover:bg-slate-50/70">
-                    <TableHead className="w-11 px-3">
-                      <input
-                        aria-label="Select all"
-                        type="checkbox"
-                        checked={allSelected}
-                        onChange={(event) => {
-                          event.stopPropagation();
-                          toggleSelectAll();
-                        }}
-                        onClick={(event) => event.stopPropagation()}
-                        className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
-                      />
-                    </TableHead>
+                    {canMutate && (
+                      <TableHead className="w-11 px-3">
+                        <input
+                          aria-label="Select all"
+                          type="checkbox"
+                          checked={allSelected}
+                          onChange={(event) => {
+                            event.stopPropagation();
+                            toggleSelectAll();
+                          }}
+                          onClick={(event) => event.stopPropagation()}
+                          className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                        />
+                      </TableHead>
+                    )}
                     <TableHead>
                       <TableHeadLabel>Warehouse</TableHeadLabel>
                     </TableHead>
@@ -1012,7 +1213,7 @@ export function WarehousesPage() {
                     <TableHead>
                       <TableHeadLabel>Status</TableHeadLabel>
                     </TableHead>
-                    <TableHead className="w-12" />
+                    {(canUpdate || canDelete) && <TableHead className="w-24" />}
                   </TableRow>
                 </TableHeader>
 
@@ -1020,7 +1221,12 @@ export function WarehousesPage() {
                   {isLoading &&
                     Array.from({ length: 8 }).map((_, index) => (
                       <TableRow key={`skeleton-${index}`} className="border-slate-100">
-                        {Array.from({ length: TABLE_COLUMN_COUNT + 1 }).map((__, cellIndex) => (
+                        {Array.from({
+                          length:
+                            TABLE_COLUMN_COUNT +
+                            (canMutate ? 1 : 0) +
+                            (canUpdate || canDelete ? 1 : 0),
+                        }).map((__, cellIndex) => (
                           <TableCell key={cellIndex}>
                             <div className="h-4 animate-pulse rounded bg-slate-100" />
                           </TableCell>
@@ -1040,19 +1246,21 @@ export function WarehousesPage() {
                           }`}
                           onClick={() => handleView(warehouse)}
                         >
-                          <TableCell className="px-3" onClick={(e) => e.stopPropagation()}>
-                            <input
-                              aria-label={`Select ${warehouse.name}`}
-                              type="checkbox"
-                              checked={selected}
-                              onChange={(event) => {
-                                event.stopPropagation();
-                                toggleSelected(warehouse.id);
-                              }}
-                              onClick={(event) => event.stopPropagation()}
-                              className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
-                            />
-                          </TableCell>
+                          {canMutate && (
+                            <TableCell className="px-3" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                aria-label={`Select ${warehouse.name}`}
+                                type="checkbox"
+                                checked={selected}
+                                onChange={(event) => {
+                                  event.stopPropagation();
+                                  toggleSelected(warehouse.id);
+                                }}
+                                onClick={(event) => event.stopPropagation()}
+                                className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                              />
+                            </TableCell>
+                          )}
 
                           <TableCell>
                             <div className="flex min-w-[200px] items-center gap-2.5">
@@ -1106,31 +1314,54 @@ export function WarehousesPage() {
                             </Badge>
                           </TableCell>
 
-                          <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                            <div className="flex items-center justify-end gap-1">
-                              <button
-                                onClick={() => handleEdit(warehouse)}
-                                className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
-                                title="Edit"
-                              >
-                                <FiEdit size={15} />
-                              </button>
-                              <button
-                                onClick={() => handleDelete(warehouse)}
-                                className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
-                                title="Delete"
-                              >
-                                <FiTrash2 size={15} />
-                              </button>
-                            </div>
-                          </TableCell>
+                          {(canUpdate || canDelete) && (
+                            <TableCell
+                              className="text-right"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div className="flex items-center justify-end gap-1">
+                                <button
+                                  onClick={() => handleView(warehouse)}
+                                  className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+                                  title="View"
+                                >
+                                  <FiEye size={15} />
+                                </button>
+                                {canUpdate && (
+                                  <button
+                                    onClick={() => handleEdit(warehouse)}
+                                    className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
+                                    title="Edit"
+                                  >
+                                    <FiEdit size={15} />
+                                  </button>
+                                )}
+                                {canDelete && (
+                                  <button
+                                    onClick={() => handleDelete(warehouse)}
+                                    className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
+                                    title="Delete"
+                                  >
+                                    <FiTrash2 size={15} />
+                                  </button>
+                                )}
+                              </div>
+                            </TableCell>
+                          )}
                         </TableRow>
                       );
                     })}
 
                   {!isLoading && !filteredWarehouses.length && (
                     <TableRow>
-                      <TableCell colSpan={TABLE_COLUMN_COUNT + 1} className="py-20 text-center">
+                      <TableCell
+                        colSpan={
+                          TABLE_COLUMN_COUNT +
+                          (canMutate ? 1 : 0) +
+                          (canUpdate || canDelete ? 1 : 0)
+                        }
+                        className="py-20 text-center"
+                      >
                         <div className="mx-auto max-w-md px-4">
                           <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 ring-1 ring-slate-200/70">
                             <FiFilter className="h-6 w-6 text-slate-400" />
@@ -1187,15 +1418,17 @@ export function WarehousesPage() {
                 >
                   <FiX className="mr-2" size={14} /> Close
                 </Button>
-                <Button
-                  onClick={() => {
-                    setIsViewPanelOpen(false);
-                    handleEdit(viewingWarehouse);
-                  }}
-                  className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
-                >
-                  <FiEdit className="mr-2" size={14} /> Edit
-                </Button>
+                {canUpdate && (
+                  <Button
+                    onClick={() => {
+                      setIsViewPanelOpen(false);
+                      handleEdit(viewingWarehouse);
+                    }}
+                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                  >
+                    <FiEdit className="mr-2" size={14} /> Edit
+                  </Button>
+                )}
               </div>
             }
           >
@@ -1312,8 +1545,8 @@ export function WarehousesPage() {
         </Suspense>
       )}
 
-      {/* Form offcanvas (Create/Edit) */}
-      {isPanelOpen && (
+      {/* Form offcanvas (Create/Edit) — only when the user can create or edit */}
+      {isPanelOpen && (canCreate || canUpdate) && (
         <Suspense
           fallback={
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
@@ -1343,7 +1576,11 @@ export function WarehousesPage() {
                   disabled={submitting}
                   className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
                 >
-                  {submitting ? 'Saving…' : editingId ? 'Update warehouse' : 'Create warehouse'}
+                  {submitting
+                    ? 'Saving…'
+                    : editingId
+                      ? 'Update warehouse'
+                      : 'Create warehouse'}
                 </Button>
               </div>
             }

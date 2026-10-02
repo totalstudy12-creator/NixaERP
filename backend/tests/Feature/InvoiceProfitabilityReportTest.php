@@ -12,12 +12,14 @@ use App\Models\PurchaseInvoice;
 use App\Models\PurchaseInvoiceItem;
 use App\Models\Supplier;
 use App\Models\User;
+use App\Models\Warehouse;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
 class InvoiceProfitabilityReportTest extends TestCase
 {
     use RefreshDatabase;
+    use InteractsWithPermissions;
 
     public function test_invoice_level_profitability_endpoint_returns_real_costed_profit_rows(): void
     {
@@ -116,7 +118,7 @@ class InvoiceProfitabilityReportTest extends TestCase
 
         $user = User::factory()->create();
 
-        $response = $this->actingAs($user, 'sanctum')
+        $response = $this->actingAsWithPermissions($user, ['view dashboard profit'])
             ->getJson('/api/reports/profit-loss/invoices?from=2025-01-01&to=2025-01-31');
 
         $response->assertOk()
@@ -162,6 +164,11 @@ class InvoiceProfitabilityReportTest extends TestCase
             'is_active' => true,
         ]);
 
+        Warehouse::factory()->create([
+            'company_id' => $company->id,
+            'branch_id' => $branch->id,
+        ]);
+
         $product = Product::create([
             'company_id' => $company->id,
             'branch_id' => $branch->id,
@@ -177,7 +184,7 @@ class InvoiceProfitabilityReportTest extends TestCase
 
         $user = User::factory()->create();
 
-        $response = $this->actingAs($user, 'sanctum')
+        $response = $this->actingAsWithPermissions($user, ['create invoices'])
             ->postJson('/api/invoices', [
                 'company_id' => $company->id,
                 'branch_id' => $branch->id,
@@ -321,6 +328,11 @@ class InvoiceProfitabilityReportTest extends TestCase
         ]);
 
         $user = User::factory()->create();
+
+        $this->actingAsWithPermissions($user, [
+            'view purchase reports',
+            'view accounting statements',
+        ]);
 
         $purchaseRegister = $this->actingAs($user, 'sanctum')
             ->getJson('/api/reports/purchase-register?from=2025-02-01&to=2025-02-28');

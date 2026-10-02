@@ -9,6 +9,8 @@ class BiometricDevice extends Model
 {
     use HasFactory;
 
+    protected $hidden = ['api_token_hash'];
+
     protected $fillable = [
         'company_id',
         'branch_id',

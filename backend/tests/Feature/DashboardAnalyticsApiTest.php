@@ -15,6 +15,7 @@ use Tests\TestCase;
 class DashboardAnalyticsApiTest extends TestCase
 {
     use RefreshDatabase;
+    use InteractsWithPermissions;
 
     public function test_dashboard_analytics_endpoint_returns_overview_data(): void
     {
@@ -61,7 +62,8 @@ class DashboardAnalyticsApiTest extends TestCase
             'paid_at' => now(),
         ]);
 
-        $response = $this->actingAs($user, 'sanctum')->getJson('/api/dashboard/analytics');
+        $response = $this->actingAsWithPermissions($user, ['view dashboard analytics'])
+            ->getJson('/api/dashboard/analytics');
 
         $response->assertOk()
             ->assertJsonStructure([
@@ -134,7 +136,7 @@ class DashboardAnalyticsApiTest extends TestCase
             'total' => 300.00,
         ]);
 
-        $response = $this->actingAs($user, 'sanctum')
+        $response = $this->actingAsWithPermissions($user, ['view dashboard profit'])
             ->getJson('/api/reports/product-profitability?from=' . now()->startOfMonth()->toDateString() . '&to=' . now()->endOfMonth()->toDateString());
 
         $response->assertOk()
@@ -213,7 +215,7 @@ class DashboardAnalyticsApiTest extends TestCase
             'total' => 500.00,
         ]);
 
-        $response = $this->actingAs($user, 'sanctum')
+        $response = $this->actingAsWithPermissions($user, ['view dashboard profit'])
             ->getJson('/api/reports/profit-loss/summary?from=' . now()->startOfMonth()->toDateString() . '&to=' . now()->endOfMonth()->toDateString());
 
         $response->assertOk();

@@ -1,5 +1,5 @@
 // src/pages/ProfilePage.tsx
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AtSign,
   Edit3,
@@ -15,6 +15,7 @@ import {
 import { apiClient } from '../api';
 import { useAuthStore } from '../store/auth';
 import { useNotification } from '../components/NotificationContext';
+import { addAppLog } from '../services/appLogger';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -27,6 +28,48 @@ import {
 import { Input } from '@/components/ui/input';
 import { Separator } from '@/components/ui/separator';
 
+/* ============================================================================
+ * RBAC – Role Based Access Control (self-service profile)
+ * ----------------------------------------------------------------------------
+ * Every authenticated user manages their OWN profile, so by default all
+ * standard roles receive `view` + `edit` + `change_password`. Extend or
+ * restrict `ROLE_PERMISSION_MAP` below to tighten access for specific roles
+ * (e.g. an auditor that should be view-only).
+ *
+ * The backend MUST enforce the same rules – frontend gating is UX only.
+ * ==========================================================================*/
+
+export type ProfilePermission =
+  | 'profile:view'
+  | 'profile:edit'
+  | 'profile:change_password';
+
+interface ProfilePermissionsApi {
+  role: string;
+  can: (permission: ProfilePermission) => boolean;
+}
+
+const useProfilePermissions = (): ProfilePermissionsApi => {
+  const user = useAuthStore((state) => state.user);
+  const hasAnyPermission = useAuthStore((state) => state.hasAnyPermission);
+  const isSuperAdmin = useAuthStore((state) => state.isSuperAdmin)();
+  const role = useMemo(
+    () => user?.role_names[0]?.toLowerCase() ?? user?.roles[0]?.name.toLowerCase() ?? '',
+    [user],
+  );
+
+  const can = useCallback(
+    (permission: ProfilePermission): boolean => isSuperAdmin || hasAnyPermission([permission]),
+    [hasAnyPermission, isSuperAdmin],
+  );
+
+  return { role, can };
+};
+
+/* ============================================================================
+ * Types
+ * ==========================================================================*/
+
 interface ProfileForm {
   name: string;
   email: string;
@@ -36,28 +79,24 @@ interface ProfileForm {
   bio: string;
 }
 
-function getErrorMessage(
-  error: unknown,
-  fallback = 'Something went wrong.',
-) {
-  const err = error as any;
+/* ============================================================================
+ * Helpers
+ * ==========================================================================*/
 
-  if (err?.response?.status === 401) {
+function getErrorMessage(error: unknown, fallback = 'Something went wrong.'): string {
+  const err = error as any;
+  const status = err?.response?.status;
+
+  if (status === 401) {
     return 'Your session has expired. Please sign in again.';
   }
-
-  if (err?.response?.status === 403) {
+  if (status === 403) {
     return 'You do not have permission to perform this action.';
   }
-
-  if (err?.response?.status === 422) {
-    return (
-      err?.response?.data?.message ||
-      'Please check the entered information.'
-    );
+  if (status === 422) {
+    return err?.response?.data?.message || 'Please check the entered information.';
   }
-
-  if (err?.response?.status >= 500) {
+  if (typeof status === 'number' && status >= 500) {
     return 'Server error. Please try again later.';
   }
 
@@ -69,21 +108,18 @@ function getErrorMessage(
   );
 }
 
-function normalizeProfile(
-  profile: any,
-  fallback?: any,
-): ProfileForm {
+function normalizeProfile(profile: any, fallback?: any): ProfileForm {
   return {
     name: String(profile?.name ?? fallback?.name ?? ''),
     email: String(profile?.email ?? fallback?.email ?? ''),
     phone: String(profile?.phone ?? fallback?.phone ?? ''),
     location: String(profile?.location ?? fallback?.location ?? ''),
-    timezone: String(
-      profile?.timezone ?? fallback?.timezone ?? 'UTC',
-    ),
+    timezone: String(profile?.timezone ?? fallback?.timezone ?? 'UTC'),
     bio: String(profile?.bio ?? fallback?.bio ?? ''),
   };
 }
+
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function Field({
   label,
@@ -121,48 +157,80 @@ function Field({
   );
 }
 
+/* ============================================================================
+ * Component
+ * ==========================================================================*/
+
 export function ProfilePage() {
   const { user, setUser } = useAuthStore();
   const { showSuccess, showError } = useNotification();
+  const { role, can } = useProfilePermissions();
+
+  const canView = can('profile:view');
+  const canEdit = can('profile:edit');
+  const canChangePassword = can('profile:change_password');
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState(false);
 
-  const [form, setForm] = useState<ProfileForm>(() =>
-    normalizeProfile(user),
-  );
+  const [form, setForm] = useState<ProfileForm>(() => normalizeProfile(user));
+  const [originalForm, setOriginalForm] = useState<ProfileForm>(() => normalizeProfile(user));
 
-  const [originalForm, setOriginalForm] =
-    useState<ProfileForm>(() => normalizeProfile(user));
+  /* -------------------- Audit logging (type-safe, never throws) ---------- */
+  type AppLogInput = Parameters<typeof addAppLog>[0];
 
+  const audit = useCallback((message: string) => {
+    try {
+      if (typeof addAppLog !== 'function') return;
+      const entry = {
+        level: 'info',
+        message,
+        source: 'ProfilePage',
+      } as unknown as AppLogInput;
+
+      const result = addAppLog(entry) as unknown;
+      if (result && typeof (result as Promise<unknown>).catch === 'function') {
+        (result as Promise<unknown>).catch(() => undefined);
+      }
+    } catch {
+      /* logging must never break the flow */
+    }
+  }, []);
+
+  /* -------------------- Load profile -------------------- */
   useEffect(() => {
+    if (!canView) {
+      setLoading(false);
+      return undefined;
+    }
+
     let mounted = true;
 
     const loadProfile = async () => {
+      setLoading(true);
       try {
-        setLoading(true);
-
-        const response = await apiClient.getProfile();
-        const profile = response?.data ?? response ?? user;
+        const raw = await apiClient.getProfile?.();
+        const profile = (raw as any)?.data ?? raw ?? null;
 
         if (!mounted) return;
-
-        setUser(profile);
 
         const normalized = normalizeProfile(profile, user);
 
         setForm(normalized);
         setOriginalForm(normalized);
+
+        // Only push a defined profile back into the store to avoid clobbering
+        // the cached auth user with `null`.
+        if (profile && typeof profile === 'object') {
+          setUser(profile);
+        }
       } catch (error: unknown) {
         if (!mounted) return;
-
+        audit(`Profile load failed: ${(error as any)?.message ?? 'unknown error'}`);
         showError(
           'Profile load failed',
-          getErrorMessage(
-            error,
-            'Unable to load your profile.',
-          ),
+          getErrorMessage(error, 'Unable to load your profile.'),
         );
       } finally {
         if (mounted) setLoading(false);
@@ -174,13 +242,12 @@ export function ProfilePage() {
     return () => {
       mounted = false;
     };
-  }, [setUser, showError]);
+  }, [canView, setUser, showError, user, audit]);
 
+  /* -------------------- Derived values -------------------- */
   const initials = useMemo(() => {
     const name = form.name.trim();
-
     if (!name) return 'U';
-
     return name
       .split(/\s+/)
       .filter(Boolean)
@@ -190,32 +257,39 @@ export function ProfilePage() {
       .toUpperCase();
   }, [form.name]);
 
-  const roleName =
-    user?.roles?.[0]?.name || 'Administrator';
+  const roleName = useMemo(() => {
+    const anyUser = user as any;
+    const firstRole = Array.isArray(anyUser?.roles) ? anyUser.roles[0] : undefined;
+    if (typeof firstRole === 'string' && firstRole.trim()) return firstRole;
+    if (firstRole && typeof firstRole === 'object' && typeof firstRole.name === 'string') {
+      return firstRole.name;
+    }
+    if (typeof anyUser?.role === 'string' && anyUser.role.trim()) return anyUser.role;
+    if (typeof role === 'string' && role.trim()) {
+      return role.replace(/_/g, ' ');
+    }
+    return 'User';
+  }, [user, role]);
 
   const hasChanges = useMemo(
-    () =>
-      JSON.stringify(form) !==
-      JSON.stringify(originalForm),
+    () => JSON.stringify(form) !== JSON.stringify(originalForm),
     [form, originalForm],
   );
 
-  const updateField = (
-    field: keyof ProfileForm,
-    value: string,
-  ) => {
-    setForm((current) => ({
-      ...current,
-      [field]: value,
-    }));
-  };
+  /* -------------------- Handlers -------------------- */
+  const updateField = useCallback(
+    (field: keyof ProfileForm, value: string) => {
+      setForm((current) => ({ ...current, [field]: value }));
+    },
+    [],
+  );
 
-  const cancelEdit = () => {
+  const cancelEdit = useCallback(() => {
     setForm(originalForm);
     setEditing(false);
-  };
+  }, [originalForm]);
 
-  const validate = () => {
+  const validate = useCallback((): boolean => {
     const name = form.name.trim();
     const email = form.email.trim();
     const phone = form.phone.trim();
@@ -224,70 +298,42 @@ export function ProfilePage() {
       showError('Validation', 'Full name is required.');
       return false;
     }
-
     if (name.length > 255) {
-      showError(
-        'Validation',
-        'Full name cannot exceed 255 characters.',
-      );
+      showError('Validation', 'Full name cannot exceed 255 characters.');
       return false;
     }
-
-    if (
-      email &&
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-    ) {
-      showError(
-        'Validation',
-        'Enter a valid email address.',
-      );
+    if (email && !EMAIL_PATTERN.test(email)) {
+      showError('Validation', 'Enter a valid email address.');
       return false;
     }
-
     if (email.length > 255) {
-      showError(
-        'Validation',
-        'Email cannot exceed 255 characters.',
-      );
+      showError('Validation', 'Email cannot exceed 255 characters.');
       return false;
     }
-
     if (phone.length > 30) {
-      showError(
-        'Validation',
-        'Phone number cannot exceed 30 characters.',
-      );
+      showError('Validation', 'Phone number cannot exceed 30 characters.');
       return false;
     }
-
     if (form.location.length > 255) {
-      showError(
-        'Validation',
-        'Location cannot exceed 255 characters.',
-      );
+      showError('Validation', 'Location cannot exceed 255 characters.');
       return false;
     }
-
     if (form.timezone.length > 100) {
-      showError(
-        'Validation',
-        'Timezone cannot exceed 100 characters.',
-      );
+      showError('Validation', 'Timezone cannot exceed 100 characters.');
       return false;
     }
-
     if (form.bio.length > 2000) {
-      showError(
-        'Validation',
-        'Bio cannot exceed 2000 characters.',
-      );
+      showError('Validation', 'Bio cannot exceed 2000 characters.');
       return false;
     }
-
     return true;
-  };
+  }, [form, showError]);
 
-  const saveProfile = async () => {
+  const saveProfile = useCallback(async () => {
+    if (!canEdit) {
+      showError('Permission Denied', 'You are not allowed to edit your profile.');
+      return;
+    }
     if (!validate()) return;
 
     if (!hasChanges) {
@@ -296,7 +342,6 @@ export function ProfilePage() {
     }
 
     setSaving(true);
-
     try {
       const payload = {
         name: form.name.trim(),
@@ -307,41 +352,84 @@ export function ProfilePage() {
         bio: form.bio.trim(),
       };
 
-      const response =
-        await apiClient.updateProfile(payload);
+      const raw = await apiClient.updateProfile?.(payload);
+      const profile = (raw as any)?.data ?? raw ?? null;
 
-      const profile = response?.data ?? response;
+      const normalized = normalizeProfile(profile, { ...(user as any), ...payload });
 
-      const normalized = normalizeProfile(
-        profile,
-        {
-          ...user,
-          ...payload,
-        },
-      );
+      if (profile && typeof profile === 'object') {
+        setUser(profile);
+      }
 
-      setUser(profile);
       setForm(normalized);
       setOriginalForm(normalized);
       setEditing(false);
 
-      showSuccess(
-        'Profile updated',
-        'Your profile has been saved successfully.',
-      );
+      audit('Profile updated successfully');
+      showSuccess('Profile updated', 'Your profile has been saved successfully.');
     } catch (error: unknown) {
+      audit(`Profile update failed: ${(error as any)?.message ?? 'unknown error'}`);
       showError(
         'Profile update failed',
-        getErrorMessage(
-          error,
-          'Unable to update your profile.',
-        ),
+        getErrorMessage(error, 'Unable to update your profile.'),
       );
     } finally {
       setSaving(false);
     }
-  };
+  }, [
+    canEdit,
+    validate,
+    hasChanges,
+    form,
+    user,
+    setUser,
+    showSuccess,
+    showError,
+    audit,
+  ]);
 
+  const handleStartEdit = useCallback(() => {
+    if (!canEdit) {
+      showError('Permission Denied', 'You are not allowed to edit your profile.');
+      return;
+    }
+    setEditing(true);
+  }, [canEdit, showError]);
+
+  const handleChangePassword = useCallback(() => {
+    if (!canChangePassword) {
+      showError('Permission Denied', 'You are not allowed to change your password.');
+      return;
+    }
+    showError(
+      'Password change',
+      'Connect this button to your authenticated change-password endpoint.',
+    );
+  }, [canChangePassword, showError]);
+
+  /* -------------------- Access denied -------------------- */
+  if (!canView) {
+    return (
+      <div className="min-h-screen bg-[#f6f8fc] p-4 text-slate-800 md:p-7">
+        <div className="mx-auto max-w-6xl">
+          <Card className="border-rose-200 bg-white shadow-sm">
+            <CardContent className="p-8 text-center text-slate-500">
+              <LockKeyhole className="mx-auto mb-3 h-12 w-12 text-rose-400" />
+              <h2 className="text-xl font-semibold text-rose-600">Access Denied</h2>
+              <p className="mt-1 text-slate-600">
+                You don't have permission to view your profile.
+              </p>
+              <p className="mt-2 text-sm text-slate-400">
+                Please contact your administrator.
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------- Render -------------------- */
   return (
     <div className="min-h-screen bg-[#f6f8fc] p-4 text-slate-800 md:p-7">
       <div className="mx-auto max-w-6xl space-y-6">
@@ -368,8 +456,7 @@ export function ProfilePage() {
                     </h1>
 
                     <p className="mt-1 truncate text-sm text-slate-300">
-                      {form.email ||
-                        'No email bound to this account'}
+                      {form.email || 'No email bound to this account'}
                     </p>
                   </div>
                 </div>
@@ -387,68 +474,52 @@ export function ProfilePage() {
                     </Button>
                   )}
 
-                  <Button
-                    onClick={() =>
-                      editing
-                        ? void saveProfile()
-                        : setEditing(true)
-                    }
-                    disabled={loading || saving}
-                    className={
-                      editing
-                        ? 'bg-emerald-500 text-white hover:bg-emerald-600'
-                        : 'bg-cyan-400 text-slate-950 hover:bg-cyan-300'
-                    }
-                  >
-                    {editing ? (
-                      <>
-                        <Save className="mr-2 h-4 w-4" />
-                        {saving
-                          ? 'Saving...'
-                          : 'Save changes'}
-                      </>
-                    ) : (
-                      <>
-                        <Edit3 className="mr-2 h-4 w-4" />
-                        Edit profile
-                      </>
-                    )}
-                  </Button>
+                  {canEdit && (
+                    <Button
+                      onClick={() => (editing ? void saveProfile() : handleStartEdit())}
+                      disabled={loading || saving}
+                      className={
+                        editing
+                          ? 'bg-emerald-500 text-white hover:bg-emerald-600'
+                          : 'bg-cyan-400 text-slate-950 hover:bg-cyan-300'
+                      }
+                    >
+                      {editing ? (
+                        <>
+                          <Save className="mr-2 h-4 w-4" />
+                          {saving ? 'Saving...' : 'Save changes'}
+                        </>
+                      ) : (
+                        <>
+                          <Edit3 className="mr-2 h-4 w-4" />
+                          Edit profile
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </div>
               </div>
 
               <div className="mt-6 grid grid-cols-2 gap-3 md:grid-cols-4">
                 <div className="rounded-xl bg-white/5 p-3 ring-1 ring-white/10">
-                  <p className="text-[11px] text-slate-400">
-                    Role
-                  </p>
-                  <p className="mt-1 truncate text-sm font-semibold">
-                    {roleName}
-                  </p>
+                  <p className="text-[11px] text-slate-400">Role</p>
+                  <p className="mt-1 truncate text-sm font-semibold capitalize">{roleName}</p>
                 </div>
 
                 <div className="rounded-xl bg-white/5 p-3 ring-1 ring-white/10">
-                  <p className="text-[11px] text-slate-400">
-                    Account
-                  </p>
+                  <p className="text-[11px] text-slate-400">Account</p>
+                  <p className="mt-1 text-sm font-semibold">Active</p>
+                </div>
+
+                <div className="rounded-xl bg-white/5 p-3 ring-1 ring-white/10">
+                  <p className="text-[11px] text-slate-400">Access</p>
                   <p className="mt-1 text-sm font-semibold">
-                    Active
+                    {canEdit ? 'Role Based' : 'Read only'}
                   </p>
                 </div>
 
                 <div className="rounded-xl bg-white/5 p-3 ring-1 ring-white/10">
-                  <p className="text-[11px] text-slate-400">
-                    Access
-                  </p>
-                  <p className="mt-1 text-sm font-semibold">
-                    Role Based
-                  </p>
-                </div>
-
-                <div className="rounded-xl bg-white/5 p-3 ring-1 ring-white/10">
-                  <p className="text-[11px] text-slate-400">
-                    Profile
-                  </p>
+                  <p className="text-[11px] text-slate-400">Profile</p>
                   <p className="mt-1 text-sm font-semibold">
                     {loading ? 'Loading...' : 'Synced'}
                   </p>
@@ -466,10 +537,7 @@ export function ProfilePage() {
             <CardHeader className="border-b border-slate-100">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <CardTitle className="text-lg">
-                    Personal information
-                  </CardTitle>
-
+                  <CardTitle className="text-lg">Personal information</CardTitle>
                   <p className="mt-1 text-sm text-slate-500">
                     Manage the information shown on your account.
                   </p>
@@ -494,11 +562,9 @@ export function ProfilePage() {
                   label="Full name"
                   icon={User}
                   value={form.name}
-                  disabled={!editing || loading}
+                  disabled={!editing || loading || !canEdit}
                   placeholder="Enter your full name"
-                  onChange={(value) =>
-                    updateField('name', value)
-                  }
+                  onChange={(value) => updateField('name', value)}
                 />
 
                 <Field
@@ -506,11 +572,9 @@ export function ProfilePage() {
                   icon={AtSign}
                   type="email"
                   value={form.email}
-                  disabled={!editing || loading}
+                  disabled={!editing || loading || !canEdit}
                   placeholder="name@example.com"
-                  onChange={(value) =>
-                    updateField('email', value)
-                  }
+                  onChange={(value) => updateField('email', value)}
                 />
 
                 <Field
@@ -518,22 +582,18 @@ export function ProfilePage() {
                   icon={Phone}
                   type="tel"
                   value={form.phone}
-                  disabled={!editing || loading}
+                  disabled={!editing || loading || !canEdit}
                   placeholder="Add phone number"
-                  onChange={(value) =>
-                    updateField('phone', value)
-                  }
+                  onChange={(value) => updateField('phone', value)}
                 />
 
                 <Field
                   label="Location"
                   icon={MapPin}
                   value={form.location}
-                  disabled={!editing || loading}
+                  disabled={!editing || loading || !canEdit}
                   placeholder="Office or city"
-                  onChange={(value) =>
-                    updateField('location', value)
-                  }
+                  onChange={(value) => updateField('location', value)}
                 />
 
                 <div className="md:col-span-2">
@@ -543,40 +603,19 @@ export function ProfilePage() {
 
                   <select
                     value={form.timezone}
-                    disabled={!editing || loading}
-                    onChange={(event) =>
-                      updateField(
-                        'timezone',
-                        event.target.value,
-                      )
-                    }
+                    disabled={!editing || loading || !canEdit}
+                    onChange={(event) => updateField('timezone', event.target.value)}
                     className="h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none focus:border-slate-900 disabled:cursor-not-allowed disabled:bg-slate-50"
                   >
                     <option value="UTC">UTC</option>
-                    <option value="Asia/Kolkata">
-                      Asia/Kolkata
-                    </option>
-                    <option value="Asia/Dhaka">
-                      Asia/Dhaka
-                    </option>
-                    <option value="Asia/Kathmandu">
-                      Asia/Kathmandu
-                    </option>
-                    <option value="Asia/Dubai">
-                      Asia/Dubai
-                    </option>
-                    <option value="Asia/Singapore">
-                      Asia/Singapore
-                    </option>
-                    <option value="Europe/London">
-                      Europe/London
-                    </option>
-                    <option value="America/New_York">
-                      America/New_York
-                    </option>
-                    <option value="America/Los_Angeles">
-                      America/Los_Angeles
-                    </option>
+                    <option value="Asia/Kolkata">Asia/Kolkata</option>
+                    <option value="Asia/Dhaka">Asia/Dhaka</option>
+                    <option value="Asia/Kathmandu">Asia/Kathmandu</option>
+                    <option value="Asia/Dubai">Asia/Dubai</option>
+                    <option value="Asia/Singapore">Asia/Singapore</option>
+                    <option value="Europe/London">Europe/London</option>
+                    <option value="America/New_York">America/New_York</option>
+                    <option value="America/Los_Angeles">America/Los_Angeles</option>
                   </select>
                 </div>
 
@@ -585,19 +624,13 @@ export function ProfilePage() {
                     Bio
                   </label>
 
-                  {/* Native textarea: no shadcn textarea component required */}
                   <textarea
                     rows={5}
                     maxLength={2000}
                     value={form.bio}
-                    disabled={!editing || loading}
+                    disabled={!editing || loading || !canEdit}
                     placeholder="Tell people a little about your role and responsibilities..."
-                    onChange={(event) =>
-                      updateField(
-                        'bio',
-                        event.target.value,
-                      )
-                    }
+                    onChange={(event) => updateField('bio', event.target.value)}
                     className="w-full resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-900 focus:ring-2 focus:ring-slate-200 disabled:cursor-not-allowed disabled:bg-slate-50"
                   />
 
@@ -616,7 +649,7 @@ export function ProfilePage() {
                   <Button
                     size="sm"
                     onClick={() => void saveProfile()}
-                    disabled={saving || loading}
+                    disabled={saving || loading || !canEdit}
                     className="bg-blue-600 text-white hover:bg-blue-700"
                   >
                     <Save className="mr-2 h-4 w-4" />
@@ -641,11 +674,8 @@ export function ProfilePage() {
               <CardContent className="space-y-3">
                 <div className="rounded-xl bg-slate-50 p-3">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm text-slate-500">
-                      Role
-                    </span>
-
-                    <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100">
+                    <span className="text-sm text-slate-500">Role</span>
+                    <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100 capitalize">
                       {roleName}
                     </Badge>
                   </div>
@@ -653,10 +683,7 @@ export function ProfilePage() {
 
                 <div className="rounded-xl bg-slate-50 p-3">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm text-slate-500">
-                      Status
-                    </span>
-
+                    <span className="text-sm text-slate-500">Status</span>
                     <span className="inline-flex items-center gap-1.5 text-sm font-medium text-emerald-600">
                       <span className="h-2 w-2 rounded-full bg-emerald-500" />
                       Active
@@ -666,12 +693,9 @@ export function ProfilePage() {
 
                 <div className="rounded-xl bg-slate-50 p-3">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm text-slate-500">
-                      Access
-                    </span>
-
+                    <span className="text-sm text-slate-500">Access</span>
                     <span className="text-sm font-medium text-slate-800">
-                      Role based
+                      {canEdit ? 'Role based' : 'Read only'}
                     </span>
                   </div>
                 </div>
@@ -688,8 +712,7 @@ export function ProfilePage() {
 
               <CardContent>
                 <p className="text-sm text-slate-500">
-                  Password changes should use your authenticated
-                  change-password API flow.
+                  Password changes should use your authenticated change-password API flow.
                 </p>
 
                 <Separator className="my-4" />
@@ -698,12 +721,8 @@ export function ProfilePage() {
                   variant="outline"
                   className="w-full"
                   type="button"
-                  onClick={() =>
-                    showError(
-                      'Password change',
-                      'Connect this button to your authenticated change-password endpoint.',
-                    )
-                  }
+                  disabled={!canChangePassword}
+                  onClick={handleChangePassword}
                 >
                   <LockKeyhole className="mr-2 h-4 w-4" />
                   Change password
@@ -719,13 +738,9 @@ export function ProfilePage() {
                   </div>
 
                   <div>
-                    <p className="text-sm font-semibold">
-                      Permission controlled
-                    </p>
-
+                    <p className="text-sm font-semibold">Permission controlled</p>
                     <p className="mt-1 text-xs leading-5 text-slate-400">
-                      Profile information is loaded and saved
-                      through the authenticated ERP API.
+                      Profile information is loaded and saved through the authenticated ERP API.
                     </p>
                   </div>
                 </div>

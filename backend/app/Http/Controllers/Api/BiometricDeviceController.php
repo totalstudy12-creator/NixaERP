@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\BiometricDevice;
 use App\Jobs\RestartDevice;
 use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
 class BiometricDeviceController extends Controller
@@ -60,9 +61,12 @@ class BiometricDeviceController extends Controller
             ['device_uid' => $validated['device_uid']],
             $validated + ['status' => 'online', 'last_sync_at' => now()]
         );
+        $deviceToken = Str::random(64);
+        $device->forceFill(['api_token_hash' => hash('sha256', $deviceToken)])->save();
 
         return response()->json([
             'device_id' => $device->id,
+            'device_token' => $deviceToken,
             'message'   => 'Device registered successfully.'
         ]);
     }

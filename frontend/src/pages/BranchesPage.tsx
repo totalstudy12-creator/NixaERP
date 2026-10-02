@@ -28,11 +28,14 @@ import {
   FiHash,
   FiBriefcase,
   FiX,
+  FiLock,
 } from 'react-icons/fi';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -43,7 +46,6 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
 import {
   Table,
   TableBody,
@@ -61,10 +63,7 @@ const Offcanvas = lazy(() =>
 /* Types                                                               */
 /* ------------------------------------------------------------------ */
 
-interface Company {
-  id: number;
-  name: string;
-}
+interface Company { id: number; name: string; }
 
 interface Branch {
   id: number;
@@ -100,7 +99,7 @@ interface AppLogEntry {
 interface ApiErrorLike {
   message?: string;
   status?: number;
-  response?: { status?: number };
+  response?: { status?: number; data?: { message?: string } };
 }
 
 /* ------------------------------------------------------------------ */
@@ -124,19 +123,22 @@ const TABLE_HEAD_CLASS = 'text-[11px] font-semibold uppercase tracking-wide text
 
 function getErrorMessage(error: unknown, fallback: string): string {
   if (typeof error === 'object' && error !== null) {
-    const candidate = (error as ApiErrorLike).message;
+    const e = error as ApiErrorLike;
+    const candidate = e.response?.data?.message || e.message;
     if (typeof candidate === 'string' && candidate.trim()) return candidate;
+    const status = e.response?.status ?? e.status;
+    if (status === 401) return 'Your session has expired. Please sign in again.';
+    if (status === 403) return 'You do not have permission to perform this action.';
+    if (status === 404) return 'The requested resource was not found.';
+    if (status === 429) return 'Too many requests. Please wait a moment and try again.';
+    if (status && status >= 500) return 'Server error. Please try again shortly.';
   }
   if (error instanceof Error && error.message) return error.message;
   return fallback;
 }
 
 function safeLog(entry: AppLogEntry): void {
-  try {
-    addAppLog(entry);
-  } catch {
-    /* no-op */
-  }
+  try { addAppLog(entry); } catch { /* no-op */ }
 }
 
 function escapeCsvField(value: unknown): string {
@@ -160,14 +162,10 @@ function formatDateTime(value?: string | null): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* Cache hook (race-safe)                                              */
+/* Cache hook                                                          */
 /* ------------------------------------------------------------------ */
 
-interface CacheEntry<T> {
-  data: T;
-  timestamp: number;
-}
-
+interface CacheEntry<T> { data: T; timestamp: number }
 const cache = new Map<string, CacheEntry<unknown>>();
 
 function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TTL_MS) {
@@ -178,9 +176,7 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
   const mountedRef = useRef(true);
   const fetcherRef = useRef(fetcher);
 
-  useEffect(() => {
-    fetcherRef.current = fetcher;
-  }, [fetcher]);
+  useEffect(() => { fetcherRef.current = fetcher; }, [fetcher]);
 
   const fetchData = useCallback(
     async (skipCache = false) => {
@@ -215,7 +211,7 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
         if (mountedRef.current && requestId === requestIdRef.current) setLoading(false);
       }
     },
-    [key, ttlMs]
+    [key, ttlMs],
   );
 
   useEffect(() => {
@@ -236,7 +232,7 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
 }
 
 /* ------------------------------------------------------------------ */
-/* Uniform table header                                                */
+/* Table head                                                          */
 /* ------------------------------------------------------------------ */
 
 function TableHeadLabel({
@@ -268,22 +264,6 @@ const StatCardSkeleton = memo(() => (
   </div>
 ));
 StatCardSkeleton.displayName = 'StatCardSkeleton';
-
-const TableSkeleton = memo(() => (
-  <div className="space-y-3 bg-white p-6">
-    <div className="h-6 w-48 animate-pulse rounded bg-slate-200" />
-    {Array.from({ length: 8 }).map((_, i) => (
-      <div key={i} className="flex gap-4">
-        <div className="h-4 w-1/4 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/5 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/6 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/6 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/4 animate-pulse rounded bg-slate-200" />
-      </div>
-    ))}
-  </div>
-));
-TableSkeleton.displayName = 'TableSkeleton';
 
 /* ------------------------------------------------------------------ */
 /* Stat card                                                           */
@@ -378,6 +358,18 @@ ToggleSwitch.displayName = 'ToggleSwitch';
 
 export function BranchesPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ---- Capability flags ---- */
+  const canViewBranches   = isSuperAdmin || can('view branches');
+  const canCreateBranch   = isSuperAdmin || can('create branches');
+  const canEditBranch     = isSuperAdmin || can('edit branches');
+  const canDeleteBranch   = isSuperAdmin || can('delete branches');
+  const canViewCompanies  = isSuperAdmin || can('view companies') || can('view branches');
+
+  const canManageBranches = canCreateBranch || canEditBranch || canDeleteBranch;
 
   /* -------------------- Filter state -------------------- */
   const [filterCompany, setFilterCompany] = useState<string>('all');
@@ -404,34 +396,40 @@ export function BranchesPage() {
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
 
   /* -------------------- Data fetching -------------------- */
+
   const {
     data: companies,
     loading: compsLoading,
     error: compsError,
     refresh: refreshComps,
-  } = useApiCache<Company[]>('companies', () => apiClient.getCompanies());
+  } = useApiCache<Company[]>('companies', () => {
+    if (!canViewCompanies) return Promise.resolve([]);
+    return apiClient.getCompanies();
+  });
 
   const {
     data: branches,
     loading: branchesLoading,
     error: branchesError,
     refresh: refreshBranches,
-  } = useApiCache<Branch[]>('branches', () => apiClient.getBranches());
+  } = useApiCache<Branch[]>('branches', () => {
+    if (!canViewBranches) return Promise.resolve([]);
+    return apiClient.getBranches();
+  });
 
   const isLoading = compsLoading || branchesLoading;
-  const globalError = compsError || branchesError;
+  const globalError = branchesError || compsError;
 
   /* -------------------- Filtering -------------------- */
+
   const filteredBranches = useMemo(() => {
     if (!branches) return [];
     let filtered = [...branches];
     if (filterCompany !== 'all') {
-      filtered = filtered.filter((b) => b.company_id === parseInt(filterCompany));
+      filtered = filtered.filter((b) => b.company_id === parseInt(filterCompany, 10));
     }
     if (filterStatus !== 'all') {
-      filtered = filtered.filter((b) =>
-        filterStatus === 'active' ? b.active : !b.active
-      );
+      filtered = filtered.filter((b) => (filterStatus === 'active' ? b.active : !b.active));
     }
     return filtered;
   }, [branches, filterCompany, filterStatus]);
@@ -442,7 +440,7 @@ export function BranchesPage() {
       active: branches?.filter((b) => b.active).length || 0,
       inactive: branches?.filter((b) => !b.active).length || 0,
     }),
-    [branches]
+    [branches],
   );
 
   const activeFilterCount = [
@@ -456,8 +454,9 @@ export function BranchesPage() {
   }, []);
 
   /* -------------------- Selection -------------------- */
+
   const allSelected = Boolean(
-    filteredBranches.length > 0 && filteredBranches.every((b) => selectedIds.includes(b.id))
+    filteredBranches.length > 0 && filteredBranches.every((b) => selectedIds.includes(b.id)),
   );
 
   const toggleSelectAll = useCallback(() => {
@@ -472,18 +471,25 @@ export function BranchesPage() {
 
   const toggleSelected = useCallback((id: number) => {
     setSelectedIds((current) =>
-      current.includes(id) ? current.filter((v) => v !== id) : [...current, id]
+      current.includes(id) ? current.filter((v) => v !== id) : [...current, id],
     );
   }, []);
 
   /* -------------------- Detail view -------------------- */
+
   const handleView = useCallback((branch: Branch) => {
+    if (!canViewBranches) return;
     setViewingBranch(branch);
     setIsViewPanelOpen(true);
-  }, []);
+  }, [canViewBranches]);
 
   /* -------------------- Bulk actions -------------------- */
+
   const handleBulkDelete = async () => {
+    if (!canDeleteBranch) {
+      showError('Permission denied', 'You do not have permission to delete branches.');
+      return;
+    }
     if (selectedIds.length === 0) return;
     if (!window.confirm(`Delete ${selectedIds.length} branch(es)?`)) return;
     try {
@@ -503,13 +509,16 @@ export function BranchesPage() {
   };
 
   const handleBulkStatusChange = async (active: boolean) => {
+    if (!canEditBranch) {
+      showError('Permission denied', 'You do not have permission to change branch status.');
+      return;
+    }
     if (selectedIds.length === 0) return;
     const label = active ? 'activate' : 'deactivate';
-    if (!window.confirm(`Are you sure you want to ${label} ${selectedIds.length} branch(es)?`))
-      return;
+    if (!window.confirm(`Are you sure you want to ${label} ${selectedIds.length} branch(es)?`)) return;
     try {
       await Promise.all(
-        selectedIds.map((id) => apiClient.updateBranch(id, { active } as Partial<Branch>))
+        selectedIds.map((id) => apiClient.updateBranch(id, { active } as Partial<Branch>)),
       );
       showSuccess('Bulk update', `${selectedIds.length} branch(es) ${label}d.`);
       safeLog({
@@ -526,6 +535,7 @@ export function BranchesPage() {
   };
 
   /* -------------------- CRUD -------------------- */
+
   const resetForm = () => {
     setFormData({
       company_id: '',
@@ -539,27 +549,42 @@ export function BranchesPage() {
   };
 
   const handleCreate = useCallback(() => {
+    if (!canCreateBranch) {
+      showError('Permission denied', 'You do not have permission to create branches.');
+      return;
+    }
     setEditingId(null);
     resetForm();
     setIsPanelOpen(true);
-  }, []);
+  }, [canCreateBranch, showError]);
 
-  const handleEdit = useCallback((branch: Branch) => {
-    setEditingId(branch.id);
-    setFormData({
-      company_id: branch.company_id || '',
-      name: branch.name || '',
-      code: branch.code || '',
-      address: branch.address || '',
-      phone: branch.phone || '',
-      email: branch.email || '',
-      active: branch.active ?? true,
-    });
-    setIsPanelOpen(true);
-  }, []);
+  const handleEdit = useCallback(
+    (branch: Branch) => {
+      if (!canEditBranch) {
+        showError('Permission denied', 'You do not have permission to edit branches.');
+        return;
+      }
+      setEditingId(branch.id);
+      setFormData({
+        company_id: branch.company_id || '',
+        name: branch.name || '',
+        code: branch.code || '',
+        address: branch.address || '',
+        phone: branch.phone || '',
+        email: branch.email || '',
+        active: branch.active ?? true,
+      });
+      setIsPanelOpen(true);
+    },
+    [canEditBranch, showError],
+  );
 
   const handleDelete = useCallback(
     async (branch: Branch) => {
+      if (!canDeleteBranch) {
+        showError('Permission denied', 'You do not have permission to delete branches.');
+        return;
+      }
       if (!window.confirm(`Delete branch "${branch.name}"?`)) return;
       try {
         await apiClient.deleteBranch(branch.id);
@@ -575,10 +600,11 @@ export function BranchesPage() {
         showError('Delete failed', getErrorMessage(err, 'Delete failed.'));
       }
     },
-    [refreshBranches, showError, showSuccess]
+    [canDeleteBranch, refreshBranches, showError, showSuccess],
   );
 
   /* -------------------- Validation -------------------- */
+
   const validateForm = (): boolean => {
     if (!formData.company_id) {
       showError('Validation', 'Please select a company.');
@@ -596,16 +622,25 @@ export function BranchesPage() {
   };
 
   const handleSubmit = useCallback(async () => {
+    const isUpdate = Boolean(editingId);
+    if (isUpdate && !canEditBranch) {
+      showError('Permission denied', 'You do not have permission to edit branches.');
+      return;
+    }
+    if (!isUpdate && !canCreateBranch) {
+      showError('Permission denied', 'You do not have permission to create branches.');
+      return;
+    }
     if (!validateForm()) return;
 
     const payload = {
       ...formData,
-      company_id: parseInt(String(formData.company_id)),
+      company_id: parseInt(String(formData.company_id), 10),
     };
 
     setSubmitting(true);
     try {
-      if (editingId) {
+      if (isUpdate && editingId) {
         await apiClient.updateBranch(editingId, payload);
         showSuccess('Branch updated', `"${formData.name}" updated.`);
         safeLog({
@@ -637,43 +672,58 @@ export function BranchesPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [formData, editingId, refreshBranches, showSuccess, showError]);
+  }, [
+    editingId,
+    canEditBranch,
+    canCreateBranch,
+    formData,
+    refreshBranches,
+    showSuccess,
+    showError,
+  ]);
 
   /* -------------------- Export -------------------- */
+
   const handleExport = useCallback(() => {
+    if (!canViewBranches) return;
     if (filteredBranches.length === 0) {
       showError('Export failed', 'No branches to export.');
       return;
     }
-    const headers = ['Branch Name', 'Company', 'Code', 'Phone', 'Email', 'Address', 'Status'];
-    const rows = filteredBranches.map((b) =>
-      [
-        escapeCsvField(b.name),
-        escapeCsvField(b.company?.name || ''),
-        escapeCsvField(b.code || ''),
-        escapeCsvField(b.phone || ''),
-        escapeCsvField(b.email || ''),
-        escapeCsvField(b.address || ''),
-        b.active ? 'Active' : 'Inactive',
-      ].join(',')
-    );
-    const csv = [headers.join(','), ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `branches-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showSuccess('Export', 'Branches exported.');
-  }, [filteredBranches, showSuccess, showError]);
+    try {
+      const headers = ['Branch Name', 'Company', 'Code', 'Phone', 'Email', 'Address', 'Status'];
+      const rows = filteredBranches.map((b) =>
+        [
+          escapeCsvField(b.name),
+          escapeCsvField(b.company?.name || ''),
+          escapeCsvField(b.code || ''),
+          escapeCsvField(b.phone || ''),
+          escapeCsvField(b.email || ''),
+          escapeCsvField(b.address || ''),
+          b.active ? 'Active' : 'Inactive',
+        ].join(','),
+      );
+      const csv = [headers.join(','), ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `branches-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showSuccess('Export', 'Branches exported.');
+    } catch (err: unknown) {
+      showError('Export failed', getErrorMessage(err, 'Could not export branches.'));
+    }
+  }, [canViewBranches, filteredBranches, showSuccess, showError]);
 
   /* -------------------- Render field helper -------------------- */
+
   const renderField = (
     label: string,
     field: keyof BranchFormData,
     type: 'text' | 'email' | 'tel' = 'text',
-    required = false
+    required = false,
   ) => {
     const value = formData[field] ?? '';
     const id = `field-${field}`;
@@ -697,7 +747,38 @@ export function BranchesPage() {
     );
   };
 
+  /* -------------------- Loading guard -------------------- */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------- No access -------------------- */
+
+  if (!canViewBranches) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to view branches.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   /* -------------------- Error state -------------------- */
+
   if (globalError) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
@@ -722,6 +803,10 @@ export function BranchesPage() {
   }
 
   /* -------------------- Render -------------------- */
+
+  const canBulkAct = canEditBranch || canDeleteBranch;
+  const showSelectionColumn = canBulkAct;
+
   return (
     <>
       <style>{`
@@ -787,22 +872,29 @@ export function BranchesPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                {!canManageBranches && (
+                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                    Read-only
+                  </span>
+                )}
                 <Button
                   variant="outline"
                   onClick={handleExport}
                   disabled={isLoading || filteredBranches.length === 0}
-                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50"
                 >
                   <FiDownload className="mr-2" size={14} />
                   Export
                 </Button>
-                <Button
-                  onClick={handleCreate}
-                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
-                >
-                  <FiPlus className="mr-2" size={14} />
-                  New branch
-                </Button>
+                {canCreateBranch && (
+                  <Button
+                    onClick={handleCreate}
+                    className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                  >
+                    <FiPlus className="mr-2" size={14} />
+                    New branch
+                  </Button>
+                )}
               </div>
             </div>
           </section>
@@ -836,19 +928,17 @@ export function BranchesPage() {
                   </CardDescription>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                {activeFilterCount > 0 && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-9 rounded-lg text-slate-500 hover:text-slate-800"
-                    onClick={clearFilters}
-                  >
-                    <FiX className="mr-1.5" size={14} />
-                    Reset
-                  </Button>
-                )}
-              </div>
+              {activeFilterCount > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-9 rounded-lg text-slate-500 hover:text-slate-800"
+                  onClick={clearFilters}
+                >
+                  <FiX className="mr-1.5" size={14} />
+                  Reset
+                </Button>
+              )}
             </CardHeader>
 
             <CardContent className="bg-white p-4 sm:p-5">
@@ -859,13 +949,12 @@ export function BranchesPage() {
                       aria-label="Company"
                       value={filterCompany}
                       onChange={(e) => setFilterCompany(e.target.value)}
-                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                      disabled={!canViewCompanies}
+                      className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
                     >
                       <option value="all">All companies</option>
                       {companies?.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
+                        <option key={c.id} value={c.id}>{c.name}</option>
                       ))}
                     </select>
                     <FiChevronDown
@@ -884,9 +973,7 @@ export function BranchesPage() {
                       className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                     >
                       {STATUS_OPTIONS.map((o) => (
-                        <option key={o.value} value={o.value}>
-                          {o.label}
-                        </option>
+                        <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
                     <FiChevronDown
@@ -900,41 +987,47 @@ export function BranchesPage() {
           </Card>
 
           {/* Bulk toolbar */}
-          {selectedIds.length > 0 && (
+          {selectedIds.length > 0 && canBulkAct && (
             <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
                 <div className="mr-1 flex items-center gap-2 rounded-lg bg-indigo-50 px-2.5 py-1 text-indigo-700 ring-1 ring-indigo-500/10">
                   <span className="text-sm font-bold">{selectedIds.length}</span>
                   <span className="text-xs font-medium">selected</span>
                 </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-lg"
-                  onClick={() => handleBulkStatusChange(true)}
-                >
-                  <FiCheckCircle className="mr-1.5 text-emerald-600" size={14} /> Activate
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-lg"
-                  onClick={() => handleBulkStatusChange(false)}
-                >
-                  <FiXCircle className="mr-1.5 text-amber-600" size={14} /> Deactivate
-                </Button>
-                <Button
-                  size="sm"
-                  className="h-9 rounded-lg border border-red-600 bg-red-600 font-semibold text-white shadow-none hover:border-red-700 hover:bg-red-700"
-                  onClick={handleBulkDelete}
-                >
-                  <FiTrash2 className="mr-1.5" size={14} /> Delete
-                </Button>
+                {canEditBranch && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-9 rounded-lg"
+                      onClick={() => handleBulkStatusChange(true)}
+                    >
+                      <FiCheckCircle className="mr-1.5 text-emerald-600" size={14} /> Activate
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-9 rounded-lg"
+                      onClick={() => handleBulkStatusChange(false)}
+                    >
+                      <FiXCircle className="mr-1.5 text-amber-600" size={14} /> Deactivate
+                    </Button>
+                  </>
+                )}
+                {canDeleteBranch && (
+                  <Button
+                    size="sm"
+                    className="h-9 rounded-lg border border-red-600 bg-red-600 font-semibold text-white shadow-none hover:border-red-700 hover:bg-red-700"
+                    onClick={handleBulkDelete}
+                  >
+                    <FiTrash2 className="mr-1.5" size={14} /> Delete
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="ghost"
                   className="ml-auto h-9 rounded-lg text-slate-500 hover:text-slate-800"
-                  onClick={() => setSelectedIds([])}
+                  onClick={() => startTransition(() => setSelectedIds([]))}
                 >
                   Clear
                 </Button>
@@ -968,34 +1061,26 @@ export function BranchesPage() {
               <Table className="min-w-[1040px]">
                 <TableHeader>
                   <TableRow className="border-slate-100 bg-slate-50/70 hover:bg-slate-50/70">
-                    <TableHead className="w-11 px-3">
-                      <input
-                        aria-label="Select all"
-                        type="checkbox"
-                        checked={allSelected}
-                        onChange={(event) => {
-                          event.stopPropagation();
-                          toggleSelectAll();
-                        }}
-                        onClick={(event) => event.stopPropagation()}
-                        className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
-                      />
-                    </TableHead>
-                    <TableHead>
-                      <TableHeadLabel>Branch</TableHeadLabel>
-                    </TableHead>
-                    <TableHead>
-                      <TableHeadLabel>Company</TableHeadLabel>
-                    </TableHead>
-                    <TableHead>
-                      <TableHeadLabel>Contact</TableHeadLabel>
-                    </TableHead>
-                    <TableHead>
-                      <TableHeadLabel>Address</TableHeadLabel>
-                    </TableHead>
-                    <TableHead>
-                      <TableHeadLabel>Status</TableHeadLabel>
-                    </TableHead>
+                    {showSelectionColumn && (
+                      <TableHead className="w-11 px-3">
+                        <input
+                          aria-label="Select all"
+                          type="checkbox"
+                          checked={allSelected}
+                          onChange={(event) => {
+                            event.stopPropagation();
+                            toggleSelectAll();
+                          }}
+                          onClick={(event) => event.stopPropagation()}
+                          className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                        />
+                      </TableHead>
+                    )}
+                    <TableHead><TableHeadLabel>Branch</TableHeadLabel></TableHead>
+                    <TableHead><TableHeadLabel>Company</TableHeadLabel></TableHead>
+                    <TableHead><TableHeadLabel>Contact</TableHeadLabel></TableHead>
+                    <TableHead><TableHeadLabel>Address</TableHeadLabel></TableHead>
+                    <TableHead><TableHeadLabel>Status</TableHeadLabel></TableHead>
                     <TableHead className="w-12" />
                   </TableRow>
                 </TableHeader>
@@ -1004,7 +1089,9 @@ export function BranchesPage() {
                   {isLoading &&
                     Array.from({ length: 8 }).map((_, index) => (
                       <TableRow key={`skeleton-${index}`} className="border-slate-100">
-                        {Array.from({ length: TABLE_COLUMN_COUNT + 1 }).map((__, cellIndex) => (
+                        {Array.from({
+                          length: showSelectionColumn ? TABLE_COLUMN_COUNT + 1 : TABLE_COLUMN_COUNT,
+                        }).map((__, cellIndex) => (
                           <TableCell key={cellIndex}>
                             <div className="h-4 animate-pulse rounded bg-slate-100" />
                           </TableCell>
@@ -1015,6 +1102,8 @@ export function BranchesPage() {
                   {!isLoading &&
                     filteredBranches.map((branch) => {
                       const selected = selectedIds.includes(branch.id);
+                      const hasRowActions = canEditBranch || canDeleteBranch;
+
                       return (
                         <TableRow
                           key={branch.id}
@@ -1024,19 +1113,21 @@ export function BranchesPage() {
                           }`}
                           onClick={() => handleView(branch)}
                         >
-                          <TableCell className="px-3" onClick={(e) => e.stopPropagation()}>
-                            <input
-                              aria-label={`Select ${branch.name}`}
-                              type="checkbox"
-                              checked={selected}
-                              onChange={(event) => {
-                                event.stopPropagation();
-                                toggleSelected(branch.id);
-                              }}
-                              onClick={(event) => event.stopPropagation()}
-                              className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
-                            />
-                          </TableCell>
+                          {showSelectionColumn && (
+                            <TableCell className="px-3" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                aria-label={`Select ${branch.name}`}
+                                type="checkbox"
+                                checked={selected}
+                                onChange={(event) => {
+                                  event.stopPropagation();
+                                  toggleSelected(branch.id);
+                                }}
+                                onClick={(event) => event.stopPropagation()}
+                                className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                              />
+                            </TableCell>
+                          )}
 
                           <TableCell>
                             <div className="flex min-w-[200px] items-center gap-2.5">
@@ -1105,20 +1196,27 @@ export function BranchesPage() {
 
                           <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center justify-end gap-1">
-                              <button
-                                onClick={() => handleEdit(branch)}
-                                className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
-                                title="Edit"
-                              >
-                                <FiEdit size={15} />
-                              </button>
-                              <button
-                                onClick={() => handleDelete(branch)}
-                                className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
-                                title="Delete"
-                              >
-                                <FiTrash2 size={15} />
-                              </button>
+                              {canEditBranch && (
+                                <button
+                                  onClick={() => handleEdit(branch)}
+                                  className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
+                                  title="Edit"
+                                >
+                                  <FiEdit size={15} />
+                                </button>
+                              )}
+                              {canDeleteBranch && (
+                                <button
+                                  onClick={() => handleDelete(branch)}
+                                  className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
+                                  title="Delete"
+                                >
+                                  <FiTrash2 size={15} />
+                                </button>
+                              )}
+                              {!hasRowActions && (
+                                <span className="text-[11px] text-slate-400">Read-only</span>
+                              )}
                             </div>
                           </TableCell>
                         </TableRow>
@@ -1127,7 +1225,10 @@ export function BranchesPage() {
 
                   {!isLoading && !filteredBranches.length && (
                     <TableRow>
-                      <TableCell colSpan={TABLE_COLUMN_COUNT + 1} className="py-20 text-center">
+                      <TableCell
+                        colSpan={showSelectionColumn ? TABLE_COLUMN_COUNT + 1 : TABLE_COLUMN_COUNT}
+                        className="py-20 text-center"
+                      >
                         <div className="mx-auto max-w-md px-4">
                           <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 ring-1 ring-slate-200/70">
                             <FiFilter className="h-6 w-6 text-slate-400" />
@@ -1157,9 +1258,7 @@ export function BranchesPage() {
         </div>
       </div>
 
-      {/* ══════════════════════════════════════════════════════════ */}
-      {/* Branch detail view (opens on row click)                   */}
-      {/* ══════════════════════════════════════════════════════════ */}
+      {/* Detail view */}
       {isViewPanelOpen && viewingBranch && (
         <Suspense
           fallback={
@@ -1184,20 +1283,21 @@ export function BranchesPage() {
                 >
                   <FiX className="mr-2" size={14} /> Close
                 </Button>
-                <Button
-                  onClick={() => {
-                    setIsViewPanelOpen(false);
-                    handleEdit(viewingBranch);
-                  }}
-                  className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
-                >
-                  <FiEdit className="mr-2" size={14} /> Edit
-                </Button>
+                {canEditBranch && (
+                  <Button
+                    onClick={() => {
+                      setIsViewPanelOpen(false);
+                      handleEdit(viewingBranch);
+                    }}
+                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                  >
+                    <FiEdit className="mr-2" size={14} /> Edit
+                  </Button>
+                )}
               </div>
             }
           >
             <div className="branches-form-scroll space-y-4 pr-2">
-              {/* Header summary */}
               <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white p-4">
                 <div className="flex items-start gap-3">
                   <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-base font-bold text-white shadow-sm">
@@ -1228,7 +1328,6 @@ export function BranchesPage() {
                 </div>
               </div>
 
-              {/* Company + contact */}
               <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
                 <div className="border-b border-slate-100 px-3.5 py-2.5">
                   <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -1276,8 +1375,7 @@ export function BranchesPage() {
                 </div>
               </div>
 
-              {/* Address */}
-              {(viewingBranch.address) && (
+              {viewingBranch.address && (
                 <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
                   <div className="border-b border-slate-100 px-3.5 py-2.5">
                     <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
@@ -1290,21 +1388,16 @@ export function BranchesPage() {
                 </div>
               )}
 
-              {/* Meta */}
               <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3.5">
                 <div className="flex items-center justify-between gap-3 text-[11px]">
-                  <span className="font-medium uppercase tracking-wide text-slate-400">
-                    Created
-                  </span>
+                  <span className="font-medium uppercase tracking-wide text-slate-400">Created</span>
                   <span className="font-semibold text-slate-700">
                     {formatDateTime(viewingBranch.created_at)}
                   </span>
                 </div>
                 {viewingBranch.updated_at && (
                   <div className="mt-1.5 flex items-center justify-between gap-3 text-[11px]">
-                    <span className="font-medium uppercase tracking-wide text-slate-400">
-                      Updated
-                    </span>
+                    <span className="font-medium uppercase tracking-wide text-slate-400">Updated</span>
                     <span className="font-semibold text-slate-700">
                       {formatDateTime(viewingBranch.updated_at)}
                     </span>
@@ -1317,7 +1410,7 @@ export function BranchesPage() {
       )}
 
       {/* Form offcanvas (Create/Edit) */}
-      {isPanelOpen && (
+      {isPanelOpen && (editingId ? canEditBranch : canCreateBranch) && (
         <Suspense
           fallback={
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
@@ -1353,7 +1446,6 @@ export function BranchesPage() {
             }
           >
             <div className="branches-form-scroll space-y-5 pr-2">
-              {/* Basic info */}
               <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
                 <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
                   <span className="h-2 w-2 rounded-full bg-indigo-500" /> Basic information
@@ -1370,13 +1462,12 @@ export function BranchesPage() {
                           onChange={(e) =>
                             setFormData((prev) => ({ ...prev, company_id: e.target.value }))
                           }
-                          className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                          disabled={!canViewCompanies}
+                          className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
                         >
                           <option value="">Select company</option>
                           {companies?.map((c) => (
-                            <option key={c.id} value={c.id}>
-                              {c.name}
-                            </option>
+                            <option key={c.id} value={c.id}>{c.name}</option>
                           ))}
                         </select>
                         <FiChevronDown
@@ -1398,7 +1489,6 @@ export function BranchesPage() {
                 </div>
               </fieldset>
 
-              {/* Contact details */}
               <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
                 <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
                   <span className="h-2 w-2 rounded-full bg-violet-500" /> Contact details
@@ -1409,7 +1499,6 @@ export function BranchesPage() {
                 </div>
               </fieldset>
 
-              {/* Address */}
               <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
                 <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
                   <span className="h-2 w-2 rounded-full bg-emerald-500" /> Address

@@ -1,16 +1,130 @@
+// src/pages/PayrollPage.tsx
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   FiRefreshCw, FiDownload, FiCheckCircle, FiXCircle,
   FiUser, FiUsers, FiClock, FiDollarSign, FiCalendar,
-  FiBriefcase, FiMapPin, FiSmartphone, FiEye, FiX,
-  FiFileText, FiPrinter, FiAward, FiTrendingUp, FiPlus,
-  FiAlertTriangle, FiPlay, FiLock, FiEdit, FiTrash2, FiLoader,
-  FiRotateCcw
+  FiEye, FiX,
+  FiFileText, FiPrinter, FiTrendingUp, FiPlay,
+  FiAlertTriangle, FiLock, FiEdit, FiTrash2, FiLoader,
+  FiRotateCcw,
 } from 'react-icons/fi';
 import { ModernDataTable } from '../components/ModernDataTable';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { useAuthStore } from '../store/auth';
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Permission keys                                              */
+/* ------------------------------------------------------------------ */
+
+const PERMISSIONS = {
+  PAYROLL_VIEW: 'payroll.view',
+  PAYROLL_GENERATE: 'payroll.generate',
+  PAYROLL_EDIT: 'payroll.edit',
+  PAYROLL_DELETE: 'payroll.delete',
+  PAYROLL_APPROVE: 'payroll.approve',
+  PAYROLL_MARK_PAID: 'payroll.mark_paid',
+  PAYROLL_PRINT: 'payroll.print',
+  PAYROLL_DOWNLOAD: 'payroll.download',
+} as const;
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Store-backed permissions (admin-aware + notation-insensitive) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Collapse a permission key so different notations of the SAME permission
+ * match each other:
+ *
+ *   "payroll.view"        → "payroll view"
+ *   "view payroll"        → "payroll view"
+ *   "payroll:view"        → "payroll view"
+ *   "payroll:mark_paid"   → "mark paid payroll"
+ *   "mark payroll paid"   → "mark paid payroll"
+ */
+function normalisePermission(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[.:_/\-]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+interface UsePagePermissionsResult {
+  can: (permission: string | string[]) => boolean;
+  isAuthenticated: boolean;
+  isSuperAdmin: boolean;
+  loadingUser: boolean;
+}
+
+function usePagePermissions(): UsePagePermissionsResult {
+  const user = useAuthStore((s) => s.user);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const storeIsSuperAdmin = useAuthStore((s) => s.isSuperAdmin);
+  const storeHasAnyPermission = useAuthStore((s) => s.hasAnyPermission);
+
+  const isSuperAdmin = useMemo(() => storeIsSuperAdmin(), [storeIsSuperAdmin, user]);
+
+  const can = useCallback(
+    (permission: string | string[]): boolean => {
+      if (!isAuthenticated) return false;
+      if (isSuperAdmin) return true;
+
+      const keys = Array.isArray(permission) ? permission : [permission];
+
+      if (storeHasAnyPermission(keys)) return true;
+
+      const hasMetadata =
+        (user?.permission_names?.length ?? 0) > 0 ||
+        (user?.permissions?.length ?? 0) > 0 ||
+        (user?.roles?.length ?? 0) > 0 ||
+        (user?.role_names?.length ?? 0) > 0;
+      if (!hasMetadata) return false;
+
+      const normalised = new Set<string>();
+      (user?.permission_names ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p)),
+      );
+      (user?.permissions ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p.name)),
+      );
+
+      return keys.some((k) => normalised.has(normalisePermission(k)));
+    },
+    [isAuthenticated, isSuperAdmin, storeHasAnyPermission, user],
+  );
+
+  return { can, isAuthenticated, isSuperAdmin, loadingUser };
+}
+
+/* ------------------------------------------------------------------ */
+/* Access-restricted screen                                            */
+/* ------------------------------------------------------------------ */
+
+function AccessRestricted() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[#f5f7fb] p-6">
+      <div className="max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-rose-50 text-rose-500">
+          <FiLock size={26} />
+        </div>
+        <h1 className="mt-4 text-lg font-bold text-slate-800">Access restricted</h1>
+        <p className="mt-2 text-sm leading-6 text-slate-500">
+          Your account does not have permission to view Payroll. Contact your
+          administrator to request the{' '}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px]">
+            payroll.view
+          </code>{' '}
+          permission.
+        </p>
+      </div>
+    </div>
+  );
+}
 
 // ---------- Types ----------
 type PayrollStatus = 'draft' | 'generated' | 'approved' | 'rejected' | 'paid' | 'pending';
@@ -89,6 +203,13 @@ interface PayrollRecord {
   overtime_details?: { date: string; hours: number; amount: number }[];
 }
 
+interface AppLogEntry {
+  module: string;
+  action: string;
+  status: 'success' | 'error' | 'info';
+  message: string;
+}
+
 // ---------- Helpers ----------
 const safeNumber = (val: any): number => {
   if (val === null || val === undefined) return 0;
@@ -124,6 +245,24 @@ const getStatusLabel = (status: PayrollStatus): string => {
   };
   return map[status] || 'Draft';
 };
+
+function getApiErrorMessage(error: unknown, fallback: string): string {
+  const err = error as any;
+  return (
+    err?.response?.data?.message ||
+    err?.response?.data?.error ||
+    err?.message ||
+    fallback
+  );
+}
+
+function safeLog(entry: AppLogEntry): void {
+  try {
+    addAppLog(entry);
+  } catch {
+    /* no-op */
+  }
+}
 
 const printPayslip = (record: PayrollRecord) => {
   const win = window.open('', '_blank', 'width=900,height=700');
@@ -166,7 +305,6 @@ const printPayslip = (record: PayrollRecord) => {
           <p>Status: ${getStatusLabel(record.status)} &nbsp;|&nbsp; Payment: ${record.payment_method || 'N/A'}</p>
         </div>
 
-        <!-- Attendance Summary -->
         <div class="section">
           <div class="section-title">📋 Attendance Summary</div>
           <div class="attendance-grid">
@@ -182,7 +320,6 @@ const printPayslip = (record: PayrollRecord) => {
           </div>
         </div>
 
-        <!-- Earnings & Deductions side by side -->
         <div class="two-col">
           <div>
             <div class="section-title">💰 Earnings</div>
@@ -213,7 +350,6 @@ const printPayslip = (record: PayrollRecord) => {
           </div>
         </div>
 
-        <!-- Overtime Details if any -->
         ${(record.overtime_details?.length ?? 0) > 0 ? `
         <div class="section">
           <div class="section-title">⏱️ Overtime Details</div>
@@ -223,7 +359,6 @@ const printPayslip = (record: PayrollRecord) => {
           </table>
         </div>` : ''}
 
-        <!-- Loan / Advance summary -->
         ${((record.loan_balance ?? 0) > 0 || (record.loan_installment ?? 0) > 0 || (record.advance ?? 0) > 0) ? `
         <div class="section">
           <div class="section-title">🏦 Loan & Advance</div>
@@ -234,7 +369,6 @@ const printPayslip = (record: PayrollRecord) => {
           </table>
         </div>` : ''}
 
-        <!-- Rates -->
         <div class="section">
           <div class="section-title">📐 Rates</div>
           <table>
@@ -244,7 +378,6 @@ const printPayslip = (record: PayrollRecord) => {
           </table>
         </div>
 
-        <!-- Net Pay -->
         <div class="net-pay">Net Pay: ${formatCurrency(record.net_pay)}</div>
 
         ${record.notes ? `<p style="margin-top:15px; font-style:italic; color:#475569;">Notes: ${record.notes}</p>` : ''}
@@ -258,6 +391,16 @@ const printPayslip = (record: PayrollRecord) => {
 
 // ---------- Component ----------
 export function PayrollPage() {
+  const { can, isAuthenticated, loadingUser } = usePagePermissions();
+
+  const canViewPayroll = can(PERMISSIONS.PAYROLL_VIEW);
+  const canGenerate = can(PERMISSIONS.PAYROLL_GENERATE);
+  const canEdit = can(PERMISSIONS.PAYROLL_EDIT);
+  const canDelete = can(PERMISSIONS.PAYROLL_DELETE);
+  const canMarkPaid = can(PERMISSIONS.PAYROLL_MARK_PAID);
+  const canPrint = can(PERMISSIONS.PAYROLL_PRINT);
+  const canDownload = can(PERMISSIONS.PAYROLL_DOWNLOAD);
+
   const [items, setItems] = useState<PayrollRecord[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
@@ -280,6 +423,7 @@ export function PayrollPage() {
 
   // ---------- Load employees ----------
   const loadEmployees = useCallback(async () => {
+    if (!canViewPayroll) return;
     try {
       const response = await apiClient.getEmployees?.() || [];
       const data = Array.isArray(response) ? response : response.data || [];
@@ -293,12 +437,16 @@ export function PayrollPage() {
       }));
       setEmployees(mapped);
     } catch (err) {
-      console.error('Failed to load employees', err);
+      // Silently ignore — employees list is optional for the page.
     }
-  }, []);
+  }, [canViewPayroll]);
 
   // ---------- Load payroll records ----------
   const loadPayrolls = useCallback(async () => {
+    if (!canViewPayroll) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     setPermissionDenied(false);
@@ -337,35 +485,36 @@ export function PayrollPage() {
       setItems(parsed);
       setLastUpdated(new Date());
     } catch (err: any) {
-      console.error('Payroll fetch error', err);
-      if (err.response?.status === 403 || err.message?.includes('403')) {
+      if (err?.response?.status === 403) {
         setPermissionDenied(true);
         setError('You do not have permission to view payroll records.');
-        showError('Permission Denied', 'You are not authorized to access payroll data.');
       } else {
-        setError(err.message || 'Could not load payroll records.');
-        showError('Failed', 'Could not load payroll records.');
+        const msg = getApiErrorMessage(err, 'Could not load payroll records.');
+        setError(msg);
+        showError('Failed', msg);
       }
     } finally {
       setLoading(false);
     }
-  }, [showError]);
+  }, [showError, canViewPayroll]);
 
   // ---------- Initial load & reload on filter change ----------
   useEffect(() => {
-    loadEmployees();
-  }, [loadEmployees]);
+    if (!canViewPayroll) return;
+    void loadEmployees();
+  }, [loadEmployees, canViewPayroll]);
 
   useEffect(() => {
-    loadPayrolls();
-  }, [loadPayrolls, selectedEmployeeId, payrollMonth]);
+    if (!canViewPayroll) return;
+    void loadPayrolls();
+  }, [loadPayrolls, selectedEmployeeId, payrollMonth, canViewPayroll]);
 
   // ---------- Load attendance summary for selected employee/month ----------
   useEffect(() => {
     setAttendanceSummary(null);
     setAttendanceLoading(true);
 
-    if (!selectedEmployeeId || !payrollMonth) {
+    if (!canViewPayroll || !selectedEmployeeId || !payrollMonth) {
       setAttendanceLoading(false);
       return;
     }
@@ -391,17 +540,16 @@ export function PayrollPage() {
         if (!cancelled) {
           setAttendanceSummary({ present, absent, leave, holiday, late, half_day });
         }
-      } catch (err) {
-        console.warn('Could not load attendance summary', err);
+      } catch {
         if (!cancelled) setAttendanceSummary(null);
       } finally {
         if (!cancelled) setAttendanceLoading(false);
       }
     };
 
-    fetchAttendance();
+    void fetchAttendance();
     return () => { cancelled = true; };
-  }, [selectedEmployeeId, payrollMonth]);
+  }, [selectedEmployeeId, payrollMonth, canViewPayroll]);
 
   // ---------- Filtered list ----------
   const filteredItems = useMemo(() => {
@@ -419,6 +567,10 @@ export function PayrollPage() {
 
   // ---------- Handlers ----------
   const handleGeneratePayroll = useCallback(async () => {
+    if (!canGenerate) {
+      showError('Permission denied', 'You do not have permission to generate payroll.');
+      return;
+    }
     if (!selectedEmployeeId || !payrollMonth) {
       showError('Missing data', 'Please select an employee and month.');
       return;
@@ -434,19 +586,28 @@ export function PayrollPage() {
         pay_period: payrollMonth,
       });
       showSuccess('Payroll Generated', `Payroll for ${payrollMonth} has been created.`);
+      safeLog({
+        module: 'Payroll',
+        action: 'Generate',
+        status: 'success',
+        message: `Generated payroll for employee #${selectedEmployeeId} (${payrollMonth})`,
+      });
       await loadPayrolls();
     } catch (err: any) {
-      const msg = err.response?.status === 403
+      const msg = err?.response?.status === 403
         ? 'You do not have permission to run payroll.'
-        : err.message || 'Could not generate payroll.';
+        : getApiErrorMessage(err, 'Could not generate payroll.');
       showError('Generation failed', msg);
     } finally {
       setGenerating(false);
     }
-  }, [selectedEmployeeId, payrollMonth, attendanceLoading, loadPayrolls, showSuccess, showError]);
+  }, [selectedEmployeeId, payrollMonth, attendanceLoading, loadPayrolls, showSuccess, showError, canGenerate]);
 
-  // Regenerate for any record (used by row button)
-  const handleRegenerate = async (record: PayrollRecord) => {
+  const handleRegenerate = useCallback(async (record: PayrollRecord) => {
+    if (!canGenerate) {
+      showError('Permission denied', 'You do not have permission to regenerate payroll.');
+      return;
+    }
     setRegeneratingIds(prev => [...prev, record.id]);
     try {
       await apiClient.runPayroll?.({
@@ -454,15 +615,25 @@ export function PayrollPage() {
         pay_period: record.pay_period,
       });
       showSuccess('Regenerated', `Payroll for ${record.employee_name} (${record.pay_period}) has been updated.`);
+      safeLog({
+        module: 'Payroll',
+        action: 'Regenerate',
+        status: 'success',
+        message: `Regenerated payroll #${record.id} for ${record.employee_name}`,
+      });
       await loadPayrolls();
     } catch (err: any) {
-      showError('Regeneration failed', err.message || 'Could not regenerate payroll.');
+      showError('Regeneration failed', getApiErrorMessage(err, 'Could not regenerate payroll.'));
     } finally {
       setRegeneratingIds(prev => prev.filter(id => id !== record.id));
     }
-  };
+  }, [loadPayrolls, showSuccess, showError, canGenerate]);
 
   const handleMarkAsPaid = useCallback(async () => {
+    if (!canMarkPaid) {
+      showError('Permission denied', 'You do not have permission to mark payroll as paid.');
+      return;
+    }
     if (!selectedRecord) return;
     if (selectedRecord.status === 'paid') {
       showError('Already paid', 'This payroll has already been marked as paid.');
@@ -471,42 +642,89 @@ export function PayrollPage() {
     try {
       await apiClient.updatePayroll?.(selectedRecord.id, { status: 'paid' });
       showSuccess('Marked as Paid', `Payroll for ${selectedRecord.employee_name} is now paid.`);
+      safeLog({
+        module: 'Payroll',
+        action: 'Mark Paid',
+        status: 'success',
+        message: `Marked payroll #${selectedRecord.id} as paid`,
+      });
       await loadPayrolls();
     } catch (err: any) {
-      const msg = err.response?.status === 403
+      const msg = err?.response?.status === 403
         ? 'You do not have permission to update payroll.'
-        : err.message || 'Failed to mark as paid.';
+        : getApiErrorMessage(err, 'Failed to mark as paid.');
       showError('Failed', msg);
     }
-  }, [selectedRecord, loadPayrolls, showSuccess, showError]);
+  }, [selectedRecord, loadPayrolls, showSuccess, showError, canMarkPaid]);
 
-  const handleEditSave = async () => {
+  const handleEditSave = useCallback(async () => {
+    if (!canEdit) {
+      showError('Permission denied', 'You do not have permission to edit payroll.');
+      return;
+    }
     if (!editingRecord) return;
     try {
       await apiClient.updatePayroll?.(editingRecord.id, editingRecord);
       showSuccess('Saved', 'Changes saved.');
+      safeLog({
+        module: 'Payroll',
+        action: 'Update',
+        status: 'success',
+        message: `Updated payroll #${editingRecord.id}`,
+      });
       setIsEditModalOpen(false);
-      loadPayrolls();
+      await loadPayrolls();
     } catch (err: any) {
-      showError('Failed', err.message || 'Could not save.');
+      showError('Failed', getApiErrorMessage(err, 'Could not save.'));
     }
-  };
+  }, [editingRecord, loadPayrolls, showSuccess, showError, canEdit]);
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = useCallback(async (id: number) => {
+    if (!canDelete) {
+      showError('Permission denied', 'You do not have permission to delete payroll records.');
+      return;
+    }
     if (!window.confirm('Delete this payroll record?')) return;
     try {
       await apiClient.deletePayroll?.(id);
       showSuccess('Deleted', 'Payroll record deleted.');
-      loadPayrolls();
+      safeLog({
+        module: 'Payroll',
+        action: 'Delete',
+        status: 'success',
+        message: `Deleted payroll #${id}`,
+      });
+      await loadPayrolls();
     } catch (err: any) {
-      showError('Failed', err.message || 'Could not delete.');
+      showError('Failed', getApiErrorMessage(err, 'Could not delete.'));
     }
-  };
+  }, [loadPayrolls, showSuccess, showError, canDelete]);
 
   const handleDownloadPayslip = useCallback(() => {
+    if (!canDownload) {
+      showError('Permission denied', 'You do not have permission to download payslips.');
+      return;
+    }
     if (!selectedRecord) return;
     showSuccess('Payslip', 'Download will start shortly.');
-  }, [selectedRecord, showSuccess]);
+  }, [selectedRecord, showSuccess, showError, canDownload]);
+
+  const handlePrintPayslip = useCallback((record: PayrollRecord) => {
+    if (!canPrint) {
+      showError('Permission denied', 'You do not have permission to print payslips.');
+      return;
+    }
+    printPayslip(record);
+  }, [showError, canPrint]);
+
+  const handleOpenEdit = useCallback((record: PayrollRecord) => {
+    if (!canEdit) {
+      showError('Permission denied', 'You do not have permission to edit payroll.');
+      return;
+    }
+    setEditingRecord({ ...record });
+    setIsEditModalOpen(true);
+  }, [showError, canEdit]);
 
   // ---------- Render employee details ----------
   const renderEmployeeDetails = useCallback(() => {
@@ -557,14 +775,16 @@ export function PayrollPage() {
           ) : (
             <p className="text-xs text-slate-400 mt-2">Attendance data not available.</p>
           )}
-          <button
-            onClick={handleGeneratePayroll}
-            disabled={generating || attendanceLoading}
-            className="mt-4 inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md hover:bg-emerald-700 disabled:opacity-50"
-          >
-            <FiPlay size={16} />
-            {generating ? 'Generating...' : 'Generate Payroll'}
-          </button>
+          {canGenerate && (
+            <button
+              onClick={handleGeneratePayroll}
+              disabled={generating || attendanceLoading}
+              className="mt-4 inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-md hover:bg-emerald-700 disabled:opacity-50"
+            >
+              <FiPlay size={16} />
+              {generating ? 'Generating...' : 'Generate Payroll'}
+            </button>
+          )}
         </div>
       );
     }
@@ -585,24 +805,36 @@ export function PayrollPage() {
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <button
-              onClick={handleMarkAsPaid}
-              disabled={record.status === 'paid'}
-              className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold transition ${
-                record.status === 'paid'
-                  ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
-                  : 'bg-emerald-500 text-white hover:bg-emerald-600'
-              }`}
-            >
-              <FiCheckCircle size={16} />
-              {record.status === 'paid' ? 'Already Paid' : 'Mark as Paid'}
-            </button>
-            <button onClick={handleDownloadPayslip} className="inline-flex items-center gap-1.5 rounded-xl bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100 transition">
-              <FiDownload size={16} /> Payslip
-            </button>
-            <button onClick={() => printPayslip(record)} className="inline-flex items-center gap-1.5 rounded-xl bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100 transition">
-              <FiPrinter size={16} /> Print
-            </button>
+            {canMarkPaid && (
+              <button
+                onClick={handleMarkAsPaid}
+                disabled={record.status === 'paid'}
+                className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold transition ${
+                  record.status === 'paid'
+                    ? 'bg-slate-200 text-slate-500 cursor-not-allowed'
+                    : 'bg-emerald-500 text-white hover:bg-emerald-600'
+                }`}
+              >
+                <FiCheckCircle size={16} />
+                {record.status === 'paid' ? 'Already Paid' : 'Mark as Paid'}
+              </button>
+            )}
+            {canDownload && (
+              <button
+                onClick={handleDownloadPayslip}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100 transition"
+              >
+                <FiDownload size={16} /> Payslip
+              </button>
+            )}
+            {canPrint && (
+              <button
+                onClick={() => handlePrintPayslip(record)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100 transition"
+              >
+                <FiPrinter size={16} /> Print
+              </button>
+            )}
           </div>
         </div>
 
@@ -788,8 +1020,24 @@ export function PayrollPage() {
     permissionDenied, selectedRecord, selectedEmployeeId, employees,
     payrollMonth, attendanceSummary, attendanceLoading, generating,
     handleGeneratePayroll, handleMarkAsPaid,
-    handleDownloadPayslip
+    handleDownloadPayslip, handlePrintPayslip,
+    canGenerate, canMarkPaid, canDownload, canPrint,
   ]);
+
+  // ---------- RBAC page gate ----------
+  if (loadingUser && !isAuthenticated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#f5f7fb]">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated || !canViewPayroll) {
+    return <AccessRestricted />;
+  }
 
   // ---------- Render ----------
   return (
@@ -813,7 +1061,7 @@ export function PayrollPage() {
               />
             </div>
             <button
-              onClick={() => { loadPayrolls(); showSuccess('Refreshed', 'Payroll data reloaded.'); }}
+              onClick={() => { void loadPayrolls(); showSuccess('Refreshed', 'Payroll data reloaded.'); }}
               className="inline-flex items-center gap-1.5 rounded-xl bg-white/10 px-3.5 py-2 text-sm font-medium text-white ring-1 ring-white/15 transition hover:bg-white/20"
             >
               <FiRefreshCw size={14} /> Refresh
@@ -854,6 +1102,11 @@ export function PayrollPage() {
                 : 'Showing all employees'}
               {' • '}
               {filteredItems.length} record{filteredItems.length !== 1 ? 's' : ''} found for {payrollMonth}
+              {lastUpdated && (
+                <>
+                  {' • '}Last updated {lastUpdated.toLocaleTimeString('en-IN')}
+                </>
+              )}
             </>
           )}
         </div>
@@ -897,28 +1150,34 @@ export function PayrollPage() {
                       >
                         <FiEye size={16} />
                       </button>
-                      <button
-                        onClick={() => { setEditingRecord({...row}); setIsEditModalOpen(true); }}
-                        className="p-1.5 rounded-lg text-slate-600 hover:bg-slate-100 hover:text-amber-600 transition"
-                        title="Edit"
-                      >
-                        <FiEdit size={16} />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(row.id)}
-                        className="p-1.5 rounded-lg text-slate-600 hover:bg-red-50 hover:text-red-600 transition"
-                        title="Delete"
-                      >
-                        <FiTrash2 size={16} />
-                      </button>
-                      <button
-                        onClick={() => handleRegenerate(row)}
-                        disabled={regeneratingIds.includes(row.id)}
-                        className="p-1.5 rounded-lg text-slate-600 hover:bg-green-50 hover:text-green-600 transition disabled:opacity-50"
-                        title="Regenerate payroll for this month"
-                      >
-                        <FiRotateCcw size={16} />
-                      </button>
+                      {canEdit && (
+                        <button
+                          onClick={() => handleOpenEdit(row)}
+                          className="p-1.5 rounded-lg text-slate-600 hover:bg-slate-100 hover:text-amber-600 transition"
+                          title="Edit"
+                        >
+                          <FiEdit size={16} />
+                        </button>
+                      )}
+                      {canDelete && (
+                        <button
+                          onClick={() => handleDelete(row.id)}
+                          className="p-1.5 rounded-lg text-slate-600 hover:bg-red-50 hover:text-red-600 transition"
+                          title="Delete"
+                        >
+                          <FiTrash2 size={16} />
+                        </button>
+                      )}
+                      {canGenerate && (
+                        <button
+                          onClick={() => handleRegenerate(row)}
+                          disabled={regeneratingIds.includes(row.id)}
+                          className="p-1.5 rounded-lg text-slate-600 hover:bg-green-50 hover:text-green-600 transition disabled:opacity-50"
+                          title="Regenerate payroll for this month"
+                        >
+                          <FiRotateCcw size={16} />
+                        </button>
+                      )}
                     </div>
                   ),
                 },
@@ -930,11 +1189,20 @@ export function PayrollPage() {
         )}
       </div>
 
-      {/* Edit Modal */}
-      {isEditModalOpen && editingRecord && (
+      {/* Edit Modal — only when the user can edit */}
+      {isEditModalOpen && editingRecord && canEdit && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md mx-4">
-            <h3 className="text-lg font-semibold mb-4">Edit Payroll</h3>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Edit Payroll</h3>
+              <button
+                onClick={() => setIsEditModalOpen(false)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100"
+                aria-label="Close"
+              >
+                <FiX size={18} />
+              </button>
+            </div>
             <div className="space-y-3">
               <div>
                 <label className="text-sm font-medium">Status</label>
@@ -969,8 +1237,18 @@ export function PayrollPage() {
               </div>
             </div>
             <div className="flex justify-end gap-2 mt-6">
-              <button onClick={() => setIsEditModalOpen(false)} className="btn btn-ghost">Cancel</button>
-              <button onClick={handleEditSave} className="btn bg-blue-600 text-white hover:bg-blue-700 px-4 py-2 rounded-xl">Save</button>
+              <button
+                onClick={() => setIsEditModalOpen(false)}
+                className="btn btn-ghost rounded-xl px-4 py-2 text-slate-600 hover:bg-slate-100"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleEditSave}
+                className="btn bg-blue-600 text-white hover:bg-blue-700 px-4 py-2 rounded-xl"
+              >
+                Save
+              </button>
             </div>
           </div>
         </div>
@@ -978,3 +1256,5 @@ export function PayrollPage() {
     </div>
   );
 }
+
+export default PayrollPage;

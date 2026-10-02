@@ -129,8 +129,7 @@ const menuSections: MenuSection[] = [
   {
     title: 'Finance',
     items: [
-      { icon: FiTrendingDown, label: 'Expenses', path: '/expenses' },
-      { icon: FiPlusCircle, label: 'Income', path: '/income' },
+     { icon: FiDollarSign, label: 'Income & Expenses', path: '/income-expenses' },
       { icon: FiPieChart, label: 'Budgets', path: '/budgets' },
       { icon: FiBarChart2, label: 'Reports', path: '/reports' },
     ],

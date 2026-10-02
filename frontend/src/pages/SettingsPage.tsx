@@ -1,3 +1,5 @@
+// src/pages/SettingsPage.tsx
+
 import {
   useEffect,
   useMemo,
@@ -36,11 +38,15 @@ import {
   FiCheckCircle,
   FiZap,
   FiCpu,
+  FiLock,
+  FiClock,
 } from 'react-icons/fi';
 
 import { apiClient, API_BASE } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { TwoFactorSettings } from '../features/security/TwoFactorSettings';
+import { useAuthStore } from '../store/auth';
+import { getCronHealth, type CronTask } from '../services/healthService';
 
 // -----------------------------------------------------------------------------
 // Types
@@ -84,7 +90,7 @@ interface McpStatus {
   version: string;
 }
 
-type ActiveTab = 'settings' | 'printer' | 'api' | 'ai' | 'security';
+type ActiveTab = 'settings' | 'printer' | 'api' | 'ai' | 'security' | 'operations';
 
 interface AiConfig {
   provider: 'gemini';
@@ -92,8 +98,19 @@ interface AiConfig {
   selectedModel: string;
 }
 
+/**
+ * Speech provider accepted by apiClient.generateAiSpeech.
+ * Kept in sync with the backend `voice` endpoint validation rule
+ * (`in:browser,cloud,auto`).
+ */
+type SpeechProviderArg = 'browser' | 'cloud' | 'auto';
+
 const BILL_EXTRACT_STORAGE_KEY = 'bill_extract_settings';
 
+/**
+ * Defaults chosen for the current (2025–2026) Gemini catalogue.
+ * Only models that actually exist on Google's side are listed below.
+ */
 const DEFAULT_AI_CONFIG: AiConfig = {
   provider: 'gemini',
   apiKey: '',
@@ -101,16 +118,110 @@ const DEFAULT_AI_CONFIG: AiConfig = {
 };
 
 const AI_MODEL_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — recommended (fast, accurate)' },
-  { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro — highest accuracy (slower)' },
-  { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
+  { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash — recommended, fast' },
+  { value: 'gemini-2.5-pro',   label: 'Gemini 2.5 Pro — highest accuracy (slower)' },
+  { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
   { value: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash — legacy fallback' },
-  { value: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro — legacy' },
+  { value: 'gemini-1.5-pro',   label: 'Gemini 1.5 Pro — legacy' },
 ];
+
+// -----------------------------------------------------------------------------
+// RBAC — Permission keys
+// -----------------------------------------------------------------------------
+
+const PERMISSIONS = {
+  SETTINGS_VIEW: 'settings.view',
+  SETTINGS_CREATE: 'settings.create',
+  SETTINGS_UPDATE: 'settings.update',
+  SETTINGS_DELETE: 'settings.delete',
+  VOICE_VIEW: 'settings.voice.view',
+  VOICE_UPDATE: 'settings.voice.update',
+  PRINTER_VIEW: 'settings.printer.view',
+  PRINTER_UPDATE: 'settings.printer.update',
+  AI_VIEW: 'settings.ai.view',
+  AI_UPDATE: 'settings.ai.update',
+  API_VIEW: 'settings.api.view',
+  MCP_MANAGE: 'settings.mcp.manage',
+  SECURITY_VIEW: 'settings.security.view',
+} as const;
+
+// -----------------------------------------------------------------------------
+// RBAC — Store-backed permissions (admin-aware + notation-insensitive)
+// -----------------------------------------------------------------------------
+
+function normalisePermission(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[.:_/\-]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+interface UsePagePermissionsResult {
+  can: (permission: string | string[]) => boolean;
+  isAuthenticated: boolean;
+  isSuperAdmin: boolean;
+  loadingUser: boolean;
+}
+
+function usePagePermissions(): UsePagePermissionsResult {
+  const user = useAuthStore((s) => s.user);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const storeIsSuperAdmin = useAuthStore((s) => s.isSuperAdmin);
+  const storeHasAnyPermission = useAuthStore((s) => s.hasAnyPermission);
+
+  const isSuperAdmin = useMemo(() => storeIsSuperAdmin(), [storeIsSuperAdmin, user]);
+
+  const can = useCallback(
+    (permission: string | string[]): boolean => {
+      if (!isAuthenticated) return false;
+      if (isSuperAdmin) return true;
+
+      const keys = Array.isArray(permission) ? permission : [permission];
+
+      if (storeHasAnyPermission(keys)) return true;
+
+      const hasMetadata =
+        (user?.permission_names?.length ?? 0) > 0 ||
+        (user?.permissions?.length ?? 0) > 0 ||
+        (user?.roles?.length ?? 0) > 0 ||
+        (user?.role_names?.length ?? 0) > 0;
+      if (!hasMetadata) return false;
+
+      const normalised = new Set<string>();
+      (user?.permission_names ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p)),
+      );
+      (user?.permissions ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p.name)),
+      );
+
+      return keys.some((k) => normalised.has(normalisePermission(k)));
+    },
+    [isAuthenticated, isSuperAdmin, storeHasAnyPermission, user],
+  );
+
+  return { can, isAuthenticated, isSuperAdmin, loadingUser };
+}
 
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+/**
+ * Map any stored voice-provider setting to a value the speech API accepts.
+ * - `elevenlabs` is a paid alias → `cloud`
+ * - anything unknown → `auto`
+ */
+function normalizeSpeechProvider(value: unknown): SpeechProviderArg {
+  const provider = String(value ?? '').trim().toLowerCase();
+  if (provider === 'browser') return 'browser';
+  if (provider === 'cloud' || provider === 'elevenlabs') return 'cloud';
+  return 'auto';
+}
 
 function inferType(key: string): SettingItem['type'] {
   const lower = key.toLowerCase();
@@ -237,10 +348,51 @@ const SkeletonTable = () => (
 );
 
 // -----------------------------------------------------------------------------
+// Access-restricted screen
+// -----------------------------------------------------------------------------
+
+function AccessRestricted() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[#f5f7fb] p-6">
+      <div className="max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-rose-50 text-rose-500">
+          <FiLock size={26} />
+        </div>
+        <h1 className="mt-4 text-lg font-bold text-slate-800">Access restricted</h1>
+        <p className="mt-2 text-sm leading-6 text-slate-500">
+          Your account does not have permission to view the Settings module.
+          Contact your administrator to request access.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
 // Component
 // -----------------------------------------------------------------------------
 
 export function SettingsPage() {
+  // ---------------------------------------------------------------------------
+  // RBAC
+  // ---------------------------------------------------------------------------
+
+  const { can, isAuthenticated, isSuperAdmin, loadingUser } = usePagePermissions();
+
+  const canViewSettings   = can(PERMISSIONS.SETTINGS_VIEW);
+  const canCreate         = can(PERMISSIONS.SETTINGS_CREATE);
+  const canUpdateSettings = can(PERMISSIONS.SETTINGS_UPDATE);
+  const canDelete         = can(PERMISSIONS.SETTINGS_DELETE);
+  const canVoiceView      = can(PERMISSIONS.VOICE_VIEW);
+  const canVoiceUpdate    = can(PERMISSIONS.VOICE_UPDATE);
+  const canPrinterView    = can(PERMISSIONS.PRINTER_VIEW);
+  const canPrinterUpdate  = can(PERMISSIONS.PRINTER_UPDATE);
+  const canAiView         = can(PERMISSIONS.AI_VIEW);
+  const canAiUpdate       = can(PERMISSIONS.AI_UPDATE);
+  const canApiView        = can(PERMISSIONS.API_VIEW);
+  const canMcpManage      = can(PERMISSIONS.MCP_MANAGE);
+  const canSecurityView   = can(PERMISSIONS.SECURITY_VIEW);
+
   // ---------------------------------------------------------------------------
   // General settings state
   // ---------------------------------------------------------------------------
@@ -280,6 +432,11 @@ export function SettingsPage() {
   const [showAiKey, setShowAiKey] = useState(false);
   const [aiTesting, setAiTesting] = useState(false);
   const [aiTestResult, setAiTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [aiServerConfigured, setAiServerConfigured] = useState(false);
+  const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
+  const [cronLoading, setCronLoading] = useState(false);
+  const [cronError, setCronError] = useState('');
+  const [voiceTestMessage, setVoiceTestMessage] = useState('');
 
   // ---------------------------------------------------------------------------
   // New setting
@@ -325,10 +482,10 @@ export function SettingsPage() {
     const readToken = (): string | null => {
       try {
         const candidates = [
-          localStorage.getItem('auth-storage'),
-          localStorage.getItem('authStorage'),
           localStorage.getItem('token'),
           localStorage.getItem('access_token'),
+          localStorage.getItem('auth-storage'),
+          localStorage.getItem('authStorage'),
         ];
 
         for (const raw of candidates) {
@@ -382,8 +539,35 @@ export function SettingsPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!canAiView) return;
+    void apiClient.request('GET', '/ai/assistant/config').then((res: any) => {
+      const data = res?.data ?? res;
+      setAiServerConfigured(Boolean(data?.configured));
+      if (typeof data?.model === 'string') {
+        setAiConfig((previous) => ({ ...previous, selectedModel: data.model }));
+      }
+    }).catch(() => setAiServerConfigured(false));
+  }, [canAiView]);
+
+  const loadCronTasks = useCallback(async () => {
+    setCronLoading(true);
+    setCronError('');
+    try {
+      setCronTasks(await getCronHealth());
+    } catch (error: any) {
+      setCronError(error?.backendMessage || error?.message || 'Unable to load scheduled jobs.');
+    } finally {
+      setCronLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'operations') void loadCronTasks();
+  }, [activeTab, loadCronTasks]);
+
   // ---------------------------------------------------------------------------
-  // Load AI config from localStorage on mount (shared with the AI purchase scanner)
+  // Load AI config from localStorage on mount
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
@@ -423,6 +607,11 @@ export function SettingsPage() {
 
   const loadSettings = useCallback(
     async () => {
+      if (!canViewSettings) {
+        setLoading(false);
+        return;
+      }
+
       setLoading(true);
       setError(null);
 
@@ -500,7 +689,7 @@ export function SettingsPage() {
         setLoading(false);
       }
     },
-    [showError]
+    [showError, canViewSettings]
   );
 
   // ---------------------------------------------------------------------------
@@ -509,6 +698,8 @@ export function SettingsPage() {
 
   const loadMcpTokens = useCallback(
     async () => {
+      if (!canMcpManage) return;
+
       setMcpLoading(true);
       try {
         const response = await apiClient.request('GET', '/mcp/tokens');
@@ -539,7 +730,7 @@ export function SettingsPage() {
         setMcpLoading(false);
       }
     },
-    [showError]
+    [showError, canMcpManage]
   );
 
   // ---------------------------------------------------------------------------
@@ -548,6 +739,8 @@ export function SettingsPage() {
 
   const checkMcpStatus = useCallback(
     async () => {
+      if (!canApiView) return;
+
       setMcpStatusLoading(true);
       try {
         const response = await apiClient.request('GET', '/mcp/status');
@@ -573,7 +766,7 @@ export function SettingsPage() {
         setMcpStatusLoading(false);
       }
     },
-    [showError]
+    [showError, canApiView]
   );
 
   // ---------------------------------------------------------------------------
@@ -582,6 +775,11 @@ export function SettingsPage() {
 
   const generateMcpToken = useCallback(
     async () => {
+      if (!canMcpManage) {
+        showError('Permission denied', 'You do not have permission to manage MCP tokens.');
+        return;
+      }
+
       const trimmedName = mcpName.trim();
       if (!trimmedName) {
         showError('Missing MCP name', 'Enter a name for this MCP connection.');
@@ -637,7 +835,7 @@ export function SettingsPage() {
         setMcpGenerating(false);
       }
     },
-    [mcpName, mcpExpiresDays, showError, showSuccess, loadMcpTokens]
+    [mcpName, mcpExpiresDays, showError, showSuccess, loadMcpTokens, canMcpManage]
   );
 
   // ---------------------------------------------------------------------------
@@ -646,6 +844,11 @@ export function SettingsPage() {
 
   const revokeMcpToken = useCallback(
     async (token: McpToken) => {
+      if (!canMcpManage) {
+        showError('Permission denied', 'You do not have permission to revoke MCP tokens.');
+        return;
+      }
+
       const confirmed = window.confirm(`Revoke MCP token "${token.name}"?`);
       if (!confirmed) return;
 
@@ -665,7 +868,7 @@ export function SettingsPage() {
         setMcpRevokingId(null);
       }
     },
-    [loadMcpTokens, showError, showSuccess]
+    [loadMcpTokens, showError, showSuccess, canMcpManage]
   );
 
   // ---------------------------------------------------------------------------
@@ -673,6 +876,11 @@ export function SettingsPage() {
   // ---------------------------------------------------------------------------
 
   const revokeAllMcpTokens = useCallback(async () => {
+    if (!canMcpManage) {
+      showError('Permission denied', 'You do not have permission to revoke MCP tokens.');
+      return;
+    }
+
     if (mcpTokens.length === 0) {
       showSuccess('No MCP tokens', 'There are no active MCP tokens to revoke.');
       return;
@@ -698,7 +906,7 @@ export function SettingsPage() {
     } finally {
       setMcpRevokingAll(false);
     }
-  }, [mcpTokens.length, showError, showSuccess]);
+  }, [mcpTokens.length, showError, showSuccess, canMcpManage]);
 
   // ---------------------------------------------------------------------------
   // Copy MCP Token
@@ -720,7 +928,12 @@ export function SettingsPage() {
   // AI config handlers
   // ---------------------------------------------------------------------------
 
-  const saveAiConfig = useCallback(() => {
+  const saveAiConfig = useCallback(async () => {
+    if (!canAiUpdate) {
+      showError('Permission denied', 'You do not have permission to change AI settings.');
+      return;
+    }
+
     const trimmedKey = aiConfig.apiKey.trim();
     const trimmedModel = aiConfig.selectedModel.trim() || DEFAULT_AI_CONFIG.selectedModel;
 
@@ -734,29 +947,42 @@ export function SettingsPage() {
     }
 
     try {
-      window.localStorage.setItem(
-        BILL_EXTRACT_STORAGE_KEY,
-        JSON.stringify({
-          apiKey: trimmedKey,
-          selectedModel: trimmedModel,
-          provider: 'gemini',
-          updatedAt: Date.now(),
-        })
-      );
+      await apiClient.request('PUT', '/ai/assistant/config', {
+        api_key: trimmedKey,
+        model: trimmedModel,
+      });
+      try {
+        window.localStorage.setItem(BILL_EXTRACT_STORAGE_KEY, JSON.stringify({
+          apiKey: trimmedKey, selectedModel: trimmedModel, provider: 'gemini', updatedAt: Date.now(),
+        }));
+      } catch { /* server-side assistant config has already been saved */ }
+      setAiServerConfigured(true);
       showSuccess(
         'AI settings saved',
-        'The AI purchase scanner will use this configuration.'
+        'The AI business assistant is ready. The purchase scanner keeps its browser-side key copy.'
       );
-    } catch {
-      showError('Save failed', 'Browser storage rejected the write (quota or disabled).');
+    } catch (error: any) {
+      showError('Save failed', error?.backendMessage || error?.message || 'Unable to save server-side AI settings.');
     }
-  }, [aiConfig, showError, showSuccess]);
+  }, [aiConfig, showError, showSuccess, canAiUpdate]);
 
-  const clearAiConfig = useCallback(() => {
+  const clearAiConfig = useCallback(async () => {
+    if (!canAiUpdate) {
+      showError('Permission denied', 'You do not have permission to change AI settings.');
+      return;
+    }
+
     const confirmed = window.confirm(
-      'Clear AI configuration? The stored API key will be removed from this browser.'
+      'Clear AI configuration? This removes the server-side assistant key and the scanner key from this browser.'
     );
     if (!confirmed) return;
+
+    try {
+      await apiClient.request('DELETE', '/ai/assistant/config');
+    } catch (error: any) {
+      showError('Clear failed', error?.backendMessage || error?.message || 'Unable to clear server AI settings.');
+      return;
+    }
 
     try {
       window.localStorage.removeItem(BILL_EXTRACT_STORAGE_KEY);
@@ -764,12 +990,18 @@ export function SettingsPage() {
       /* ignore */
     }
     setAiConfig(DEFAULT_AI_CONFIG);
+    setAiServerConfigured(false);
     setAiTestResult(null);
     setShowAiKey(false);
     showSuccess('AI settings cleared', 'The stored API key has been removed.');
-  }, [showSuccess]);
+  }, [showSuccess, showError, canAiUpdate]);
 
   const testAiConnection = useCallback(async () => {
+    if (!canAiView) {
+      showError('Permission denied', 'You do not have permission to test AI settings.');
+      return;
+    }
+
     const trimmedKey = aiConfig.apiKey.trim();
     if (!trimmedKey) {
       showError('Missing API key', 'Enter a Gemini API key first.');
@@ -780,37 +1012,28 @@ export function SettingsPage() {
     setAiTestResult(null);
 
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(trimmedKey)}`;
-      const res = await fetch(url);
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`HTTP ${res.status}${text ? ` — ${text.slice(0, 180)}` : ''}`);
-      }
-      const data = await res.json();
-      const models: Array<{ name?: string }> = Array.isArray(data?.models) ? data.models : [];
-      const selected = aiConfig.selectedModel;
-      const hasSelected = models.some((m) =>
-        String(m.name || '').toLowerCase().endsWith(selected.toLowerCase())
-      );
-
+      const result: any = await apiClient.request('POST', '/ai/assistant/test', {
+        api_key: trimmedKey,
+        model: aiConfig.selectedModel,
+      });
       setAiTestResult({
         ok: true,
-        message: hasSelected
-          ? `Connection OK. ${models.length} model(s) available. "${selected}" is ready.`
-          : `Connection OK. ${models.length} model(s) available, but "${selected}" was not listed — it may still work.`,
+        message: result?.message || `Gemini ${aiConfig.selectedModel} is responding.`,
       });
     } catch (err) {
       setAiTestResult({
         ok: false,
         message:
-          err instanceof Error
+          err && typeof err === 'object' && 'backendMessage' in err
+            ? String((err as any).backendMessage)
+            : err instanceof Error
             ? err.message
             : 'Unable to reach the Gemini API.',
       });
     } finally {
       setAiTesting(false);
     }
-  }, [aiConfig.apiKey, aiConfig.selectedModel, showError]);
+  }, [aiConfig.apiKey, aiConfig.selectedModel, showError, canAiView]);
 
   // ---------------------------------------------------------------------------
   // Effects
@@ -826,6 +1049,28 @@ export function SettingsPage() {
       void checkMcpStatus();
     }
   }, [activeTab, loadMcpTokens, checkMcpStatus]);
+
+  // ---------------------------------------------------------------------------
+  // Tab availability (RBAC)
+  // ---------------------------------------------------------------------------
+
+  const availableTabs = useMemo<ActiveTab[]>(() => {
+    const tabs: ActiveTab[] = [];
+    if (canViewSettings) tabs.push('settings');
+    if (canPrinterView) tabs.push('printer');
+    if (canAiView) tabs.push('ai');
+    if (canApiView) tabs.push('api');
+    if (canSecurityView) tabs.push('security');
+    if (canViewSettings) tabs.push('operations');
+    return tabs;
+  }, [canViewSettings, canPrinterView, canAiView, canApiView, canSecurityView]);
+
+  useEffect(() => {
+    if (availableTabs.length === 0) return;
+    if (!availableTabs.includes(activeTab)) {
+      setActiveTab(availableTabs[0]);
+    }
+  }, [availableTabs, activeTab]);
 
   // ---------------------------------------------------------------------------
   // Grouped settings
@@ -857,14 +1102,23 @@ export function SettingsPage() {
   // Setting handlers
   // ---------------------------------------------------------------------------
 
-  const handleValueChange = useCallback((id: number, value: string) => {
-    setSettings((current) =>
-      current.map((item) => (item.id === id ? { ...item, value } : item))
-    );
-  }, []);
+  const handleValueChange = useCallback(
+    (id: number, value: string) => {
+      if (!canUpdateSettings) return;
+      setSettings((current) =>
+        current.map((item) => (item.id === id ? { ...item, value } : item))
+      );
+    },
+    [canUpdateSettings]
+  );
 
   const saveSetting = useCallback(
     async (setting: SettingItem) => {
+      if (!canUpdateSettings) {
+        showError('Permission denied', 'You do not have permission to edit settings.');
+        return;
+      }
+
       setSaving((previous) => ({ ...previous, [setting.key]: true }));
       try {
         if (setting.type === 'number' && Number.isNaN(Number(setting.value))) {
@@ -905,10 +1159,15 @@ export function SettingsPage() {
         setSaving((previous) => ({ ...previous, [setting.key]: false }));
       }
     },
-    [showSuccess, showError]
+    [showSuccess, showError, canUpdateSettings]
   );
 
   const saveAll = useCallback(async () => {
+    if (!canUpdateSettings) {
+      showError('Permission denied', 'You do not have permission to edit settings.');
+      return;
+    }
+
     const changed = settings.filter((setting) => setting.value !== setting.defaultValue);
     if (changed.length === 0) {
       showSuccess('No changes', 'All settings are up to date.');
@@ -941,9 +1200,14 @@ export function SettingsPage() {
       showSuccess('Saved', `${successCount} setting(s) updated.`);
       await loadSettings();
     }
-  }, [settings, showSuccess, showError, loadSettings]);
+  }, [settings, showSuccess, showError, loadSettings, canUpdateSettings]);
 
   const createSetting = useCallback(async () => {
+    if (!canCreate) {
+      showError('Permission denied', 'You do not have permission to create settings.');
+      return;
+    }
+
     const key = newSetting.key.trim();
     if (!key) {
       showError('Missing key', 'Setting key is required.');
@@ -966,10 +1230,15 @@ export function SettingsPage() {
     } finally {
       setSaving((previous) => ({ ...previous, new: false }));
     }
-  }, [newSetting, showSuccess, showError, loadSettings]);
+  }, [newSetting, showSuccess, showError, loadSettings, canCreate]);
 
   const deleteSetting = useCallback(
     async (key: string) => {
+      if (!canDelete) {
+        showError('Permission denied', 'You do not have permission to delete settings.');
+        return;
+      }
+
       const confirmed = window.confirm(`Delete setting "${key}"?`);
       if (!confirmed) return;
       try {
@@ -984,7 +1253,7 @@ export function SettingsPage() {
         );
       }
     },
-    [showSuccess, showError, loadSettings]
+    [showSuccess, showError, loadSettings, canDelete]
   );
 
   // ---------------------------------------------------------------------------
@@ -992,6 +1261,11 @@ export function SettingsPage() {
   // ---------------------------------------------------------------------------
 
   const saveVoiceSettings = useCallback(async () => {
+    if (!canVoiceUpdate) {
+      showError('Permission denied', 'You do not have permission to update voice settings.');
+      return;
+    }
+
     const voiceEntries = Object.entries(voiceConfig).map(([key, value]) => ({
       key,
       value,
@@ -1014,13 +1288,52 @@ export function SettingsPage() {
     } finally {
       setSaving((previous) => ({ ...previous, voice: false }));
     }
-  }, [voiceConfig, showSuccess, showError, loadSettings]);
+  }, [voiceConfig, showSuccess, showError, loadSettings, canVoiceUpdate]);
+
+  const testVoiceConnection = useCallback(async () => {
+    if (!canVoiceView) return;
+    setVoiceTestMessage('Testing configured speech provider…');
+    try {
+      // Normalise the stored provider setting into a value the API accepts.
+      const providerArg: SpeechProviderArg = normalizeSpeechProvider(
+        voiceConfig.voice_tts_provider
+      );
+
+      const response: any = await apiClient.generateAiSpeech(
+        'Your business assistant is ready.',
+        providerArg,
+        voiceConfig.voice_default_language,
+      );
+      const payload = response?.data ?? response;
+      const source = payload?.source || payload?.provider || 'unknown';
+      setVoiceTestMessage(
+        source === 'cloud'
+          ? 'ElevenLabs voice API responded successfully.'
+          : `Speech API responded using ${source} voice.`
+      );
+      showSuccess(
+        'Voice connection ready',
+        source === 'cloud'
+          ? 'ElevenLabs returned audio successfully.'
+          : `Using ${source} speech output.`
+      );
+    } catch (error: any) {
+      const message = error?.backendMessage || error?.message || 'Voice provider test failed.';
+      setVoiceTestMessage(message);
+      showError('Voice test failed', message);
+    }
+  }, [canVoiceView, voiceConfig.voice_tts_provider, voiceConfig.voice_default_language, showSuccess, showError]);
 
   // ---------------------------------------------------------------------------
   // Printer
   // ---------------------------------------------------------------------------
 
   const savePrinterSettings = useCallback(async () => {
+    if (!canPrinterUpdate) {
+      showError('Permission denied', 'You do not have permission to update printer settings.');
+      return;
+    }
+
     setSaving((previous) => ({ ...previous, printer: true }));
     try {
       for (const [key, value] of Object.entries(printerSettings)) {
@@ -1042,13 +1355,18 @@ export function SettingsPage() {
     } finally {
       setSaving((previous) => ({ ...previous, printer: false }));
     }
-  }, [printerSettings, showSuccess, showError, loadSettings]);
+  }, [printerSettings, showSuccess, showError, loadSettings, canPrinterUpdate]);
 
   // ---------------------------------------------------------------------------
   // Bluetooth
   // ---------------------------------------------------------------------------
 
   const scanBluetoothPrinters = useCallback(async () => {
+    if (!canPrinterUpdate) {
+      showError('Permission denied', 'You do not have permission to configure printers.');
+      return;
+    }
+
     if (!('bluetooth' in navigator)) {
       showError(
         'Bluetooth not supported',
@@ -1087,10 +1405,15 @@ export function SettingsPage() {
     } finally {
       setScanningBluetooth(false);
     }
-  }, [showSuccess, showError]);
+  }, [showSuccess, showError, canPrinterUpdate]);
 
   const connectBluetoothDevice = useCallback(
     async (device: BluetoothDevice) => {
+      if (!canPrinterUpdate) {
+        showError('Permission denied', 'You do not have permission to configure printers.');
+        return;
+      }
+
       setConnectingDevice(device.id);
       try {
         const server = await device.gatt?.connect();
@@ -1112,10 +1435,15 @@ export function SettingsPage() {
         setConnectingDevice(null);
       }
     },
-    [showSuccess, showError]
+    [showSuccess, showError, canPrinterUpdate]
   );
 
   const disconnectBluetooth = useCallback(async () => {
+    if (!canPrinterUpdate) {
+      showError('Permission denied', 'You do not have permission to configure printers.');
+      return;
+    }
+
     if (connectedDevice?.gatt?.connected) {
       connectedDevice.gatt.disconnect();
     }
@@ -1127,7 +1455,7 @@ export function SettingsPage() {
       printer_bluetooth_device_name: '',
     }));
     showSuccess('Disconnected', 'Bluetooth printer disconnected.');
-  }, [connectedDevice, showSuccess]);
+  }, [connectedDevice, showSuccess, showError, canPrinterUpdate]);
 
   // ---------------------------------------------------------------------------
   // Clipboard
@@ -1152,8 +1480,9 @@ export function SettingsPage() {
 
   const renderInput = (setting: SettingItem) => {
     const commonClasses =
-      'w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-200';
+      'w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-200 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500';
     const safeValue = String(setting.value ?? '');
+    const disabled = !canUpdateSettings;
 
     switch (setting.type) {
       case 'boolean':
@@ -1163,9 +1492,10 @@ export function SettingsPage() {
             onClick={() =>
               handleValueChange(setting.id, setting.value === 'true' ? 'false' : 'true')
             }
+            disabled={disabled}
             className={`relative inline-flex h-6 w-11 items-center rounded-full transition ${
               setting.value === 'true' ? 'bg-blue-600' : 'bg-slate-300'
-            }`}
+            } ${disabled ? 'cursor-not-allowed opacity-60' : ''}`}
             aria-pressed={setting.value === 'true'}
           >
             <span
@@ -1183,13 +1513,15 @@ export function SettingsPage() {
               type="color"
               value={safeValue.startsWith('#') ? safeValue : '#000000'}
               onChange={(event) => handleValueChange(setting.id, event.target.value)}
-              className="h-10 w-14 cursor-pointer rounded border border-slate-300"
+              disabled={disabled}
+              className="h-10 w-14 cursor-pointer rounded border border-slate-300 disabled:cursor-not-allowed disabled:opacity-60"
               aria-label={`${setting.key} color`}
             />
             <input
               type="text"
               value={safeValue}
               onChange={(event) => handleValueChange(setting.id, event.target.value)}
+              disabled={disabled}
               className={commonClasses}
             />
           </div>
@@ -1201,6 +1533,7 @@ export function SettingsPage() {
             type="number"
             value={safeValue}
             onChange={(event) => handleValueChange(setting.id, event.target.value)}
+            disabled={disabled}
             className={commonClasses}
           />
         );
@@ -1211,6 +1544,7 @@ export function SettingsPage() {
             rows={3}
             value={safeValue}
             onChange={(event) => handleValueChange(setting.id, event.target.value)}
+            disabled={disabled}
             className={`${commonClasses} font-mono text-xs`}
           />
         );
@@ -1220,6 +1554,7 @@ export function SettingsPage() {
           <select
             value={safeValue}
             onChange={(event) => handleValueChange(setting.id, event.target.value)}
+            disabled={disabled}
             className={commonClasses}
           >
             {setting.options?.map((option) => (
@@ -1236,6 +1571,7 @@ export function SettingsPage() {
             type="text"
             value={safeValue}
             onChange={(event) => handleValueChange(setting.id, event.target.value)}
+            disabled={disabled}
             className={commonClasses}
           />
         );
@@ -1243,15 +1579,30 @@ export function SettingsPage() {
   };
 
   // ---------------------------------------------------------------------------
+  // RBAC page gate
+  // ---------------------------------------------------------------------------
+
+  if (loadingUser && !isAuthenticated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#f5f7fb]">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated || availableTabs.length === 0) {
+    return <AccessRestricted />;
+  }
+
+  // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
 
   return (
     <div className="min-h-screen bg-[#f5f7fb] p-4 text-slate-800 md:p-7">
-      {/* ------------------------------------------------------------------- */}
-      {/* Header                                                              */}
-      {/* ------------------------------------------------------------------- */}
-
+      {/* Header */}
       <div className="mb-6 flex flex-col justify-between gap-5 rounded-3xl bg-slate-950 px-5 py-6 shadow-xl shadow-slate-300/50 sm:flex-row sm:items-center md:px-8 md:py-7">
         <div>
           <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-emerald-300">
@@ -1286,101 +1637,121 @@ export function SettingsPage() {
             Refresh
           </button>
 
-          <button
-            type="button"
-            onClick={() => void saveAll()}
-            className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20"
-          >
-            <FiSave className="mr-1 inline" size={14} />
-            Save All
-          </button>
+          {canUpdateSettings && (
+            <button
+              type="button"
+              onClick={() => void saveAll()}
+              className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 hover:bg-white/20"
+            >
+              <FiSave className="mr-1 inline" size={14} />
+              Save All
+            </button>
+          )}
 
-          <button
-            type="button"
-            onClick={() => setShowAddModal(true)}
-            className="rounded-xl bg-emerald-400 px-3 py-2 text-sm font-medium text-slate-950 shadow-md shadow-emerald-500/20 hover:bg-emerald-300"
-          >
-            <FiPlus className="mr-1 inline" size={14} />
-            Add Setting
-          </button>
+          {canCreate && (
+            <button
+              type="button"
+              onClick={() => setShowAddModal(true)}
+              className="rounded-xl bg-emerald-400 px-3 py-2 text-sm font-medium text-slate-950 shadow-md shadow-emerald-500/20 hover:bg-emerald-300"
+            >
+              <FiPlus className="mr-1 inline" size={14} />
+              Add Setting
+            </button>
+          )}
         </div>
       </div>
 
-      {/* ------------------------------------------------------------------- */}
-      {/* Tabs                                                                */}
-      {/* ------------------------------------------------------------------- */}
-
+      {/* Tabs */}
       <div className="mb-6 flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() => setActiveTab('settings')}
-          className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-            activeTab === 'settings'
-              ? 'bg-slate-900 text-white shadow-lg'
-              : 'bg-white text-slate-600 hover:bg-slate-50'
-          }`}
-        >
-          <FiSettings className="mr-1 inline" size={14} />
-          Settings
-        </button>
+        {availableTabs.includes('settings') && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('settings')}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'settings'
+                ? 'bg-slate-900 text-white shadow-lg'
+                : 'bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <FiSettings className="mr-1 inline" size={14} />
+            Settings
+          </button>
+        )}
 
-        <button
-          type="button"
-          onClick={() => setActiveTab('printer')}
-          className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-            activeTab === 'printer'
-              ? 'bg-slate-900 text-white shadow-lg'
-              : 'bg-white text-slate-600 hover:bg-slate-50'
-          }`}
-        >
-          <FiPrinter className="mr-1 inline" size={14} />
-          Printer
-        </button>
+        {availableTabs.includes('printer') && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('printer')}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'printer'
+                ? 'bg-slate-900 text-white shadow-lg'
+                : 'bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <FiPrinter className="mr-1 inline" size={14} />
+            Printer
+          </button>
+        )}
 
-        <button
-          type="button"
-          onClick={() => setActiveTab('ai')}
-          className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-            activeTab === 'ai'
-              ? 'bg-slate-900 text-white shadow-lg'
-              : 'bg-white text-slate-600 hover:bg-slate-50'
-          }`}
-        >
-          <FiZap className="mr-1 inline" size={14} />
-          AI
-        </button>
+        {availableTabs.includes('ai') && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('ai')}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'ai'
+                ? 'bg-slate-900 text-white shadow-lg'
+                : 'bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <FiZap className="mr-1 inline" size={14} />
+            AI
+          </button>
+        )}
 
-        <button
-          type="button"
-          onClick={() => setActiveTab('api')}
-          className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-            activeTab === 'api'
-              ? 'bg-slate-900 text-white shadow-lg'
-              : 'bg-white text-slate-600 hover:bg-slate-50'
-          }`}
-        >
-          <FiCode className="mr-1 inline" size={14} />
-          API &amp; MCP
-        </button>
+        {availableTabs.includes('api') && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('api')}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'api'
+                ? 'bg-slate-900 text-white shadow-lg'
+                : 'bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <FiCode className="mr-1 inline" size={14} />
+            API &amp; MCP
+          </button>
+        )}
 
-        <button
-          type="button"
-          onClick={() => setActiveTab('security')}
-          className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-            activeTab === 'security'
-              ? 'bg-slate-900 text-white shadow-lg'
-              : 'bg-white text-slate-600 hover:bg-slate-50'
-          }`}
-        >
-          <FiShield className="mr-1 inline" size={14} />
-          Security
-        </button>
+        {availableTabs.includes('security') && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('security')}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'security'
+                ? 'bg-slate-900 text-white shadow-lg'
+                : 'bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <FiShield className="mr-1 inline" size={14} />
+            Security
+          </button>
+        )}
+
+        {availableTabs.includes('operations') && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('operations')}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${activeTab === 'operations' ? 'bg-slate-900 text-white shadow-lg' : 'bg-white text-slate-600 hover:bg-slate-50'}`}
+            title="View scheduled Laravel tasks and the server scheduler setup instructions."
+          >
+            <FiClock className="mr-1 inline" size={14} />
+            Operations &amp; Cron
+          </button>
+        )}
       </div>
 
-      {/* ------------------------------------------------------------------- */}
-      {/* Search                                                              */}
-      {/* ------------------------------------------------------------------- */}
-
+      {/* Search */}
       {activeTab === 'settings' && (
         <div className="mb-6 flex flex-col gap-4 sm:flex-row">
           <div className="relative max-w-md flex-1">
@@ -1399,10 +1770,7 @@ export function SettingsPage() {
         </div>
       )}
 
-      {/* ------------------------------------------------------------------- */}
-      {/* Error                                                               */}
-      {/* ------------------------------------------------------------------- */}
-
+      {/* Error */}
       {error && (
         <div className="mb-4 flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-rose-700">
           <FiAlertCircle size={20} />
@@ -1410,10 +1778,7 @@ export function SettingsPage() {
         </div>
       )}
 
-      {/* =================================================================== */}
-      {/* SETTINGS TAB                                                        */}
-      {/* =================================================================== */}
-
+      {/* SETTINGS TAB */}
       {activeTab === 'settings' &&
         (loading ? (
           <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
@@ -1424,179 +1789,192 @@ export function SettingsPage() {
         ) : (
           <div className="space-y-6">
             {/* Voice */}
-            <div className="rounded-2xl border border-violet-200 bg-gradient-to-r from-violet-50 via-white to-indigo-50 p-5 shadow-sm">
-              <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-600">
-                    AI Voice Connection
-                  </p>
-                  <h2 className="mt-1 text-xl font-bold text-slate-800">
-                    Free and paid TTS setup
-                  </h2>
-                  <p className="text-sm text-slate-600">
-                    Use browser speech for free or premium voice providers.
-                  </p>
+            {canVoiceView && (
+              <div className="rounded-2xl border border-violet-200 bg-gradient-to-r from-violet-50 via-white to-indigo-50 p-5 shadow-sm">
+                <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-600">
+                      AI Voice Connection
+                    </p>
+                    <h2 className="mt-1 text-xl font-bold text-slate-800">
+                      Free and paid TTS setup
+                    </h2>
+                    <p className="text-sm text-slate-600">
+                      Use browser speech for free or premium voice providers.
+                    </p>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => void testVoiceConnection()} title="Make a short TTS request to confirm the selected provider and credentials." className="rounded-xl border border-violet-200 bg-white px-4 py-2 text-sm font-medium text-violet-700 hover:bg-violet-50">Test voice</button>
+                    {canVoiceUpdate && (
+                      <button type="button" onClick={() => void saveVoiceSettings()} disabled={saving.voice} className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-60">
+                        {saving.voice ? 'Saving...' : 'Save voice config'}
+                      </button>
+                    )}
+                  </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => void saveVoiceSettings()}
-                  disabled={saving.voice}
-                  className="rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-60"
-                >
-                  {saving.voice ? 'Saving...' : 'Save voice config'}
-                </button>
+                <div className="mt-5 grid gap-4 md:grid-cols-2">
+                  <label className="text-sm text-slate-700">
+                    <span className="mb-1 block font-medium">Provider</span>
+                    <select
+                      value={voiceConfig.voice_tts_provider}
+                      onChange={(event) =>
+                        setVoiceConfig((previous) => ({
+                          ...previous,
+                          voice_tts_provider: event.target.value,
+                        }))
+                      }
+                      disabled={!canVoiceUpdate}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200 disabled:cursor-not-allowed disabled:bg-slate-100"
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="browser">Browser (free)</option>
+                      <option value="cloud">Premium</option>
+                      <option value="elevenlabs">ElevenLabs</option>
+                    </select>
+                  </label>
+
+                  <label className="text-sm text-slate-700">
+                    <span className="mb-1 block font-medium">Default language</span>
+                    <select
+                      value={voiceConfig.voice_default_language}
+                      onChange={(event) =>
+                        setVoiceConfig((previous) => ({
+                          ...previous,
+                          voice_default_language: event.target.value,
+                        }))
+                      }
+                      disabled={!canVoiceUpdate}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200 disabled:cursor-not-allowed disabled:bg-slate-100"
+                    >
+                      <option value="en-US">English (US)</option>
+                      <option value="hi-IN">Hindi</option>
+                      <option value="en-GB">English (UK)</option>
+                    </select>
+                  </label>
+
+                  <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={voiceConfig.voice_browser_enabled === 'true'}
+                      onChange={(event) =>
+                        setVoiceConfig((previous) => ({
+                          ...previous,
+                          voice_browser_enabled: String(event.target.checked),
+                        }))
+                      }
+                      disabled={!canVoiceUpdate}
+                      className="h-4 w-4 accent-violet-600"
+                    />
+                    Browser TTS enabled
+                  </label>
+
+                  <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={voiceConfig.voice_paid_enabled === 'true'}
+                      onChange={(event) =>
+                        setVoiceConfig((previous) => ({
+                          ...previous,
+                          voice_paid_enabled: String(event.target.checked),
+                        }))
+                      }
+                      disabled={!canVoiceUpdate}
+                      className="h-4 w-4 accent-violet-600"
+                    />
+                    Premium provider enabled
+                  </label>
+
+                  <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={voiceConfig.voice_auto_read_enabled === 'true'}
+                      onChange={(event) =>
+                        setVoiceConfig((previous) => ({
+                          ...previous,
+                          voice_auto_read_enabled: String(event.target.checked),
+                        }))
+                      }
+                      disabled={!canVoiceUpdate}
+                      className="h-4 w-4 accent-violet-600"
+                    />
+                    Auto-read assistant replies
+                  </label>
+
+                  <label className="text-sm text-slate-700">
+                    <span className="mb-1 block font-medium">Voice speed</span>
+                    <input
+                      type="number"
+                      min="0.6"
+                      max="1.4"
+                      step="0.05"
+                      value={voiceConfig.voice_speed}
+                      onChange={(event) =>
+                        setVoiceConfig((previous) => ({
+                          ...previous,
+                          voice_speed: event.target.value,
+                        }))
+                      }
+                      disabled={!canVoiceUpdate}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200 disabled:cursor-not-allowed disabled:bg-slate-100"
+                    />
+                  </label>
+
+                  <label className="text-sm text-slate-700 md:col-span-2">
+                    <span className="mb-1 block font-medium" title="Create an API key in your ElevenLabs account. Save it here so the server can call Text to Speech; never share it in chat.">ElevenLabs API key ⓘ</span>
+                    <input
+                      type="password"
+                      value={voiceConfig.elevenlabs_api_key}
+                      onChange={(event) =>
+                        setVoiceConfig((previous) => ({
+                          ...previous,
+                          elevenlabs_api_key: event.target.value,
+                        }))
+                      }
+                      disabled={!canVoiceUpdate}
+                      placeholder="Enter API key"
+                      autoComplete="new-password"
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200 disabled:cursor-not-allowed disabled:bg-slate-100"
+                    />
+                  </label>
+
+                  <label className="text-sm text-slate-700">
+                    <span className="mb-1 block font-medium" title="Find the voice ID for the voice you want in ElevenLabs Voice Library or My Voices.">ElevenLabs voice ID ⓘ</span>
+                    <input
+                      type="text"
+                      value={voiceConfig.elevenlabs_voice_id}
+                      onChange={(event) =>
+                        setVoiceConfig((previous) => ({
+                          ...previous,
+                          elevenlabs_voice_id: event.target.value,
+                        }))
+                      }
+                      disabled={!canVoiceUpdate}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200 disabled:cursor-not-allowed disabled:bg-slate-100"
+                    />
+                  </label>
+
+                  <label className="text-sm text-slate-700">
+                    <span className="mb-1 block font-medium" title="eleven_multilingual_v2 supports multilingual speech. Ensure your subscription supports the selected model.">ElevenLabs model ID ⓘ</span>
+                    <input
+                      type="text"
+                      value={voiceConfig.elevenlabs_model_id}
+                      onChange={(event) =>
+                        setVoiceConfig((previous) => ({
+                          ...previous,
+                          elevenlabs_model_id: event.target.value,
+                        }))
+                      }
+                      disabled={!canVoiceUpdate}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200 disabled:cursor-not-allowed disabled:bg-slate-100"
+                    />
+                  </label>
+                </div>
+                <p className="mt-3 rounded-lg border border-violet-100 bg-violet-50 p-3 text-xs text-violet-900">Setup: enter the API key, voice ID and model; choose ElevenLabs (or Auto), enable Premium provider, then save. Use Test voice to confirm the server can return speech. Auto-read replies can also be enabled in the assistant voice panel.</p>
+                {voiceTestMessage && <p role="status" className="mt-2 text-xs text-slate-600">{voiceTestMessage}</p>}
               </div>
-
-              <div className="mt-5 grid gap-4 md:grid-cols-2">
-                <label className="text-sm text-slate-700">
-                  <span className="mb-1 block font-medium">Provider</span>
-                  <select
-                    value={voiceConfig.voice_tts_provider}
-                    onChange={(event) =>
-                      setVoiceConfig((previous) => ({
-                        ...previous,
-                        voice_tts_provider: event.target.value,
-                      }))
-                    }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
-                  >
-                    <option value="auto">Auto</option>
-                    <option value="browser">Browser (free)</option>
-                    <option value="cloud">Premium</option>
-                    <option value="elevenlabs">ElevenLabs</option>
-                  </select>
-                </label>
-
-                <label className="text-sm text-slate-700">
-                  <span className="mb-1 block font-medium">Default language</span>
-                  <select
-                    value={voiceConfig.voice_default_language}
-                    onChange={(event) =>
-                      setVoiceConfig((previous) => ({
-                        ...previous,
-                        voice_default_language: event.target.value,
-                      }))
-                    }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
-                  >
-                    <option value="en-US">English (US)</option>
-                    <option value="hi-IN">Hindi</option>
-                    <option value="en-GB">English (UK)</option>
-                  </select>
-                </label>
-
-                <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={voiceConfig.voice_browser_enabled === 'true'}
-                    onChange={(event) =>
-                      setVoiceConfig((previous) => ({
-                        ...previous,
-                        voice_browser_enabled: String(event.target.checked),
-                      }))
-                    }
-                    className="h-4 w-4 accent-violet-600"
-                  />
-                  Browser TTS enabled
-                </label>
-
-                <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={voiceConfig.voice_paid_enabled === 'true'}
-                    onChange={(event) =>
-                      setVoiceConfig((previous) => ({
-                        ...previous,
-                        voice_paid_enabled: String(event.target.checked),
-                      }))
-                    }
-                    className="h-4 w-4 accent-violet-600"
-                  />
-                  Premium provider enabled
-                </label>
-
-                <label className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={voiceConfig.voice_auto_read_enabled === 'true'}
-                    onChange={(event) =>
-                      setVoiceConfig((previous) => ({
-                        ...previous,
-                        voice_auto_read_enabled: String(event.target.checked),
-                      }))
-                    }
-                    className="h-4 w-4 accent-violet-600"
-                  />
-                  Auto-read assistant replies
-                </label>
-
-                <label className="text-sm text-slate-700">
-                  <span className="mb-1 block font-medium">Voice speed</span>
-                  <input
-                    type="number"
-                    min="0.6"
-                    max="1.4"
-                    step="0.05"
-                    value={voiceConfig.voice_speed}
-                    onChange={(event) =>
-                      setVoiceConfig((previous) => ({
-                        ...previous,
-                        voice_speed: event.target.value,
-                      }))
-                    }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
-                  />
-                </label>
-
-                <label className="text-sm text-slate-700 md:col-span-2">
-                  <span className="mb-1 block font-medium">ElevenLabs API key</span>
-                  <input
-                    type="password"
-                    value={voiceConfig.elevenlabs_api_key}
-                    onChange={(event) =>
-                      setVoiceConfig((previous) => ({
-                        ...previous,
-                        elevenlabs_api_key: event.target.value,
-                      }))
-                    }
-                    placeholder="Enter API key"
-                    autoComplete="new-password"
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
-                  />
-                </label>
-
-                <label className="text-sm text-slate-700">
-                  <span className="mb-1 block font-medium">ElevenLabs voice ID</span>
-                  <input
-                    type="text"
-                    value={voiceConfig.elevenlabs_voice_id}
-                    onChange={(event) =>
-                      setVoiceConfig((previous) => ({
-                        ...previous,
-                        elevenlabs_voice_id: event.target.value,
-                      }))
-                    }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
-                  />
-                </label>
-
-                <label className="text-sm text-slate-700">
-                  <span className="mb-1 block font-medium">ElevenLabs model ID</span>
-                  <input
-                    type="text"
-                    value={voiceConfig.elevenlabs_model_id}
-                    onChange={(event) =>
-                      setVoiceConfig((previous) => ({
-                        ...previous,
-                        elevenlabs_model_id: event.target.value,
-                      }))
-                    }
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-violet-200"
-                  />
-                </label>
-              </div>
-            </div>
+            )}
 
             {/* General groups */}
             {settings.length === 0 ? (
@@ -1692,31 +2070,35 @@ export function SettingsPage() {
                                       <FiCopy size={14} />
                                     )}
                                   </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => void deleteSetting(setting.key)}
-                                    className="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600"
-                                  >
-                                    <FiTrash2 className="text-rose-500" size={14} />
-                                  </button>
+                                  {canDelete && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void deleteSetting(setting.key)}
+                                      className="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600"
+                                    >
+                                      <FiTrash2 className="text-rose-500" size={14} />
+                                    </button>
+                                  )}
                                 </div>
                               </div>
 
                               <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
                                 <div className="flex-1">{renderInput(setting)}</div>
-                                <button
-                                  type="button"
-                                  onClick={() => void saveSetting(setting)}
-                                  disabled={saving[setting.key]}
-                                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
-                                >
-                                  {saving[setting.key] ? (
-                                    <FiRefreshCw className="animate-spin" size={14} />
-                                  ) : (
-                                    <FiSave size={14} />
-                                  )}
-                                  Save
-                                </button>
+                                {canUpdateSettings && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void saveSetting(setting)}
+                                    disabled={saving[setting.key]}
+                                    className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+                                  >
+                                    {saving[setting.key] ? (
+                                      <FiRefreshCw className="animate-spin" size={14} />
+                                    ) : (
+                                      <FiSave size={14} />
+                                    )}
+                                    Save
+                                  </button>
+                                )}
                               </div>
                             </div>
                           ))}
@@ -1730,10 +2112,7 @@ export function SettingsPage() {
           </div>
         ))}
 
-      {/* =================================================================== */}
-      {/* PRINTER TAB                                                         */}
-      {/* =================================================================== */}
-
+      {/* PRINTER TAB */}
       {activeTab === 'printer' && (
         <div className="space-y-6">
           <div className="rounded-2xl border border-cyan-200 bg-gradient-to-r from-cyan-50 via-white to-blue-50 p-5 shadow-sm">
@@ -1750,14 +2129,16 @@ export function SettingsPage() {
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => void savePrinterSettings()}
-                disabled={saving.printer}
-                className="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700 disabled:opacity-60"
-              >
-                {saving.printer ? 'Saving...' : 'Save printer settings'}
-              </button>
+              {canPrinterUpdate && (
+                <button
+                  type="button"
+                  onClick={() => void savePrinterSettings()}
+                  disabled={saving.printer}
+                  className="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700 disabled:opacity-60"
+                >
+                  {saving.printer ? 'Saving...' : 'Save printer settings'}
+                </button>
+              )}
             </div>
 
             <div className="mt-6 grid gap-4 md:grid-cols-2">
@@ -1771,7 +2152,8 @@ export function SettingsPage() {
                       printer_default_format: event.target.value,
                     }))
                   }
-                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-200"
+                  disabled={!canPrinterUpdate}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-200 disabled:cursor-not-allowed disabled:bg-slate-100"
                 >
                   <option value="A4">A4 (Standard)</option>
                   <option value="58mm">58mm Thermal</option>
@@ -1789,7 +2171,8 @@ export function SettingsPage() {
                       printer_connection_mode: event.target.value,
                     }))
                   }
-                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-200"
+                  disabled={!canPrinterUpdate}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-cyan-200 disabled:cursor-not-allowed disabled:bg-slate-100"
                 >
                   <option value="browser">Browser Print</option>
                   <option value="bluetooth">Bluetooth Thermal</option>
@@ -1808,7 +2191,7 @@ export function SettingsPage() {
                 <button
                   type="button"
                   onClick={() => void scanBluetoothPrinters()}
-                  disabled={scanningBluetooth}
+                  disabled={scanningBluetooth || !canPrinterUpdate}
                   className="flex items-center gap-2 rounded-lg bg-cyan-600 px-4 py-2 text-sm font-medium text-white hover:bg-cyan-700 disabled:opacity-60"
                 >
                   {scanningBluetooth ? (
@@ -1819,7 +2202,7 @@ export function SettingsPage() {
                   {scanningBluetooth ? 'Scanning...' : 'Scan for Bluetooth Printers'}
                 </button>
 
-                {connectedDevice && (
+                {connectedDevice && canPrinterUpdate && (
                   <button
                     type="button"
                     onClick={() => void disconnectBluetooth()}
@@ -1844,14 +2227,16 @@ export function SettingsPage() {
                           {device.name || 'Unnamed device'}
                         </span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => void connectBluetoothDevice(device)}
-                        disabled={connectingDevice === device.id}
-                        className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-60"
-                      >
-                        {connectingDevice === device.id ? 'Connecting...' : 'Connect'}
-                      </button>
+                      {canPrinterUpdate && (
+                        <button
+                          type="button"
+                          onClick={() => void connectBluetoothDevice(device)}
+                          disabled={connectingDevice === device.id}
+                          className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs text-white hover:bg-blue-700 disabled:opacity-60"
+                        >
+                          {connectingDevice === device.id ? 'Connecting...' : 'Connect'}
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1882,13 +2267,9 @@ export function SettingsPage() {
         </div>
       )}
 
-      {/* =================================================================== */}
-      {/* AI TAB                                                              */}
-      {/* =================================================================== */}
-
+      {/* AI TAB */}
       {activeTab === 'ai' && (
         <div className="space-y-6">
-          {/* Header */}
           <div className="rounded-2xl border border-violet-200 bg-gradient-to-r from-violet-50 via-white to-indigo-50 p-5 shadow-sm">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
               <div>
@@ -1900,9 +2281,8 @@ export function SettingsPage() {
                   AI API Key &amp; Model
                 </h2>
                 <p className="mt-1 max-w-2xl text-sm text-slate-600">
-                  Used by the AI purchase scanner (OCR) and other AI features. The key is
-                  stored only in this browser's local storage and never sent to the ERP
-                  backend.
+                  Powers the AI business assistant on the server and the purchase scanner.
+                  The assistant key is encrypted before it is stored by the ERP.
                 </p>
               </div>
 
@@ -1921,19 +2301,20 @@ export function SettingsPage() {
                   {aiTesting ? 'Testing…' : 'Test connection'}
                 </button>
 
-                <button
-                  type="button"
-                  onClick={saveAiConfig}
-                  className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700"
-                >
-                  <FiSave size={15} />
-                  Save AI settings
-                </button>
+                {canAiUpdate && (
+                  <button
+                    type="button"
+                    onClick={saveAiConfig}
+                    className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700"
+                  >
+                    <FiSave size={15} />
+                    Save AI settings
+                  </button>
+                )}
               </div>
             </div>
           </div>
 
-          {/* Config card */}
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <div className="grid gap-5 md:grid-cols-2">
               <label className="text-sm text-slate-700">
@@ -1946,12 +2327,13 @@ export function SettingsPage() {
                       provider: event.target.value as 'gemini',
                     }))
                   }
-                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"
+                  disabled={!canAiUpdate}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100 disabled:cursor-not-allowed disabled:bg-slate-100"
                 >
                   <option value="gemini">Google Gemini</option>
                 </select>
                 <p className="mt-1 text-xs text-slate-500">
-                  More providers (OpenAI, Anthropic) can be added later.
+                  Gemini powers business chat; use the Voice tab to configure ElevenLabs speech output.
                 </p>
               </label>
 
@@ -1965,8 +2347,16 @@ export function SettingsPage() {
                       selectedModel: event.target.value,
                     }))
                   }
-                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"
+                  disabled={!canAiUpdate}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100 disabled:cursor-not-allowed disabled:bg-slate-100"
                 >
+                  {/* If the stored model is not in the list, add it so the user can see what's saved */}
+                  {!AI_MODEL_OPTIONS.some((option) => option.value === aiConfig.selectedModel) &&
+                    aiConfig.selectedModel.trim() !== '' && (
+                      <option value={aiConfig.selectedModel}>
+                        {aiConfig.selectedModel} (currently saved)
+                      </option>
+                    )}
                   {AI_MODEL_OPTIONS.map((option) => (
                     <option key={option.value} value={option.value}>
                       {option.label}
@@ -1974,8 +2364,8 @@ export function SettingsPage() {
                   ))}
                 </select>
                 <p className="mt-1 text-xs text-slate-500">
-                  The purchase scanner also falls back to a secondary model if this one
-                  fails.
+                  The assistant automatically disables thinking tokens for 2.5 / 2.0
+                  probes so the connection test always sees real text.
                 </p>
               </label>
 
@@ -1991,10 +2381,11 @@ export function SettingsPage() {
                         apiKey: event.target.value,
                       }))
                     }
+                    disabled={!canAiUpdate}
                     placeholder="AIza…"
                     autoComplete="new-password"
                     spellCheck={false}
-                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 pr-10 font-mono text-xs outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 pr-10 font-mono text-xs outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100 disabled:cursor-not-allowed disabled:bg-slate-100"
                   />
                   <button
                     type="button"
@@ -2006,7 +2397,7 @@ export function SettingsPage() {
                   </button>
                 </div>
                 <p className="mt-1 text-xs text-slate-500">
-                  Get a free key from{' '}
+                  Get a key from{' '}
                   <a
                     href="https://aistudio.google.com/app/apikey"
                     target="_blank"
@@ -2015,7 +2406,7 @@ export function SettingsPage() {
                   >
                     Google AI Studio
                   </a>
-                  . Stored in this browser only (key{' '}
+                  . Saving securely configures server-side AI chat and keeps the scanner preference here (key{' '}
                   <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px]">
                     {BILL_EXTRACT_STORAGE_KEY}
                   </code>
@@ -2024,7 +2415,10 @@ export function SettingsPage() {
               </label>
             </div>
 
-            {/* Test result */}
+            <p className={`mt-4 rounded-lg border px-3 py-2 text-xs ${aiServerConfigured ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+              {aiServerConfigured ? 'Business assistant AI is configured. The API key is never returned to this page.' : 'Business assistant is not configured yet. Enter a Gemini key, test it, then save.'}
+            </p>
+
             {aiTestResult && (
               <div
                 className={`mt-4 flex items-start gap-2 rounded-lg border p-3 text-xs ${
@@ -2042,30 +2436,29 @@ export function SettingsPage() {
               </div>
             )}
 
-            {/* Clear */}
-            <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
-              <button
-                type="button"
-                onClick={clearAiConfig}
-                className="inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50"
-              >
-                <FiTrash2 size={13} />
-                Clear configuration
-              </button>
-              <span className="text-xs text-slate-500">
-                Removes the stored key from this browser.
-              </span>
-            </div>
+            {canAiUpdate && (
+              <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-4">
+                <button
+                  type="button"
+                  onClick={clearAiConfig}
+                  className="inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-white px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50"
+                >
+                  <FiTrash2 size={13} />
+                  Clear configuration
+                </button>
+                <span className="text-xs text-slate-500">
+                  Removes the server-side assistant key and this browser’s scanner key.
+                </span>
+              </div>
+            )}
           </div>
 
-          {/* Info cards */}
           <div className="grid gap-4 md:grid-cols-3">
             <div className="rounded-xl border border-slate-200 bg-white p-4">
               <FiShield className="mb-2 text-emerald-600" />
-              <h4 className="font-semibold text-slate-800">Stored locally</h4>
+              <h4 className="font-semibold text-slate-800">Assistant key encrypted</h4>
               <p className="mt-1 text-xs leading-5 text-slate-500">
-                The API key is never persisted to the ERP database or transmitted to your
-                own backend — it lives only in this browser.
+                The assistant sends requests through the ERP server. Its API key is encrypted in application settings and is never returned by the config endpoint.
               </p>
             </div>
 
@@ -2090,13 +2483,38 @@ export function SettingsPage() {
         </div>
       )}
 
-      {/* =================================================================== */}
-      {/* API + MCP TAB                                                       */}
-      {/* =================================================================== */}
+      {activeTab === 'operations' && (
+        <div className="space-y-5">
+          <div className="rounded-2xl border border-blue-200 bg-blue-50 p-5">
+            <h2 className="flex items-center gap-2 text-lg font-bold text-slate-800"><FiClock className="text-blue-600" /> Scheduled jobs</h2>
+            <p className="mt-1 text-sm text-slate-600">This list is discovered from Laravel's registered schedule. A healthy listing means the job is configured; the server scheduler still needs to invoke Laravel every minute.</p>
+            <ol className="mt-3 list-inside list-decimal space-y-1 text-sm text-slate-700">
+              <li>For Linux, add <code className="rounded bg-white px-1">* * * * * cd /path/to/backend &amp;&amp; php artisan schedule:run &gt;&gt; /dev/null 2&gt;&amp;1</code> to the web user crontab.</li>
+              <li>For Windows/XAMPP, create a Task Scheduler task that runs every minute: <code className="rounded bg-white px-1">php artisan schedule:run</code> with the backend folder as its working directory.</li>
+              <li>Keep the task enabled and confirm the PHP executable and backend path match this installation.</li>
+            </ol>
+            <div className="mt-3 flex flex-wrap gap-2 text-xs text-blue-900">
+              <span className="rounded-full bg-white px-3 py-1">Attendance absence marking: daily 00:30</span>
+              <span className="rounded-full bg-white px-3 py-1">Device offline check: every 15 minutes</span>
+              <span className="rounded-full bg-white px-3 py-1">Expired 2FA challenge cleanup: daily</span>
+            </div>
+          </div>
+          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <div><h3 className="font-semibold text-slate-800">Registered Laravel schedules</h3><p className="text-xs text-slate-500">Review each discovered command and schedule expression.</p></div>
+              <button type="button" onClick={() => void loadCronTasks()} disabled={cronLoading} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium hover:bg-slate-50 disabled:opacity-60">{cronLoading ? 'Refreshing…' : 'Refresh jobs'}</button>
+            </div>
+            {cronError ? <p className="rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{cronError}</p> : cronLoading ? <p className="text-sm text-slate-500">Loading scheduled jobs…</p> : cronTasks.length === 0 ? <p className="text-sm text-slate-500">No Laravel schedules were discovered.</p> : (
+              <div className="space-y-3">{cronTasks.map((task, index) => <div key={String(task.id ?? index)} className="rounded-xl border border-slate-200 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><h4 className="font-medium text-slate-800">{task.name || task.command || `Scheduled job ${index + 1}`}</h4><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">{task.enabled === false ? 'Disabled' : task.status || 'Registered'}</span></div><p className="mt-1 font-mono text-xs text-slate-600">{task.command || 'Laravel scheduled callback'} · {task.schedule || 'Schedule not reported'}</p><p className="mt-2 text-xs text-slate-500">Next run: {task.nextRun ? new Date(task.nextRun).toLocaleString() : 'Not reported by scheduler API'}</p></div>)}</div>
+            )}
+          </div>
+          <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900"><strong>Operations guide:</strong> jobs run only when the host scheduler is active. The dashboard lists Laravel's schedule definitions and cannot verify that Windows Task Scheduler or system cron is enabled on the server.</p>
+        </div>
+      )}
 
+      {/* API + MCP TAB */}
       {activeTab === 'api' && (
         <div className="space-y-6">
-          {/* API URL */}
           <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 bg-gradient-to-r from-blue-50 to-indigo-50 px-6 py-4">
               <h2 className="flex items-center gap-2 font-semibold text-slate-800">
@@ -2126,7 +2544,6 @@ export function SettingsPage() {
             </div>
           </div>
 
-          {/* MCP */}
           <div className="overflow-hidden rounded-2xl border border-emerald-200 bg-white shadow-sm">
             <div className="border-b border-emerald-200 bg-gradient-to-r from-emerald-50 via-white to-teal-50 px-6 py-5">
               <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
@@ -2168,7 +2585,6 @@ export function SettingsPage() {
             </div>
 
             <div className="space-y-6 p-6">
-              {/* Status */}
               <div className="grid gap-3 md:grid-cols-4">
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
                   <p className="text-xs uppercase tracking-wide text-slate-500">MCP</p>
@@ -2198,7 +2614,6 @@ export function SettingsPage() {
                 </div>
               </div>
 
-              {/* Security notice */}
               <div className="flex gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4">
                 <FiShield className="mt-0.5 shrink-0 text-amber-600" />
                 <div>
@@ -2214,66 +2629,66 @@ export function SettingsPage() {
                 </div>
               </div>
 
-              {/* Token creation */}
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-                <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
-                  <div>
-                    <h3 className="flex items-center gap-2 font-semibold text-slate-800">
-                      <FiPlus className="text-emerald-600" />
-                      Create MCP token
-                    </h3>
-                    <p className="mt-1 text-sm text-slate-500">
-                      Generate a short-lived credential for one MCP client.
-                    </p>
+              {canMcpManage && (
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                  <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
+                    <div>
+                      <h3 className="flex items-center gap-2 font-semibold text-slate-800">
+                        <FiPlus className="text-emerald-600" />
+                        Create MCP token
+                      </h3>
+                      <p className="mt-1 text-sm text-slate-500">
+                        Generate a short-lived credential for one MCP client.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-5 grid gap-4 md:grid-cols-[1fr_180px_auto]">
+                    <label className="text-sm text-slate-700">
+                      <span className="mb-1 block font-medium">Connection name</span>
+                      <input
+                        type="text"
+                        value={mcpName}
+                        onChange={(event) => setMcpName(event.target.value)}
+                        maxLength={100}
+                        placeholder="ChatGPT"
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
+                      />
+                    </label>
+
+                    <label className="text-sm text-slate-700">
+                      <span className="mb-1 block font-medium">Expires in</span>
+                      <select
+                        value={mcpExpiresDays}
+                        onChange={(event) => setMcpExpiresDays(event.target.value)}
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
+                      >
+                        <option value="7">7 days</option>
+                        <option value="30">30 days</option>
+                        <option value="60">60 days</option>
+                        <option value="90">90 days</option>
+                      </select>
+                    </label>
+
+                    <div className="flex items-end">
+                      <button
+                        type="button"
+                        onClick={() => void generateMcpToken()}
+                        disabled={mcpGenerating}
+                        className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60 md:w-auto"
+                      >
+                        {mcpGenerating ? (
+                          <FiLoader className="animate-spin" size={16} />
+                        ) : (
+                          <FiKey size={16} />
+                        )}
+                        {mcpGenerating ? 'Generating...' : 'Generate token'}
+                      </button>
+                    </div>
                   </div>
                 </div>
+              )}
 
-                <div className="mt-5 grid gap-4 md:grid-cols-[1fr_180px_auto]">
-                  <label className="text-sm text-slate-700">
-                    <span className="mb-1 block font-medium">Connection name</span>
-                    <input
-                      type="text"
-                      value={mcpName}
-                      onChange={(event) => setMcpName(event.target.value)}
-                      maxLength={100}
-                      placeholder="ChatGPT"
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
-                    />
-                  </label>
-
-                  <label className="text-sm text-slate-700">
-                    <span className="mb-1 block font-medium">Expires in</span>
-                    <select
-                      value={mcpExpiresDays}
-                      onChange={(event) => setMcpExpiresDays(event.target.value)}
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100"
-                    >
-                      <option value="7">7 days</option>
-                      <option value="30">30 days</option>
-                      <option value="60">60 days</option>
-                      <option value="90">90 days</option>
-                    </select>
-                  </label>
-
-                  <div className="flex items-end">
-                    <button
-                      type="button"
-                      onClick={() => void generateMcpToken()}
-                      disabled={mcpGenerating}
-                      className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60 md:w-auto"
-                    >
-                      {mcpGenerating ? (
-                        <FiLoader className="animate-spin" size={16} />
-                      ) : (
-                        <FiKey size={16} />
-                      )}
-                      {mcpGenerating ? 'Generating...' : 'Generate token'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* MCP endpoint info */}
               <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
                 <div className="flex gap-3">
                   <FiInfo className="mt-0.5 shrink-0 text-blue-600" />
@@ -2293,135 +2708,135 @@ export function SettingsPage() {
                 </div>
               </div>
 
-              {/* Existing tokens */}
-              <div>
-                <div className="mb-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-                  <div>
-                    <h3 className="font-semibold text-slate-800">Active MCP tokens</h3>
-                    <p className="text-sm text-slate-500">
-                      Only tokens belonging to your current ERP account are shown.
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => void revokeAllMcpTokens()}
-                    disabled={mcpRevokingAll || mcpTokens.length === 0}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-rose-300 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
-                  >
-                    {mcpRevokingAll ? (
-                      <FiLoader className="animate-spin" size={14} />
-                    ) : (
-                      <FiTrash2 size={14} />
-                    )}
-                    Revoke all
-                  </button>
-                </div>
-
-                {mcpLoading ? (
-                  <SkeletonTable />
-                ) : mcpTokens.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
-                    <FiKey className="mx-auto mb-3 text-slate-300" size={40} />
-                    <p className="font-medium text-slate-700">No MCP tokens</p>
-                    <p className="mt-1 text-sm text-slate-500">
-                      Generate your first token to connect an MCP client.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="overflow-hidden rounded-xl border border-slate-200">
-                    <div className="hidden grid-cols-[1.5fr_1fr_1fr_1fr_auto] gap-4 bg-slate-50 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:grid">
-                      <span>Token</span>
-                      <span>Ability</span>
-                      <span>Created</span>
-                      <span>Expires</span>
-                      <span>Action</span>
+              {canMcpManage && (
+                <div>
+                  <div className="mb-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                    <div>
+                      <h3 className="font-semibold text-slate-800">Active MCP tokens</h3>
+                      <p className="text-sm text-slate-500">
+                        Only tokens belonging to your current ERP account are shown.
+                      </p>
                     </div>
 
-                    <div className="divide-y divide-slate-200">
-                      {mcpTokens.map((token) => (
-                        <div
-                          key={token.id}
-                          className="grid gap-3 px-4 py-4 md:grid-cols-[1.5fr_1fr_1fr_1fr_auto] md:items-center md:gap-4"
-                        >
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <FiKey className="text-emerald-600" />
-                              <span className="font-medium text-slate-800">
-                                {token.name}
-                              </span>
-                            </div>
-                            <p className="mt-1 text-xs text-slate-500">
-                              ID: {token.id}
-                            </p>
-                          </div>
+                    <button
+                      type="button"
+                      onClick={() => void revokeAllMcpTokens()}
+                      disabled={mcpRevokingAll || mcpTokens.length === 0}
+                      className="inline-flex items-center justify-center gap-2 rounded-lg border border-rose-300 px-3 py-2 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                    >
+                      {mcpRevokingAll ? (
+                        <FiLoader className="animate-spin" size={14} />
+                      ) : (
+                        <FiTrash2 size={14} />
+                      )}
+                      Revoke all
+                    </button>
+                  </div>
 
-                          <div>
-                            <span className="inline-flex rounded-full bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-700">
-                              {token.abilities.join(', ') || 'none'}
-                            </span>
-                          </div>
+                  {mcpLoading ? (
+                    <SkeletonTable />
+                  ) : mcpTokens.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
+                      <FiKey className="mx-auto mb-3 text-slate-300" size={40} />
+                      <p className="font-medium text-slate-700">No MCP tokens</p>
+                      <p className="mt-1 text-sm text-slate-500">
+                        Generate your first token to connect an MCP client.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="overflow-hidden rounded-xl border border-slate-200">
+                      <div className="hidden grid-cols-[1.5fr_1fr_1fr_1fr_auto] gap-4 bg-slate-50 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500 md:grid">
+                        <span>Token</span>
+                        <span>Ability</span>
+                        <span>Created</span>
+                        <span>Expires</span>
+                        <span>Action</span>
+                      </div>
 
-                          <div className="text-sm text-slate-600">
-                            {token.created_at
-                              ? new Date(token.created_at).toLocaleString()
-                              : '—'}
-                          </div>
-
-                          <div className="text-sm">
-                            {token.expires_at ? (
-                              <div>
-                                <p className="text-slate-700">
-                                  {new Date(token.expires_at).toLocaleString()}
-                                </p>
-                                <p
-                                  className={`mt-1 text-xs ${
-                                    new Date(token.expires_at).getTime() < Date.now()
-                                      ? 'text-rose-600'
-                                      : 'text-slate-500'
-                                  }`}
-                                >
-                                  {new Date(token.expires_at).getTime() < Date.now()
-                                    ? 'Expired'
-                                    : 'Active'}
-                                </p>
+                      <div className="divide-y divide-slate-200">
+                        {mcpTokens.map((token) => (
+                          <div
+                            key={token.id}
+                            className="grid gap-3 px-4 py-4 md:grid-cols-[1.5fr_1fr_1fr_1fr_auto] md:items-center md:gap-4"
+                          >
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <FiKey className="text-emerald-600" />
+                                <span className="font-medium text-slate-800">
+                                  {token.name}
+                                </span>
                               </div>
-                            ) : (
-                              'No expiry'
-                            )}
-                          </div>
-
-                          <div>
-                            <button
-                              type="button"
-                              onClick={() => void revokeMcpToken(token)}
-                              disabled={mcpRevokingId === token.id}
-                              className="inline-flex items-center gap-2 rounded-lg border border-rose-200 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-60"
-                            >
-                              {mcpRevokingId === token.id ? (
-                                <FiLoader className="animate-spin" size={13} />
-                              ) : (
-                                <FiTrash2 size={13} />
-                              )}
-                              Revoke
-                            </button>
-                          </div>
-
-                          {token.last_used_at && (
-                            <div className="md:col-span-5">
-                              <p className="text-xs text-slate-500">
-                                Last used: {new Date(token.last_used_at).toLocaleString()}
+                              <p className="mt-1 text-xs text-slate-500">
+                                ID: {token.id}
                               </p>
                             </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
 
-              {/* Development security notes */}
+                            <div>
+                              <span className="inline-flex rounded-full bg-emerald-100 px-2 py-1 text-xs font-medium text-emerald-700">
+                                {token.abilities.join(', ') || 'none'}
+                              </span>
+                            </div>
+
+                            <div className="text-sm text-slate-600">
+                              {token.created_at
+                                ? new Date(token.created_at).toLocaleString()
+                                : '—'}
+                            </div>
+
+                            <div className="text-sm">
+                              {token.expires_at ? (
+                                <div>
+                                  <p className="text-slate-700">
+                                    {new Date(token.expires_at).toLocaleString()}
+                                  </p>
+                                  <p
+                                    className={`mt-1 text-xs ${
+                                      new Date(token.expires_at).getTime() < Date.now()
+                                        ? 'text-rose-600'
+                                        : 'text-slate-500'
+                                    }`}
+                                  >
+                                    {new Date(token.expires_at).getTime() < Date.now()
+                                      ? 'Expired'
+                                      : 'Active'}
+                                  </p>
+                                </div>
+                              ) : (
+                                'No expiry'
+                              )}
+                            </div>
+
+                            <div>
+                              <button
+                                type="button"
+                                onClick={() => void revokeMcpToken(token)}
+                                disabled={mcpRevokingId === token.id}
+                                className="inline-flex items-center gap-2 rounded-lg border border-rose-200 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+                              >
+                                {mcpRevokingId === token.id ? (
+                                  <FiLoader className="animate-spin" size={13} />
+                                ) : (
+                                  <FiTrash2 size={13} />
+                                )}
+                                Revoke
+                              </button>
+                            </div>
+
+                            {token.last_used_at && (
+                              <div className="md:col-span-5">
+                                <p className="text-xs text-slate-500">
+                                  Last used: {new Date(token.last_used_at).toLocaleString()}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="rounded-xl border border-slate-200 bg-white p-4">
                   <FiShield className="mb-2 text-emerald-600" />
@@ -2451,7 +2866,6 @@ export function SettingsPage() {
             </div>
           </div>
 
-          {/* Existing auth info */}
           <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 bg-gradient-to-r from-purple-50 to-pink-50 px-6 py-4">
               <h2 className="flex items-center gap-2 font-semibold text-slate-800">
@@ -2507,7 +2921,6 @@ export function SettingsPage() {
             </div>
           </div>
 
-          {/* Quick Links */}
           <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 bg-gradient-to-r from-amber-50 to-orange-50 px-6 py-4">
               <h2 className="flex items-center gap-2 font-semibold text-slate-800">
@@ -2570,10 +2983,7 @@ export function SettingsPage() {
         </div>
       )}
 
-      {/* =================================================================== */}
-      {/* SECURITY TAB                                                        */}
-      {/* =================================================================== */}
-
+      {/* SECURITY TAB */}
       {activeTab === 'security' && (
         <div className="space-y-6">
           <TwoFactorSettings />
@@ -2609,11 +3019,8 @@ export function SettingsPage() {
         </div>
       )}
 
-      {/* =================================================================== */}
-      {/* ADD SETTING MODAL                                                   */}
-      {/* =================================================================== */}
-
-      {showAddModal && (
+      {/* ADD SETTING MODAL */}
+      {showAddModal && canCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl bg-white p-6 shadow-xl">
             <div className="flex items-center justify-between">
@@ -2726,11 +3133,8 @@ export function SettingsPage() {
         </div>
       )}
 
-      {/* =================================================================== */}
-      {/* MCP TOKEN CREATED MODAL                                             */}
-      {/* =================================================================== */}
-
-      {createdMcpToken && (
+      {/* MCP TOKEN CREATED MODAL */}
+      {createdMcpToken && canMcpManage && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-4">
           <div className="w-full max-w-2xl rounded-2xl bg-white shadow-2xl">
             <div className="border-b border-emerald-100 bg-emerald-50 px-6 py-5">

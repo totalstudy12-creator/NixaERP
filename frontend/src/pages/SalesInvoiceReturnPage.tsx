@@ -22,6 +22,7 @@ import {
   FileText,
   Filter,
   Loader2,
+  Lock,
   PackageCheck,
   Pencil,
   Plus,
@@ -35,6 +36,7 @@ import {
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { useAuthStore } from '../store/auth';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -53,6 +55,114 @@ import {
 const Offcanvas = lazy(() =>
   import('../components/Offcanvas').then((m) => ({ default: m.Offcanvas })),
 );
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Permission keys                                              */
+/* ------------------------------------------------------------------ */
+
+const PERMISSIONS = {
+  SALES_RETURNS_VIEW: 'sales.returns.view',
+  SALES_RETURNS_CREATE: 'sales.returns.create',
+  SALES_RETURNS_UPDATE: 'sales.returns.update',
+  SALES_RETURNS_DELETE: 'sales.returns.delete',
+  SALES_RETURNS_EXPORT: 'sales.returns.export',
+  SALES_RETURNS_CONFIRM: 'sales.returns.confirm',
+} as const;
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Store-backed permissions (admin-aware + notation-insensitive) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Collapse a permission key so that the different notations used across
+ * the codebase all match each other:
+ *
+ *   "sales.returns.view"    → "returns sales view"
+ *   "view sales returns"    → "returns sales view"
+ *   "sales:returns:view"    → "returns sales view"
+ */
+function normalisePermission(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[.:_/\-]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+interface UsePagePermissionsResult {
+  can: (permission: string | string[]) => boolean;
+  isAuthenticated: boolean;
+  isSuperAdmin: boolean;
+  loadingUser: boolean;
+}
+
+function usePagePermissions(): UsePagePermissionsResult {
+  const user = useAuthStore((s) => s.user);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const storeIsSuperAdmin = useAuthStore((s) => s.isSuperAdmin);
+  const storeHasAnyPermission = useAuthStore((s) => s.hasAnyPermission);
+
+  const isSuperAdmin = useMemo(() => storeIsSuperAdmin(), [storeIsSuperAdmin, user]);
+
+  const can = useCallback(
+    (permission: string | string[]): boolean => {
+      if (!isAuthenticated) return false;
+      if (isSuperAdmin) return true;
+
+      const keys = Array.isArray(permission) ? permission : [permission];
+
+      if (storeHasAnyPermission(keys)) return true;
+
+      const hasMetadata =
+        (user?.permission_names?.length ?? 0) > 0 ||
+        (user?.permissions?.length ?? 0) > 0 ||
+        (user?.roles?.length ?? 0) > 0 ||
+        (user?.role_names?.length ?? 0) > 0;
+      if (!hasMetadata) return false;
+
+      const normalised = new Set<string>();
+      (user?.permission_names ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p)),
+      );
+      (user?.permissions ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p.name)),
+      );
+
+      return keys.some((k) => normalised.has(normalisePermission(k)));
+    },
+    [isAuthenticated, isSuperAdmin, storeHasAnyPermission, user],
+  );
+
+  return { can, isAuthenticated, isSuperAdmin, loadingUser };
+}
+
+/* ------------------------------------------------------------------ */
+/* Access-restricted screen                                            */
+/* ------------------------------------------------------------------ */
+
+function AccessRestricted() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-rose-50 text-rose-500">
+          <Lock size={26} />
+        </div>
+        <h1 className="mt-4 text-lg font-bold text-slate-900">Access restricted</h1>
+        <p className="mt-2 text-sm leading-6 text-slate-500">
+          Your account does not have permission to view Sales Returns. Contact your
+          administrator to request the{' '}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px]">
+            sales.returns.view
+          </code>{' '}
+          permission.
+        </p>
+      </div>
+    </div>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -468,6 +578,9 @@ interface FormPanelProps {
   onRemoveItem: (index: number) => void;
   onSetFullReturn: () => void;
   onSetPartialReturn: () => void;
+  canCreate: boolean;
+  canUpdate: boolean;
+  canConfirm: boolean;
 }
 
 function FormPanel(props: FormPanelProps) {
@@ -478,10 +591,15 @@ function FormPanel(props: FormPanelProps) {
     invoiceSearchQuery, invoiceSearchResults, showInvoiceDropdown, invoiceSearchLoading,
     totals, onClose, onSubmit, onInvoiceSearchChange, onLoadInvoice,
     onUpdateItem, onRemoveItem, onSetFullReturn, onSetPartialReturn,
+    canCreate, canUpdate, canConfirm,
   } = props;
 
   const refundFieldDisabled = isReadOnly || formData.refund_method === 'credit';
   const creditFieldDisabled = isReadOnly || formData.refund_method !== 'credit';
+
+  // Whether the current user can persist any change to this form
+  const canSaveDraft = isReadOnly ? false : (editingId ? canUpdate : canCreate);
+  const canConfirmReturn = isReadOnly ? false : (editingId ? canUpdate && canConfirm : canCreate && canConfirm);
 
   const fieldLabel = 'block text-xs font-medium text-slate-600 mb-1.5';
   const fieldInput =
@@ -521,21 +639,21 @@ function FormPanel(props: FormPanelProps) {
               <Button variant="outline" onClick={onClose} disabled={submitting} className="rounded-xl">
                 <X className="mr-2 h-4 w-4" /> Close
               </Button>
-              {!isReadOnly && (
-                <>
-                  <Button variant="outline" onClick={() => onSubmit('draft')} disabled={submitting} className="rounded-xl">
-                    <FileText className="mr-2 h-4 w-4" />
-                    {submitting ? 'Saving…' : 'Save draft'}
-                  </Button>
-                  <Button
-                    onClick={() => onSubmit('confirmed')}
-                    disabled={submitting}
-                    className="rounded-xl bg-indigo-600 font-semibold text-white hover:bg-indigo-700"
-                  >
-                    {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
-                    {submitting ? 'Processing…' : 'Confirm return'}
-                  </Button>
-                </>
+              {!isReadOnly && canSaveDraft && (
+                <Button variant="outline" onClick={() => onSubmit('draft')} disabled={submitting} className="rounded-xl">
+                  <FileText className="mr-2 h-4 w-4" />
+                  {submitting ? 'Saving…' : 'Save draft'}
+                </Button>
+              )}
+              {!isReadOnly && canConfirmReturn && (
+                <Button
+                  onClick={() => onSubmit('confirmed')}
+                  disabled={submitting}
+                  className="rounded-xl bg-indigo-600 font-semibold text-white hover:bg-indigo-700"
+                >
+                  {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
+                  {submitting ? 'Processing…' : 'Confirm return'}
+                </Button>
               )}
             </div>
           </div>
@@ -546,6 +664,13 @@ function FormPanel(props: FormPanelProps) {
             <div className="flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 text-sm text-amber-800">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>This return is locked because it has already moved beyond draft status.</span>
+            </div>
+          )}
+
+          {!isReadOnly && !canSaveDraft && !canConfirmReturn && (
+            <div className="flex items-start gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-3 text-sm text-rose-800">
+              <Lock className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>You have read-only access to this form. Contact an administrator to request create or update permission.</span>
             </div>
           )}
 
@@ -971,6 +1096,15 @@ function FormPanel(props: FormPanelProps) {
 
 export function SalesInvoiceReturnPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isAuthenticated, loadingUser } = usePagePermissions();
+
+  const canView = can(PERMISSIONS.SALES_RETURNS_VIEW);
+  const canCreate = can(PERMISSIONS.SALES_RETURNS_CREATE);
+  const canUpdate = can(PERMISSIONS.SALES_RETURNS_UPDATE);
+  const canDelete = can(PERMISSIONS.SALES_RETURNS_DELETE);
+  const canExport = can(PERMISSIONS.SALES_RETURNS_EXPORT);
+  const canConfirm = can(PERMISSIONS.SALES_RETURNS_CONFIRM);
+
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [viewingId, setViewingId] = useState<number | null>(null);
@@ -1259,9 +1393,13 @@ export function SalesInvoiceReturnPage() {
   );
 
   const handleCreate = useCallback(() => {
+    if (!canCreate) {
+      showError('Permission denied', 'You do not have permission to create sales returns.');
+      return;
+    }
     resetForm();
     setIsPanelOpen(true);
-  }, [resetForm]);
+  }, [resetForm, canCreate, showError]);
 
   const buildItemsFromReturn = useCallback(
     (items: SalesReturnItem[]): ReturnItemForm[] =>
@@ -1393,6 +1531,10 @@ export function SalesInvoiceReturnPage() {
 
   const handleEdit = useCallback(
     (returnItem: SalesReturn) => {
+      if (!canUpdate) {
+        showError('Permission denied', 'You do not have permission to edit sales returns.');
+        return;
+      }
       if (!EDITABLE_STATUSES.includes(returnItem.status)) {
         void hydrateReturnForm(returnItem, false).then(() => {
           showError(
@@ -1404,11 +1546,15 @@ export function SalesInvoiceReturnPage() {
       }
       void hydrateReturnForm(returnItem, true);
     },
-    [hydrateReturnForm, showError]
+    [hydrateReturnForm, showError, canUpdate]
   );
 
   const handleDelete = useCallback(
     async (returnItem: SalesReturn) => {
+      if (!canDelete) {
+        showError('Permission denied', 'You do not have permission to delete sales returns.');
+        return;
+      }
       if (!DELETABLE_STATUSES.includes(returnItem.status)) {
         showError('Delete blocked', 'Only draft returns can be deleted. Processed returns must not be hard-deleted.');
         return;
@@ -1428,7 +1574,7 @@ export function SalesInvoiceReturnPage() {
         showError('Delete failed', getApiErrorMessage(err, 'Unable to delete the return.'));
       }
     },
-    [refresh, showError, showSuccess]
+    [refresh, showError, showSuccess, canDelete]
   );
 
   const updateItem = useCallback(
@@ -1569,6 +1715,22 @@ export function SalesInvoiceReturnPage() {
   const handleSubmit = useCallback(
     async (targetStatus: 'draft' | 'confirmed') => {
       if (isReadOnly || submitting) return;
+
+      // RBAC — defence in depth
+      if (targetStatus === 'confirmed' && !canConfirm) {
+        showError('Permission denied', 'You do not have permission to confirm sales returns.');
+        return;
+      }
+      if (editingId ? !canUpdate : !canCreate) {
+        showError(
+          'Permission denied',
+          editingId
+            ? 'You do not have permission to edit sales returns.'
+            : 'You do not have permission to create sales returns.'
+        );
+        return;
+      }
+
       if (!validateForm(targetStatus)) return;
 
       setSubmitting(true);
@@ -1618,10 +1780,14 @@ export function SalesInvoiceReturnPage() {
         setSubmitting(false);
       }
     },
-    [buildPayload, editingId, isReadOnly, refresh, showError, showSuccess, submitting, validateForm]
+    [buildPayload, editingId, isReadOnly, refresh, showError, showSuccess, submitting, validateForm, canCreate, canUpdate, canConfirm]
   );
 
   const handleExport = useCallback(() => {
+    if (!canExport) {
+      showError('Permission denied', 'You do not have permission to export sales returns.');
+      return;
+    }
     if (!filteredReturns.length) {
       showError('Nothing to export', 'There are no returns matching the current filters.');
       return;
@@ -1664,7 +1830,7 @@ export function SalesInvoiceReturnPage() {
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     showSuccess('Export complete', `${filteredReturns.length} return(s) exported.`);
-  }, [filteredReturns, showError, showSuccess]);
+  }, [filteredReturns, showError, showSuccess, canExport]);
 
   const branchOptions = useMemo(
     () =>
@@ -1696,6 +1862,24 @@ export function SalesInvoiceReturnPage() {
     setFilterCompany('all');
     setFilterBranch('all');
   }, []);
+
+  /* --------------------------------------------------------------- */
+  /* RBAC page gate                                                  */
+  /* --------------------------------------------------------------- */
+
+  if (loadingUser && !isAuthenticated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated || !canView) {
+    return <AccessRestricted />;
+  }
 
   return (
     <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
@@ -1749,22 +1933,26 @@ export function SalesInvoiceReturnPage() {
                 <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                 Refresh
               </Button>
-              <Button
-                variant="outline"
-                onClick={handleExport}
-                disabled={!filteredReturns.length}
-                className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
-              >
-                <Download className="mr-2 h-4 w-4" />
-                Export
-              </Button>
-              <Button
-                onClick={handleCreate}
-                className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
-              >
-                <Plus className="mr-2 h-4 w-4" />
-                New return
-              </Button>
+              {canExport && (
+                <Button
+                  variant="outline"
+                  onClick={handleExport}
+                  disabled={!filteredReturns.length}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  Export
+                </Button>
+              )}
+              {canCreate && (
+                <Button
+                  onClick={handleCreate}
+                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  New return
+                </Button>
+              )}
             </div>
           </div>
         </section>
@@ -2026,26 +2214,30 @@ export function SalesInvoiceReturnPage() {
                             >
                               <Eye className="h-4 w-4" />
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => handleEdit(row)}
-                              disabled={!editable || openingReturnId === row.id}
-                              className="grid h-8 w-8 place-items-center rounded-lg text-indigo-600 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40"
-                              title={editable ? 'Edit draft' : 'Only drafts editable'}
-                              aria-label={`Edit ${row.return_number}`}
-                            >
-                              <Pencil className="h-4 w-4" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDelete(row)}
-                              disabled={!deletable}
-                              className="grid h-8 w-8 place-items-center rounded-lg text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
-                              title={deletable ? 'Delete draft' : 'Processed returns cannot be deleted'}
-                              aria-label={`Delete ${row.return_number}`}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
+                            {canUpdate && (
+                              <button
+                                type="button"
+                                onClick={() => handleEdit(row)}
+                                disabled={!editable || openingReturnId === row.id}
+                                className="grid h-8 w-8 place-items-center rounded-lg text-indigo-600 transition hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-40"
+                                title={editable ? 'Edit draft' : 'Only drafts editable'}
+                                aria-label={`Edit ${row.return_number}`}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </button>
+                            )}
+                            {canDelete && (
+                              <button
+                                type="button"
+                                onClick={() => handleDelete(row)}
+                                disabled={!deletable}
+                                className="grid h-8 w-8 place-items-center rounded-lg text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40"
+                                title={deletable ? 'Delete draft' : 'Processed returns cannot be deleted'}
+                                aria-label={`Delete ${row.return_number}`}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -2071,12 +2263,14 @@ export function SalesInvoiceReturnPage() {
                               <RefreshCw className="mr-2 h-3.5 w-3.5" /> Reset filters
                             </Button>
                           )}
-                          <Button
-                            className="rounded-lg bg-indigo-600 hover:bg-indigo-700"
-                            onClick={handleCreate}
-                          >
-                            <Plus className="mr-2 h-3.5 w-3.5" /> New return
-                          </Button>
+                          {canCreate && (
+                            <Button
+                              className="rounded-lg bg-indigo-600 hover:bg-indigo-700"
+                              onClick={handleCreate}
+                            >
+                              <Plus className="mr-2 h-3.5 w-3.5" /> New return
+                            </Button>
+                          )}
                         </div>
                       </div>
                     </TableCell>
@@ -2177,6 +2371,9 @@ export function SalesInvoiceReturnPage() {
           onRemoveItem={removeItem}
           onSetFullReturn={setFullReturn}
           onSetPartialReturn={setPartialReturn}
+          canCreate={canCreate}
+          canUpdate={canUpdate}
+          canConfirm={canConfirm}
         />
       )}
     </div>

@@ -29,6 +29,8 @@ import {
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import PermissionGate from '../components/PermissionGate';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -226,6 +228,12 @@ function SelectBox({
 
 export function CompaniesPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+
+  /* ---------- RBAC capability flags ---------- */
+  const canCreateCompany = isSuperAdmin || can('create companies');
+  const canEditCompany = isSuperAdmin || can('edit companies');
+  const canDeleteCompany = isSuperAdmin || can('delete companies');
 
   const [companies, setCompanies] = useState<Company[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
@@ -317,65 +325,24 @@ export function CompaniesPage() {
         return false;
       }
 
-      if (
-        statusFilter === 'active' &&
-        !company.active
-      ) {
-        return false;
-      }
+      if (statusFilter === 'active' && !company.active) return false;
+      if (statusFilter === 'inactive' && company.active) return false;
 
-      if (
-        statusFilter === 'inactive' &&
-        company.active
-      ) {
-        return false;
-      }
+      if (typeFilter !== 'all' && company.type !== typeFilter) return false;
 
-      if (
-        typeFilter !== 'all' &&
-        company.type !== typeFilter
-      ) {
-        return false;
-      }
-
-      if (
-        taxFilter === 'gst' &&
-        !company.gst_number
-      ) {
-        return false;
-      }
-
-      if (
-        taxFilter === 'pan' &&
-        !company.pan_number
-      ) {
-        return false;
-      }
-
+      if (taxFilter === 'gst' && !company.gst_number) return false;
+      if (taxFilter === 'pan' && !company.pan_number) return false;
       if (
         taxFilter === 'complete' &&
-        (!company.gst_number ||
-          !company.pan_number)
+        (!company.gst_number || !company.pan_number)
       ) {
         return false;
       }
 
-      const hasBranch =
-        (companyBranchCount.get(company.id) || 0) > 0;
+      const hasBranch = (companyBranchCount.get(company.id) || 0) > 0;
 
-      if (
-        branchFilter === 'with_branch' &&
-        !hasBranch
-      ) {
-        return false;
-      }
-
-      if (
-        branchFilter === 'without_branch' &&
-        hasBranch
-      ) {
-        return false;
-      }
+      if (branchFilter === 'with_branch' && !hasBranch) return false;
+      if (branchFilter === 'without_branch' && hasBranch) return false;
 
       return true;
     });
@@ -432,11 +399,13 @@ export function CompaniesPage() {
 
   const allSelected =
     rows.length > 0 &&
-    rows.every((company) =>
-      selectedIds.includes(company.id),
-    );
+    rows.every((company) => selectedIds.includes(company.id));
 
   const openCreate = () => {
+    if (!canCreateCompany) {
+      showError('Not permitted', 'You do not have permission to create companies.');
+      return;
+    }
     setEditingId(null);
     setForm(emptyForm());
     setFormErrors({});
@@ -444,6 +413,10 @@ export function CompaniesPage() {
   };
 
   const openEdit = (company: Company) => {
+    if (!canEditCompany) {
+      showError('Not permitted', 'You do not have permission to edit companies.');
+      return;
+    }
     setMenuId(null);
     setEditingId(company.id);
 
@@ -476,17 +449,11 @@ export function CompaniesPage() {
     if (!form.name.trim()) errors.name = true;
     if (!form.code.trim()) errors.code = true;
 
-    if (
-      form.email &&
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)
-    ) {
+    if (form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email)) {
       errors.email = true;
     }
 
-    if (
-      form.phone &&
-      !/^[0-9+()\-.\s]{7,20}$/.test(form.phone)
-    ) {
+    if (form.phone && !/^[0-9+()\-.\s]{7,20}$/.test(form.phone)) {
       errors.phone = true;
     }
 
@@ -518,6 +485,16 @@ export function CompaniesPage() {
   };
 
   const saveCompany = async () => {
+    // Guard against unauthorized submission even if the form is opened.
+    if (editingId && !canEditCompany) {
+      showError('Not permitted', 'You do not have permission to edit companies.');
+      return;
+    }
+    if (!editingId && !canCreateCompany) {
+      showError('Not permitted', 'You do not have permission to create companies.');
+      return;
+    }
+
     if (!validate()) return;
 
     const payload = {
@@ -537,16 +514,11 @@ export function CompaniesPage() {
 
     try {
       if (editingId) {
-        await apiClient.updateCompany(
-          editingId,
-          payload,
-        );
-
+        await apiClient.updateCompany(editingId, payload);
         showSuccess(
           'Company updated',
           `${payload.name} updated successfully.`,
         );
-
         addAppLog({
           module: 'Companies',
           action: 'Update company',
@@ -555,12 +527,10 @@ export function CompaniesPage() {
         });
       } else {
         await apiClient.createCompany(payload);
-
         showSuccess(
           'Company created',
           `${payload.name} created successfully.`,
         );
-
         addAppLog({
           module: 'Companies',
           action: 'Create company',
@@ -574,9 +544,7 @@ export function CompaniesPage() {
     } catch (err) {
       showError(
         'Save failed',
-        err instanceof Error
-          ? err.message
-          : 'Unable to save company.',
+        err instanceof Error ? err.message : 'Unable to save company.',
       );
     } finally {
       setSaving(false);
@@ -584,6 +552,10 @@ export function CompaniesPage() {
   };
 
   const deleteCompany = async (company: Company) => {
+    if (!canDeleteCompany) {
+      showError('Not permitted', 'You do not have permission to delete companies.');
+      return;
+    }
     setMenuId(null);
 
     if (
@@ -622,14 +594,16 @@ export function CompaniesPage() {
     } catch (err) {
       showError(
         'Delete failed',
-        err instanceof Error
-          ? err.message
-          : 'Unable to delete company.',
+        err instanceof Error ? err.message : 'Unable to delete company.',
       );
     }
   };
 
   const bulkDelete = async () => {
+    if (!canDeleteCompany) {
+      showError('Not permitted', 'You do not have permission to delete companies.');
+      return;
+    }
     if (!selectedIds.length) return;
 
     if (
@@ -642,9 +616,7 @@ export function CompaniesPage() {
 
     try {
       await Promise.all(
-        selectedIds.map((id) =>
-          apiClient.deleteCompany(id),
-        ),
+        selectedIds.map((id) => apiClient.deleteCompany(id)),
       );
 
       showSuccess(
@@ -664,9 +636,7 @@ export function CompaniesPage() {
     } catch (err) {
       showError(
         'Bulk delete failed',
-        err instanceof Error
-          ? err.message
-          : 'Unable to delete selected companies.',
+        err instanceof Error ? err.message : 'Unable to delete selected companies.',
       );
     }
   };
@@ -793,13 +763,15 @@ export function CompaniesPage() {
                 Export
               </Button>
 
-              <Button
-                onClick={openCreate}
-                className="h-10 rounded-xl bg-cyan-400 font-semibold text-slate-950 hover:bg-cyan-300"
-              >
-                <Plus className="mr-2 h-4 w-4" />
-                Add company
-              </Button>
+              {canCreateCompany && (
+                <Button
+                  onClick={openCreate}
+                  className="h-10 rounded-xl bg-cyan-400 font-semibold text-slate-950 hover:bg-cyan-300"
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  Add company
+                </Button>
+              )}
             </div>
           </div>
         </section>
@@ -963,9 +935,7 @@ export function CompaniesPage() {
           <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-rose-600" />
             <div>
-              <p className="font-semibold">
-                Unable to load companies
-              </p>
+              <p className="font-semibold">Unable to load companies</p>
               <p className="mt-0.5">{error}</p>
             </div>
           </div>
@@ -979,15 +949,17 @@ export function CompaniesPage() {
                 {selectedIds.length} selected
               </Badge>
 
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={bulkDelete}
-                className="h-9 rounded-lg !bg-rose-600 !text-white hover:!bg-rose-700"
-              >
-                <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-                Delete
-              </Button>
+              {canDeleteCompany && (
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  onClick={bulkDelete}
+                  className="h-9 rounded-lg !bg-rose-600 !text-white hover:!bg-rose-700"
+                >
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                  Delete
+                </Button>
+              )}
 
               <Button
                 size="sm"
@@ -1084,35 +1056,30 @@ export function CompaniesPage() {
 
                 {!loading &&
                   rows.map((company) => {
-                    const checked = selectedIds.includes(
-                      company.id,
-                    );
+                    const checked = selectedIds.includes(company.id);
 
                     const branchCount =
                       companyBranchCount.get(company.id) || 0;
+
+                    const hasAnyRowAction =
+                      canEditCompany || canDeleteCompany;
 
                     return (
                       <TableRow
                         key={company.id}
                         onClick={() => openView(company)}
                         className={`cursor-pointer border-slate-100 hover:bg-slate-50/80 ${
-                          checked
-                            ? 'bg-cyan-50/40'
-                            : ''
+                          checked ? 'bg-cyan-50/40' : ''
                         }`}
                       >
                         <TableCell
                           className="px-3"
-                          onClick={(e) =>
-                            e.stopPropagation()
-                          }
+                          onClick={(e) => e.stopPropagation()}
                         >
                           <input
                             type="checkbox"
                             checked={checked}
-                            onChange={() =>
-                              toggleOne(company.id)
-                            }
+                            onChange={() => toggleOne(company.id)}
                             aria-label={`Select ${company.name}`}
                             className="h-4 w-4 rounded border-slate-300 text-cyan-600"
                           />
@@ -1191,19 +1158,13 @@ export function CompaniesPage() {
                           <StatusBadge active={company.active} />
                         </TableCell>
 
-                        <TableCell
-                          onClick={(e) =>
-                            e.stopPropagation()
-                          }
-                        >
+                        <TableCell onClick={(e) => e.stopPropagation()}>
                           <div className="relative">
                             <button
                               type="button"
                               onClick={() =>
                                 setMenuId((id) =>
-                                  id === company.id
-                                    ? null
-                                    : company.id,
+                                  id === company.id ? null : company.id,
                                 )
                               }
                               className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700"
@@ -1215,38 +1176,44 @@ export function CompaniesPage() {
                               <div className="absolute right-0 top-9 z-50 w-44 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 text-left shadow-xl">
                                 <button
                                   type="button"
-                                  onClick={() =>
-                                    openView(company)
-                                  }
+                                  onClick={() => openView(company)}
                                   className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
                                 >
                                   <Eye className="h-4 w-4 text-slate-400" />
                                   View details
                                 </button>
 
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    openEdit(company)
-                                  }
-                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                                >
-                                  <Pencil className="h-4 w-4 text-slate-400" />
-                                  Edit company
-                                </button>
+                                {canEditCompany && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openEdit(company)}
+                                    className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                                  >
+                                    <Pencil className="h-4 w-4 text-slate-400" />
+                                    Edit company
+                                  </button>
+                                )}
 
-                                <Separator className="my-1" />
+                                {canDeleteCompany && (
+                                  <>
+                                    <Separator className="my-1" />
 
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    deleteCompany(company)
-                                  }
-                                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                  Delete company
-                                </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => deleteCompany(company)}
+                                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-rose-600 hover:bg-rose-50"
+                                    >
+                                      <Trash2 className="h-4 w-4" />
+                                      Delete company
+                                    </button>
+                                  </>
+                                )}
+
+                                {!hasAnyRowAction && (
+                                  <div className="px-3 py-2 text-[11px] text-slate-400">
+                                    Read-only
+                                  </div>
+                                )}
                               </div>
                             )}
                           </div>
@@ -1255,29 +1222,25 @@ export function CompaniesPage() {
                     );
                   })}
 
-                {!loading &&
-                  rows.length === 0 && (
-                    <TableRow>
-                      <TableCell
-                        colSpan={9}
-                        className="py-20 text-center"
-                      >
-                        <div className="mx-auto max-w-md">
-                          <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-slate-100">
-                            <Search className="h-6 w-6 text-slate-400" />
-                          </div>
-
-                          <p className="mt-4 font-semibold text-slate-800">
-                            No companies found
-                          </p>
-
-                          <p className="mt-1 text-sm text-slate-500">
-                            Adjust the filters or search phrase.
-                          </p>
+                {!loading && rows.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={9} className="py-20 text-center">
+                      <div className="mx-auto max-w-md">
+                        <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-slate-100">
+                          <Search className="h-6 w-6 text-slate-400" />
                         </div>
-                      </TableCell>
-                    </TableRow>
-                  )}
+
+                        <p className="mt-4 font-semibold text-slate-800">
+                          No companies found
+                        </p>
+
+                        <p className="mt-1 text-sm text-slate-500">
+                          Adjust the filters or search phrase.
+                        </p>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
               </TableBody>
             </Table>
           </div>
@@ -1286,16 +1249,11 @@ export function CompaniesPage() {
             <p className="text-xs text-slate-500">
               Showing{' '}
               <b>
-                {filteredCompanies.length
-                  ? (page - 1) * PAGE_SIZE + 1
-                  : 0}
+                {filteredCompanies.length ? (page - 1) * PAGE_SIZE + 1 : 0}
               </b>
               {' – '}
               <b>
-                {Math.min(
-                  page * PAGE_SIZE,
-                  filteredCompanies.length,
-                )}
+                {Math.min(page * PAGE_SIZE, filteredCompanies.length)}
               </b>
               {' of '}
               <b>{filteredCompanies.length}</b>
@@ -1317,11 +1275,7 @@ export function CompaniesPage() {
                 size="icon"
                 className="h-9 w-9"
                 disabled={page === 1}
-                onClick={() =>
-                  setPage((p) =>
-                    Math.max(1, p - 1),
-                  )
-                }
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
               >
                 <ChevronLeft className="h-4 w-4" />
               </Button>
@@ -1336,12 +1290,7 @@ export function CompaniesPage() {
                 className="h-9 w-9"
                 disabled={page === totalPages}
                 onClick={() =>
-                  setPage((p) =>
-                    Math.min(
-                      totalPages,
-                      p + 1,
-                    ),
-                  )
+                  setPage((p) => Math.min(totalPages, p + 1))
                 }
               >
                 <ChevronRight className="h-4 w-4" />
@@ -1352,9 +1301,7 @@ export function CompaniesPage() {
                 size="icon"
                 className="h-9 w-9"
                 disabled={page === totalPages}
-                onClick={() =>
-                  setPage(totalPages)
-                }
+                onClick={() => setPage(totalPages)}
               >
                 <ChevronsRight className="h-4 w-4" />
               </Button>
@@ -1398,9 +1345,7 @@ export function CompaniesPage() {
                   </SheetTitle>
 
                   <div className="mt-2">
-                    <StatusBadge
-                      active={viewing.active}
-                    />
+                    <StatusBadge active={viewing.active} />
                   </div>
                 </SheetHeader>
               </div>
@@ -1482,25 +1427,17 @@ export function CompaniesPage() {
                   </div>
 
                   <div className="p-3.5">
-                    {branches.filter(
-                      (b) => b.company_id === viewing.id,
-                    ).length ? (
+                    {branches.filter((b) => b.company_id === viewing.id).length ? (
                       <div className="space-y-2">
                         {branches
-                          .filter(
-                            (b) =>
-                              b.company_id ===
-                              viewing.id,
-                          )
+                          .filter((b) => b.company_id === viewing.id)
                           .map((b) => (
                             <div
                               key={b.id}
                               className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2"
                             >
                               <div>
-                                <p className="text-xs font-semibold">
-                                  {b.name}
-                                </p>
+                                <p className="text-xs font-semibold">{b.name}</p>
                                 {b.code && (
                                   <p className="text-[10px] text-slate-400">
                                     {b.code}
@@ -1525,30 +1462,37 @@ export function CompaniesPage() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 pb-4">
-                  <Button
-                    variant="outline"
-                    className="h-10 rounded-xl"
-                    onClick={() => {
-                      setViewOpen(false);
-                      openEdit(viewing);
-                    }}
-                  >
-                    <Pencil className="mr-2 h-4 w-4" />
-                    Edit
-                  </Button>
+                {/* Sheet footer actions — RBAC gated */}
+                {(canEditCompany || canDeleteCompany) && (
+                  <div className="grid grid-cols-2 gap-2 pb-4">
+                    {canEditCompany && (
+                      <Button
+                        variant="outline"
+                        className="h-10 rounded-xl"
+                        onClick={() => {
+                          setViewOpen(false);
+                          openEdit(viewing);
+                        }}
+                      >
+                        <Pencil className="mr-2 h-4 w-4" />
+                        Edit
+                      </Button>
+                    )}
 
-                  <Button
-                    variant="destructive"
-                    className="h-10 rounded-xl !bg-rose-600 !text-white hover:!bg-rose-700"
-                    onClick={() =>
-                      deleteCompany(viewing)
-                    }
-                  >
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete
-                  </Button>
-                </div>
+                    {canDeleteCompany && (
+                      <Button
+                        variant="destructive"
+                        className={`h-10 rounded-xl !bg-rose-600 !text-white hover:!bg-rose-700 ${
+                          !canEditCompany ? 'col-span-2' : ''
+                        }`}
+                        onClick={() => deleteCompany(viewing)}
+                      >
+                        <Trash2 className="mr-2 h-4 w-4" />
+                        Delete
+                      </Button>
+                    )}
+                  </div>
+                )}
               </div>
             </>
           )}
@@ -1572,18 +1516,14 @@ export function CompaniesPage() {
                   )}
                 </span>
 
-                {editingId
-                  ? 'Edit company'
-                  : 'Add company'}
+                {editingId ? 'Edit company' : 'Add company'}
               </SheetTitle>
             </SheetHeader>
           </div>
 
           <div className="space-y-4 px-5 py-5 pb-24">
             <section className="rounded-2xl border bg-white p-4">
-              <p className="mb-4 text-sm font-semibold">
-                Company information
-              </p>
+              <p className="mb-4 text-sm font-semibold">Company information</p>
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
@@ -1593,10 +1533,7 @@ export function CompaniesPage() {
                   <Input
                     value={form.name}
                     onChange={(e) =>
-                      setForm((x) => ({
-                        ...x,
-                        name: e.target.value,
-                      }))
+                      setForm((x) => ({ ...x, name: e.target.value }))
                     }
                     className={
                       formErrors.name
@@ -1613,10 +1550,7 @@ export function CompaniesPage() {
                   <Input
                     value={form.code}
                     onChange={(e) =>
-                      setForm((x) => ({
-                        ...x,
-                        code: e.target.value,
-                      }))
+                      setForm((x) => ({ ...x, code: e.target.value }))
                     }
                     className={
                       formErrors.code
@@ -1629,23 +1563,13 @@ export function CompaniesPage() {
                 <SelectBox
                   label="Company type"
                   value={form.type}
-                  onChange={(v) =>
-                    setForm((x) => ({
-                      ...x,
-                      type: v,
-                    }))
-                  }
+                  onChange={(v) => setForm((x) => ({ ...x, type: v }))}
                   options={[
-                    {
-                      value: '',
-                      label: 'Select company type',
-                    },
-                    ...COMPANY_TYPES.map(
-                      (type) => ({
-                        value: type,
-                        label: type,
-                      }),
-                    ),
+                    { value: '', label: 'Select company type' },
+                    ...COMPANY_TYPES.map((type) => ({
+                      value: type,
+                      label: type,
+                    })),
                   ]}
                 />
 
@@ -1655,36 +1579,24 @@ export function CompaniesPage() {
                   </label>
 
                   <select
-                    value={
-                      form.active
-                        ? 'active'
-                        : 'inactive'
-                    }
+                    value={form.active ? 'active' : 'inactive'}
                     onChange={(e) =>
                       setForm((x) => ({
                         ...x,
-                        active:
-                          e.target.value ===
-                          'active',
+                        active: e.target.value === 'active',
                       }))
                     }
                     className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm"
                   >
-                    <option value="active">
-                      Active
-                    </option>
-                    <option value="inactive">
-                      Inactive
-                    </option>
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
                   </select>
                 </div>
               </div>
             </section>
 
             <section className="rounded-2xl border bg-white p-4">
-              <p className="mb-4 text-sm font-semibold">
-                Tax & registration
-              </p>
+              <p className="mb-4 text-sm font-semibold">Tax & registration</p>
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
@@ -1696,8 +1608,7 @@ export function CompaniesPage() {
                     onChange={(e) =>
                       setForm((x) => ({
                         ...x,
-                        gst_number:
-                          e.target.value.toUpperCase(),
+                        gst_number: e.target.value.toUpperCase(),
                       }))
                     }
                     maxLength={15}
@@ -1719,8 +1630,7 @@ export function CompaniesPage() {
                     onChange={(e) =>
                       setForm((x) => ({
                         ...x,
-                        pan_number:
-                          e.target.value.toUpperCase(),
+                        pan_number: e.target.value.toUpperCase(),
                       }))
                     }
                     maxLength={10}
@@ -1736,9 +1646,7 @@ export function CompaniesPage() {
             </section>
 
             <section className="rounded-2xl border bg-white p-4">
-              <p className="mb-4 text-sm font-semibold">
-                Contact information
-              </p>
+              <p className="mb-4 text-sm font-semibold">Contact information</p>
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
@@ -1749,10 +1657,7 @@ export function CompaniesPage() {
                     type="email"
                     value={form.email}
                     onChange={(e) =>
-                      setForm((x) => ({
-                        ...x,
-                        email: e.target.value,
-                      }))
+                      setForm((x) => ({ ...x, email: e.target.value }))
                     }
                     className={
                       formErrors.email
@@ -1770,10 +1675,7 @@ export function CompaniesPage() {
                     type="tel"
                     value={form.phone}
                     onChange={(e) =>
-                      setForm((x) => ({
-                        ...x,
-                        phone: e.target.value,
-                      }))
+                      setForm((x) => ({ ...x, phone: e.target.value }))
                     }
                     className={
                       formErrors.phone
@@ -1791,10 +1693,7 @@ export function CompaniesPage() {
                     type="url"
                     value={form.website}
                     onChange={(e) =>
-                      setForm((x) => ({
-                        ...x,
-                        website: e.target.value,
-                      }))
+                      setForm((x) => ({ ...x, website: e.target.value }))
                     }
                   />
                 </div>
@@ -1807,11 +1706,7 @@ export function CompaniesPage() {
                     rows={4}
                     value={form.address}
                     onChange={(e) =>
-                      setForm((x) => ({
-                        ...x,
-                        address:
-                          e.target.value,
-                      }))
+                      setForm((x) => ({ ...x, address: e.target.value }))
                     }
                     className="w-full resize-none rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-cyan-400 focus:ring-4 focus:ring-cyan-500/10"
                   />
@@ -1825,26 +1720,26 @@ export function CompaniesPage() {
               <Button
                 variant="outline"
                 disabled={saving}
-                onClick={() =>
-                  setEditOpen(false)
-                }
+                onClick={() => setEditOpen(false)}
                 className="h-10 rounded-xl"
               >
                 <X className="mr-2 h-4 w-4" />
                 Cancel
               </Button>
 
-              <Button
-                disabled={saving}
-                onClick={saveCompany}
-                className="h-10 rounded-xl bg-cyan-600 text-white hover:bg-cyan-700"
-              >
-                {saving
-                  ? 'Saving…'
-                  : editingId
-                    ? 'Update company'
-                    : 'Create company'}
-              </Button>
+              {(editingId ? canEditCompany : canCreateCompany) && (
+                <Button
+                  disabled={saving}
+                  onClick={saveCompany}
+                  className="h-10 rounded-xl bg-cyan-600 text-white hover:bg-cyan-700"
+                >
+                  {saving
+                    ? 'Saving…'
+                    : editingId
+                      ? 'Update company'
+                      : 'Create company'}
+                </Button>
+              )}
             </div>
           </div>
         </SheetContent>

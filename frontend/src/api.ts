@@ -164,6 +164,58 @@ export interface TwoFactorRecoveryCodesResponse {
   recovery_codes: string[];
 }
 
+/* ------------------------------------------------------------------ */
+/* RBAC types                                                          */
+/* ------------------------------------------------------------------ */
+
+export interface RBACPermission {
+  id: number;
+  name: string;
+  group: string | null;
+  description: string | null;
+  active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RBACRole {
+  id: number;
+  name: string;
+  group: string | null;
+  description: string | null;
+  active: boolean;
+  permissions: number[];
+  permission_names?: string[];
+  users_count?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RBACUser {
+  id: number;
+  name: string;
+  email: string;
+  phone?: string | null;
+  two_factor_enabled?: boolean;
+  email_verified_at?: string | null;
+  roles: Array<{ id: number; name: string; group?: string | null }>;
+  role_names?: string[];
+  permission_names?: string[];
+  permission_ids?: number[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface MyPermissionsResponse {
+  success: boolean;
+  data: {
+    roles: string[];
+    permissions: Array<{ id: number; name: string; group: string | null }>;
+    permission_names: string[];
+    permission_ids: number[];
+  };
+}
+
 // -----------------------------------------------------------------------------
 // HELPERS
 // -----------------------------------------------------------------------------
@@ -259,6 +311,27 @@ const buildApiError = (options: {
   return error;
 };
 
+const statusFallbackMessage = (status: number, statusText: string): string => {
+  switch (status) {
+    case 401:
+      return 'Your session has expired. Please sign in again.';
+    case 403:
+      return "You don't have permission to perform this action.";
+    case 404:
+      return 'The requested resource was not found.';
+    case 409:
+      return 'This action conflicts with the current record state.';
+    case 422:
+      return 'Please correct the highlighted fields.';
+    case 429:
+      return 'Too many requests. Please try again shortly.';
+    default:
+      return status >= 500
+        ? 'The server could not complete the request. Please try again.'
+        : statusText || 'Request failed.';
+  }
+};
+
 /** Safely compute the byte length of a request body without tripping TS. */
 const getBodyByteLength = (body: BodyInit | null | undefined): number => {
   if (!body) return 0;
@@ -288,6 +361,7 @@ export const apiClient = {
     const token = useAuthStore.getState().token;
 
     const headers: Record<string, string> = {
+      Accept: 'application/json',
       'Content-Type': 'application/json',
       ...(options?.headers || {}),
     };
@@ -342,13 +416,6 @@ export const apiClient = {
       // -----------------------------------------------------------------------
       // UNAUTHORIZED
       // -----------------------------------------------------------------------
-      //
-      // A 401 from a public auth endpoint (login, 2FA challenge) is a normal
-      // user-facing error, not a session expiry. We must let it fall through
-      // to the standard error handling so the caller can read `status` and
-      // `backendMessage`. Only a 401 from an authenticated endpoint means
-      // "session expired" — that is when we wipe the store and bounce to /login.
-      //
 
       if (response.status === 401 && !isPublicAuthEndpoint(endpoint)) {
         useAuthStore.getState().logout();
@@ -433,7 +500,10 @@ export const apiClient = {
           status: response.status,
           endpoint,
           method,
-          fallbackMessage: response.statusText || 'Request failed',
+          fallbackMessage: statusFallbackMessage(
+            response.status,
+            response.statusText,
+          ),
           payload: body,
         });
       }
@@ -453,12 +523,10 @@ export const apiClient = {
       let networkMessage = 'Network request failed';
 
       if (error instanceof DOMException && error.name === 'AbortError') {
-        networkMessage =
-          'Request timeout (30s). The backend server is not responding in time.';
+        networkMessage = 'The request timed out. Please try again.';
       } else if (error instanceof TypeError) {
         if (error.message.includes('Failed to fetch')) {
-          networkMessage =
-            'Failed to connect to server. The backend may be offline, or there might be a CORS issue.';
+          networkMessage = 'Unable to connect to the server. Please try again.';
         } else {
           networkMessage = `Network error: ${error.message}`;
         }
@@ -515,6 +583,7 @@ export const apiClient = {
           access_token: string;
           token_type: string;
           expires_at?: string;
+          user?: RBACUser;
         }
       | TwoFactorChallengeResponse
     >('POST', '/login', { email, password });
@@ -539,11 +608,6 @@ export const apiClient = {
   // ---------------------------------------------------------------------------
   // TWO-FACTOR AUTHENTICATION
   // ---------------------------------------------------------------------------
-  //
-  // 2FA challenge verification: uses the short-lived challenge_token issued
-  // by /login, NOT the Sanctum bearer token. The endpoint is public by
-  // design and the 401 returned on bad codes is handled inline by the caller.
-  //
 
   async verifyTwoFactor(challengeToken: string, code: string) {
     return this.request<{
@@ -871,6 +935,38 @@ export const apiClient = {
 
   async deletePayment(id: number) {
     return this.request('DELETE', `/payments/${id}`);
+  },
+
+  async getIncomeExpenses(params: Record<string, unknown> = {}) {
+    return this.request('GET', `/income-expenses${buildQuery(params)}`);
+  },
+
+  async getIncomeExpenseDashboard(params: Record<string, unknown> = {}) {
+    return this.request('GET', `/income-expenses/dashboard${buildQuery(params)}`);
+  },
+
+  async createIncomeExpense(data: any) {
+    return this.request('POST', '/income-expenses', data);
+  },
+
+  async updateIncomeExpense(id: number, data: any) {
+    return this.request('PUT', `/income-expenses/${id}`, data);
+  },
+
+  async deleteIncomeExpense(id: number) {
+    return this.request('DELETE', `/income-expenses/${id}`);
+  },
+
+  async getFinancialCategories(params: Record<string, unknown> = {}) {
+    return this.request('GET', `/financial-categories${buildQuery(params)}`);
+  },
+
+  async createFinancialCategory(data: any) {
+    return this.request('POST', '/financial-categories', data);
+  },
+
+  async updateFinancialCategory(id: number, data: any) {
+    return this.request('PUT', `/financial-categories/${id}`, data);
   },
 
   // ---------------------------------------------------------------------------
@@ -1635,41 +1731,143 @@ export const apiClient = {
   },
 
   // ---------------------------------------------------------------------------
-  // USERS / ROLES / PERMISSIONS
+  // USERS / ROLES / PERMISSIONS — full RBAC surface
   // ---------------------------------------------------------------------------
 
-  async getUsers() {
+  /* ---------------------------- USERS ---------------------------- */
+
+  async getUsers(): Promise<{ success: boolean; data: RBACUser[] } | RBACUser[]> {
     return this.request('GET', '/users');
   },
 
-  async getRoles() {
-    return this.request('GET', '/roles');
+  async getUser(id: number) {
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid user ID.');
+    return this.request('GET', `/users/${id}`);
   },
 
-  async getPermissions() {
-    return this.request('GET', '/permissions');
+  async createUser(data: {
+    name: string;
+    email: string;
+    password: string;
+    phone?: string | null;
+    role_ids?: number[];
+  }) {
+    return this.request('POST', '/users', data);
+  },
+
+  async updateUser(
+    id: number,
+    data: {
+      name?: string;
+      email?: string;
+      password?: string | null;
+      phone?: string | null;
+      role_ids?: number[];
+    }
+  ) {
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid user ID.');
+    return this.request('PUT', `/users/${id}`, data);
   },
 
   async deleteUser(id: number) {
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid user ID.');
     return this.request('DELETE', `/users/${id}`);
   },
 
   async assignRolesToUser(userId: number, roleIds: number[]) {
+    if (!Number.isInteger(userId) || userId <= 0) {
+      throw new Error('Invalid user ID.');
+    }
     return this.request('POST', `/users/${userId}/roles`, {
       role_ids: roleIds,
     });
   },
 
-  async createRole(data: any) {
+  /* ---------------------------- ROLES ---------------------------- */
+
+  async getRoles(): Promise<{ success: boolean; data: RBACRole[] } | RBACRole[]> {
+    return this.request('GET', '/roles');
+  },
+
+  async getRole(id: number) {
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid role ID.');
+    return this.request('GET', `/roles/${id}`);
+  },
+
+  async createRole(data: {
+    name: string;
+    group?: string | null;
+    description?: string | null;
+    active?: boolean;
+    permission_ids?: number[];
+  }) {
     return this.request('POST', '/roles', data);
   },
 
-  async updateRole(id: number, data: any) {
+  async updateRole(
+    id: number,
+    data: {
+      name: string;
+      group?: string | null;
+      description?: string | null;
+      active?: boolean;
+      permission_ids?: number[];
+    }
+  ) {
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid role ID.');
     return this.request('PUT', `/roles/${id}`, data);
   },
 
   async deleteRole(id: number) {
+    if (!Number.isInteger(id) || id <= 0) throw new Error('Invalid role ID.');
     return this.request('DELETE', `/roles/${id}`);
+  },
+
+  /* ------------------------- PERMISSIONS ------------------------- */
+
+  async getPermissions(): Promise<
+    { success: boolean; data: RBACPermission[] } | RBACPermission[]
+  > {
+    return this.request('GET', '/permissions');
+  },
+
+  async createPermission(data: {
+    name: string;
+    group?: string | null;
+    description?: string | null;
+    active?: boolean;
+  }) {
+    return this.request('POST', '/permissions', data);
+  },
+
+  async updatePermission(
+    id: number,
+    data: {
+      name: string;
+      group?: string | null;
+      description?: string | null;
+      active?: boolean;
+    }
+  ) {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error('Invalid permission ID.');
+    }
+    return this.request('PUT', `/permissions/${id}`, data);
+  },
+
+  async deletePermission(id: number) {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new Error('Invalid permission ID.');
+    }
+    return this.request('DELETE', `/permissions/${id}`);
+  },
+
+  /**
+   * Self-inspection — "what can I do right now?"
+   * Public to any authenticated user.
+   */
+  async getMyPermissions(): Promise<MyPermissionsResponse> {
+    return this.request<MyPermissionsResponse>('GET', '/permissions/me');
   },
 
   // ---------------------------------------------------------------------------
@@ -2033,9 +2231,10 @@ export const apiClient = {
 
   async geminiChat(
     message: string,
-    history?: Array<{ role: string; text: string }>
+    history?: Array<{ role: string; text: string }>,
+    memory?: string,
   ) {
-    return this.request('POST', '/gemini/chat', { message, history });
+    return this.request('POST', '/gemini/chat', { message, history, memory });
   },
 
   async geminiVoice(text: string) {

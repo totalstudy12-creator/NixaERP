@@ -1,3 +1,4 @@
+// src/pages/InvoicesPage.tsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Link, useSearchParams, useNavigate } from 'react-router-dom';
@@ -18,6 +19,7 @@ import {
   Filter,
   GitBranch,
   IndianRupee,
+  Lock,
   MoreHorizontal,
   Plus,
   RefreshCw,
@@ -34,6 +36,7 @@ import {
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { useAuthStore } from '../store/auth';
 import InvoicePrint from '../components/InvoicePrint';
 
 import { Badge } from '@/components/ui/badge';
@@ -50,6 +53,116 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Permission keys                                              */
+/* ------------------------------------------------------------------ */
+
+const PERMISSIONS = {
+  INVOICES_VIEW: 'invoices.view',
+  INVOICES_CREATE: 'invoices.create',
+  INVOICES_UPDATE: 'invoices.update',
+  INVOICES_DELETE: 'invoices.delete',
+  INVOICES_EXPORT: 'invoices.export',
+  INVOICES_PRINT: 'invoices.print',
+} as const;
+
+type PermissionKey = typeof PERMISSIONS[keyof typeof PERMISSIONS];
+
+/* ------------------------------------------------------------------ */
+/* RBAC — Store-backed permissions (admin-aware + notation-insensitive) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Collapse a permission key so different notations of the SAME permission
+ * match each other:
+ *
+ *   "invoices.view"      → "invoices view"
+ *   "view invoices"      → "invoices view"
+ *   "invoices:view"      → "invoices view"
+ */
+function normalisePermission(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[.:_/\-]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+interface UsePagePermissionsResult {
+  can: (permission: string | string[]) => boolean;
+  isAuthenticated: boolean;
+  isSuperAdmin: boolean;
+  loadingUser: boolean;
+}
+
+function usePagePermissions(): UsePagePermissionsResult {
+  const user = useAuthStore((s) => s.user);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const storeIsSuperAdmin = useAuthStore((s) => s.isSuperAdmin);
+  const storeHasAnyPermission = useAuthStore((s) => s.hasAnyPermission);
+
+  const isSuperAdmin = useMemo(() => storeIsSuperAdmin(), [storeIsSuperAdmin, user]);
+
+  const can = useCallback(
+    (permission: string | string[]): boolean => {
+      if (!isAuthenticated) return false;
+      if (isSuperAdmin) return true;
+
+      const keys = Array.isArray(permission) ? permission : [permission];
+
+      if (storeHasAnyPermission(keys)) return true;
+
+      const hasMetadata =
+        (user?.permission_names?.length ?? 0) > 0 ||
+        (user?.permissions?.length ?? 0) > 0 ||
+        (user?.roles?.length ?? 0) > 0 ||
+        (user?.role_names?.length ?? 0) > 0;
+      if (!hasMetadata) return false;
+
+      const normalised = new Set<string>();
+      (user?.permission_names ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p)),
+      );
+      (user?.permissions ?? []).forEach((p) =>
+        normalised.add(normalisePermission(p.name)),
+      );
+
+      return keys.some((k) => normalised.has(normalisePermission(k)));
+    },
+    [isAuthenticated, isSuperAdmin, storeHasAnyPermission, user],
+  );
+
+  return { can, isAuthenticated, isSuperAdmin, loadingUser };
+}
+
+/* ------------------------------------------------------------------ */
+/* Access-restricted screen                                            */
+/* ------------------------------------------------------------------ */
+
+function AccessRestricted() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+      <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-rose-50 text-rose-500">
+          <Lock size={26} />
+        </div>
+        <h1 className="mt-4 text-lg font-bold text-slate-900">Access restricted</h1>
+        <p className="mt-2 text-sm leading-6 text-slate-500">
+          Your account does not have permission to view Invoices. Contact your
+          administrator to request the{' '}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px]">
+            view invoices
+          </code>{' '}
+          permission.
+        </p>
+      </div>
+    </div>
+  );
+}
 
 /* ------------------------------------------------------------------ */
 /* Types                                                               */
@@ -112,16 +225,9 @@ interface Invoice {
   tax_amount: number | string;
   discount_amount?: number | string | null;
 
-  /**
-   * Server-computed values added by the backend `index()` endpoint.
-   * `received_amount` is a correlated sub-select sum of inward payments.
-   * `outstanding_amount` is `max(0, total_amount - received_amount)`.
-   * Prefer these over client-side math when present.
-   */
   received_amount?: number | string | null;
   outstanding_amount?: number | string | null;
 
-  /** Legacy fallbacks that predate the server-side fields. */
   payment_received?: number | string | null;
   paid_amount?: number | string | null;
 
@@ -169,10 +275,6 @@ interface InvoiceSummary {
   partial: number;
 }
 
-/**
- * Shape of the payload returned by `GET /api/invoices/summary`.
- * See `InvoiceController::summary()` on the backend.
- */
 interface BackendInvoiceSummary {
   total_invoices: number;
   total_amount: number;
@@ -208,15 +310,8 @@ const MENU_HEIGHT = 168;
 const MENU_MARGIN = 8;
 const UNWRAP_DEPTH = 3;
 const TABLE_COLUMN_COUNT = 9;
-
-/**
- * KPI totals are now sourced from the dedicated `/invoices/summary`
- * endpoint. Only a short debounce is needed to coalesce rapid filter
- * changes into a single request.
- */
 const TOTALS_DEBOUNCE_MS = 120;
 
-/** Shared class for every table header cell so all columns match exactly. */
 const TABLE_HEAD_CLASS =
   'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
 
@@ -345,14 +440,6 @@ function escapeCsvField(value: unknown): string {
   return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
-/**
- * Resolve the received amount for an invoice.
- *
- * Priority:
- *   1. `invoice.received_amount` — computed server-side in the index endpoint
- *   2. Sum of inward payments (if the `payments` relation was eager-loaded)
- *   3. Legacy `payment_received` / `paid_amount` columns
- */
 function getReceived(invoice: Invoice): number {
   if (invoice.received_amount != null) {
     const n = Number(invoice.received_amount);
@@ -367,12 +454,6 @@ function getReceived(invoice: Invoice): number {
   return toNumber(invoice.payment_received ?? invoice.paid_amount);
 }
 
-/**
- * Resolve the outstanding amount for an invoice.
- *
- * Prefers the server-computed `outstanding_amount`; falls back to
- * `max(0, total - received)` when the field is absent.
- */
 function getOutstanding(invoice: Invoice): number {
   if (invoice.outstanding_amount != null) {
     const n = Number(invoice.outstanding_amount);
@@ -426,7 +507,6 @@ function normalizePaginated(
   };
 }
 
-/** Aggregate totals across a set of invoices — used as a page fallback. */
 function summarizeInvoices(rows: Invoice[]): InvoiceSummary {
   const summary: InvoiceSummary = { ...EMPTY_SUMMARY, total: rows.length };
   for (const invoice of rows) {
@@ -441,7 +521,6 @@ function summarizeInvoices(rows: Invoice[]): InvoiceSummary {
   return summary;
 }
 
-/** Map the backend summary payload into the frontend `InvoiceSummary` shape. */
 function mapBackendSummary(data: Partial<BackendInvoiceSummary> | null | undefined): InvoiceSummary {
   if (!data) return { ...EMPTY_SUMMARY };
   return {
@@ -521,7 +600,6 @@ function invoiceStatusBadge(status?: string | null) {
   );
 }
 
-/** Shared table header wrapper — enforces identical typography across all columns. */
 function TableHeadLabel({
   children,
   sortable = false,
@@ -634,9 +712,8 @@ function NativeSelect({
 /* ------------------------------------------------------------------ */
 /* RowActions                                                          */
 /*                                                                     */
-/* The dropdown is portal-rendered. The outside-click handler checks    */
-/* BOTH the trigger and the menu; without that, the first mousedown on  */
-/* a menu item unmounts the menu before its click handler can run.      */
+/* The dropdown is portal-rendered. Actions are hidden when the user   */
+/* lacks the matching permission.                                      */
 /* ------------------------------------------------------------------ */
 
 function RowActions({
@@ -647,6 +724,10 @@ function RowActions({
   onClose,
   openId,
   setOpenId,
+  canView,
+  canEdit,
+  canPrint,
+  canDelete,
 }: {
   invoice: Invoice;
   onView: (invoice: Invoice) => void;
@@ -655,6 +736,10 @@ function RowActions({
   onClose: () => void;
   openId: number | null;
   setOpenId: (id: number | null) => void;
+  canView: boolean;
+  canEdit: boolean;
+  canPrint: boolean;
+  canDelete: boolean;
 }) {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -701,6 +786,11 @@ function RowActions({
     };
   }, [isOpen, onClose]);
 
+  const hasAnyAction = canView || canEdit || canPrint || canDelete;
+  if (!hasAnyAction) {
+    return <span className="text-[11px] text-slate-400">—</span>;
+  }
+
   return (
     <>
       <button
@@ -726,52 +816,65 @@ function RowActions({
             onClick={(event) => event.stopPropagation()}
             className="overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10"
           >
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setOpenId(null);
-                onView(invoice);
-              }}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
-            >
-              <Eye className="h-4 w-4 text-slate-400" />
-              View invoice
-            </button>
-            <Link
-              to={`/invoices/${invoice.id}/edit`}
-              role="menuitem"
-              onClick={() => setOpenId(null)}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 transition hover:bg-slate-50"
-            >
-              <FileText className="h-4 w-4 text-slate-400" />
-              Edit invoice
-            </Link>
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setOpenId(null);
-                onPrint(invoice);
-              }}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
-            >
-              <Download className="h-4 w-4 text-slate-400" />
-              Print invoice
-            </button>
-            <Separator className="my-1" />
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setOpenId(null);
-                onDelete(invoice);
-              }}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-rose-600 transition hover:bg-rose-50"
-            >
-              <Trash2 className="h-4 w-4" />
-              Delete invoice
-            </button>
+            {canView && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setOpenId(null);
+                  onView(invoice);
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
+              >
+                <Eye className="h-4 w-4 text-slate-400" />
+                View invoice
+              </button>
+            )}
+
+            {canEdit && (
+              <Link
+                to={`/invoices/${invoice.id}/edit`}
+                role="menuitem"
+                onClick={() => setOpenId(null)}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 transition hover:bg-slate-50"
+              >
+                <FileText className="h-4 w-4 text-slate-400" />
+                Edit invoice
+              </Link>
+            )}
+
+            {canPrint && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setOpenId(null);
+                  onPrint(invoice);
+                }}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
+              >
+                <Download className="h-4 w-4 text-slate-400" />
+                Print invoice
+              </button>
+            )}
+
+            {canDelete && (
+              <>
+                <Separator className="my-1" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setOpenId(null);
+                    onDelete(invoice);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-rose-600 transition hover:bg-rose-50"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete invoice
+                </button>
+              </>
+            )}
           </div>,
           document.body,
         )}
@@ -787,6 +890,14 @@ export function InvoicesPage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const { showError, showSuccess } = useNotification();
+  const { can, isAuthenticated, loadingUser } = usePagePermissions();
+
+  const canViewInvoices   = can(PERMISSIONS.INVOICES_VIEW);
+  const canCreateInvoice  = can(PERMISSIONS.INVOICES_CREATE);
+  const canUpdateInvoice  = can(PERMISSIONS.INVOICES_UPDATE);
+  const canDeleteInvoice  = can(PERMISSIONS.INVOICES_DELETE);
+  const canExportInvoices = can(PERMISSIONS.INVOICES_EXPORT);
+  const canPrintInvoice   = can(PERMISSIONS.INVOICES_PRINT);
 
   const [searchInput, setSearchInput] = useState(params.get('search') || '');
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -803,11 +914,6 @@ export function InvoicesPage() {
   const [actionMenuId, setActionMenuId] = useState<number | null>(null);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
-  /**
-   * KPI totals for the entire filtered set. Sourced from the dedicated
-   * `/invoices/summary` endpoint — a single request that runs the same
-   * aggregate query server-side instead of sweeping every page here.
-   */
   const [totals, setTotals] = useState<InvoiceSummary | null>(null);
   const [totalsLoading, setTotalsLoading] = useState(false);
 
@@ -874,6 +980,7 @@ export function InvoicesPage() {
   /* -------------------- Companies -------------------- */
 
   useEffect(() => {
+    if (!canViewInvoices) return;
     let active = true;
     setCompanyLoading(true);
     apiClient
@@ -892,11 +999,12 @@ export function InvoicesPage() {
     return () => {
       active = false;
     };
-  }, [showError]);
+  }, [showError, canViewInvoices]);
 
   /* -------------------- Branches -------------------- */
 
   useEffect(() => {
+    if (!canViewInvoices) return;
     let active = true;
     if (!companyId) {
       setBranches([]);
@@ -922,7 +1030,7 @@ export function InvoicesPage() {
     return () => {
       active = false;
     };
-  }, [companyId, branchId, updateParams, showError]);
+  }, [companyId, branchId, updateParams, showError, canViewInvoices]);
 
   /* -------------------- Query + page loader -------------------- */
 
@@ -944,6 +1052,10 @@ export function InvoicesPage() {
   );
 
   const loadInvoices = useCallback(async () => {
+    if (!canViewInvoices) {
+      setLoading(false);
+      return;
+    }
     const requestId = ++invoicesRequestIdRef.current;
     setLoading(true);
     setError(null);
@@ -957,11 +1069,12 @@ export function InvoicesPage() {
     } finally {
       if (requestId === invoicesRequestIdRef.current) setLoading(false);
     }
-  }, [query, page, perPage]);
+  }, [query, page, perPage, canViewInvoices]);
 
   useEffect(() => {
+    if (!canViewInvoices) return;
     void loadInvoices();
-  }, [loadInvoices]);
+  }, [loadInvoices, canViewInvoices]);
 
   useEffect(
     () => () => {
@@ -970,15 +1083,10 @@ export function InvoicesPage() {
     [],
   );
 
-  /* -------------------- Aggregate totals (whole filtered set) -------------------- */
+  /* -------------------- Aggregate totals -------------------- */
 
-  /**
-   * Fetch KPI totals from `/api/invoices/summary`. The backend runs the
-   * aggregate over the entire filtered scope in one query — no client-side
-   * page sweep, no N+1, no artificial page cap. Runs only when the filter
-   * signature changes (pagination and sorting do not retrigger it).
-   */
   useEffect(() => {
+    if (!canViewInvoices) return;
     const requestId = ++totalsRequestIdRef.current;
     let cancelled = false;
 
@@ -1009,8 +1117,6 @@ export function InvoicesPage() {
         const response = await apiClient.get(url);
         if (cancelled || requestId !== totalsRequestIdRef.current) return;
 
-        // The endpoint returns `{ success, data: {...}, filters: {...} }`.
-        // Be tolerant of the api client pre-unwrapping `.data`.
         const body = response as
           | { data?: BackendInvoiceSummary }
           | BackendInvoiceSummary
@@ -1025,8 +1131,6 @@ export function InvoicesPage() {
         setTotals(mapBackendSummary(payload ?? null));
       } catch {
         if (cancelled || requestId !== totalsRequestIdRef.current) return;
-        // Leave the previous totals in place; the KPI will keep showing the
-        // last successful snapshot, or fall back to the page summary below.
       } finally {
         if (!cancelled && requestId === totalsRequestIdRef.current) {
           setTotalsLoading(false);
@@ -1038,15 +1142,10 @@ export function InvoicesPage() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [search, companyId, branchId, invoiceStatus, paymentState, dateFrom, dateTo]);
+  }, [search, companyId, branchId, invoiceStatus, paymentState, dateFrom, dateTo, canViewInvoices]);
 
-  /* -------------------- Visible summary (KPI source of truth) -------------------- */
+  /* -------------------- Visible summary -------------------- */
 
-  /**
-   * Prefer the aggregate across the entire filtered set (from the summary
-   * endpoint). Fall back to the current page when the summary hasn't
-   * completed yet, and mark that fallback with a "This page only" hint.
-   */
   const pageSummary = useMemo<InvoiceSummary>(() => {
     const rows = invoices?.data ?? [];
     return summarizeInvoices(rows);
@@ -1135,6 +1234,7 @@ export function InvoicesPage() {
 
   const handleView = useCallback(
     async (invoice: Invoice) => {
+      if (!canViewInvoices) return;
       try {
         const result = await apiClient.getInvoice(invoice.id);
         setViewingInvoice(unwrap<Invoice>(result, invoice));
@@ -1142,11 +1242,15 @@ export function InvoicesPage() {
         showError('Unable to open invoice', getErrorMessage(err, 'Failed to load invoice details.'));
       }
     },
-    [showError],
+    [showError, canViewInvoices],
   );
 
   const handlePrint = useCallback(
     async (invoice: Invoice) => {
+      if (!canPrintInvoice) {
+        showError('Permission denied', 'You do not have permission to print invoices.');
+        return;
+      }
       setPrinting(true);
       try {
         const result = await apiClient.getInvoice(invoice.id);
@@ -1158,7 +1262,7 @@ export function InvoicesPage() {
         setPrinting(false);
       }
     },
-    [showError],
+    [showError, canPrintInvoice],
   );
 
   useEffect(() => {
@@ -1169,6 +1273,10 @@ export function InvoicesPage() {
 
   const deleteInvoice = useCallback(
     async (invoice: Invoice) => {
+      if (!canDeleteInvoice) {
+        showError('Permission denied', 'You do not have permission to delete invoices.');
+        return;
+      }
       if (!window.confirm(`Delete invoice ${invoice.invoice_no}?`)) return;
       try {
         await apiClient.deleteInvoice(invoice.id);
@@ -1184,11 +1292,15 @@ export function InvoicesPage() {
         showError('Delete failed', getErrorMessage(err, 'Unable to delete invoice.'));
       }
     },
-    [loadInvoices, showError, showSuccess],
+    [loadInvoices, showError, showSuccess, canDeleteInvoice],
   );
 
   const bulkStatus = useCallback(
     async (status: 'paid' | 'pending' | 'overdue') => {
+      if (!canUpdateInvoice) {
+        showError('Permission denied', 'You do not have permission to update invoices.');
+        return;
+      }
       if (!selectedIds.length) return;
       const count = selectedIds.length;
       if (!window.confirm(`Update ${count} invoice(s) to ${status}?`)) return;
@@ -1207,10 +1319,14 @@ export function InvoicesPage() {
         showError('Bulk update failed', getErrorMessage(err, 'One or more updates failed.'));
       }
     },
-    [loadInvoices, selectedIds, showError, showSuccess],
+    [loadInvoices, selectedIds, showError, showSuccess, canUpdateInvoice],
   );
 
   const bulkDelete = useCallback(async () => {
+    if (!canDeleteInvoice) {
+      showError('Permission denied', 'You do not have permission to delete invoices.');
+      return;
+    }
     if (!selectedIds.length) return;
     const count = selectedIds.length;
     if (!window.confirm(`Delete ${count} selected invoice(s)?`)) return;
@@ -1228,9 +1344,13 @@ export function InvoicesPage() {
     } catch (err: unknown) {
       showError('Bulk delete failed', getErrorMessage(err, 'One or more deletes failed.'));
     }
-  }, [loadInvoices, selectedIds, showError, showSuccess]);
+  }, [loadInvoices, selectedIds, showError, showSuccess, canDeleteInvoice]);
 
   const exportCurrentPage = useCallback(() => {
+    if (!canExportInvoices) {
+      showError('Permission denied', 'You do not have permission to export invoices.');
+      return;
+    }
     const rows = invoices?.data ?? [];
     if (!rows.length) {
       showError('Nothing to export', 'The current page contains no invoices.');
@@ -1278,7 +1398,7 @@ export function InvoicesPage() {
     anchor.remove();
     URL.revokeObjectURL(url);
     showSuccess('Export complete', `Exported ${rows.length} visible invoice(s).`);
-  }, [invoices, page, showError, showSuccess]);
+  }, [invoices, page, showError, showSuccess, canExportInvoices]);
 
   /* -------------------- Derived display data -------------------- */
 
@@ -1317,6 +1437,24 @@ export function InvoicesPage() {
     return formatter(value);
   };
 
+  /* --------------------------------------------------------------- */
+  /* RBAC page gate                                                  */
+  /* --------------------------------------------------------------- */
+
+  if (loadingUser && !isAuthenticated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated || !canViewInvoices) {
+    return <AccessRestricted />;
+  }
+
   /* -------------------- Render -------------------- */
 
   return (
@@ -1342,22 +1480,26 @@ export function InvoicesPage() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Button
-                variant="outline"
-                onClick={exportCurrentPage}
-                disabled={loading || !tableRows.length}
-                className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
-              >
-                <Download className="mr-2 h-4 w-4" />
-                Export
-              </Button>
-              <Button
-                onClick={() => navigate('/invoices/create')}
-                className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
-              >
-                <Plus className="mr-2 h-4 w-4" />
-                New invoice
-              </Button>
+              {canExportInvoices && (
+                <Button
+                  variant="outline"
+                  onClick={exportCurrentPage}
+                  disabled={loading || !tableRows.length}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                >
+                  <Download className="mr-2 h-4 w-4" />
+                  Export
+                </Button>
+              )}
+              {canCreateInvoice && (
+                <Button
+                  onClick={() => navigate('/invoices/create')}
+                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  New invoice
+                </Button>
+              )}
             </div>
           </div>
         </section>
@@ -1634,31 +1776,37 @@ export function InvoicesPage() {
           </div>
         )}
 
-        {/* Bulk toolbar */}
-        {selectedIds.length > 0 && (
+        {/* Bulk toolbar — only when the user can update or delete */}
+        {selectedIds.length > 0 && (canUpdateInvoice || canDeleteInvoice) && (
           <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
             <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
               <div className="mr-1 flex items-center gap-2 rounded-lg bg-indigo-50 px-2.5 py-1 text-indigo-700 ring-1 ring-indigo-500/10">
                 <span className="text-sm font-bold">{selectedIds.length}</span>
                 <span className="text-xs font-medium">selected</span>
               </div>
-              <Button size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => bulkStatus('paid')}>
-                <CheckCircle2 className="mr-1.5 h-3.5 w-3.5 text-emerald-600" /> Mark paid
-              </Button>
-              <Button size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => bulkStatus('pending')}>
-                Mark pending
-              </Button>
-              <Button size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => bulkStatus('overdue')}>
-                Mark overdue
-              </Button>
-              <Button
-                size="sm"
-                variant="destructive"
-                className="h-9 rounded-lg bg-rose-600 hover:bg-rose-700"
-                onClick={bulkDelete}
-              >
-                <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Delete
-              </Button>
+              {canUpdateInvoice && (
+                <>
+                  <Button size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => bulkStatus('paid')}>
+                    <CheckCircle2 className="mr-1.5 h-3.5 w-3.5 text-emerald-600" /> Mark paid
+                  </Button>
+                  <Button size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => bulkStatus('pending')}>
+                    Mark pending
+                  </Button>
+                  <Button size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => bulkStatus('overdue')}>
+                    Mark overdue
+                  </Button>
+                </>
+              )}
+              {canDeleteInvoice && (
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  className="h-9 rounded-lg bg-rose-600 hover:bg-rose-700"
+                  onClick={bulkDelete}
+                >
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Delete
+                </Button>
+              )}
               <Button
                 size="sm"
                 variant="ghost"
@@ -1711,19 +1859,21 @@ export function InvoicesPage() {
             <Table className="min-w-[1060px]">
               <TableHeader>
                 <TableRow className="border-slate-100 bg-slate-50/70 hover:bg-slate-50/70">
-                  <TableHead className="w-11 px-3">
-                    <input
-                      aria-label="Select all invoices on page"
-                      type="checkbox"
-                      checked={allSelected}
-                      onChange={(event) => {
-                        event.stopPropagation();
-                        toggleSelectAll();
-                      }}
-                      onClick={(event) => event.stopPropagation()}
-                      className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
-                    />
-                  </TableHead>
+                  {canDeleteInvoice && (
+                    <TableHead className="w-11 px-3">
+                      <input
+                        aria-label="Select all invoices on page"
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={(event) => {
+                          event.stopPropagation();
+                          toggleSelectAll();
+                        }}
+                        onClick={(event) => event.stopPropagation()}
+                        className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                      />
+                    </TableHead>
+                  )}
                   <TableHead>
                     <TableHeadLabel sortable onClick={() => handleSort('invoice_no')}>
                       Invoice {sortIcon('invoice_no')}
@@ -1780,19 +1930,21 @@ export function InvoicesPage() {
                         }`}
                         onClick={() => handleView(invoice)}
                       >
-                        <TableCell className="px-3">
-                          <input
-                            aria-label={`Select ${invoice.invoice_no}`}
-                            type="checkbox"
-                            checked={selected}
-                            onChange={(event) => {
-                              event.stopPropagation();
-                              toggleSelected(invoice.id);
-                            }}
-                            onClick={(event) => event.stopPropagation()}
-                            className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
-                          />
-                        </TableCell>
+                        {canDeleteInvoice && (
+                          <TableCell className="px-3">
+                            <input
+                              aria-label={`Select ${invoice.invoice_no}`}
+                              type="checkbox"
+                              checked={selected}
+                              onChange={(event) => {
+                                event.stopPropagation();
+                                toggleSelected(invoice.id);
+                              }}
+                              onClick={(event) => event.stopPropagation()}
+                              className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                            />
+                          </TableCell>
+                        )}
 
                         <TableCell>
                           <div className="min-w-[140px]">
@@ -1875,6 +2027,10 @@ export function InvoicesPage() {
                             onClose={closeActionMenu}
                             openId={actionMenuId}
                             setOpenId={setActionMenuId}
+                            canView={canViewInvoices}
+                            canEdit={canUpdateInvoice}
+                            canPrint={canPrintInvoice}
+                            canDelete={canDeleteInvoice}
                           />
                         </TableCell>
                       </TableRow>
@@ -2128,16 +2284,18 @@ export function InvoicesPage() {
                   >
                     Open full invoice
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-9 rounded-xl text-xs"
-                    onClick={() => handlePrint(viewingInvoice)}
-                    disabled={printing}
-                  >
-                    <Download className="mr-1.5 h-3.5 w-3.5" />
-                    {printing ? 'Preparing…' : 'Print'}
-                  </Button>
+                  {canPrintInvoice && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-9 rounded-xl text-xs"
+                      onClick={() => handlePrint(viewingInvoice)}
+                      disabled={printing}
+                    >
+                      <Download className="mr-1.5 h-3.5 w-3.5" />
+                      {printing ? 'Preparing…' : 'Print'}
+                    </Button>
+                  )}
                 </div>
               </div>
             </>

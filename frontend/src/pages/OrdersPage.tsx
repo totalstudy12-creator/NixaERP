@@ -31,12 +31,15 @@ import {
   FiX,
   FiArrowLeft,
   FiChevronDown,
+  FiLock,
 } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 import OrderPrint from '../components/OrderPrint';
 
 import { Badge } from '@/components/ui/badge';
@@ -72,20 +75,9 @@ type PaymentMethod = 'qr' | 'bank_transfer' | 'cash' | 'card';
 type PaymentDirection = 'inward' | 'outward';
 type CustomerType = 'customer' | 'vendor' | 'dealer' | 'distributor';
 
-interface Company {
-  id: number;
-  name: string;
-}
-interface Branch {
-  id: number;
-  name: string;
-  company_id: number;
-}
-interface Customer {
-  id: number;
-  name: string;
-  type?: string;
-}
+interface Company { id: number; name: string; }
+interface Branch { id: number; name: string; company_id: number; }
+interface Customer { id: number; name: string; type?: string; }
 interface Product {
   id: number;
   name: string;
@@ -213,11 +205,7 @@ function getErrorMessage(error: unknown, fallback: string): string {
 }
 
 function safeLog(entry: AppLogEntry): void {
-  try {
-    addAppLog(entry);
-  } catch {
-    /* no-op */
-  }
+  try { addAppLog(entry); } catch { /* no-op */ }
 }
 
 function safeNum(value: unknown): number {
@@ -266,11 +254,7 @@ function formatDate(value?: string | null): string {
 /* Cache hook                                                          */
 /* ------------------------------------------------------------------ */
 
-interface CacheEntry<T> {
-  data: T;
-  timestamp: number;
-}
-
+interface CacheEntry<T> { data: T; timestamp: number }
 const cache = new Map<string, CacheEntry<unknown>>();
 
 function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TTL_MS) {
@@ -281,9 +265,7 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
   const mountedRef = useRef(true);
   const fetcherRef = useRef(fetcher);
 
-  useEffect(() => {
-    fetcherRef.current = fetcher;
-  }, [fetcher]);
+  useEffect(() => { fetcherRef.current = fetcher; }, [fetcher]);
 
   const fetchData = useCallback(
     async (skipCache = false) => {
@@ -372,22 +354,6 @@ const StatCardSkeleton = memo(() => (
 ));
 StatCardSkeleton.displayName = 'StatCardSkeleton';
 
-const TableSkeleton = memo(() => (
-  <div className="space-y-3 bg-white p-6">
-    <div className="h-6 w-48 animate-pulse rounded bg-slate-200" />
-    {Array.from({ length: 8 }).map((_, i) => (
-      <div key={i} className="flex gap-4">
-        <div className="h-4 w-1/4 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/5 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/6 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/6 animate-pulse rounded bg-slate-200" />
-        <div className="h-4 w-1/4 animate-pulse rounded bg-slate-200" />
-      </div>
-    ))}
-  </div>
-));
-TableSkeleton.displayName = 'TableSkeleton';
-
 /* ------------------------------------------------------------------ */
 /* Stat card                                                           */
 /* ------------------------------------------------------------------ */
@@ -427,8 +393,7 @@ const StatCard = memo(
               {label}
             </p>
             <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
-              {prefix}
-              {value}
+              {prefix}{value}
             </p>
           </div>
           <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${style.bg} ring-1 ${style.ring}`}>
@@ -442,13 +407,10 @@ const StatCard = memo(
 StatCard.displayName = 'StatCard';
 
 /* ------------------------------------------------------------------ */
-/* Searchable Select (portal-rendered dropdown)                        */
+/* Searchable Select                                                   */
 /* ------------------------------------------------------------------ */
 
-interface SearchableOption {
-  id: number | string;
-  name: string;
-}
+interface SearchableOption { id: number | string; name: string; }
 
 const SearchableSelect: React.FC<{
   options: SearchableOption[];
@@ -491,21 +453,12 @@ const SearchableSelect: React.FC<{
     const onClick = (e: MouseEvent) => {
       const target = e.target as Node;
       if (
-        triggerRef.current &&
-        !triggerRef.current.contains(target) &&
-        dropdownRef.current &&
-        !dropdownRef.current.contains(target)
-      ) {
-        setIsOpen(false);
-      }
+        triggerRef.current && !triggerRef.current.contains(target) &&
+        dropdownRef.current && !dropdownRef.current.contains(target)
+      ) setIsOpen(false);
     };
-    const onScrollOrResize = () => {
-      // Reposition on scroll of the offcanvas, close on window resize
-      reposition();
-    };
-    const onWindowResize = () => {
-      setIsOpen(false);
-    };
+    const onScrollOrResize = () => { reposition(); };
+    const onWindowResize = () => { setIsOpen(false); };
 
     document.addEventListener('mousedown', onClick);
     window.addEventListener('scroll', onScrollOrResize, true);
@@ -608,6 +561,22 @@ const SearchableSelect: React.FC<{
 export function OrdersPage() {
   const navigate = useNavigate();
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ---- Capability flags ---- */
+  const canViewOrders      = isSuperAdmin || can('view orders');
+  const canCreateOrder     = isSuperAdmin || can('create orders');
+  const canEditOrder       = isSuperAdmin || can('edit orders');
+  const canDeleteOrder     = isSuperAdmin || can('delete orders');
+  const canCreateCustomer  = isSuperAdmin || can('create customers');
+  const canCreateInvoice   = isSuperAdmin || can('create invoices');
+  const canViewProducts    = isSuperAdmin || can('view products') || can('create products');
+  const canViewCustomers   = isSuperAdmin || can('view customers') || can('create customers');
+
+  const canManageOrders = canCreateOrder || canEditOrder || canDeleteOrder;
+  const canBulkAct = canEditOrder || canDeleteOrder;
 
   /* -------------------- Filter state -------------------- */
   const [searchTerm, setSearchTerm] = useState('');
@@ -674,24 +643,25 @@ export function OrdersPage() {
     loading: ordLoading,
     error: ordError,
     refresh: refreshOrders,
-  } = useApiCache<Order[]>('orders', () => apiClient.getOrders());
+  } = useApiCache<Order[]>('orders', () => {
+    if (!canViewOrders) return Promise.resolve([]);
+    return apiClient.getOrders();
+  });
 
   const { data: companies } = useApiCache<Company[]>('companies', () => apiClient.getCompanies());
   const { data: branches } = useApiCache<Branch[]>('branches', () => apiClient.getBranches());
-  const { data: customers, refresh: refreshCustomers } = useApiCache<Customer[]>('customers', () =>
-    apiClient.getCustomers()
-  );
+  const { data: customers, refresh: refreshCustomers } = useApiCache<Customer[]>('customers', () => {
+    if (!canViewCustomers) return Promise.resolve([]);
+    return apiClient.getCustomers();
+  });
 
-  // ⬇️ Load ALL products (not just the first page).
-  // Tries /products?per_page=1000 first, falls back to whatever getProducts() returns.
   const { data: products } = useApiCache<Product[]>('products-all', async () => {
+    if (!canViewProducts) return [];
     try {
       const res = await apiClient.request('GET', '/products?per_page=1000');
       const list = unwrapList<Product>(res);
       if (list.length > 0) return list;
-    } catch {
-      /* fall through */
-    }
+    } catch { /* fall through */ }
     const fallback = await apiClient.getProducts();
     return unwrapList<Product>(fallback);
   });
@@ -749,16 +719,10 @@ export function OrdersPage() {
     if (filterSource !== 'all') filtered = filtered.filter((o) => o.source === filterSource);
     if (filterCompanyId) filtered = filtered.filter((o) => o.company_id === filterCompanyId);
     if (filterDateFrom) {
-      filtered = filtered.filter((o) => {
-        const d = (o.created_at || '').slice(0, 10);
-        return d >= filterDateFrom;
-      });
+      filtered = filtered.filter((o) => ((o.created_at || '').slice(0, 10)) >= filterDateFrom);
     }
     if (filterDateTo) {
-      filtered = filtered.filter((o) => {
-        const d = (o.created_at || '').slice(0, 10);
-        return d <= filterDateTo;
-      });
+      filtered = filtered.filter((o) => ((o.created_at || '').slice(0, 10)) <= filterDateTo);
     }
     return filtered;
   }, [orders, searchTerm, filterStatus, filterSource, filterCompanyId, filterDateFrom, filterDateTo]);
@@ -790,6 +754,10 @@ export function OrdersPage() {
 
   /* -------------------- Bulk actions -------------------- */
   const handleBulkDelete = async () => {
+    if (!canDeleteOrder) {
+      showError('Permission denied', 'You do not have permission to delete orders.');
+      return;
+    }
     if (selectedIds.length === 0) return;
     if (!window.confirm(`Delete ${selectedIds.length} order(s)?`)) return;
     try {
@@ -809,6 +777,10 @@ export function OrdersPage() {
   };
 
   const handleBulkStatusChange = async (status: OrderStatus) => {
+    if (!canEditOrder) {
+      showError('Permission denied', 'You do not have permission to update orders.');
+      return;
+    }
     if (selectedIds.length === 0) return;
     if (!window.confirm(`Change ${selectedIds.length} order(s) to ${status}?`)) return;
     try {
@@ -856,6 +828,7 @@ export function OrdersPage() {
   /* -------------------- CRUD -------------------- */
   const openView = useCallback(
     (order: Order) => {
+      if (!canViewOrders) return;
       setViewMode(true);
       setEditingId(order.id);
       setFormData({
@@ -878,11 +851,15 @@ export function OrdersPage() {
       setItems(mapOrderItems(order.items || []));
       setIsPanelOpen(true);
     },
-    [mapOrderItems]
+    [canViewOrders, mapOrderItems]
   );
 
   const openEdit = useCallback(
     (order: Order) => {
+      if (!canEditOrder) {
+        showError('Permission denied', 'You do not have permission to edit orders.');
+        return;
+      }
       setViewMode(false);
       setEditingId(order.id);
       setFormData({
@@ -905,11 +882,15 @@ export function OrdersPage() {
       setItems(mapOrderItems(order.items || []));
       setIsPanelOpen(true);
     },
-    [mapOrderItems]
+    [canEditOrder, showError, mapOrderItems]
   );
 
   const handleDelete = useCallback(
     async (order: Order) => {
+      if (!canDeleteOrder) {
+        showError('Permission denied', 'You do not have permission to delete orders.');
+        return;
+      }
       if (!window.confirm(`Delete order ${order.order_no}?`)) return;
       try {
         await apiClient.deleteOrder(order.id);
@@ -925,7 +906,7 @@ export function OrdersPage() {
         showError('Delete failed', getErrorMessage(err, 'Delete failed.'));
       }
     },
-    [refreshOrders, showSuccess, showError]
+    [canDeleteOrder, refreshOrders, showSuccess, showError]
   );
 
   /* -------------------- Customer creation -------------------- */
@@ -937,6 +918,10 @@ export function OrdersPage() {
   }, [newCustomer.company_id, branches]);
 
   const createCustomerInline = async () => {
+    if (!canCreateCustomer) {
+      showError('Permission denied', 'You do not have permission to create customers.');
+      return;
+    }
     if (!newCustomer.name.trim()) {
       showError('Validation', 'Customer name is required.');
       return;
@@ -1022,39 +1007,23 @@ export function OrdersPage() {
     const errors: Record<string, boolean> = {};
     let valid = true;
     if (!formData.company_id || formData.company_id === '') {
-      errors.company_id = true;
-      valid = false;
+      errors.company_id = true; valid = false;
     }
     if (!formData.customer_id || formData.customer_id === '') {
-      errors.customer_id = true;
-      valid = false;
+      errors.customer_id = true; valid = false;
     }
     if (!editingId && !formData.order_no.trim()) {
-      errors.order_no = true;
-      valid = false;
+      errors.order_no = true; valid = false;
     }
-    if (items.length === 0) {
-      errors.items = true;
-      valid = false;
-    }
-    if (total <= 0) {
-      errors.total = true;
-      valid = false;
-    }
+    if (items.length === 0) { errors.items = true; valid = false; }
+    if (total <= 0) { errors.total = true; valid = false; }
     if (formData.is_partial) {
       const pmt = parseFloat(String(formData.payment_amount || 0));
-      if (pmt <= 0) {
-        errors.payment_amount = true;
-        valid = false;
-      }
-      if (pmt >= total) {
-        errors.payment_amount = true;
-        valid = false;
-      }
+      if (pmt <= 0) { errors.payment_amount = true; valid = false; }
+      if (pmt >= total) { errors.payment_amount = true; valid = false; }
     }
     if (!['inward', 'outward'].includes(formData.payment_direction)) {
-      errors.payment_direction = true;
-      valid = false;
+      errors.payment_direction = true; valid = false;
     }
     setFormErrors(errors);
     if (!valid) showError('Validation', 'Please fix the highlighted required fields.');
@@ -1062,7 +1031,17 @@ export function OrdersPage() {
   };
 
   const handleSubmit = useCallback(async () => {
+    const isUpdate = Boolean(editingId);
+    if (isUpdate && !canEditOrder) {
+      showError('Permission denied', 'You do not have permission to edit orders.');
+      return;
+    }
+    if (!isUpdate && !canCreateOrder) {
+      showError('Permission denied', 'You do not have permission to create orders.');
+      return;
+    }
     if (!validateForm()) return;
+
     const paymentAmount = parseFloat(String(formData.payment_amount || 0));
     const isPartial = formData.is_partial || (paymentAmount > 0 && paymentAmount < total);
     const payload = {
@@ -1135,9 +1114,13 @@ export function OrdersPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [formData, editingId, items, total, tax, refreshOrders, showSuccess, showError]);
+  }, [canEditOrder, canCreateOrder, formData, editingId, items, total, tax, refreshOrders, showSuccess, showError]);
 
   const handleCreateInvoice = async () => {
+    if (!canCreateInvoice) {
+      showError('Permission denied', 'You do not have permission to create invoices.');
+      return;
+    }
     if (!editingId) return;
     const invoiceNo = window.prompt('Enter invoice number for this order');
     if (!invoiceNo) return;
@@ -1154,43 +1137,42 @@ export function OrdersPage() {
 
   /* -------------------- Export -------------------- */
   const handleExport = useCallback(() => {
+    if (!canViewOrders) return;
     if (filteredOrders.length === 0) {
       showError('Export failed', 'No orders to export.');
       return;
     }
-    const headers = [
-      'Order #',
-      'Customer',
-      'Total',
-      'Source',
-      'Status',
-      'Payment Status',
-      'Delivery Date',
-      'Date',
-    ];
-    const rows = filteredOrders.map((o) => {
-      const t = safeNum(o.total_amount);
-      return [
-        escapeCsvField(o.order_no),
-        escapeCsvField(o.customer?.name || o.customer_name || '-'),
-        t.toFixed(2),
-        escapeCsvField(o.source || '-'),
-        escapeCsvField(o.status),
-        escapeCsvField(o.payment_status || '-'),
-        escapeCsvField(o.delivery_date || '-'),
-        o.created_at ? new Date(o.created_at).toLocaleDateString() : '-',
-      ].join(',');
-    });
-    const csv = [headers.join(','), ...rows].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `orders-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    showSuccess('Export', 'Orders exported.');
-  }, [filteredOrders, showSuccess, showError]);
+    try {
+      const headers = [
+        'Order #', 'Customer', 'Total', 'Source', 'Status',
+        'Payment Status', 'Delivery Date', 'Date',
+      ];
+      const rows = filteredOrders.map((o) => {
+        const t = safeNum(o.total_amount);
+        return [
+          escapeCsvField(o.order_no),
+          escapeCsvField(o.customer?.name || o.customer_name || '-'),
+          t.toFixed(2),
+          escapeCsvField(o.source || '-'),
+          escapeCsvField(o.status),
+          escapeCsvField(o.payment_status || '-'),
+          escapeCsvField(o.delivery_date || '-'),
+          o.created_at ? new Date(o.created_at).toLocaleDateString() : '-',
+        ].join(',');
+      });
+      const csv = [headers.join(','), ...rows].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `orders-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showSuccess('Export', 'Orders exported.');
+    } catch (err: unknown) {
+      showError('Export failed', getErrorMessage(err, 'Could not export orders.'));
+    }
+  }, [canViewOrders, filteredOrders, showSuccess, showError]);
 
   /* -------------------- Helpers -------------------- */
   const clearFilters = useCallback(() => {
@@ -1238,7 +1220,6 @@ export function OrdersPage() {
     required = false,
     readOnly = false
   ) => {
-    // ✅ FIX: cast through `unknown` first — `OrderFormData` has no index signature.
     const value = (formData as unknown as Record<string, unknown>)[field] ?? '';
     const id = `field-${field}`;
     const hasError = formErrors[field];
@@ -1306,6 +1287,34 @@ export function OrdersPage() {
     );
   };
 
+  /* -------------------- Loading guard -------------------- */
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------- No access panel -------------------- */
+  if (!canViewOrders) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to view orders.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   /* -------------------- Error state -------------------- */
   if (ordError) {
     return (
@@ -1327,10 +1336,11 @@ export function OrdersPage() {
     );
   }
 
+  const showSelectionColumn = canBulkAct;
+
   /* -------------------- Render -------------------- */
   return (
     <>
-      {/* A4 print + offcanvas width + scroll overrides */}
       <style>{`
         @media print {
           @page { size: A4 portrait; margin: 12mm; }
@@ -1342,7 +1352,6 @@ export function OrdersPage() {
         .animate-fadeIn { animation: fadeIn 0.2s ease-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
 
-        /* ── Wider offcanvas for Create/Edit Order ── */
         .orders-offcanvas-wide {
           width: min(1080px, 96vw) !important;
           max-width: min(1080px, 96vw) !important;
@@ -1351,7 +1360,6 @@ export function OrdersPage() {
           .orders-offcanvas-wide { width: 100vw !important; max-width: 100vw !important; }
         }
 
-        /* ── Scroll containment inside the offcanvas ── */
         .orders-offcanvas-wide .orders-form-scroll {
           overflow-y: auto;
           overflow-x: hidden;
@@ -1393,46 +1401,54 @@ export function OrdersPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                {!canManageOrders && (
+                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                    Read-only
+                  </span>
+                )}
                 <Button
                   variant="outline"
                   onClick={handleExport}
-                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
+                  disabled={ordLoading || filteredOrders.length === 0}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50"
                 >
                   <FiDownload className="mr-2" size={14} />
                   Export
                 </Button>
-                <Button
-                  onClick={() => {
-                    setViewMode(false);
-                    setEditingId(null);
-                    setFormData({
-                      company_id: '',
-                      customer_id: '',
-                      quotation_id: '',
-                      order_no: generateOrderNo(),
-                      total_amount: '',
-                      tax_amount: '',
-                      status: 'pending',
-                      source: 'whatsapp',
-                      payment_method: 'qr',
-                      payment_direction: 'inward',
-                      payment_amount: 0,
-                      is_partial: false,
-                      delivery_date: '',
-                      shipping_address: '',
-                      notes: '',
-                    });
-                    setItems([]);
-                    setFormErrors({});
-                    setIsPanelOpen(true);
-                    setShowCustomerForm(false);
-                    setSelectedProductId('');
-                  }}
-                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
-                >
-                  <FiPlus className="mr-2" size={14} />
-                  New order
-                </Button>
+                {canCreateOrder && (
+                  <Button
+                    onClick={() => {
+                      setViewMode(false);
+                      setEditingId(null);
+                      setFormData({
+                        company_id: '',
+                        customer_id: '',
+                        quotation_id: '',
+                        order_no: generateOrderNo(),
+                        total_amount: '',
+                        tax_amount: '',
+                        status: 'pending',
+                        source: 'whatsapp',
+                        payment_method: 'qr',
+                        payment_direction: 'inward',
+                        payment_amount: 0,
+                        is_partial: false,
+                        delivery_date: '',
+                        shipping_address: '',
+                        notes: '',
+                      });
+                      setItems([]);
+                      setFormErrors({});
+                      setIsPanelOpen(true);
+                      setShowCustomerForm(false);
+                      setSelectedProductId('');
+                    }}
+                    className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                  >
+                    <FiPlus className="mr-2" size={14} />
+                    New order
+                  </Button>
+                )}
               </div>
             </div>
           </section>
@@ -1443,12 +1459,7 @@ export function OrdersPage() {
               <>
                 <StatCard icon={FiShoppingCart} label="Total" value={summary.total} accent="indigo" />
                 <StatCard icon={FiClock} label="Pending" value={summary.pending} accent="amber" />
-                <StatCard
-                  icon={FiCheckCircle}
-                  label="Confirmed"
-                  value={summary.confirmed}
-                  accent="sky"
-                />
+                <StatCard icon={FiCheckCircle} label="Confirmed" value={summary.confirmed} accent="sky" />
                 <StatCard icon={FiTruck} label="Shipped" value={summary.shipped} accent="violet" />
                 <StatCard icon={FiPackage} label="Delivered" value={summary.delivered} accent="emerald" />
                 <StatCard
@@ -1518,17 +1529,13 @@ export function OrdersPage() {
                       aria-label="Company"
                       value={filterCompanyId ? String(filterCompanyId) : 'all'}
                       onChange={(e) =>
-                        setFilterCompanyId(
-                          e.target.value === 'all' ? undefined : Number(e.target.value)
-                        )
+                        setFilterCompanyId(e.target.value === 'all' ? undefined : Number(e.target.value))
                       }
                       className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                     >
                       <option value="all">All companies</option>
                       {companies?.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
+                        <option key={c.id} value={c.id}>{c.name}</option>
                       ))}
                     </select>
                     <FiChevronDown
@@ -1547,9 +1554,7 @@ export function OrdersPage() {
                       className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                     >
                       {STATUS_OPTIONS.map((o) => (
-                        <option key={o.value} value={o.value}>
-                          {o.label}
-                        </option>
+                        <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
                     <FiChevronDown
@@ -1568,9 +1573,7 @@ export function OrdersPage() {
                       className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
                     >
                       {SOURCE_OPTIONS.map((o) => (
-                        <option key={o.value} value={o.value}>
-                          {o.label}
-                        </option>
+                        <option key={o.value} value={o.value}>{o.label}</option>
                       ))}
                     </select>
                     <FiChevronDown
@@ -1617,45 +1620,51 @@ export function OrdersPage() {
           </Card>
 
           {/* Bulk toolbar */}
-          {selectedIds.length > 0 && (
+          {selectedIds.length > 0 && canBulkAct && (
             <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
                 <div className="mr-1 flex items-center gap-2 rounded-lg bg-indigo-50 px-2.5 py-1 text-indigo-700 ring-1 ring-indigo-500/10">
                   <span className="text-sm font-bold">{selectedIds.length}</span>
                   <span className="text-xs font-medium">selected</span>
                 </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-lg"
-                  onClick={() => handleBulkStatusChange('confirmed')}
-                >
-                  <FiCheckCircle className="mr-1.5 text-sky-600" size={14} /> Confirm
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-lg"
-                  onClick={() => handleBulkStatusChange('shipped')}
-                >
-                  <FiTruck className="mr-1.5 text-violet-600" size={14} /> Ship
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-lg"
-                  onClick={() => handleBulkStatusChange('delivered')}
-                >
-                  <FiPackage className="mr-1.5 text-emerald-600" size={14} /> Deliver
-                </Button>
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  className="h-9 rounded-lg bg-rose-600 hover:bg-rose-700"
-                  onClick={handleBulkDelete}
-                >
-                  <FiTrash2 className="mr-1.5" size={14} /> Delete
-                </Button>
+                {canEditOrder && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-9 rounded-lg"
+                      onClick={() => handleBulkStatusChange('confirmed')}
+                    >
+                      <FiCheckCircle className="mr-1.5 text-sky-600" size={14} /> Confirm
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-9 rounded-lg"
+                      onClick={() => handleBulkStatusChange('shipped')}
+                    >
+                      <FiTruck className="mr-1.5 text-violet-600" size={14} /> Ship
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-9 rounded-lg"
+                      onClick={() => handleBulkStatusChange('delivered')}
+                    >
+                      <FiPackage className="mr-1.5 text-emerald-600" size={14} /> Deliver
+                    </Button>
+                  </>
+                )}
+                {canDeleteOrder && (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    className="h-9 rounded-lg bg-rose-600 hover:bg-rose-700"
+                    onClick={handleBulkDelete}
+                  >
+                    <FiTrash2 className="mr-1.5" size={14} /> Delete
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="ghost"
@@ -1698,37 +1707,29 @@ export function OrdersPage() {
               <Table className="min-w-[1050px]">
                 <TableHeader>
                   <TableRow className="border-slate-100 bg-slate-50/70 hover:bg-slate-50/70">
-                    <TableHead className="w-11 px-3">
-                      <input
-                        aria-label="Select all orders on page"
-                        type="checkbox"
-                        checked={allSelected}
-                        onChange={(event) => {
-                          event.stopPropagation();
-                          toggleSelectAll();
-                        }}
-                        onClick={(event) => event.stopPropagation()}
-                        className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
-                      />
-                    </TableHead>
-                    <TableHead>
-                      <TableHeadLabel>Order #</TableHeadLabel>
-                    </TableHead>
-                    <TableHead>
-                      <TableHeadLabel>Customer</TableHeadLabel>
-                    </TableHead>
+                    {showSelectionColumn && (
+                      <TableHead className="w-11 px-3">
+                        <input
+                          aria-label="Select all orders on page"
+                          type="checkbox"
+                          checked={allSelected}
+                          onChange={(event) => {
+                            event.stopPropagation();
+                            toggleSelectAll();
+                          }}
+                          onClick={(event) => event.stopPropagation()}
+                          className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                        />
+                      </TableHead>
+                    )}
+                    <TableHead><TableHeadLabel>Order #</TableHeadLabel></TableHead>
+                    <TableHead><TableHeadLabel>Customer</TableHeadLabel></TableHead>
                     <TableHead className="text-right">
                       <TableHeadLabel align="right">Total</TableHeadLabel>
                     </TableHead>
-                    <TableHead>
-                      <TableHeadLabel>Source</TableHeadLabel>
-                    </TableHead>
-                    <TableHead>
-                      <TableHeadLabel>Status</TableHeadLabel>
-                    </TableHead>
-                    <TableHead>
-                      <TableHeadLabel>Delivery</TableHeadLabel>
-                    </TableHead>
+                    <TableHead><TableHeadLabel>Source</TableHeadLabel></TableHead>
+                    <TableHead><TableHeadLabel>Status</TableHeadLabel></TableHead>
+                    <TableHead><TableHeadLabel>Delivery</TableHeadLabel></TableHead>
                     <TableHead className="w-12" />
                   </TableRow>
                 </TableHeader>
@@ -1737,7 +1738,9 @@ export function OrdersPage() {
                   {ordLoading &&
                     Array.from({ length: 8 }).map((_, index) => (
                       <TableRow key={`skeleton-${index}`} className="border-slate-100">
-                        {Array.from({ length: TABLE_COLUMN_COUNT }).map((__, cellIndex) => (
+                        {Array.from({
+                          length: showSelectionColumn ? TABLE_COLUMN_COUNT + 1 : TABLE_COLUMN_COUNT,
+                        }).map((__, cellIndex) => (
                           <TableCell key={cellIndex}>
                             <div className="h-4 animate-pulse rounded bg-slate-100" />
                           </TableCell>
@@ -1766,6 +1769,7 @@ export function OrdersPage() {
                         phone: 'border-sky-200/70 bg-sky-50 text-sky-700',
                         email: 'border-violet-200/70 bg-violet-50 text-violet-700',
                       };
+                      const hasRowActions = canEditOrder || canDeleteOrder || canViewOrders;
 
                       return (
                         <TableRow
@@ -1776,19 +1780,21 @@ export function OrdersPage() {
                           }`}
                           onClick={() => openView(order)}
                         >
-                          <TableCell className="px-3">
-                            <input
-                              aria-label={`Select ${order.order_no}`}
-                              type="checkbox"
-                              checked={selected}
-                              onChange={(event) => {
-                                event.stopPropagation();
-                                toggleSelected(order.id);
-                              }}
-                              onClick={(event) => event.stopPropagation()}
-                              className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
-                            />
-                          </TableCell>
+                          {showSelectionColumn && (
+                            <TableCell className="px-3">
+                              <input
+                                aria-label={`Select ${order.order_no}`}
+                                type="checkbox"
+                                checked={selected}
+                                onChange={(event) => {
+                                  event.stopPropagation();
+                                  toggleSelected(order.id);
+                                }}
+                                onClick={(event) => event.stopPropagation()}
+                                className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
+                              />
+                            </TableCell>
+                          )}
 
                           <TableCell>
                             <div className="min-w-[140px]">
@@ -1822,8 +1828,7 @@ export function OrdersPage() {
                             <Badge
                               variant="outline"
                               className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold capitalize ${
-                                sourceColors[order.source] ||
-                                'border-slate-200 bg-slate-50 text-slate-600'
+                                sourceColors[order.source] || 'border-slate-200 bg-slate-50 text-slate-600'
                               }`}
                             >
                               {order.source}
@@ -1835,8 +1840,7 @@ export function OrdersPage() {
                               <Badge
                                 variant="outline"
                                 className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
-                                  statusColors[order.status] ||
-                                  'border-slate-200 bg-slate-50 text-slate-600'
+                                  statusColors[order.status] || 'border-slate-200 bg-slate-50 text-slate-600'
                                 }`}
                               >
                                 {statusLabel[order.status] || order.status}
@@ -1861,10 +1865,7 @@ export function OrdersPage() {
                             {formatDate(order.delivery_date)}
                           </TableCell>
 
-                          <TableCell
-                            className="text-right"
-                            onClick={(event) => event.stopPropagation()}
-                          >
+                          <TableCell className="text-right" onClick={(event) => event.stopPropagation()}>
                             <div className="flex items-center justify-end gap-1">
                               <button
                                 onClick={() => openView(order)}
@@ -1873,13 +1874,15 @@ export function OrdersPage() {
                               >
                                 <FiEye size={15} />
                               </button>
-                              <button
-                                onClick={() => openEdit(order)}
-                                className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
-                                title="Edit"
-                              >
-                                <FiEdit size={15} />
-                              </button>
+                              {canEditOrder && (
+                                <button
+                                  onClick={() => openEdit(order)}
+                                  className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
+                                  title="Edit"
+                                >
+                                  <FiEdit size={15} />
+                                </button>
+                              )}
                               <button
                                 onClick={() => handlePrint(order)}
                                 className="grid h-8 w-8 place-items-center rounded-lg text-sky-500 transition hover:bg-sky-50 hover:text-sky-700"
@@ -1887,13 +1890,18 @@ export function OrdersPage() {
                               >
                                 <FiPrinter size={15} />
                               </button>
-                              <button
-                                onClick={() => handleDelete(order)}
-                                className="grid h-8 w-8 place-items-center rounded-lg text-rose-500 transition hover:bg-rose-50 hover:text-rose-700"
-                                title="Delete"
-                              >
-                                <FiTrash2 size={15} />
-                              </button>
+                              {canDeleteOrder && (
+                                <button
+                                  onClick={() => handleDelete(order)}
+                                  className="grid h-8 w-8 place-items-center rounded-lg text-rose-500 transition hover:bg-rose-50 hover:text-rose-700"
+                                  title="Delete"
+                                >
+                                  <FiTrash2 size={15} />
+                                </button>
+                              )}
+                              {!hasRowActions && (
+                                <span className="text-[11px] text-slate-400">Read-only</span>
+                              )}
                             </div>
                           </TableCell>
                         </TableRow>
@@ -1902,7 +1910,10 @@ export function OrdersPage() {
 
                   {!ordLoading && !paginatedOrders.length && (
                     <TableRow>
-                      <TableCell colSpan={TABLE_COLUMN_COUNT} className="py-20 text-center">
+                      <TableCell
+                        colSpan={showSelectionColumn ? TABLE_COLUMN_COUNT + 1 : TABLE_COLUMN_COUNT}
+                        className="py-20 text-center"
+                      >
                         <div className="mx-auto max-w-md px-4">
                           <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 ring-1 ring-slate-200/70">
                             <FiSearch className="h-6 w-6 text-slate-400" />
@@ -1913,11 +1924,7 @@ export function OrdersPage() {
                           <p className="mt-1 text-sm text-slate-500">
                             Try adjusting the date range, company, source, status, or search term.
                           </p>
-                          <Button
-                            className="mt-5 rounded-lg"
-                            variant="outline"
-                            onClick={clearFilters}
-                          >
+                          <Button className="mt-5 rounded-lg" variant="outline" onClick={clearFilters}>
                             <FiFilter className="mr-2" size={14} />
                             Reset filters
                           </Button>
@@ -1951,9 +1958,7 @@ export function OrdersPage() {
                     size="icon"
                     className="h-9 w-9 rounded-lg"
                     disabled={currentPage === 1}
-                    onClick={() =>
-                      startTransition(() => setCurrentPage((p) => Math.max(1, p - 1)))
-                    }
+                    onClick={() => startTransition(() => setCurrentPage((p) => Math.max(1, p - 1)))}
                     aria-label="Previous page"
                   >
                     ‹
@@ -1966,9 +1971,7 @@ export function OrdersPage() {
                     size="icon"
                     className="h-9 w-9 rounded-lg"
                     disabled={currentPage === totalPages}
-                    onClick={() =>
-                      startTransition(() => setCurrentPage((p) => Math.min(totalPages, p + 1)))
-                    }
+                    onClick={() => startTransition(() => setCurrentPage((p) => Math.min(totalPages, p + 1)))}
                     aria-label="Next page"
                   >
                     ›
@@ -2048,7 +2051,8 @@ export function OrdersPage() {
                   </Button>
                   <Button
                     onClick={createCustomerInline}
-                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                    disabled={!canCreateCustomer}
+                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700 disabled:opacity-50"
                   >
                     Create customer
                   </Button>
@@ -2063,9 +2067,9 @@ export function OrdersPage() {
                   >
                     <FiX className="mr-2" size={14} /> {viewMode ? 'Close' : 'Cancel'}
                   </Button>
-                  {!viewMode && (
+                  {!viewMode && (editingId ? canEditOrder : canCreateOrder) && (
                     <div className="flex gap-2">
-                      {editingId && (
+                      {editingId && canCreateInvoice && (
                         <Button
                           variant="outline"
                           onClick={handleCreateInvoice}
@@ -2111,10 +2115,7 @@ export function OrdersPage() {
                         Branch
                       </label>
                       <SearchableSelect
-                        options={filteredBranchesForNewCustomer.map((b) => ({
-                          id: b.id,
-                          name: b.name,
-                        }))}
+                        options={filteredBranchesForNewCustomer.map((b) => ({ id: b.id, name: b.name }))}
                         value={newCustomer.branch_id}
                         onChange={(val) => setNewCustomer((prev) => ({ ...prev, branch_id: val }))}
                         placeholder="None"
@@ -2212,9 +2213,7 @@ export function OrdersPage() {
                       </label>
                       <Input
                         value={newCustomer.gst_number}
-                        onChange={(e) =>
-                          setNewCustomer((prev) => ({ ...prev, gst_number: e.target.value }))
-                        }
+                        onChange={(e) => setNewCustomer((prev) => ({ ...prev, gst_number: e.target.value }))}
                         className="h-10 rounded-xl border-slate-200"
                         placeholder="GSTIN"
                       />
@@ -2358,15 +2357,13 @@ export function OrdersPage() {
                           <SearchableSelect
                             options={customers?.map((c) => ({ id: c.id, name: c.name })) || []}
                             value={formData.customer_id}
-                            onChange={(val) =>
-                              setFormData((prev) => ({ ...prev, customer_id: val }))
-                            }
-                            placeholder="Select customer"
-                            disabled={viewMode}
+                            onChange={(val) => setFormData((prev) => ({ ...prev, customer_id: val }))}
+                            placeholder={canViewCustomers ? 'Select customer' : 'Customer search disabled'}
+                            disabled={viewMode || !canViewCustomers}
                             error={formErrors.customer_id}
                           />
                         </div>
-                        {!viewMode && (
+                        {!viewMode && canCreateCustomer && (
                           <Button
                             type="button"
                             variant="outline"
@@ -2403,28 +2400,35 @@ export function OrdersPage() {
                   <div className="mt-3">
                     {!viewMode ? (
                       <>
-                        <div className="mb-3 min-w-0">
-                          <SearchableSelect
-                            options={
-                              products?.map((p) => ({
-                                id: p.id,
-                                name: `${p.name} (₹${p.sale_price || p.price || 0})`,
-                              })) || []
-                            }
-                            value={selectedProductId}
-                            onChange={(val) => {
-                              if (val) {
-                                addItemToOrder(Number(val));
-                                setSelectedProductId('');
+                        {canViewProducts ? (
+                          <div className="mb-3 min-w-0">
+                            <SearchableSelect
+                              options={
+                                products?.map((p) => ({
+                                  id: p.id,
+                                  name: `${p.name} (₹${p.sale_price || p.price || 0})`,
+                                })) || []
                               }
-                            }}
-                            placeholder={
-                              products && products.length > 0
-                                ? `Select product to add (${products.length} available)`
-                                : 'No products found'
-                            }
-                          />
-                        </div>
+                              value={selectedProductId}
+                              onChange={(val) => {
+                                if (val) {
+                                  addItemToOrder(Number(val));
+                                  setSelectedProductId('');
+                                }
+                              }}
+                              placeholder={
+                                products && products.length > 0
+                                  ? `Select product to add (${products.length} available)`
+                                  : 'No products found'
+                              }
+                            />
+                          </div>
+                        ) : (
+                          <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                            <FiLock className="mr-1 inline" size={11} />
+                            You do not have permission to browse the product catalogue. Add items manually after creation.
+                          </div>
+                        )}
                         {items.length === 0 ? (
                           <p className="py-4 text-center text-sm italic text-slate-400">
                             No products added yet
@@ -2595,8 +2599,7 @@ export function OrdersPage() {
                         <div className="mt-1 flex justify-between text-sm">
                           <span className="text-slate-600">Balance due</span>
                           <span className="font-semibold tabular-nums text-rose-600">
-                            ₹
-                            {(total - parseFloat(String(formData.payment_amount || 0))).toFixed(2)}
+                            ₹{(total - parseFloat(String(formData.payment_amount || 0))).toFixed(2)}
                           </span>
                         </div>
                         <div className="mt-1 flex justify-between text-sm">
@@ -2650,10 +2653,7 @@ export function OrdersPage() {
         </Suspense>
       )}
 
-      {/* ✅ FIX: normalize BOTH `company` and `customer` from `X | null | undefined`
-          to `X | undefined` so the object matches OrderPrint's stricter prop types.
-          The `as unknown as React.ComponentProps<typeof OrderPrint>['order']` cast
-          is a safety net in case OrderPrint declares any other non-nullable field. */}
+      {/* Print pipeline */}
       {printOrder && (
         <OrderPrint
           order={

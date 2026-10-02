@@ -1,3 +1,4 @@
+// src/pages/AttendancePage.tsx
 import { useEffect, useState, useCallback, useMemo, memo, lazy, Suspense } from 'react';
 import {
   FiRefreshCw, FiDownload, FiUser, FiUsers, FiCheckCircle, FiXCircle,
@@ -5,10 +6,13 @@ import {
   FiCalendar, FiClock, FiActivity, FiServer,
   FiAlertTriangle, FiPlus, FiRotateCcw,
   FiEdit, FiUserPlus, FiInfo, FiEdit2, FiTrash2,
-  FiSettings
+  FiSettings, FiLock,
 } from 'react-icons/fi';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
+import PermissionGate from '../components/PermissionGate';
 
 // ---------- Lazy loaded Offcanvas ----------
 const Offcanvas = lazy(() =>
@@ -37,20 +41,18 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = 300_000)
       const res = await fetcher();
       let result;
       if (key === 'today_attendance_summary') {
-        console.log('API response for summary:', res);
         result = (res as any)?.data ?? res;
         if (Array.isArray(result)) {
           result = result[0] || null;
         }
-        console.log('Processed summary data:', result);
       } else {
         const potentialArray = (res as any)?.data;
         if (Array.isArray(potentialArray)) {
-            result = potentialArray;
+          result = potentialArray;
         } else if (Array.isArray(res)) {
-            result = res;
+          result = res;
         } else {
-            result = [];
+          result = [];
         }
       }
       cache.set(key, { data: result, timestamp: Date.now() });
@@ -281,7 +283,6 @@ const AttendanceCalendar = memo(({ year, month, records, onDayClick }: any) => {
 });
 
 const StatCards = memo(({ todayStats }: any) => {
-  console.log('StatCards received props:', { todayStats });
   return (
     <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
       {[
@@ -308,6 +309,32 @@ const StatCards = memo(({ todayStats }: any) => {
 
 // ---------- Main Component ----------
 export function AttendancePage() {
+  const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ---- Capability flags ---- */
+  const canViewAttendance     = isSuperAdmin || can('view attendance');
+  const canViewTodaySummary   = isSuperAdmin || can('view today attendance summary');
+  const canViewTodayEmployees = isSuperAdmin || can('view today employees attendance');
+  const canCreateAttendance   = isSuperAdmin || can('create attendance');
+  const canEditAttendance     = isSuperAdmin || can('edit attendance');
+  const canDeleteAttendance   = isSuperAdmin || can('delete attendance');
+
+  const canViewDevices        = isSuperAdmin || can('view biometric devices');
+  const canRegisterDevice     = isSuperAdmin || can('register biometric device');
+  const canUpdateDevice       = isSuperAdmin || can('update biometric device');
+  const canDeleteDevice       = isSuperAdmin || can('delete biometric device');
+  const canSyncDevice         = isSuperAdmin || can('sync biometric device');
+  const canRestartDevice      = isSuperAdmin || can('restart biometric device');
+  const canEditDeviceSettings = isSuperAdmin || can('update biometric device settings');
+  const canStartEnrollment    = isSuperAdmin || can('start device enrollment');
+
+  const canEditAttendanceAny = canCreateAttendance || canEditAttendance || canDeleteAttendance;
+  const canManageDevices = canUpdateDevice || canDeleteDevice || canSyncDevice || canRestartDevice || canEditDeviceSettings;
+
+  /* ---- Local state ---- */
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -315,7 +342,6 @@ export function AttendancePage() {
   // Filter state
   const { data: companies } = useApiCache<Company[]>('companies', () => apiClient.getCompanies());
   const { data: branches } = useApiCache<Branch[]>('branches', () => apiClient.getBranches());
-  // 🔧 FIX: cast apiClient to any to bypass missing method type error
   const { data: departments } = useApiCache<Department[]>('departments', () => (apiClient as any).getDepartments?.() ?? []);
   const [selectedCompany, setSelectedCompany] = useState<number | ''>('');
   const [selectedBranch, setSelectedBranch] = useState<number | ''>('');
@@ -338,12 +364,12 @@ export function AttendancePage() {
   const [showTimeView, setShowTimeView] = useState(false);
   const [selectedRecordForTime, setSelectedRecordForTime] = useState<AttendanceRecord | null>(null);
 
-  // ---------- FIXED: Ensure apiClient.getBiometricDevices() returns an array before mapping ----------
+  /* ---- Devices ---- */
   const { data: devices, loading: devicesLoading, refresh: refreshDevices } = useApiCache<ESP32Device[]>(
     'biometric_devices',
     async () => {
+      if (!canViewDevices) return [];
       const raw = await apiClient.getBiometricDevices();
-      // Normalise the response: could be array, or object with data prop
       const list = Array.isArray(raw) ? raw : raw?.data ?? [];
       return list.map((d: any) => ({
         id: d.device_uid,
@@ -392,23 +418,27 @@ export function AttendancePage() {
   const [enrolledFingers, setEnrolledFingers] = useState<any[]>([]);
   const [loadingEnrolled, setLoadingEnrolled] = useState(false);
 
-  // Today stats
+  // Today stats (only fetch if permitted)
   const { data: todayStats, refresh: refreshTodayStats } = useApiCache<{
     present: number; absent: number; late: number; on_leave: number;
-  }>('today_attendance_summary', () => apiClient.getTodayAttendanceSummary());
+  }>('today_attendance_summary', () => {
+    if (!canViewTodaySummary) return Promise.resolve({ present: 0, absent: 0, late: 0, on_leave: 0 });
+    return apiClient.getTodayAttendanceSummary();
+  });
 
-  // Today employee attendance list
+  // Today employee list (only fetch if permitted)
   const { data: todayEmployeeList, loading: todayListLoading, refresh: refreshTodayList } = useApiCache<any[]>(
     'today_employee_attendance',
-    () => apiClient.getTodayEmployeeAttendance(),
+    () => {
+      if (!canViewTodayEmployees) return Promise.resolve([]);
+      return apiClient.getTodayEmployeeAttendance();
+    },
     30_000
   );
 
   // UI toggles
   const [autoAttendanceEnabled, setAutoAttendanceEnabled] = useState(true);
   const [activeView, setActiveView] = useState<'overview' | 'attendance' | 'devices'>('overview');
-
-  const { showSuccess, showError } = useNotification();
 
   // ---------- Branch filtering ----------
   const filteredBranches = useMemo(() => {
@@ -422,6 +452,7 @@ export function AttendancePage() {
 
   // Employees fetch
   const loadEmployees = useCallback(async () => {
+    if (!canViewAttendance) return;
     try {
       const params = new URLSearchParams();
       if (selectedCompany) params.append('company_id', String(selectedCompany));
@@ -437,16 +468,16 @@ export function AttendancePage() {
       if (selectedEmployee && !data.some((e: any) => e.id === selectedEmployee)) {
         setSelectedEmployee('');
       }
-    } catch (err) {
+    } catch {
       showError('Error', 'Could not load employees.');
     }
-  }, [selectedCompany, selectedBranch, selectedDepartment, debouncedSearch, showError, selectedEmployee]);
+  }, [canViewAttendance, selectedCompany, selectedBranch, selectedDepartment, debouncedSearch, showError, selectedEmployee]);
 
   useEffect(() => { loadEmployees(); }, [loadEmployees]);
 
   // Attendance load
   const loadAttendance = useCallback(async () => {
-    if (!selectedEmployee) return;
+    if (!canViewAttendance || !selectedEmployee) return;
     setLoading(true);
     try {
       const monthStr = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
@@ -461,43 +492,44 @@ export function AttendancePage() {
       setAttendanceRecords(recordsMap);
       setLastUpdated(new Date());
     } catch (err: any) {
-      showError('Load failed', err.message);
+      showError('Load failed', err?.message || 'Could not load attendance.');
     } finally {
       setLoading(false);
     }
-  }, [selectedEmployee, currentYear, currentMonth, showError]);
+  }, [canViewAttendance, selectedEmployee, currentYear, currentMonth, showError]);
 
   useEffect(() => { loadAttendance(); }, [loadAttendance]);
 
   // Refresh today data when overview tab active
   useEffect(() => {
     if (activeView !== 'overview') return;
+    if (!canViewTodaySummary && !canViewTodayEmployees) return;
     const id = setInterval(() => {
-      refreshTodayStats();
-      refreshTodayList();
+      if (canViewTodaySummary) refreshTodayStats();
+      if (canViewTodayEmployees) refreshTodayList();
     }, 30000);
     return () => clearInterval(id);
-  }, [activeView, refreshTodayStats, refreshTodayList]);
+  }, [activeView, canViewTodaySummary, canViewTodayEmployees, refreshTodayStats, refreshTodayList]);
 
-  // ----- LIVE MONITORING: auto-refresh devices every 15s when Devices tab active -----
+  // Auto-refresh devices
   useEffect(() => {
-    if (activeView !== 'devices') return;
+    if (activeView !== 'devices' || !canViewDevices) return;
     const interval = setInterval(() => {
       refreshDevices();
     }, 15000);
     return () => clearInterval(interval);
-  }, [activeView, refreshDevices]);
+  }, [activeView, canViewDevices, refreshDevices]);
 
   // Enrollment data
   const fetchEnrolledFingers = useCallback(async () => {
-    if (!enrollEmployeeId) return;
+    if (!enrollEmployeeId || !canStartEnrollment) return;
     setLoadingEnrolled(true);
     try {
       const result = await apiClient.getEnrolledFingers(enrollEmployeeId);
       setEnrolledFingers(Array.isArray(result) ? result : result.data || []);
-    } catch (err) { setEnrolledFingers([]); }
+    } catch { setEnrolledFingers([]); }
     finally { setLoadingEnrolled(false); }
-  }, [enrollEmployeeId]);
+  }, [enrollEmployeeId, canStartEnrollment]);
 
   useEffect(() => {
     if (enrollEmployeeId) fetchEnrolledFingers();
@@ -518,6 +550,10 @@ export function AttendancePage() {
   }, [enrollBranch, devices, branches]);
 
   const handleStartEnrollment = async () => {
+    if (!canStartEnrollment) {
+      showError('Permission denied', 'You do not have permission to start enrollment.');
+      return;
+    }
     if (!enrollDevice || !enrollEmployeeId) {
       showError('Validation', 'Select a device and employee first.');
       return;
@@ -543,7 +579,7 @@ export function AttendancePage() {
             showSuccess('Enrollment', 'Fingerprint registered successfully!');
             fetchEnrolledFingers();
           }
-        } catch (e) {}
+        } catch { /* keep polling */ }
       }, 2000);
 
       setTimeout(() => {
@@ -555,7 +591,7 @@ export function AttendancePage() {
       }, 120000);
     } catch (err: any) {
       setEnrolling(false);
-      showError('Enrollment failed', err.message);
+      showError('Enrollment failed', err?.message || 'Could not start enrollment.');
     }
   };
 
@@ -573,7 +609,7 @@ export function AttendancePage() {
       else if (s === 'half_day') halfDay++;
       if (s === 'late') late++;
       if (rec.check_out && (s === 'present' || s === 'on_time' || s === 'remote')) {
-        const [h, m] = rec.check_out.split(':').map(Number);
+        const [h] = rec.check_out.split(':').map(Number);
         if (h < 16) early++;
       }
       totalOvertime += rec.overtime || 0;
@@ -581,12 +617,7 @@ export function AttendancePage() {
     });
 
     return {
-      present,
-      absent,
-      leave,
-      halfDay,
-      late,
-      early,
+      present, absent, leave, halfDay, late, early,
       overtimeHours: Math.floor(totalOvertime / 60),
       overtimeMins: totalOvertime % 60,
       totalWorkingHours: formatWorkingHours(totalWorkingMinutes),
@@ -596,7 +627,12 @@ export function AttendancePage() {
 
   // ---------- Handlers ----------
   const handleDayClick = (dateStr: string, record: AttendanceRecord | null) => {
+    if (!canViewAttendance) return;
     if (!selectedEmployee) { showError('No employee', 'Please select an employee first.'); return; }
+    if (!canEditAttendanceAny) {
+      showError('Read-only', 'You do not have permission to modify attendance records.');
+      return;
+    }
     setSelectedDate(dateStr);
     setEditingRecord(record || {
       id: 0, employee_id: Number(selectedEmployee), date: dateStr, status: 'not_set',
@@ -606,35 +642,51 @@ export function AttendancePage() {
     setIsPanelOpen(true);
   };
 
-  // UPDATED handleSaveAttendance with deletion on "Not Set"
-  const handleSaveAttendance = async (status: AttendanceStatus, check_in?: string, check_out?: string, notes?: string) => {
+  const handleSaveAttendance = async (
+    status: AttendanceStatus,
+    check_in?: string,
+    check_out?: string,
+    notes?: string,
+  ) => {
     if (!selectedEmployee || !selectedDate) return;
 
-    // ── Delete existing record when "Not Set" is clicked ──
+    // Delete existing
     if (status === 'not_set' && editingRecord?.id && editingRecord.id !== 0) {
+      if (!canDeleteAttendance) {
+        showError('Permission denied', 'You do not have permission to delete attendance.');
+        return;
+      }
       setSubmitting(true);
       try {
         await apiClient.deleteAttendance(editingRecord.id);
         showSuccess('Deleted', 'Attendance record removed.');
         setIsPanelOpen(false);
         loadAttendance();
-        refreshTodayStats();
-        refreshTodayList();
+        if (canViewTodaySummary) refreshTodayStats();
+        if (canViewTodayEmployees) refreshTodayList();
       } catch (err: any) {
-        showError('Delete failed', err.message);
+        showError('Delete failed', err?.message || 'Could not delete record.');
       } finally {
         setSubmitting(false);
       }
       return;
     }
 
-    // ── If "Not Set" on a new record, simply close the panel ──
     if (status === 'not_set') {
       setIsPanelOpen(false);
       return;
     }
 
-    // ── Otherwise, create or update normally ──
+    const isUpdate = Boolean(editingRecord?.id && editingRecord.id !== 0);
+    if (isUpdate && !canEditAttendance) {
+      showError('Permission denied', 'You do not have permission to edit attendance.');
+      return;
+    }
+    if (!isUpdate && !canCreateAttendance) {
+      showError('Permission denied', 'You do not have permission to create attendance.');
+      return;
+    }
+
     const payload = {
       employee_id: Number(selectedEmployee),
       date: selectedDate,
@@ -648,8 +700,8 @@ export function AttendancePage() {
 
     setSubmitting(true);
     try {
-      if (editingRecord?.id && editingRecord.id !== 0) {
-        await apiClient.updateAttendance(editingRecord.id, payload);
+      if (isUpdate) {
+        await apiClient.updateAttendance(editingRecord!.id, payload);
         showSuccess('Updated', `Status: ${getStatusLabel(status)}`);
       } else {
         await apiClient.createAttendance(payload);
@@ -657,10 +709,10 @@ export function AttendancePage() {
       }
       setIsPanelOpen(false);
       loadAttendance();
-      refreshTodayStats();
-      refreshTodayList();
+      if (canViewTodaySummary) refreshTodayStats();
+      if (canViewTodayEmployees) refreshTodayList();
     } catch (err: any) {
-      showError('Save failed', err.message);
+      showError('Save failed', err?.message || 'Could not save attendance.');
     } finally {
       setSubmitting(false);
     }
@@ -679,44 +731,86 @@ export function AttendancePage() {
   };
 
   const handleManualAttendance = () => {
+    if (!canEditAttendanceAny) {
+      showError('Permission denied', 'You do not have permission to modify attendance.');
+      return;
+    }
     const today = new Date().toISOString().slice(0, 10);
     handleDayClick(today, attendanceRecords[today] || null);
   };
 
   const handleExport = () => {
+    if (!canViewAttendance) return;
     if (!Object.keys(attendanceRecords).length) { showError('No data', 'No records to export.'); return; }
-    const headers = ['Date', 'Status', 'Check In', 'Check Out', 'Shift', 'Overtime(min)', 'Notes'];
-    const rows = Object.values(attendanceRecords).map(r => [
-      r.date, getStatusLabel(r.status), r.check_in || '', r.check_out || '',
-      r.shift, r.overtime, r.notes,
-    ]);
-    const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `attendance-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    showSuccess('Export', 'CSV downloaded.');
+    try {
+      const headers = ['Date', 'Status', 'Check In', 'Check Out', 'Shift', 'Overtime(min)', 'Notes'];
+      const rows = Object.values(attendanceRecords).map(r => [
+        r.date, getStatusLabel(r.status), r.check_in || '', r.check_out || '',
+        r.shift, r.overtime, r.notes,
+      ]);
+      const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `attendance-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      showSuccess('Export', 'CSV downloaded.');
+    } catch {
+      showError('Export failed', 'Could not export attendance.');
+    }
   };
 
   // ---------- Device CRUD ----------
   const handleSyncDevice = async (numericId: number, name: string) => {
-    try { await apiClient.syncDevice(numericId); showSuccess('Sync', `${name} sync started`); setTimeout(refreshDevices, 2000); }
-    catch (err: any) { showError('Sync failed', err.message); }
+    if (!canSyncDevice) {
+      showError('Permission denied', 'You do not have permission to sync devices.');
+      return;
+    }
+    try {
+      await apiClient.syncDevice(numericId);
+      showSuccess('Sync', `${name} sync started`);
+      setTimeout(refreshDevices, 2000);
+    } catch (err: any) {
+      showError('Sync failed', err?.message || 'Could not sync device.');
+    }
   };
+
   const handleDeviceSettings = async (numericId: number) => {
+    if (!canEditDeviceSettings) {
+      showError('Permission denied', 'You do not have permission to change device settings.');
+      return;
+    }
     const json = prompt('Settings JSON:', '{"sleep_mode": false}');
     if (!json) return;
-    try { await apiClient.updateDeviceSettings(numericId, JSON.parse(json)); showSuccess('Settings', 'Updated'); }
-    catch (err: any) { showError('Settings error', err.message); }
+    try {
+      await apiClient.updateDeviceSettings(numericId, JSON.parse(json));
+      showSuccess('Settings', 'Updated');
+    } catch (err: any) {
+      showError('Settings error', err?.message || 'Could not update settings.');
+    }
   };
+
   const handleRestartDevice = async (numericId: number, name: string) => {
+    if (!canRestartDevice) {
+      showError('Permission denied', 'You do not have permission to restart devices.');
+      return;
+    }
     if (!confirm(`Restart ${name}?`)) return;
-    try { await apiClient.restartDevice(numericId); showSuccess('Restart', `${name} restarting`); setTimeout(refreshDevices, 5000); }
-    catch (err: any) { showError('Restart failed', err.message); }
+    try {
+      await apiClient.restartDevice(numericId);
+      showSuccess('Restart', `${name} restarting`);
+      setTimeout(refreshDevices, 5000);
+    } catch (err: any) {
+      showError('Restart failed', err?.message || 'Could not restart device.');
+    }
   };
 
   const openEditDeviceModal = (device: ESP32Device) => {
+    if (!canUpdateDevice) {
+      showError('Permission denied', 'You do not have permission to edit devices.');
+      return;
+    }
     setEditingDevice(device);
     setDeviceForm({
       name: device.name,
@@ -730,6 +824,14 @@ export function AttendancePage() {
   const handleSaveDevice = async () => {
     if (!deviceForm.name || !deviceForm.device_uid) {
       showError('Validation', 'Name and UID are required.');
+      return;
+    }
+    if (editingDevice && !canUpdateDevice) {
+      showError('Permission denied', 'You do not have permission to edit devices.');
+      return;
+    }
+    if (!editingDevice && !canRegisterDevice) {
+      showError('Permission denied', 'You do not have permission to register devices.');
       return;
     }
     setSavingDevice(true);
@@ -755,20 +857,32 @@ export function AttendancePage() {
       }
       setShowDeviceModal(false);
       refreshDevices();
-    } catch (err: any) { showError('Save failed', err.message); }
-    finally { setSavingDevice(false); }
+    } catch (err: any) {
+      showError('Save failed', err?.message || 'Could not save device.');
+    } finally {
+      setSavingDevice(false);
+    }
   };
 
   const handleDeleteDevice = async (device: ESP32Device) => {
+    if (!canDeleteDevice) {
+      showError('Permission denied', 'You do not have permission to delete devices.');
+      return;
+    }
     if (!confirm(`Delete device "${device.name}"?`)) return;
     try {
       await apiClient.deleteDevice(device.numericId);
       showSuccess('Deleted', `${device.name} removed.`);
       refreshDevices();
-    } catch (err: any) { showError('Delete failed', err.message); }
+    } catch (err: any) {
+      showError('Delete failed', err?.message || 'Could not delete device.');
+    }
   };
 
-  const selectedEmployeeData = useMemo(() => employees.find(e => e.id === selectedEmployee), [employees, selectedEmployee]);
+  const selectedEmployeeData = useMemo(
+    () => employees.find(e => e.id === selectedEmployee),
+    [employees, selectedEmployee],
+  );
 
   const [empSearch, setEmpSearch] = useState('');
   const filteredTodayList = useMemo(() => {
@@ -776,12 +890,42 @@ export function AttendancePage() {
     if (!empSearch.trim()) return todayEmployeeList;
     const q = empSearch.toLowerCase();
     return todayEmployeeList.filter(e =>
-      e.employee_name.toLowerCase().includes(q) ||
-      (e.employee_code || '').toLowerCase().includes(q)
+      (e.employee_name || '').toLowerCase().includes(q) ||
+      (e.employee_code || '').toLowerCase().includes(q),
     );
   }, [todayEmployeeList, empSearch]);
 
+  /* ---- Loading guard ---- */
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* ---- No access panel ---- */
+  if (!canViewAttendance && !canViewTodaySummary) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to view attendance.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   // ---------- Render ----------
+  const attendanceReadOnly = !canEditAttendanceAny;
+
   return (
     <div className="min-h-screen bg-[#f5f7fb] p-4 md:p-7 text-slate-800">
       {/* Header */}
@@ -797,19 +941,36 @@ export function AttendancePage() {
           <p className="text-sm text-slate-300">Real-time ESP32 biometric monitoring & attendance</p>
         </div>
         <div className="flex items-center gap-2">
+          {attendanceReadOnly && (
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+              Read-only
+            </span>
+          )}
           <button onClick={goToToday} className="rounded-xl bg-white/10 px-3 py-2 text-sm font-medium text-white ring-1 ring-white/15 transition hover:bg-white/20">Today</button>
-          <button onClick={loadAttendance} className="grid h-9 w-9 place-items-center rounded-xl bg-white/10 text-white ring-1 ring-white/15 transition hover:bg-white/20 disabled:opacity-60" disabled={loading}><FiRefreshCw className={loading ? 'animate-spin' : ''} size={14} /></button>
-          <button onClick={handleExport} className="grid h-9 w-9 place-items-center rounded-xl bg-cyan-400 text-slate-950 transition hover:bg-cyan-300"><FiDownload size={14} /></button>
+          <button
+            onClick={loadAttendance}
+            disabled={loading || !canViewAttendance}
+            className="grid h-9 w-9 place-items-center rounded-xl bg-white/10 text-white ring-1 ring-white/15 transition hover:bg-white/20 disabled:opacity-60"
+          >
+            <FiRefreshCw className={loading ? 'animate-spin' : ''} size={14} />
+          </button>
+          <button
+            onClick={handleExport}
+            disabled={!canViewAttendance}
+            className="grid h-9 w-9 place-items-center rounded-xl bg-cyan-400 text-slate-950 transition hover:bg-cyan-300 disabled:opacity-60"
+          >
+            <FiDownload size={14} />
+          </button>
         </div>
       </div>
 
       {/* Tabs */}
       <nav className="mb-5 flex items-center gap-2 overflow-x-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-sm">
         {[
-          { id: 'overview', label: 'Overview', icon: FiActivity },
-          { id: 'attendance', label: 'Attendance', icon: FiCalendar },
-          { id: 'devices', label: 'Devices', icon: FiServer },
-        ].map(item => {
+          { id: 'overview', label: 'Overview', icon: FiActivity, allowed: canViewTodaySummary || canViewTodayEmployees },
+          { id: 'attendance', label: 'Attendance', icon: FiCalendar, allowed: canViewAttendance },
+          { id: 'devices', label: 'Devices', icon: FiServer, allowed: canViewDevices },
+        ].filter(t => t.allowed).map(item => {
           const Icon = item.icon;
           return (
             <button
@@ -835,9 +996,14 @@ export function AttendancePage() {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button onClick={() => { setActiveView('attendance'); handleManualAttendance(); }} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-200 transition">
-            <FiEdit size={15} /> Manual
-          </button>
+          {canEditAttendanceAny && (
+            <button
+              onClick={() => { setActiveView('attendance'); handleManualAttendance(); }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-200 transition"
+            >
+              <FiEdit size={15} /> Manual
+            </button>
+          )}
           <button
             onClick={() => setAutoAttendanceEnabled(!autoAttendanceEnabled)}
             className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold transition ${
@@ -853,91 +1019,95 @@ export function AttendancePage() {
       {/* Overview Dashboard */}
       {activeView === 'overview' && (
         <div className="space-y-6">
-          <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm">
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <h2 className="text-base font-bold text-slate-800">Today at a glance</h2>
-                <p className="text-xs text-slate-500">Live attendance overview</p>
+          {canViewTodaySummary && (
+            <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-bold text-slate-800">Today at a glance</h2>
+                  <p className="text-xs text-slate-500">Live attendance overview</p>
+                </div>
+                <span className="text-xs text-emerald-600 flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 live-pulse" /> Updated live
+                </span>
               </div>
-              <span className="text-xs text-emerald-600 flex items-center gap-1.5">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 live-pulse" /> Updated live
-              </span>
+              <StatCards todayStats={todayStats || { present: 0, absent: 0, late: 0, on_leave: 0 }} />
             </div>
-            <StatCards todayStats={todayStats || { present: 0, absent: 0, late: 0, on_leave: 0 }} />
-          </div>
+          )}
 
-          <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-              <div>
-                <h3 className="text-base font-bold text-slate-800">Employee Attendance Today</h3>
-                <p className="text-xs text-slate-500">Real‑time status for all employees</p>
+          {canViewTodayEmployees && (
+            <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+                <div>
+                  <h3 className="text-base font-bold text-slate-800">Employee Attendance Today</h3>
+                  <p className="text-xs text-slate-500">Real‑time status for all employees</p>
+                </div>
+                <div className="relative w-full sm:w-64">
+                  <FiSearch className="absolute left-3 top-2.5 text-slate-400" size={16} />
+                  <input
+                    type="text"
+                    placeholder="Search employees..."
+                    value={empSearch}
+                    onChange={(e) => setEmpSearch(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-sm outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
+                  />
+                </div>
               </div>
-              <div className="relative w-full sm:w-64">
-                <FiSearch className="absolute left-3 top-2.5 text-slate-400" size={16} />
-                <input
-                  type="text"
-                  placeholder="Search employees..."
-                  value={empSearch}
-                  onChange={(e) => setEmpSearch(e.target.value)}
-                  className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-sm outline-none focus:border-cyan-400 focus:ring-2 focus:ring-cyan-100"
-                />
-              </div>
-            </div>
-            {todayListLoading ? (
-              <div className="space-y-2">
-                {[...Array(5)].map((_, i) => (
-                  <div key={i} className="flex items-center gap-3 p-2 animate-pulse">
-                    <SkeletonBox className="h-8 w-8 rounded-full" />
-                    <SkeletonBox className="h-4 w-32" />
-                    <SkeletonBox className="h-4 w-20 ml-auto" />
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="max-h-96 overflow-y-auto custom-scrollbar">
-                {filteredTodayList.length === 0 ? (
-                  <p className="text-sm text-slate-400 text-center py-6">No attendance data found for today.</p>
-                ) : (
-                  filteredTodayList.map(emp => (
-                    <div
-                      key={emp.employee_id}
-                      className="flex items-center justify-between py-2 px-2 border-b border-slate-100 last:border-0 hover:bg-slate-50 rounded-lg"
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold shrink-0">
-                          {emp.employee_name.charAt(0)}
-                        </div>
-                        <div className="truncate">
-                          <p className="text-sm font-medium text-slate-800 truncate">{emp.employee_name}</p>
-                          {emp.employee_code && <p className="text-xs text-slate-400">{emp.employee_code}</p>}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-4 ml-4">
-                        <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-                          emp.status === 'present' || emp.status === 'on_time' ? 'bg-emerald-100 text-emerald-700' :
-                          emp.status === 'late' ? 'bg-amber-100 text-amber-700' :
-                          emp.status === 'absent' ? 'bg-rose-100 text-rose-700' :
-                          emp.status === 'leave' || emp.status === 'paid_leave' ? 'bg-purple-100 text-purple-700' :
-                          emp.status === 'half_day' ? 'bg-indigo-100 text-indigo-700' :
-                          'bg-gray-100 text-gray-600'
-                        }`}>
-                          {getStatusLabel(emp.status)}
-                        </span>
-                        <span className="text-xs text-slate-500 hidden sm:block">{formatTime(emp.check_in)}</span>
-                        <span className="text-xs text-slate-500 hidden sm:block">{formatTime(emp.check_out)}</span>
-                        <span className="text-xs text-slate-400 hidden md:block">{formatWorkingHours(calculateWorkingHours(emp.check_in, emp.check_out))}</span>
-                      </div>
+              {todayListLoading ? (
+                <div className="space-y-2">
+                  {[...Array(5)].map((_, i) => (
+                    <div key={i} className="flex items-center gap-3 p-2 animate-pulse">
+                      <SkeletonBox className="h-8 w-8 rounded-full" />
+                      <SkeletonBox className="h-4 w-32" />
+                      <SkeletonBox className="h-4 w-20 ml-auto" />
                     </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="max-h-96 overflow-y-auto custom-scrollbar">
+                  {filteredTodayList.length === 0 ? (
+                    <p className="text-sm text-slate-400 text-center py-6">No attendance data found for today.</p>
+                  ) : (
+                    filteredTodayList.map(emp => (
+                      <div
+                        key={emp.employee_id}
+                        className="flex items-center justify-between py-2 px-2 border-b border-slate-100 last:border-0 hover:bg-slate-50 rounded-lg"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-xs font-bold shrink-0">
+                            {(emp.employee_name || '?').charAt(0)}
+                          </div>
+                          <div className="truncate">
+                            <p className="text-sm font-medium text-slate-800 truncate">{emp.employee_name}</p>
+                            {emp.employee_code && <p className="text-xs text-slate-400">{emp.employee_code}</p>}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-4 ml-4">
+                          <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                            emp.status === 'present' || emp.status === 'on_time' ? 'bg-emerald-100 text-emerald-700' :
+                            emp.status === 'late' ? 'bg-amber-100 text-amber-700' :
+                            emp.status === 'absent' ? 'bg-rose-100 text-rose-700' :
+                            emp.status === 'leave' || emp.status === 'paid_leave' ? 'bg-purple-100 text-purple-700' :
+                            emp.status === 'half_day' ? 'bg-indigo-100 text-indigo-700' :
+                            'bg-gray-100 text-gray-600'
+                          }`}>
+                            {getStatusLabel(emp.status)}
+                          </span>
+                          <span className="text-xs text-slate-500 hidden sm:block">{formatTime(emp.check_in)}</span>
+                          <span className="text-xs text-slate-500 hidden sm:block">{formatTime(emp.check_out)}</span>
+                          <span className="text-xs text-slate-400 hidden md:block">{formatWorkingHours(calculateWorkingHours(emp.check_in, emp.check_out))}</span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
       {/* Search & Filter (Attendance) */}
-      {activeView === 'attendance' && (
+      {activeView === 'attendance' && canViewAttendance && (
         <>
           <div className="mb-4 rounded-2xl border border-slate-200/80 bg-white p-3 shadow-sm">
             <div className="relative max-w-md">
@@ -987,7 +1157,7 @@ export function AttendancePage() {
       )}
 
       {/* Devices & Enrollment */}
-      {activeView === 'devices' && (
+      {activeView === 'devices' && canViewDevices && (
         <>
           <div className="mb-6">
             <div className="flex items-center justify-between mb-3">
@@ -997,12 +1167,14 @@ export function AttendancePage() {
                 <span className="text-xs font-medium text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">{(devices || []).length}</span>
               </h2>
               <div className="flex items-center gap-2">
-                <button
-                  onClick={() => { setEditingDevice(null); setDeviceForm({ name: '', device_uid: '', firmware_version: 'v2.0.0', ip_address: '' }); setShowDeviceModal(true); }}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-cyan-700 transition"
-                >
-                  <FiPlus size={16} /> Add Device
-                </button>
+                {canRegisterDevice && (
+                  <button
+                    onClick={() => { setEditingDevice(null); setDeviceForm({ name: '', device_uid: '', firmware_version: 'v2.0.0', ip_address: '' }); setShowDeviceModal(true); }}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-cyan-700 transition"
+                  >
+                    <FiPlus size={16} /> Add Device
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1014,6 +1186,7 @@ export function AttendancePage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
                 {(devices || []).map(device => {
                   const statusInfo = getDeviceStatusInfo(device.status);
+                  const StatusIcon = statusInfo.icon;
                   return (
                     <div key={device.id} className="group rounded-2xl border border-slate-200 bg-white p-4 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all duration-300">
                       <div className="flex items-center justify-between mb-2">
@@ -1026,7 +1199,7 @@ export function AttendancePage() {
                         }`}>
                           <span className={`w-2 h-2 rounded-full ${statusInfo.color}`} />
                           {statusInfo.text}
-                          <statusInfo.icon size={12} />
+                          <StatusIcon size={12} />
                         </span>
                       </div>
                       <div className="text-xs text-slate-500 space-y-1">
@@ -1047,35 +1220,47 @@ export function AttendancePage() {
                           </div>
                         )}
                       </div>
-                      <div className="mt-3 flex items-center justify-between border-t pt-2 text-xs text-slate-400">
-                        <div className="flex gap-1.5">
-                          <button onClick={() => handleSyncDevice(device.numericId, device.name)}
-                            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-cyan-600 transition"
-                            title="Sync">
-                            <FiRefreshCw size={14} />
-                          </button>
-                          <button onClick={() => handleDeviceSettings(device.numericId)}
-                            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-cyan-600 transition"
-                            title="Settings">
-                            <FiSettings size={14} />
-                          </button>
-                          <button onClick={() => openEditDeviceModal(device)}
-                            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-blue-600 transition"
-                            title="Edit">
-                            <FiEdit2 size={14} />
-                          </button>
-                          <button onClick={() => handleRestartDevice(device.numericId, device.name)}
-                            className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-rose-600 transition"
-                            title="Restart">
-                            <FiRotateCcw size={14} />
-                          </button>
-                          <button onClick={() => handleDeleteDevice(device)}
-                            className="p-1.5 rounded-lg hover:bg-red-50 text-slate-500 hover:text-red-600 transition"
-                            title="Delete">
-                            <FiTrash2 size={14} />
-                          </button>
+                      {canManageDevices && (
+                        <div className="mt-3 flex items-center justify-between border-t pt-2 text-xs text-slate-400">
+                          <div className="flex gap-1.5">
+                            {canSyncDevice && (
+                              <button onClick={() => handleSyncDevice(device.numericId, device.name)}
+                                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-cyan-600 transition"
+                                title="Sync">
+                                <FiRefreshCw size={14} />
+                              </button>
+                            )}
+                            {canEditDeviceSettings && (
+                              <button onClick={() => handleDeviceSettings(device.numericId)}
+                                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-cyan-600 transition"
+                                title="Settings">
+                                <FiSettings size={14} />
+                              </button>
+                            )}
+                            {canUpdateDevice && (
+                              <button onClick={() => openEditDeviceModal(device)}
+                                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-blue-600 transition"
+                                title="Edit">
+                                <FiEdit2 size={14} />
+                              </button>
+                            )}
+                            {canRestartDevice && (
+                              <button onClick={() => handleRestartDevice(device.numericId, device.name)}
+                                className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-rose-600 transition"
+                                title="Restart">
+                                <FiRotateCcw size={14} />
+                              </button>
+                            )}
+                            {canDeleteDevice && (
+                              <button onClick={() => handleDeleteDevice(device)}
+                                className="p-1.5 rounded-lg hover:bg-red-50 text-slate-500 hover:text-red-600 transition"
+                                title="Delete">
+                                <FiTrash2 size={14} />
+                              </button>
+                            )}
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1084,124 +1269,126 @@ export function AttendancePage() {
           </div>
 
           {/* ===== Enrollment Section ===== */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
-            <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
-              <FiUserPlus className="text-purple-500" /> Fingerprint Enrollment
-            </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <div className="space-y-3">
-                  <div>
-                    <label className="text-xs font-medium text-slate-500 mb-1 block">Company</label>
-                    <select value={enrollCompany} onChange={e => { setEnrollCompany(e.target.value ? Number(e.target.value) : ''); setEnrollBranch(''); setEnrollDevice(null); }} className="input-field w-full text-sm">
-                      <option value="">Select Company</option>
-                      {(companies || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs font-medium text-slate-500 mb-1 block">Branch</label>
-                    <select value={enrollBranch} onChange={e => { setEnrollBranch(e.target.value ? Number(e.target.value) : ''); setEnrollDevice(null); }} disabled={!enrollCompany} className="input-field w-full text-sm">
-                      <option value="">Select Branch</option>
-                      {(enrollableBranches || []).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs font-medium text-slate-500 mb-1 block">Online Device</label>
-                    <select
-                      value={enrollDevice?.numericId || ''}
-                      onChange={e => {
-                        const id = Number(e.target.value);
-                        setEnrollDevice(devices?.find(d => d.numericId === id) || null);
-                      }}
-                      disabled={!enrollBranch || enrollableDevices.length === 0}
-                      className="input-field w-full text-sm"
-                    >
-                      <option value="">Select a device</option>
-                      {(enrollableDevices || []).map(d => (
-                        <option key={d.numericId} value={d.numericId}>{d.name}</option>
-                      ))}
-                    </select>
-                    {enrollBranch && enrollableDevices.length === 0 && (
-                      <p className="text-xs text-amber-600 mt-1">No online devices in this branch.</p>
-                    )}
-                  </div>
-                  <div>
-                    <label className="text-xs font-medium text-slate-500 mb-1 block">Employee</label>
-                    <select value={enrollEmployeeId} onChange={e => setEnrollEmployeeId(e.target.value ? Number(e.target.value) : '')} className="input-field w-full text-sm" disabled={!enrollDevice}>
-                      <option value="">Select Employee</option>
-                      {employees.filter(e => !enrollBranch || e.branch_id === Number(enrollBranch)).map(emp => (
-                        <option key={emp.id} value={emp.id}>{emp.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <button
-                    onClick={handleStartEnrollment}
-                    disabled={enrolling || !enrollDevice || !enrollEmployeeId}
-                    className="btn-primary w-full justify-center gap-2 py-2.5 mt-2"
-                  >
-                    {enrolling ? (
-                      <><FiRefreshCw className="animate-spin" size={16} /> Enrolling...</>
-                    ) : (
-                      <><FiPlus size={16} /> Start Enrollment</>
-                    )}
-                  </button>
-                  {enrolling && (
-                    <div className="mt-3">
-                      <div className="flex justify-between text-xs text-slate-500 mb-1">
-                        <span>{enrollmentStep}</span>
-                        <span>{enrollmentProgress}%</span>
-                      </div>
-                      <div className="w-full bg-slate-200 rounded-full h-2">
-                        <div
-                          className="bg-indigo-600 h-2 rounded-full transition-all duration-500"
-                          style={{ width: `${enrollmentProgress}%` }}
-                        />
-                      </div>
+          {canStartEnrollment && (
+            <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 mb-6">
+              <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
+                <FiUserPlus className="text-purple-500" /> Fingerprint Enrollment
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="text-xs font-medium text-slate-500 mb-1 block">Company</label>
+                      <select value={enrollCompany} onChange={e => { setEnrollCompany(e.target.value ? Number(e.target.value) : ''); setEnrollBranch(''); setEnrollDevice(null); }} className="input-field w-full text-sm">
+                        <option value="">Select Company</option>
+                        {(companies || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
                     </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-500 mb-1 block">Branch</label>
+                      <select value={enrollBranch} onChange={e => { setEnrollBranch(e.target.value ? Number(e.target.value) : ''); setEnrollDevice(null); }} disabled={!enrollCompany} className="input-field w-full text-sm">
+                        <option value="">Select Branch</option>
+                        {(enrollableBranches || []).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-500 mb-1 block">Online Device</label>
+                      <select
+                        value={enrollDevice?.numericId || ''}
+                        onChange={e => {
+                          const id = Number(e.target.value);
+                          setEnrollDevice(devices?.find(d => d.numericId === id) || null);
+                        }}
+                        disabled={!enrollBranch || enrollableDevices.length === 0}
+                        className="input-field w-full text-sm"
+                      >
+                        <option value="">Select a device</option>
+                        {(enrollableDevices || []).map(d => (
+                          <option key={d.numericId} value={d.numericId}>{d.name}</option>
+                        ))}
+                      </select>
+                      {enrollBranch && enrollableDevices.length === 0 && (
+                        <p className="text-xs text-amber-600 mt-1">No online devices in this branch.</p>
+                      )}
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-500 mb-1 block">Employee</label>
+                      <select value={enrollEmployeeId} onChange={e => setEnrollEmployeeId(e.target.value ? Number(e.target.value) : '')} className="input-field w-full text-sm" disabled={!enrollDevice}>
+                        <option value="">Select Employee</option>
+                        {employees.filter(e => !enrollBranch || e.branch_id === Number(enrollBranch)).map(emp => (
+                          <option key={emp.id} value={emp.id}>{emp.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <button
+                      onClick={handleStartEnrollment}
+                      disabled={enrolling || !enrollDevice || !enrollEmployeeId}
+                      className="btn-primary w-full justify-center gap-2 py-2.5 mt-2"
+                    >
+                      {enrolling ? (
+                        <><FiRefreshCw className="animate-spin" size={16} /> Enrolling...</>
+                      ) : (
+                        <><FiPlus size={16} /> Start Enrollment</>
+                      )}
+                    </button>
+                    {enrolling && (
+                      <div className="mt-3">
+                        <div className="flex justify-between text-xs text-slate-500 mb-1">
+                          <span>{enrollmentStep}</span>
+                          <span>{enrollmentProgress}%</span>
+                        </div>
+                        <div className="w-full bg-slate-200 rounded-full h-2">
+                          <div
+                            className="bg-indigo-600 h-2 rounded-full transition-all duration-500"
+                            style={{ width: `${enrollmentProgress}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="text-sm font-semibold text-slate-700">Enrolled Fingers</h4>
+                    <button onClick={fetchEnrolledFingers} className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-1" disabled={loadingEnrolled}>
+                      <FiRefreshCw size={12} className={loadingEnrolled ? 'animate-spin' : ''} /> Refresh
+                    </button>
+                  </div>
+                  {enrollEmployeeId ? (
+                    enrolledFingers.length > 0 ? (
+                      <ul className="space-y-2 text-sm max-h-48 overflow-y-auto custom-scrollbar">
+                        {enrolledFingers.map((f: any, idx: number) => (
+                          <li key={idx} className="flex items-center justify-between border-b border-slate-100 pb-1">
+                            <span className="flex items-center gap-2">
+                              <FiCheckCircle className="text-emerald-500" size={14} />
+                              Finger #{f.fingerId || idx + 1}
+                            </span>
+                            {f.enrolledAt && <span className="text-xs text-slate-400">{new Date(f.enrolledAt).toLocaleDateString()}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-sm text-slate-400 py-4">{loadingEnrolled ? <SkeletonBox className="h-4 w-32" /> : 'No fingers enrolled.'}</p>
+                    )
+                  ) : (
+                    <p className="text-sm text-slate-400 py-4">Select an employee to view enrolled fingers.</p>
                   )}
                 </div>
               </div>
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <h4 className="text-sm font-semibold text-slate-700">Enrolled Fingers</h4>
-                  <button onClick={fetchEnrolledFingers} className="text-xs text-indigo-600 hover:text-indigo-800 flex items-center gap-1" disabled={loadingEnrolled}>
-                    <FiRefreshCw size={12} className={loadingEnrolled ? 'animate-spin' : ''} /> Refresh
-                  </button>
-                </div>
-                {enrollEmployeeId ? (
-                  enrolledFingers.length > 0 ? (
-                    <ul className="space-y-2 text-sm max-h-48 overflow-y-auto custom-scrollbar">
-                      {enrolledFingers.map((f: any, idx: number) => (
-                        <li key={idx} className="flex items-center justify-between border-b border-slate-100 pb-1">
-                          <span className="flex items-center gap-2">
-                            <FiCheckCircle className="text-emerald-500" size={14} />
-                            Finger #{f.fingerId || idx + 1}
-                          </span>
-                          {f.enrolledAt && <span className="text-xs text-slate-400">{new Date(f.enrolledAt).toLocaleDateString()}</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-sm text-slate-400 py-4">{loadingEnrolled ? <SkeletonBox className="h-4 w-32" /> : 'No fingers enrolled.'}</p>
-                  )
-                ) : (
-                  <p className="text-sm text-slate-400 py-4">Select an employee to view enrolled fingers.</p>
-                )}
-              </div>
             </div>
-          </div>
+          )}
         </>
       )}
 
       {/* Attendance Calendar */}
-      {activeView === 'attendance' && (
+      {activeView === 'attendance' && canViewAttendance && (
         selectedEmployee && selectedEmployeeData ? (
           <>
             <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 mb-6">
               <div className="flex flex-col lg:flex-row lg:items-center gap-4">
                 <div className="flex items-center gap-4">
                   <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-lg font-bold shadow-md">
-                    {selectedEmployeeData.name.charAt(0)}
+                    {(selectedEmployeeData.name || '?').charAt(0)}
                   </div>
                   <div>
                     <h2 className="text-lg font-bold text-slate-800">{selectedEmployeeData.name}</h2>
@@ -1277,28 +1464,60 @@ export function AttendancePage() {
       )}
 
       {/* Offcanvas for editing attendance */}
-      {isPanelOpen && (
+      {isPanelOpen && canEditAttendanceAny && (
         <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
           <Offcanvas isOpen={isPanelOpen} title={`Attendance for ${selectedDate || ''}`} onClose={() => setIsPanelOpen(false)}>
             {editingRecord && (
               <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
                 <div className="grid grid-cols-3 gap-2">
-                  {(['present', 'half_day', 'absent', 'leave', 'holiday', 'not_set'] as AttendanceStatus[]).map(status => (
-                    <button key={status} onClick={() => handleSaveAttendance(status)} disabled={submitting}
-                      className={`btn ${editingRecord.status === status ? 'btn-primary' : 'btn-secondary'} w-full justify-center text-sm`}>
-                      {getStatusLabel(status)}
-                    </button>
-                  ))}
+                  {(['present', 'half_day', 'absent', 'leave', 'holiday', 'not_set'] as AttendanceStatus[]).map(status => {
+                    // Guard against delete when user can't delete.
+                    // Boolean(...) is required so `disabled` receives a boolean, not `0`.
+                    const blocked = Boolean(
+                      status === 'not_set' &&
+                      editingRecord?.id &&
+                      editingRecord.id !== 0 &&
+                      !canDeleteAttendance,
+                    );
+                    return (
+                      <button
+                        key={status}
+                        onClick={() => handleSaveAttendance(status)}
+                        disabled={submitting || blocked}
+                        title={blocked ? 'You do not have permission to delete attendance' : undefined}
+                        className={`btn ${editingRecord.status === status ? 'btn-primary' : 'btn-secondary'} w-full justify-center text-sm disabled:opacity-50`}
+                      >
+                        {getStatusLabel(status)}
+                      </button>
+                    );
+                  })}
                 </div>
                 <div className="border-t pt-4 space-y-3">
                   <div className="grid grid-cols-2 gap-3">
-                    <div><label className="text-xs text-slate-500">Check In</label><input type="time" value={editingRecord.check_in || ''} onChange={e => setEditingRecord({...editingRecord, check_in: e.target.value})} className="input-field w-full" /></div>
-                    <div><label className="text-xs text-slate-500">Check Out</label><input type="time" value={editingRecord.check_out || ''} onChange={e => setEditingRecord({...editingRecord, check_out: e.target.value})} className="input-field w-full" /></div>
+                    <div>
+                      <label className="text-xs text-slate-500">Check In</label>
+                      <input type="time" value={editingRecord.check_in || ''} onChange={e => setEditingRecord({ ...editingRecord, check_in: e.target.value })} className="input-field w-full" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-500">Check Out</label>
+                      <input type="time" value={editingRecord.check_out || ''} onChange={e => setEditingRecord({ ...editingRecord, check_out: e.target.value })} className="input-field w-full" />
+                    </div>
                   </div>
-                  <div><label className="text-xs text-slate-500">Overtime (min)</label><input type="number" value={editingRecord.overtime} onChange={e => setEditingRecord({...editingRecord, overtime: Number(e.target.value)})} className="input-field w-full" /></div>
+                  <div>
+                    <label className="text-xs text-slate-500">Overtime (min)</label>
+                    <input type="number" value={editingRecord.overtime} onChange={e => setEditingRecord({ ...editingRecord, overtime: Number(e.target.value) })} className="input-field w-full" />
+                  </div>
                   <div className="flex gap-2 pt-2">
-                    <button onClick={() => handleSaveAttendance(editingRecord.status, editingRecord.check_in || undefined, editingRecord.check_out || undefined)} disabled={submitting} className="btn btn-primary flex-1">{submitting ? 'Saving...' : 'Save'}</button>
-                    <button onClick={() => { setShowTimeView(true); setSelectedRecordForTime(editingRecord); }} className="btn btn-secondary"><FiEye size={16} /></button>
+                    <button
+                      onClick={() => handleSaveAttendance(editingRecord.status, editingRecord.check_in || undefined, editingRecord.check_out || undefined)}
+                      disabled={submitting}
+                      className="btn btn-primary flex-1"
+                    >
+                      {submitting ? 'Saving...' : 'Save'}
+                    </button>
+                    <button onClick={() => { setShowTimeView(true); setSelectedRecordForTime(editingRecord); }} className="btn btn-secondary">
+                      <FiEye size={16} />
+                    </button>
                   </div>
                 </div>
               </div>
@@ -1321,47 +1540,47 @@ export function AttendancePage() {
               <div><span className="font-medium">Working Hours:</span> {formatWorkingHours(calculateWorkingHours(selectedRecordForTime.check_in, selectedRecordForTime.check_out))}</div>
               <div><span className="font-medium">Overtime:</span> {selectedRecordForTime.overtime} min</div>
             </div>
-            <div className="mt-4 flex justify-end"><button onClick={() => setShowTimeView(false)} className="btn btn-secondary">Close</button></div>
+            <div className="mt-4 flex justify-end">
+              <button onClick={() => setShowTimeView(false)} className="btn btn-secondary">Close</button>
+            </div>
           </div>
         </div>
       )}
 
       {/* Add / Edit Device Modal */}
-      {showDeviceModal && (
-        <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}>
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-            <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-bold">{editingDevice ? 'Edit Device' : 'Register New ESP32 Device'}</h3>
-                <button onClick={() => setShowDeviceModal(false)} className="p-1 hover:bg-slate-100 rounded-full"><FiX size={24} /></button>
+      {showDeviceModal && (editingDevice ? canUpdateDevice : canRegisterDevice) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold">{editingDevice ? 'Edit Device' : 'Register New ESP32 Device'}</h3>
+              <button onClick={() => setShowDeviceModal(false)} className="p-1 hover:bg-slate-100 rounded-full"><FiX size={24} /></button>
+            </div>
+            <div className="space-y-3 text-sm">
+              <div>
+                <label className="text-xs text-slate-500">Device UID *</label>
+                <input type="text" value={deviceForm.device_uid} onChange={e => setDeviceForm({ ...deviceForm, device_uid: e.target.value })} className="input-field w-full" />
               </div>
-              <div className="space-y-3 text-sm">
-                <div>
-                  <label className="text-xs text-slate-500">Device UID *</label>
-                  <input type="text" value={deviceForm.device_uid} onChange={e => setDeviceForm({...deviceForm, device_uid: e.target.value})} className="input-field w-full" />
-                </div>
-                <div>
-                  <label className="text-xs text-slate-500">Name *</label>
-                  <input type="text" value={deviceForm.name} onChange={e => setDeviceForm({...deviceForm, name: e.target.value})} className="input-field w-full" />
-                </div>
-                <div>
-                  <label className="text-xs text-slate-500">Firmware Version</label>
-                  <input type="text" value={deviceForm.firmware_version} onChange={e => setDeviceForm({...deviceForm, firmware_version: e.target.value})} className="input-field w-full" />
-                </div>
-                <div>
-                  <label className="text-xs text-slate-500">IP Address</label>
-                  <input type="text" value={deviceForm.ip_address} onChange={e => setDeviceForm({...deviceForm, ip_address: e.target.value})} className="input-field w-full" />
-                </div>
+              <div>
+                <label className="text-xs text-slate-500">Name *</label>
+                <input type="text" value={deviceForm.name} onChange={e => setDeviceForm({ ...deviceForm, name: e.target.value })} className="input-field w-full" />
               </div>
-              <div className="mt-6 flex justify-end gap-2">
-                <button onClick={() => setShowDeviceModal(false)} className="btn btn-secondary">Cancel</button>
-                <button onClick={handleSaveDevice} disabled={savingDevice} className="btn btn-primary">
-                  {savingDevice ? 'Saving...' : 'Save'}
-                </button>
+              <div>
+                <label className="text-xs text-slate-500">Firmware Version</label>
+                <input type="text" value={deviceForm.firmware_version} onChange={e => setDeviceForm({ ...deviceForm, firmware_version: e.target.value })} className="input-field w-full" />
+              </div>
+              <div>
+                <label className="text-xs text-slate-500">IP Address</label>
+                <input type="text" value={deviceForm.ip_address} onChange={e => setDeviceForm({ ...deviceForm, ip_address: e.target.value })} className="input-field w-full" />
               </div>
             </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <button onClick={() => setShowDeviceModal(false)} className="btn btn-secondary">Cancel</button>
+              <button onClick={handleSaveDevice} disabled={savingDevice} className="btn btn-primary">
+                {savingDevice ? 'Saving...' : 'Save'}
+              </button>
+            </div>
           </div>
-        </Suspense>
+        </div>
       )}
 
       <style>{`

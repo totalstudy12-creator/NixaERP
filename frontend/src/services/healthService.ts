@@ -99,12 +99,21 @@ export interface CronTask {
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
 
-const extractArrayPayload = <T>(payload: unknown, candidateKeys: string[] = ['data', 'items', 'tasks', 'cronTasks']): T[] => {
+const extractArrayPayload = <T>(
+  payload: unknown,
+  candidateKeys: string[] = ['data', 'items', 'tasks', 'cronTasks'],
+  depth = 0,
+): T[] => {
+  if (depth > 5) return [];
   if (Array.isArray(payload)) return payload as T[];
 
   if (!isRecord(payload)) {
-    if (isRecord((payload as any)?.response)) {
-      return extractArrayPayload<T>((payload as any).response, candidateKeys);
+    if (isRecord((payload as { response?: unknown } | null)?.response)) {
+      return extractArrayPayload<T>(
+        (payload as { response: Record<string, unknown> }).response,
+        candidateKeys,
+        depth + 1,
+      );
     }
     return [];
   }
@@ -116,6 +125,19 @@ const extractArrayPayload = <T>(payload: unknown, candidateKeys: string[] = ['da
 
   const nestedData = payload.data;
   if (Array.isArray(nestedData)) return nestedData as T[];
+
+  if (isRecord(nestedData)) {
+    const nestedArray = extractArrayPayload<T>(nestedData, candidateKeys, depth + 1);
+    if (nestedArray.length > 0 || candidateKeys.some((key) => Array.isArray(nestedData[key]))) {
+      return nestedArray;
+    }
+  }
+
+  const nestedResponse = payload.response;
+  if (isRecord(nestedResponse)) {
+    const responseArray = extractArrayPayload<T>(nestedResponse, candidateKeys, depth + 1);
+    if (responseArray.length > 0) return responseArray;
+  }
 
   if (payload.success === false) {
     const message = typeof payload.message === 'string' ? payload.message : 'Request failed';

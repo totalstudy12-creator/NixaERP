@@ -6,12 +6,14 @@ import {
 import {
   FiPlus, FiTrash2, FiSearch, FiFileText, FiUser, FiBox,
   FiX, FiSave, FiLoader, FiChevronDown, FiChevronRight,
-  FiCheckCircle, FiAlertCircle, FiArrowLeft,
+  FiCheckCircle, FiAlertCircle, FiArrowLeft, FiLock,
 } from 'react-icons/fi';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 
 const Offcanvas = lazy(() =>
   import('../components/Offcanvas').then((m) => ({ default: m.Offcanvas })),
@@ -460,6 +462,17 @@ export function EditPurchaseInvoicePage() {
     showSuccess: (a: string, b?: string) => void;
     showError: (a: string, b?: string) => void;
   };
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ── RBAC flags ── */
+  const canViewPurchase    = isSuperAdmin || can('view purchases');
+  const canEditPurchase    = isSuperAdmin || can('edit purchase invoices') || can('edit purchases');
+  const canCreateSupplier  = isSuperAdmin || can('create suppliers');
+  const canCreateProduct   = isSuperAdmin || can('create products');
+  const canRecordPayments  = isSuperAdmin || can('create payments');
+  const canAdjustStock     = isSuperAdmin || can('adjust stock') || can('manage inventory');
 
   const getCompanies = useCallback(() => apiClient.getCompanies(), []);
   const getSuppliers = useCallback(() => apiClient.getSuppliers(), []);
@@ -593,7 +606,10 @@ export function EditPurchaseInvoicePage() {
   }, []);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id || !canViewPurchase) {
+      setLoadingInvoice(false);
+      return;
+    }
     let cancelled = false;
     (async () => {
       setLoadingInvoice(true);
@@ -740,7 +756,7 @@ export function EditPurchaseInvoicePage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [id, showError]);
+  }, [id, showError, canViewPurchase]);
 
   const filteredSuppliers = useMemo(() => {
     if (!suppliers) return [];
@@ -880,15 +896,6 @@ export function EditPurchaseInvoicePage() {
   /**
    * ────────────────────────────────────────────────────────────────────
    * Supplier hydration  →  also auto-fills `place_of_supply`.
-   *
-   * Rules for `place_of_supply`:
-   *   1. On the very first sync after loading an invoice, keep the value
-   *      stored on the invoice (if any).
-   *   2. If the invoice has no stored value → fill from supplier's state.
-   *   3. When the user changes the supplier → always fill from the new
-   *      supplier's state (this is what the user expects).
-   *   4. The user can still edit the field manually; that edit will be
-   *      kept until they change the supplier again.
    * ────────────────────────────────────────────────────────────────────
    */
   useEffect(() => {
@@ -902,11 +909,9 @@ export function EditPurchaseInvoicePage() {
 
     const supplierState = (sup.billing_state || sup.state || '').trim();
 
-    // Was this the initial invoice load, or a user-initiated supplier change?
     const isInitialHydration = lastHydratedSupplierIdRef.current === form.supplier_id;
     const supplierChangedByUser = !isInitialHydration;
 
-    // Update the ref so subsequent runs treat this as "already hydrated".
     lastHydratedSupplierIdRef.current = form.supplier_id;
 
     setForm((p) => {
@@ -1010,6 +1015,10 @@ export function EditPurchaseInvoicePage() {
   };
 
   const addPayment = () => {
+    if (!canRecordPayments) {
+      showError('Permission denied', 'You do not have permission to record payments.');
+      return;
+    }
     setForm((p) => ({
       ...p,
       payments: [
@@ -1036,6 +1045,10 @@ export function EditPurchaseInvoicePage() {
     }));
   };
   const removePayment = (id: string) => {
+    if (!canRecordPayments) {
+      showError('Permission denied', 'You do not have permission to remove payments.');
+      return;
+    }
     setForm((p) => ({ ...p, payments: p.payments.filter((x) => x.id !== id) }));
   };
 
@@ -1096,6 +1109,10 @@ export function EditPurchaseInvoicePage() {
   };
 
   const handleUpdate = useCallback(async () => {
+    if (!canEditPurchase) {
+      showError('Permission denied', 'You do not have permission to edit purchase invoices.');
+      return;
+    }
     setErrorMsg(null);
     if (!validateMainForm()) {
       showError('Validation', 'Please fix the highlighted fields.');
@@ -1107,6 +1124,12 @@ export function EditPurchaseInvoicePage() {
     }
 
     const newPayments = form.payments.filter((p) => !p.persisted && p.amount > 0);
+
+    // Additional permission gate: if new payments are being added, need create payments.
+    if (newPayments.length > 0 && !canRecordPayments) {
+      showError('Permission denied', 'You do not have permission to record payments. Remove the new payments or ask an administrator.');
+      return;
+    }
 
     const payload = {
       company_id: Number(form.company_id),
@@ -1201,9 +1224,14 @@ export function EditPurchaseInvoicePage() {
     form, items, id, navigate, showSuccess, showError,
     packingAmount, packingApplyType, generalDiscountType, generalDiscountApplyType,
     refreshProducts,
+    canEditPurchase, canRecordPayments,
   ]);
 
   const createSupplier = async () => {
+    if (!canCreateSupplier) {
+      showError('Permission denied', 'You do not have permission to create suppliers.');
+      return;
+    }
     const errs: Record<string, boolean> = {};
     const name = sanitizeText(newSupplier.name, LIMITS.NAME).trim();
     if (!name) errs.name = true;
@@ -1254,18 +1282,30 @@ export function EditPurchaseInvoicePage() {
   }, [products]);
 
   const openProductOffcanvas = () => {
+    if (!canCreateProduct) {
+      showError('Permission denied', 'You do not have permission to create products.');
+      return;
+    }
     setNewProduct((p) => ({ ...p, company_id: form.company_id ? String(form.company_id) : '', branch_id: '' }));
     setProductFormErrors({});
     setShowProductOffcanvas(true);
   };
 
   const openSupplierOffcanvas = () => {
+    if (!canCreateSupplier) {
+      showError('Permission denied', 'You do not have permission to create suppliers.');
+      return;
+    }
     setNewSupplier((p) => ({ ...p, company_id: form.company_id ? String(form.company_id) : '' }));
     setSupplierFormErrors({});
     setShowSupplierOffcanvas(true);
   };
 
   const createProduct = async () => {
+    if (!canCreateProduct) {
+      showError('Permission denied', 'You do not have permission to create products.');
+      return;
+    }
     const errs: Record<string, boolean> = {};
     if (!newProduct.company_id) errs.company_id = true;
     if (!newProduct.name.trim()) errs.name = true;
@@ -1325,6 +1365,43 @@ export function EditPurchaseInvoicePage() {
       showError('Product creation failed', msg);
     } finally { setProductSubmitting(false); }
   };
+
+  /* ────────────────────────────────────────────────────────────────────────
+   * Render guards
+   * ──────────────────────────────────────────────────────────────────────── */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="bg-white rounded-2xl shadow-xl px-8 py-6 flex items-center gap-3">
+          <FiLoader className="animate-spin text-indigo-600" />
+          <span className="text-sm text-slate-600">Loading permissions…</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!canViewPurchase) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-xl px-8 py-8 text-center max-w-sm border border-rose-200">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600 mb-3">
+            <FiLock size={22} />
+          </div>
+          <h2 className="text-lg font-semibold text-slate-800">Access denied</h2>
+          <p className="text-sm text-slate-500 mt-1">
+            You don't have permission to view purchase invoices.
+          </p>
+          <Link
+            to="/"
+            className="inline-block mt-5 px-4 py-2 rounded-xl bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 transition"
+          >
+            Back to dashboard
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   if (loadingInvoice) {
     return (
@@ -1389,6 +1466,17 @@ export function EditPurchaseInvoicePage() {
         </div>
       )}
 
+      {!canEditPurchase && (
+        <div className="max-w-[1600px] mx-auto px-4 md:px-8 mt-4">
+          <div className="p-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl flex items-center gap-2 text-sm">
+            <FiLock size={16} />
+            <span className="flex-1">
+              You have read-only access to this purchase invoice. Editing is disabled.
+            </span>
+          </div>
+        </div>
+      )}
+
       <main className="max-w-[1600px] mx-auto px-4 md:px-8 py-6 space-y-6">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 md:p-6">
@@ -1398,6 +1486,7 @@ export function EditPurchaseInvoicePage() {
             <div className="space-y-4">
               <Field label="Company" required error={formErrors.company_id}>
                 <select value={form.company_id} onChange={handleCompanyChange}
+                  disabled={!canEditPurchase}
                   data-error={!!formErrors.company_id}
                   className={`${inputBase} ${formErrors.company_id ? inputError : ''}`}>
                   <option value="">Select Company</option>
@@ -1409,7 +1498,7 @@ export function EditPurchaseInvoicePage() {
                 <div className="relative">
                   <select value={form.branch}
                     onChange={(e) => { setBranchTouched(true); updateForm('branch', e.target.value); }}
-                    disabled={branchLoading || !form.company_id}
+                    disabled={branchLoading || !form.company_id || !canEditPurchase}
                     className={inputBase}>
                     {availableBranches.map((b) => <option key={b} value={b}>{b}</option>)}
                   </select>
@@ -1429,6 +1518,7 @@ export function EditPurchaseInvoicePage() {
                       onFocus={() => setShowSupplierDropdown(true)}
                       onKeyDown={onSupplierKeyDown}
                       placeholder="Search by name, code, GSTIN…"
+                      disabled={!canEditPurchase}
                       className={inputBase} maxLength={LIMITS.NAME} />
                     {supplierSearch && (
                       <button type="button" onClick={() => { setSupplierSearch(''); setShowSupplierDropdown(false); }}
@@ -1467,10 +1557,12 @@ export function EditPurchaseInvoicePage() {
                       </div>
                     )}
                   </div>
-                  <button type="button" onClick={openSupplierOffcanvas}
-                    className="px-4 rounded-xl border border-slate-200 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:border-indigo-300 transition">
-                    Add
-                  </button>
+                  {canCreateSupplier && canEditPurchase && (
+                    <button type="button" onClick={openSupplierOffcanvas}
+                      className="px-4 rounded-xl border border-slate-200 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:border-indigo-300 transition">
+                      Add
+                    </button>
+                  )}
                 </div>
                 {form.supplier_id && suppliers?.find((s) => s.id === Number(form.supplier_id)) && (
                   <p className="text-xs text-emerald-600 flex items-center gap-1 mt-1.5">
@@ -1483,25 +1575,25 @@ export function EditPurchaseInvoicePage() {
               <Field label="M/S.">
                 <input type="text" value={form.supplier_name}
                   onChange={(e) => updateForm('supplier_name', sanitizeText(e.target.value, LIMITS.NAME))}
-                  maxLength={LIMITS.NAME} className={inputBase} />
+                  maxLength={LIMITS.NAME} disabled={!canEditPurchase} className={inputBase} />
               </Field>
 
               <Field label="Address">
                 <textarea rows={2} value={form.supplier_address}
                   onChange={(e) => updateForm('supplier_address', sanitizeText(e.target.value))}
-                  maxLength={LIMITS.TEXT} className={inputBase} />
+                  maxLength={LIMITS.TEXT} disabled={!canEditPurchase} className={inputBase} />
               </Field>
 
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Contact Person">
                   <input type="text" value={form.contact_person}
                     onChange={(e) => updateForm('contact_person', sanitizeText(e.target.value, LIMITS.NAME))}
-                    maxLength={LIMITS.NAME} className={inputBase} />
+                    maxLength={LIMITS.NAME} disabled={!canEditPurchase} className={inputBase} />
                 </Field>
                 <Field label="Phone No">
                   <input type="tel" value={form.phone_no}
                     onChange={(e) => updateForm('phone_no', sanitizeText(e.target.value, LIMITS.PHONE))}
-                    maxLength={LIMITS.PHONE} className={inputBase} />
+                    maxLength={LIMITS.PHONE} disabled={!canEditPurchase} className={inputBase} />
                 </Field>
               </div>
 
@@ -1509,6 +1601,7 @@ export function EditPurchaseInvoicePage() {
                 <input type="text" value={form.gstin_pan}
                   onChange={(e) => updateForm('gstin_pan', sanitizeText(e.target.value.toUpperCase(), LIMITS.GSTIN))}
                   maxLength={LIMITS.GSTIN}
+                  disabled={!canEditPurchase}
                   placeholder="27AAAAA0000A1Z5"
                   className={`${inputBase} font-mono tracking-wide`} />
               </Field>
@@ -1517,11 +1610,14 @@ export function EditPurchaseInvoicePage() {
                 <label className="flex items-center gap-2 text-sm text-slate-700">
                   <input type="checkbox" checked={form.reverse_charge}
                     onChange={(e) => updateForm('reverse_charge', e.target.checked)}
+                    disabled={!canEditPurchase}
                     className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
                   Reverse Charge
                 </label>
                 <Field label="Ship To">
-                  <select value={form.ship_to} onChange={(e) => updateForm('ship_to', e.target.value)} className={inputBase}>
+                  <select value={form.ship_to} onChange={(e) => updateForm('ship_to', e.target.value)}
+                    disabled={!canEditPurchase}
+                    className={inputBase}>
                     <option value="">-- Select --</option>
                     <option value="billing">Same as Billing</option>
                     <option value="shipping">Shipping Address</option>
@@ -1538,6 +1634,7 @@ export function EditPurchaseInvoicePage() {
                 <input type="text" value={form.place_of_supply}
                   onChange={(e) => updateForm('place_of_supply', sanitizeText(e.target.value, LIMITS.SHORT))}
                   maxLength={LIMITS.SHORT}
+                  disabled={!canEditPurchase}
                   placeholder="State / UT"
                   data-error={!!formErrors.place_of_supply}
                   className={`${inputBase} ${formErrors.place_of_supply ? inputError : ''}`} />
@@ -1554,6 +1651,7 @@ export function EditPurchaseInvoicePage() {
                 <Field label="Invoice Type">
                   <select value={form.invoice_type}
                     onChange={(e) => updateForm('invoice_type', e.target.value as PurchaseFormData['invoice_type'])}
+                    disabled={!canEditPurchase}
                     className={inputBase}>
                     <option value="purchase_invoice">Purchase Invoice</option>
                     <option value="purchase_bill">Purchase Bill</option>
@@ -1563,6 +1661,7 @@ export function EditPurchaseInvoicePage() {
                   <input type="text" value={form.invoice_no}
                     onChange={(e) => updateForm('invoice_no', sanitizeText(e.target.value, LIMITS.SHORT))}
                     maxLength={LIMITS.SHORT}
+                    disabled={!canEditPurchase}
                     placeholder="Invoice number"
                     data-error={!!formErrors.invoice_no}
                     className={`${inputBase} font-mono ${formErrors.invoice_no ? inputError : ''}`} />
@@ -1570,26 +1669,26 @@ export function EditPurchaseInvoicePage() {
                 <Field label="Invoice Date">
                   <input type="date" value={form.invoice_date}
                     onChange={(e) => updateForm('invoice_date', e.target.value)}
-                    className={inputBase} />
+                    disabled={!canEditPurchase} className={inputBase} />
                 </Field>
               </div>
 
               <Field label="Due Date">
                 <input type="date" value={form.due_date}
                   onChange={(e) => updateForm('due_date', e.target.value)}
-                  className={inputBase} />
+                  disabled={!canEditPurchase} className={inputBase} />
               </Field>
 
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Challan No.">
                   <input type="text" value={form.challan_no}
                     onChange={(e) => updateForm('challan_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                    maxLength={LIMITS.SHORT} className={inputBase} />
+                    maxLength={LIMITS.SHORT} disabled={!canEditPurchase} className={inputBase} />
                 </Field>
                 <Field label="Challan Date">
                   <input type="date" value={form.challan_date}
                     onChange={(e) => updateForm('challan_date', e.target.value)}
-                    className={inputBase} />
+                    disabled={!canEditPurchase} className={inputBase} />
                 </Field>
               </div>
 
@@ -1597,12 +1696,12 @@ export function EditPurchaseInvoicePage() {
                 <Field label="PO Number">
                   <input type="text" value={form.po_no}
                     onChange={(e) => updateForm('po_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                    maxLength={LIMITS.SHORT} className={inputBase} />
+                    maxLength={LIMITS.SHORT} disabled={!canEditPurchase} className={inputBase} />
                 </Field>
                 <Field label="PO Date">
                   <input type="date" value={form.po_date}
                     onChange={(e) => updateForm('po_date', e.target.value)}
-                    className={inputBase} />
+                    disabled={!canEditPurchase} className={inputBase} />
                 </Field>
               </div>
 
@@ -1610,33 +1709,36 @@ export function EditPurchaseInvoicePage() {
                 <Field label="LR No.">
                   <input type="text" value={form.lr_no}
                     onChange={(e) => updateForm('lr_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                    maxLength={LIMITS.SHORT} className={inputBase} />
+                    maxLength={LIMITS.SHORT} disabled={!canEditPurchase} className={inputBase} />
                 </Field>
                 <Field label="E-Way Bill">
                   <input type="text" value={form.eway_no}
                     onChange={(e) => updateForm('eway_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                    maxLength={LIMITS.SHORT} className={inputBase} />
+                    maxLength={LIMITS.SHORT} disabled={!canEditPurchase} className={inputBase} />
                 </Field>
               </div>
 
               <Field label="Delivery Mode">
                 <input type="text" value={form.delivery_mode}
                   onChange={(e) => updateForm('delivery_mode', sanitizeText(e.target.value, LIMITS.SHORT))}
-                  maxLength={LIMITS.SHORT} className={inputBase} />
+                  maxLength={LIMITS.SHORT} disabled={!canEditPurchase} className={inputBase} />
               </Field>
 
               <Field label="Payment Terms">
                 <input type="text" value={form.payment_term} placeholder="e.g., Net 30"
                   onChange={(e) => updateForm('payment_term', sanitizeText(e.target.value, LIMITS.SHORT))}
-                  maxLength={LIMITS.SHORT} className={inputBase} />
+                  maxLength={LIMITS.SHORT} disabled={!canEditPurchase} className={inputBase} />
               </Field>
 
-              <div className="pt-4 border-t border-slate-100 space-y-2">
-                <h3 className="text-sm font-semibold text-slate-700">Stock adjustment</h3>
-                <p className="text-xs text-slate-500">
-                  Stock is adjusted automatically by the server when you update the purchase.
-                </p>
-              </div>
+              {/* Stock adjustment notice — only shown when user can adjust stock */}
+              {canAdjustStock && (
+                <div className="pt-4 border-t border-slate-100 space-y-2">
+                  <h3 className="text-sm font-semibold text-slate-700">Stock adjustment</h3>
+                  <p className="text-xs text-slate-500">
+                    Stock is adjusted automatically by the server when you update the purchase.
+                  </p>
+                </div>
+              )}
             </div>
           </section>
         </div>
@@ -1652,6 +1754,7 @@ export function EditPurchaseInvoicePage() {
                   onFocus={() => setShowProductDropdown(true)}
                   onKeyDown={onProductKeyDown}
                   maxLength={LIMITS.NAME}
+                  disabled={!canEditPurchase}
                   className={`${inputBase} pl-10 pr-10`} />
                 {productSearch && (
                   <button type="button" onClick={() => { setProductSearch(''); setShowProductDropdown(false); }}
@@ -1697,10 +1800,12 @@ export function EditPurchaseInvoicePage() {
                   </div>
                 )}
               </div>
-              <button type="button" onClick={openProductOffcanvas}
-                className="px-4 py-2.5 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1.5 whitespace-nowrap transition">
-                <FiPlus size={16} /> Add Product
-              </button>
+              {canCreateProduct && canEditPurchase && (
+                <button type="button" onClick={openProductOffcanvas}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1.5 whitespace-nowrap transition">
+                  <FiPlus size={16} /> Add Product
+                </button>
+              )}
             </div>
           </div>
 
@@ -1735,6 +1840,7 @@ export function EditPurchaseInvoicePage() {
                         <input type="text" value={item.product_name}
                           onChange={(e) => updateItem(idx, 'product_name', sanitizeText(e.target.value, LIMITS.NAME))}
                           maxLength={LIMITS.NAME}
+                          disabled={!canEditPurchase}
                           className="w-full bg-transparent text-sm outline-none truncate" />
                         <div className="flex items-center gap-2 text-[10px]">
                           <span className="text-slate-400">ID #{item.product_id}</span>
@@ -1745,23 +1851,27 @@ export function EditPurchaseInvoicePage() {
                       <td className="py-2 px-3">
                         <input type="number" min={0.001} step={0.001} inputMode="decimal" value={item.qty}
                           onChange={(e) => updateItem(idx, 'qty', Math.max(0.001, safeNumber(e.target.value, 1)))}
+                          disabled={!canEditPurchase}
                           className="w-16 bg-transparent text-center text-sm outline-none tabular-nums" />
                       </td>
                       <td className="py-2 px-3">
                         <input type="text" value={item.uom}
                           onChange={(e) => updateItem(idx, 'uom', sanitizeText(e.target.value, 16))}
                           maxLength={16}
+                          disabled={!canEditPurchase}
                           className="w-14 bg-transparent text-center text-sm outline-none" />
                       </td>
                       <td className="py-2 px-3">
                         <input type="number" min={0} step={0.01} inputMode="decimal" value={item.price}
                           onChange={(e) => updateItem(idx, 'price', Math.max(0, safeNumber(e.target.value)))}
+                          disabled={!canEditPurchase}
                           className="w-20 bg-transparent text-right text-sm outline-none tabular-nums" />
                       </td>
                       <td className="py-2 px-3">
                         <div className="flex items-center justify-center gap-1">
                           <select value={item.discount_type}
                             onChange={(e) => updateItem(idx, 'discount_type', e.target.value as DiscountType)}
+                            disabled={!canEditPurchase}
                             className="bg-transparent text-xs outline-none">
                             <option value="percent">%</option>
                             <option value="amount">₹</option>
@@ -1769,10 +1879,12 @@ export function EditPurchaseInvoicePage() {
                           {item.discount_type === 'percent' ? (
                             <input type="number" min={0} max={100} step={0.01} value={item.discount_percent}
                               onChange={(e) => updateItem(idx, 'discount_percent', clamp(safeNumber(e.target.value), 0, 100))}
+                              disabled={!canEditPurchase}
                               className="w-14 bg-transparent text-center text-sm outline-none tabular-nums" />
                           ) : (
                             <input type="number" min={0} step={0.01} value={item.discount_amount}
                               onChange={(e) => updateItem(idx, 'discount_amount', Math.max(0, safeNumber(e.target.value)))}
+                              disabled={!canEditPurchase}
                               className="w-16 bg-transparent text-center text-sm outline-none tabular-nums" />
                           )}
                         </div>
@@ -1780,6 +1892,7 @@ export function EditPurchaseInvoicePage() {
                       <td className="py-2 px-3">
                         <select value={[0, 5, 12, 18, 28].includes(item.gst_slab) ? item.gst_slab : -1}
                           onChange={(e) => { const v = Number(e.target.value); updateItem(idx, 'gst_slab', v === -1 ? -1 : v); }}
+                          disabled={!canEditPurchase}
                           className="bg-transparent text-sm outline-none">
                           <option value={0}>0%</option>
                           <option value={5}>5%</option>
@@ -1791,22 +1904,26 @@ export function EditPurchaseInvoicePage() {
                         {item.gst_slab === -1 && (
                           <input type="number" min={0} max={100} step={0.01} value={item.custom_gst_rate}
                             onChange={(e) => updateItem(idx, 'custom_gst_rate', clamp(safeNumber(e.target.value), 0, 100))}
+                            disabled={!canEditPurchase}
                             className="w-12 ml-1 bg-transparent text-center text-sm outline-none tabular-nums" />
                         )}
                       </td>
                       <td className="py-2 px-3 text-center">
                         <input type="checkbox" checked={item.is_inter_state}
                           onChange={(e) => updateItem(idx, 'is_inter_state', e.target.checked)}
+                          disabled={!canEditPurchase}
                           className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" />
                       </td>
                       <td className="py-2 px-3 text-right font-semibold tabular-nums text-slate-800">
                         ₹{formatCurrency(item.total)}
                       </td>
                       <td className="py-2 px-3">
-                        <button onClick={() => removeItem(idx)}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition">
-                          <FiTrash2 size={15} />
-                        </button>
+                        {canEditPurchase && (
+                          <button onClick={() => removeItem(idx)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition">
+                            <FiTrash2 size={15} />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
@@ -1829,6 +1946,7 @@ export function EditPurchaseInvoicePage() {
             <Field label="Bank Account">
               <select value={form.bank_id}
                 onChange={(e) => updateForm('bank_id', e.target.value ? Number(e.target.value) : '')}
+                disabled={!canEditPurchase}
                 className={inputBase}>
                 <option value="">Select Bank</option>
                 {banks?.map((b) => <option key={b.id} value={b.id}>{b.bank_name} ({b.account_no})</option>)}
@@ -1838,35 +1956,37 @@ export function EditPurchaseInvoicePage() {
             <Field label="Terms Title">
               <input type="text" value={form.terms_title}
                 onChange={(e) => updateForm('terms_title', sanitizeText(e.target.value, LIMITS.SHORT))}
-                maxLength={LIMITS.SHORT} className={inputBase} />
+                maxLength={LIMITS.SHORT} disabled={!canEditPurchase} className={inputBase} />
             </Field>
 
             <Field label="Terms & Conditions">
               <textarea rows={5} value={form.terms_detail}
                 onChange={(e) => updateForm('terms_detail', sanitizeText(e.target.value, LIMITS.LONG_TEXT))}
-                maxLength={LIMITS.LONG_TEXT} className={`${inputBase} leading-relaxed`} />
+                maxLength={LIMITS.LONG_TEXT} disabled={!canEditPurchase} className={`${inputBase} leading-relaxed`} />
             </Field>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <Field label="Document Note">
                 <textarea rows={3} value={form.document_note}
                   onChange={(e) => updateForm('document_note', sanitizeText(e.target.value, LIMITS.LONG_TEXT))}
-                  maxLength={LIMITS.LONG_TEXT} className={inputBase} />
+                  maxLength={LIMITS.LONG_TEXT} disabled={!canEditPurchase} className={inputBase} />
               </Field>
               <Field label="Internal Note (private)">
                 <textarea rows={3} value={form.internal_note}
                   onChange={(e) => updateForm('internal_note', sanitizeText(e.target.value, LIMITS.LONG_TEXT))}
-                  maxLength={LIMITS.LONG_TEXT} className={inputBase} />
+                  maxLength={LIMITS.LONG_TEXT} disabled={!canEditPurchase} className={inputBase} />
               </Field>
             </div>
 
             <div className="pt-4 border-t border-slate-100">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold text-slate-700">Additional Charges</h3>
-                <button onClick={addAdditionalCharge}
-                  className="text-xs text-indigo-600 flex items-center gap-1 hover:underline">
-                  <FiPlus size={12} /> Add
-                </button>
+                {canEditPurchase && (
+                  <button onClick={addAdditionalCharge}
+                    className="text-xs text-indigo-600 flex items-center gap-1 hover:underline">
+                    <FiPlus size={12} /> Add
+                  </button>
+                )}
               </div>
               {form.additional_charges.length === 0 ? (
                 <p className="text-xs text-slate-400">No additional charges.</p>
@@ -1877,14 +1997,18 @@ export function EditPurchaseInvoicePage() {
                       <input type="text" value={c.label} placeholder="Label"
                         onChange={(e) => updateAdditionalCharge(c.id, 'label', sanitizeText(e.target.value, LIMITS.SHORT))}
                         maxLength={LIMITS.SHORT}
+                        disabled={!canEditPurchase}
                         className={`${inputBase} flex-1`} />
                       <input type="number" min={0} step={0.01} value={c.amount}
                         onChange={(e) => updateAdditionalCharge(c.id, 'amount', Math.max(0, safeNumber(e.target.value)))}
+                        disabled={!canEditPurchase}
                         className={`${inputBase} w-32 text-right tabular-nums`} />
-                      <button onClick={() => removeAdditionalCharge(c.id)}
-                        className="p-2.5 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition">
-                        <FiTrash2 size={15} />
-                      </button>
+                      {canEditPurchase && (
+                        <button onClick={() => removeAdditionalCharge(c.id)}
+                          className="p-2.5 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition">
+                          <FiTrash2 size={15} />
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1922,6 +2046,7 @@ export function EditPurchaseInvoicePage() {
                         general_discount_amount: type === 'amount' ? p.general_discount_amount : 0,
                       }));
                     }}
+                    disabled={!canEditPurchase}
                     className="border rounded-lg px-2 py-1 text-xs">
                     <option value="percent">%</option>
                     <option value="amount">₹</option>
@@ -1932,6 +2057,7 @@ export function EditPurchaseInvoicePage() {
                       generalDiscountType === 'percent' ? 'general_discount_percent' : 'general_discount_amount',
                       Math.max(0, safeNumber(e.target.value)),
                     )}
+                    disabled={!canEditPurchase}
                     className="w-24 text-right border rounded-lg px-2 py-1.5 tabular-nums" />
                 </div>
               </div>
@@ -1939,6 +2065,7 @@ export function EditPurchaseInvoicePage() {
                 <span>Apply:</span>
                 <select value={generalDiscountApplyType}
                   onChange={(e) => setGeneralDiscountApplyType(e.target.value as ApplyType)}
+                  disabled={!canEditPurchase}
                   className="border rounded-lg px-2 py-1">
                   <option value="before_tax">Before Tax</option>
                   <option value="after_tax">After Tax</option>
@@ -1955,12 +2082,14 @@ export function EditPurchaseInvoicePage() {
                 <span className="text-slate-500">Packing Charges</span>
                 <input type="number" min={0} step={0.01} value={form.packing_charges}
                   onChange={(e) => updateForm('packing_charges', nonNegative(e.target.value))}
+                  disabled={!canEditPurchase}
                   className="w-28 text-right border rounded-lg px-2 py-1.5 tabular-nums" />
               </div>
               <div className="flex items-center gap-2 text-xs">
                 <span>Apply packing:</span>
                 <select value={packingApplyType}
                   onChange={(e) => setPackingApplyType(e.target.value as ApplyType)}
+                  disabled={!canEditPurchase}
                   className="border rounded-lg px-2 py-1">
                   <option value="before_tax">Before Tax</option>
                   <option value="after_tax">After Tax</option>
@@ -1973,11 +2102,12 @@ export function EditPurchaseInvoicePage() {
               <div className="flex items-center gap-2">
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={autoRoundOff}
-                    onChange={(e) => setAutoRoundOff(e.target.checked)} />
+                    onChange={(e) => setAutoRoundOff(e.target.checked)}
+                    disabled={!canEditPurchase} />
                   Auto round off
                 </label>
                 <input type="number" step={0.01} value={form.round_off}
-                  disabled={autoRoundOff}
+                  disabled={autoRoundOff || !canEditPurchase}
                   onChange={(e) => updateForm('round_off', safeNumber(e.target.value))}
                   className="w-24 text-right border rounded-lg px-2 py-1.5 tabular-nums" />
               </div>
@@ -1992,10 +2122,12 @@ export function EditPurchaseInvoicePage() {
               <div className="border-t pt-4 mt-5">
                 <div className="flex justify-between items-center mb-3">
                   <h3 className="font-semibold">Payments</h3>
-                  <button type="button" onClick={addPayment}
-                    className="text-blue-600 text-xs flex items-center gap-1">
-                    <FiPlus />Add Payment
-                  </button>
+                  {canRecordPayments && canEditPurchase && (
+                    <button type="button" onClick={addPayment}
+                      className="text-blue-600 text-xs flex items-center gap-1">
+                      <FiPlus />Add Payment
+                    </button>
+                  )}
                 </div>
 
                 {form.payments.length === 0 ? (
@@ -2009,23 +2141,25 @@ export function EditPurchaseInvoicePage() {
                           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">saved</span>
                         )}
                       </span>
-                      <button type="button" onClick={() => removePayment(pay.id)} className="text-red-400">
-                        <FiTrash2 size={13} />
-                      </button>
+                      {canRecordPayments && canEditPurchase && (
+                        <button type="button" onClick={() => removePayment(pay.id)} className="text-red-400">
+                          <FiTrash2 size={13} />
+                        </button>
+                      )}
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <div>
                         <label className="block text-xs text-slate-500">Amount</label>
                         <input type="number" min="0" step="0.01" value={pay.amount}
                           onChange={(e) => updatePayment(pay.id, 'amount', nonNegative(e.target.value))}
-                          disabled={pay.persisted}
+                          disabled={pay.persisted || !canRecordPayments || !canEditPurchase}
                           className="w-full border rounded-lg px-2 py-1.5 text-xs text-right tabular-nums" />
                       </div>
                       <div>
                         <label className="block text-xs text-slate-500">Method</label>
                         <select value={pay.payment_method}
                           onChange={(e) => updatePayment(pay.id, 'payment_method', e.target.value as PaymentMethod)}
-                          disabled={pay.persisted}
+                          disabled={pay.persisted || !canRecordPayments || !canEditPurchase}
                           className="w-full border rounded-lg px-2 py-1.5 text-xs">
                           <option value="UPI">UPI</option>
                           <option value="cash">Cash</option>
@@ -2038,21 +2172,21 @@ export function EditPurchaseInvoicePage() {
                         <label className="block text-xs text-slate-500">Reference</label>
                         <input value={pay.reference_no}
                           onChange={(e) => updatePayment(pay.id, 'reference_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                          disabled={pay.persisted}
+                          disabled={pay.persisted || !canRecordPayments || !canEditPurchase}
                           className="w-full border rounded-lg px-2 py-1.5 text-xs" />
                       </div>
                       <div>
                         <label className="block text-xs text-slate-500">Date</label>
                         <input type="date" value={pay.transaction_date}
                           onChange={(e) => updatePayment(pay.id, 'transaction_date', e.target.value)}
-                          disabled={pay.persisted}
+                          disabled={pay.persisted || !canRecordPayments || !canEditPurchase}
                           className="w-full border rounded-lg px-2 py-1.5 text-xs" />
                       </div>
                       <div>
                         <label className="block text-xs text-slate-500">Direction</label>
                         <select value={pay.payment_direction}
                           onChange={(e) => updatePayment(pay.id, 'payment_direction', e.target.value as PaymentDirection)}
-                          disabled={pay.persisted}
+                          disabled={pay.persisted || !canRecordPayments || !canEditPurchase}
                           className="w-full border rounded-lg px-2 py-1.5 text-xs">
                           <option value="outward">Outward</option>
                           <option value="inward">Inward / Refund</option>
@@ -2062,14 +2196,14 @@ export function EditPurchaseInvoicePage() {
                         <label className="block text-xs text-slate-500">Bank Name</label>
                         <input value={pay.bank_name}
                           onChange={(e) => updatePayment(pay.id, 'bank_name', sanitizeText(e.target.value, LIMITS.SHORT))}
-                          disabled={pay.persisted}
+                          disabled={pay.persisted || !canRecordPayments || !canEditPurchase}
                           className="w-full border rounded-lg px-2 py-1.5 text-xs" />
                       </div>
                       <div className="col-span-2">
                         <label className="block text-xs text-slate-500">Remarks</label>
                         <input value={pay.remarks}
                           onChange={(e) => updatePayment(pay.id, 'remarks', sanitizeText(e.target.value, LIMITS.TEXT))}
-                          disabled={pay.persisted}
+                          disabled={pay.persisted || !canRecordPayments || !canEditPurchase}
                           className="w-full border rounded-lg px-2 py-1.5 text-xs" />
                       </div>
                     </div>
@@ -2082,6 +2216,13 @@ export function EditPurchaseInvoicePage() {
                   <span>Balance Due</span>
                   <span className={balanceDue > 0.01 ? 'text-red-600' : 'text-emerald-600'}>₹{formatCurrency(balanceDue)}</span>
                 </div>
+
+                {!canRecordPayments && canEditPurchase && (
+                  <div className="pt-2 text-[11px] text-slate-500 flex items-center gap-1.5">
+                    <FiLock size={10} />
+                    You cannot add payments. Ask an authorized user.
+                  </div>
+                )}
               </div>
             </div>
           </section>
@@ -2099,8 +2240,9 @@ export function EditPurchaseInvoicePage() {
               className="px-4 py-2.5 rounded-xl border border-slate-200 text-sm font-medium text-slate-700 hover:bg-slate-50 transition">
               Cancel
             </button>
-            <button onClick={handleUpdate} disabled={submitting}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 shadow-sm shadow-indigo-500/30 disabled:opacity-50 transition">
+            <button onClick={handleUpdate} disabled={submitting || !canEditPurchase}
+              title={!canEditPurchase ? 'You do not have permission to edit purchase invoices' : undefined}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 shadow-sm shadow-indigo-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition">
               {submitting ? <FiLoader className="animate-spin" size={15} /> : <FiSave size={15} />}
               Update Purchase
             </button>
@@ -2135,7 +2277,8 @@ export function EditPurchaseInvoicePage() {
         }}
       />
 
-      {showSupplierOffcanvas && (
+      {/* Supplier offcanvas — only when permitted */}
+      {showSupplierOffcanvas && canCreateSupplier && (
         <Suspense fallback={<OffcanvasFallback />}>
           <Offcanvas isOpen={showSupplierOffcanvas} title="Add Supplier"
             onClose={() => setShowSupplierOffcanvas(false)}
@@ -2219,7 +2362,8 @@ export function EditPurchaseInvoicePage() {
         </Suspense>
       )}
 
-      {showProductOffcanvas && (
+      {/* Product offcanvas — only when permitted */}
+      {showProductOffcanvas && canCreateProduct && (
         <Suspense fallback={<OffcanvasFallback />}>
           <Offcanvas isOpen={showProductOffcanvas} title="Add Product"
             onClose={() => setShowProductOffcanvas(false)}

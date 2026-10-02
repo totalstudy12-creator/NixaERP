@@ -6,12 +6,14 @@ import {
 import {
   FiPlus, FiTrash2, FiSearch, FiFileText, FiUser, FiBox,
   FiX, FiSave, FiPrinter, FiLoader, FiRefreshCw, FiChevronDown, FiChevronUp,
-  FiChevronRight, FiCheckCircle, FiAlertCircle, FiArrowLeft, FiPackage, FiSlash,
+  FiChevronRight, FiCheckCircle, FiAlertCircle, FiArrowLeft, FiPackage, FiSlash, FiLock,
 } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 
 const Offcanvas = lazy(() =>
   import('../components/Offcanvas').then((m) => ({ default: m.Offcanvas })),
@@ -61,7 +63,6 @@ function makeTxnId(): string {
   return `TXN-${y}${m}${day}-${rnd}`;
 }
 
-/** Detects a 404-family error from the API client. */
 function isNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const e = err as {
@@ -75,10 +76,6 @@ function isNotFoundError(err: unknown): boolean {
   return msg.includes('not found') || msg.includes('no query results');
 }
 
-/**
- * Stock-row 404 only. Matches "stock record" / "no stock record" — never
- * matches the word "warehouse" alone so validation 422s aren't misrouted.
- */
 function isStockRecordNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const e = err as {
@@ -113,22 +110,8 @@ function formatCurrency(value: number | string | undefined | null): string {
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Quantity input — safe decimal-aware number field
- *
- * Why this exists:
- *   `<input type="number">` combined with an onChange that immediately coerces
- *   (e.g. Math.floor) causes the displayed text to drift from React state —
- *   typing "1.100" shows "1.100" while state is `1`, and decimals get eaten.
- *
- * Design:
- *   • type="text" + inputMode="decimal" so mobile shows the decimal keyboard.
- *   • `text` state holds the raw string while focused.
- *   • Only digits and a single dot are accepted; max 3 decimals.
- *   • On blur, the string is parsed, clamped, and normalised back to a plain
- *     number string ("1.100" → "1.1", "2.000" → "2"). Invalid/empty reverts.
- *   • Only valid, in-range values are propagated upstream via onChange.
  * ──────────────────────────────────────────────────────────────────────── */
 
-/** Round to `maxDecimals` places and drop trailing zeros ("1.100" → "1.1"). */
 function formatQty(v: number, maxDecimals = 3): string {
   if (!Number.isFinite(v)) return '';
   const factor = Math.pow(10, maxDecimals);
@@ -158,24 +141,16 @@ const QuantityInput = memo(function QuantityInput({
   const [text, setText] = useState<string>(() => formatQty(value, maxDecimals));
   const [focused, setFocused] = useState(false);
 
-  // Sync display from external `value` changes whenever not actively editing.
   useEffect(() => {
     if (!focused) setText(formatQty(value, maxDecimals));
   }, [value, focused, maxDecimals]);
 
   const handleChange = (raw: string) => {
-    // Only digits and at most one dot.
     if (raw !== '' && !/^\d*\.?\d*$/.test(raw)) return;
-
-    // Enforce max decimals after the dot.
     const dot = raw.indexOf('.');
     if (dot >= 0 && raw.length - dot - 1 > maxDecimals) return;
-
     setText(raw);
-
-    // Don't propagate incomplete states upstream.
     if (raw === '' || raw === '.') return;
-
     const n = Number(raw);
     if (!Number.isFinite(n)) return;
     if (n < min || n > max) return;
@@ -186,7 +161,6 @@ const QuantityInput = memo(function QuantityInput({
     setFocused(false);
     const n = Number(text);
     const invalid = text === '' || text === '.' || !Number.isFinite(n) || n < min;
-
     if (invalid) {
       const fallback = value >= min ? value : min;
       setText(formatQty(fallback, maxDecimals));
@@ -335,8 +309,6 @@ type PostSaveTask = {
 function calculateItem(
   raw: Omit<InvoiceItem, 'cgst_percent' | 'sgst_percent' | 'igst_percent' | 'cgst_amount' | 'sgst_amount' | 'igst_amount' | 'total'>,
 ): InvoiceItem {
-  // Quantity: accept decimals (up to 3 places), reject <= 0, cap to avoid
-  // precision blowups / obviously-invalid input.
   const qtyRaw = safeNumber(raw.qty);
   const qty = Number.isFinite(qtyRaw) && qtyRaw > 0
     ? Math.min(1_000_000, Math.round(qtyRaw * 1000) / 1000)
@@ -491,8 +463,7 @@ function useApiCache<T>(key: string, fetcher: () => Promise<unknown>, ttlMs = 30
       const result = extractArray<T>(res);
       apiCache.set(key, { data: result, timestamp: Date.now() });
       setData(result);
-    } catch (err) {
-      console.error('API error:', err);
+    } catch {
       setError('Unable to load data. Please try again.');
     } finally {
       setLoading(false);
@@ -672,10 +643,28 @@ export function CreateInvoicePage() {
     showInfo?: (a: string, b?: string) => void;
   };
 
-  /* ── API fetchers ── */
-  const getProducts = useCallback(() => apiClient.getAllProducts(), []);
+  /* ── RBAC ── */
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  const canCreateInvoice = isSuperAdmin || can('create invoices');
+  const canViewCustomers = isSuperAdmin || can('view customers');
+  const canCreateCustomer = isSuperAdmin || can('create customers');
+  const canViewProducts = isSuperAdmin || can('view products');
+  const canCreateProduct = isSuperAdmin || can('create products');
+  const canRecordPayments = isSuperAdmin || can('create payments');
+
+  /* ── API fetchers (gated) ── */
+  const getProducts = useCallback(() => {
+    if (!canViewProducts) return Promise.resolve([]);
+    return apiClient.getAllProducts();
+  }, [canViewProducts]);
   const getCompanies = useCallback(() => apiClient.getCompanies(), []);
-  const getCustomers = useCallback(() => apiClient.getAllCustomers(), []);
+  const getCustomers = useCallback(() => {
+    if (!canViewCustomers) return Promise.resolve([]);
+    return apiClient.getAllCustomers();
+  }, [canViewCustomers]);
   const getBanks = useCallback(async () => {
     try { return await apiClient.request('GET', '/banks'); } catch { return []; }
   }, []);
@@ -747,6 +736,10 @@ export function CreateInvoicePage() {
   const [invoiceNumberError, setInvoiceNumberError] = useState<string | null>(null);
 
   const generateInvoiceNumber = useCallback(async () => {
+    if (!canCreateInvoice) {
+      setInvoiceNumberLoading(false);
+      return;
+    }
     setInvoiceNumberLoading(true);
     setInvoiceNumberError(null);
     try {
@@ -765,7 +758,7 @@ export function CreateInvoicePage() {
     } finally {
       setInvoiceNumberLoading(false);
     }
-  }, []);
+  }, [canCreateInvoice]);
 
   useEffect(() => { void generateInvoiceNumber(); }, [generateInvoiceNumber]);
 
@@ -1014,6 +1007,10 @@ export function CreateInvoicePage() {
 
   /* ── Payments ── */
   const addPayment = () => {
+    if (!canRecordPayments) {
+      showError('Permission denied', 'You do not have permission to record payments.');
+      return;
+    }
     setForm((p) => ({
       ...p,
       payments: [
@@ -1039,6 +1036,7 @@ export function CreateInvoicePage() {
     }));
   };
   const removePayment = (id: string) => {
+    if (!canRecordPayments) return;
     setForm((p) => ({ ...p, payments: p.payments.filter((x) => x.id !== id) }));
   };
 
@@ -1104,12 +1102,6 @@ export function CreateInvoicePage() {
 
   /* ────────────────────────────────────────────────────────────────────────
    * Post-save automation — STOCK DEDUCTION
-   *
-   * Backend now:
-   *   • auto-creates a missing warehouse stock row (quantity 0)
-   *   • allows stock to go negative (no insufficient-stock rejection)
-   *
-   * So we simply call /stock-out per line item and report the result.
    * ──────────────────────────────────────────────────────────────────────── */
 
   const runPostSaveAutomation = useCallback(async (
@@ -1161,7 +1153,6 @@ export function CreateInvoicePage() {
           remark: `Auto stock-out for invoice ${invoiceNo}`,
         });
 
-        // Surface negative-stock warning if backend reports it
         const after = (res as any)?.data?.stock_after;
         if (typeof after === 'number' && after < 0) {
           setTask(taskId, { status: 'success', message: `Deducted (balance ${after})` });
@@ -1207,6 +1198,11 @@ export function CreateInvoicePage() {
    * ──────────────────────────────────────────────────────────────────────── */
 
   const handleSubmit = useCallback(async (action: 'save' | 'save_print' | 'save_draft' = 'save') => {
+    // Guard: creating invoices requires the permission
+    if (!canCreateInvoice) {
+      showError('Permission denied', 'You do not have permission to create invoices.');
+      return;
+    }
     setErrorMsg(null);
 
     if (action !== 'save_draft' && !validateMainForm()) {
@@ -1215,6 +1211,16 @@ export function CreateInvoicePage() {
         const el = document.querySelector<HTMLElement>('[data-error="true"]');
         el?.focus();
       });
+      return;
+    }
+
+    // Guard: if payments are attached, require create payments
+    const hasPayments = form.payments.some((p) => safeNumber(p.amount) > 0);
+    if (hasPayments && !canRecordPayments) {
+      showError(
+        'Permission denied',
+        'You do not have permission to record payments. Remove the payments or ask an administrator.',
+      );
       return;
     }
 
@@ -1314,7 +1320,7 @@ export function CreateInvoicePage() {
         }
       }
 
-      if (validPayments.length > 0 && invoiceId) {
+      if (validPayments.length > 0 && invoiceId && canRecordPayments) {
         try {
           await Promise.all(validPayments.map((p, idx) =>
             apiClient.request('POST', '/payments', {
@@ -1423,12 +1429,17 @@ export function CreateInvoicePage() {
       setSubmitting(false);
     }
   }, [
+    canCreateInvoice, canRecordPayments,
     form, items, navigate, showSuccess, showError, showInfo, summary, changeToReturn,
     autoDeductStock, runPostSaveAutomation, refreshProducts,
   ]);
 
   /* ── Customer create ── */
   const createCustomer = async () => {
+    if (!canCreateCustomer) {
+      showError('Permission denied', 'You do not have permission to create customers.');
+      return;
+    }
     const errs: Record<string, boolean> = {};
     const name = sanitizeText(newCustomer.name, LIMITS.NAME).trim();
     const city = sanitizeText(newCustomer.billing_city, LIMITS.SHORT).trim();
@@ -1490,6 +1501,10 @@ export function CreateInvoicePage() {
   }, [products]);
 
   const openProductOffcanvas = () => {
+    if (!canCreateProduct) {
+      showError('Permission denied', 'You do not have permission to create products.');
+      return;
+    }
     setNewProduct((p) => ({
       ...p,
       company_id: form.company_id ? String(form.company_id) : '',
@@ -1500,6 +1515,10 @@ export function CreateInvoicePage() {
   };
 
   const createProduct = async () => {
+    if (!canCreateProduct) {
+      showError('Permission denied', 'You do not have permission to create products.');
+      return;
+    }
     const errs: Record<string, boolean> = {};
     if (!newProduct.company_id) errs.company_id = true;
     if (!newProduct.name.trim()) errs.name = true;
@@ -1513,7 +1532,6 @@ export function CreateInvoicePage() {
 
     const sku = newProduct.sku.trim() || generateProductSKU();
 
-    // warehouse_id included so an initial stock row is created
     const payload = {
       company_id: Number(newProduct.company_id),
       branch_id: newProduct.branch_id ? Number(newProduct.branch_id) : null,
@@ -1615,6 +1633,46 @@ export function CreateInvoicePage() {
   }, [refreshProducts, refreshWarehouses, showSuccess]);
 
   /* ────────────────────────────────────────────────────────────────────────
+   * Loading guard
+   * ──────────────────────────────────────────────────────────────────────── */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* ────────────────────────────────────────────────────────────────────────
+   * No-access panel
+   * ──────────────────────────────────────────────────────────────────────── */
+
+  if (!canCreateInvoice) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to create invoices.
+          </p>
+          <button
+            onClick={() => navigate('/invoices')}
+            className="mt-5 inline-flex h-10 items-center rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-800 transition"
+          >
+            Back to invoices
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ────────────────────────────────────────────────────────────────────────
    * Render
    * ──────────────────────────────────────────────────────────────────────── */
 
@@ -1708,12 +1766,13 @@ export function CreateInvoicePage() {
                         setShowCustomerDropdown(true);
                         setCustomerHighlight(-1);
                       }}
-                      onFocus={() => setShowCustomerDropdown(true)}
+                      onFocus={() => canViewCustomers && setShowCustomerDropdown(true)}
                       onKeyDown={onCustomerKeyDown}
-                      placeholder="Search by name, code, GSTIN…"
+                      placeholder={canViewCustomers ? 'Search by name, code, GSTIN…' : 'Customer search disabled'}
                       aria-label="Search customer"
                       aria-autocomplete="list"
                       aria-expanded={showCustomerDropdown}
+                      disabled={!canViewCustomers}
                       className={inputBase}
                       maxLength={LIMITS.NAME}
                     />
@@ -1727,7 +1786,7 @@ export function CreateInvoicePage() {
                         <FiX size={16} />
                       </button>
                     )}
-                    {showCustomerDropdown && customerSearch && (
+                    {showCustomerDropdown && customerSearch && canViewCustomers && (
                       <div role="listbox" className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-64 overflow-y-auto">
                         {customersLoading ? (
                           <div className="p-4 text-sm text-slate-500 flex items-center justify-center gap-2">
@@ -1769,13 +1828,15 @@ export function CreateInvoicePage() {
                       </div>
                     )}
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowCustomerOffcanvas(true)}
-                    className="px-4 rounded-xl border border-slate-200 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:border-indigo-300 transition"
-                  >
-                    Add
-                  </button>
+                  {canCreateCustomer && (
+                    <button
+                      type="button"
+                      onClick={() => setShowCustomerOffcanvas(true)}
+                      className="px-4 rounded-xl border border-slate-200 text-sm font-medium text-indigo-600 hover:bg-indigo-50 hover:border-indigo-300 transition"
+                    >
+                      Add
+                    </button>
+                  )}
                 </div>
                 {form.customer_id && customers?.find((c) => c.id === Number(form.customer_id)) && (
                   <p className="text-xs text-emerald-600 flex items-center gap-1 mt-1.5">
@@ -2015,18 +2076,19 @@ export function CreateInvoicePage() {
                 <FiSearch className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                 <input
                   type="text"
-                  placeholder="Search products by name, SKU, barcode or HSN…"
+                  placeholder={canViewProducts ? 'Search products by name, SKU, barcode or HSN…' : 'Product search disabled'}
                   value={productSearch}
                   onChange={(e) => {
                     setProductSearch(sanitizeText(e.target.value, LIMITS.NAME));
                     setShowProductDropdown(true);
                     setProductHighlight(-1);
                   }}
-                  onFocus={() => setShowProductDropdown(true)}
+                  onFocus={() => canViewProducts && setShowProductDropdown(true)}
                   onKeyDown={onProductKeyDown}
                   aria-label="Search products"
                   aria-autocomplete="list"
                   aria-expanded={showProductDropdown}
+                  disabled={!canViewProducts}
                   maxLength={LIMITS.NAME}
                   className={`${inputBase} pl-10 pr-10`}
                 />
@@ -2040,7 +2102,7 @@ export function CreateInvoicePage() {
                     <FiX size={16} />
                   </button>
                 )}
-                {showProductDropdown && productSearch && (
+                {showProductDropdown && productSearch && canViewProducts && (
                   <div role="listbox" className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-64 overflow-y-auto">
                     {productsLoading ? (
                       <div className="p-4 text-sm text-slate-500 flex items-center justify-center gap-2">
@@ -2085,13 +2147,15 @@ export function CreateInvoicePage() {
                   </div>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={openProductOffcanvas}
-                className="px-4 py-2.5 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1.5 whitespace-nowrap transition"
-              >
-                <FiPlus size={16} /> Add Product
-              </button>
+              {canCreateProduct && (
+                <button
+                  type="button"
+                  onClick={openProductOffcanvas}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-sm font-medium flex items-center gap-1.5 whitespace-nowrap transition"
+                >
+                  <FiPlus size={16} /> Add Product
+                </button>
+              )}
             </div>
           </div>
 
@@ -2534,94 +2598,107 @@ export function CreateInvoicePage() {
               <p className="text-xs text-slate-500 italic">{totalInWords}</p>
             </dl>
 
-            <div className="mt-6 pt-5 border-t border-slate-100">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-slate-700">Payments</h3>
-                <button
-                  onClick={addPayment}
-                  className="text-xs text-indigo-600 flex items-center gap-1 hover:underline"
-                >
-                  <FiPlus size={12} /> Add Payment
-                </button>
-              </div>
+            {/* Payments — hidden entirely when not permitted */}
+            {canRecordPayments && (
+              <div className="mt-6 pt-5 border-t border-slate-100">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-slate-700">Payments</h3>
+                  <button
+                    onClick={addPayment}
+                    className="text-xs text-indigo-600 flex items-center gap-1 hover:underline"
+                  >
+                    <FiPlus size={12} /> Add Payment
+                  </button>
+                </div>
 
-              {form.payments.length === 0 ? (
-                <p className="text-xs text-slate-400">No payments recorded.</p>
-              ) : (
-                <div className="space-y-3">
-                  {form.payments.map((pay, idx) => (
-                    <div key={pay.id} className="bg-slate-50 rounded-xl p-3 border border-slate-200">
-                      <div className="flex justify-between items-center mb-2">
-                        <span className="text-xs font-semibold text-slate-500">Payment #{idx + 1}</span>
-                        <button
-                          onClick={() => removePayment(pay.id)}
-                          className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
-                          aria-label="Remove payment"
-                        >
-                          <FiTrash2 size={13} />
-                        </button>
+                {form.payments.length === 0 ? (
+                  <p className="text-xs text-slate-400">No payments recorded.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {form.payments.map((pay, idx) => (
+                      <div key={pay.id} className="bg-slate-50 rounded-xl p-3 border border-slate-200">
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-xs font-semibold text-slate-500">Payment #{idx + 1}</span>
+                          <button
+                            onClick={() => removePayment(pay.id)}
+                            className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition"
+                            aria-label="Remove payment"
+                          >
+                            <FiTrash2 size={13} />
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <input
+                            type="number" min={0} step={0.01} placeholder="Amount"
+                            value={pay.amount}
+                            onChange={(e) => updatePayment(pay.id, 'amount', Math.max(0, safeNumber(e.target.value)))}
+                            className={`${inputBase} text-right tabular-nums`}
+                          />
+                          <select
+                            value={pay.payment_method}
+                            onChange={(e) => updatePayment(pay.id, 'payment_method', e.target.value as PaymentEntry['payment_method'])}
+                            className={inputBase}
+                          >
+                            <option value="UPI">UPI</option>
+                            <option value="cash">Cash</option>
+                            <option value="cheque">Cheque</option>
+                            <option value="other">Other</option>
+                          </select>
+                          <input
+                            type="text" placeholder="Transaction ID"
+                            value={pay.reference_no}
+                            onChange={(e) => updatePayment(pay.id, 'reference_no', sanitizeText(e.target.value, LIMITS.SHORT))}
+                            maxLength={LIMITS.SHORT}
+                            className={`${inputBase} font-mono`}
+                          />
+                          <input
+                            type="date" value={pay.transaction_date}
+                            onChange={(e) => updatePayment(pay.id, 'transaction_date', e.target.value)}
+                            className={inputBase}
+                          />
+                          <input
+                            type="text" placeholder="Remarks"
+                            value={pay.remarks}
+                            onChange={(e) => updatePayment(pay.id, 'remarks', sanitizeText(e.target.value, LIMITS.TEXT))}
+                            maxLength={LIMITS.TEXT}
+                            className={`${inputBase} col-span-2`}
+                          />
+                        </div>
                       </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <input
-                          type="number" min={0} step={0.01} placeholder="Amount"
-                          value={pay.amount}
-                          onChange={(e) => updatePayment(pay.id, 'amount', Math.max(0, safeNumber(e.target.value)))}
-                          className={`${inputBase} text-right tabular-nums`}
-                        />
-                        <select
-                          value={pay.payment_method}
-                          onChange={(e) => updatePayment(pay.id, 'payment_method', e.target.value as PaymentEntry['payment_method'])}
-                          className={inputBase}
-                        >
-                          <option value="UPI">UPI</option>
-                          <option value="cash">Cash</option>
-                          <option value="cheque">Cheque</option>
-                          <option value="other">Other</option>
-                        </select>
-                        <input
-                          type="text" placeholder="Transaction ID"
-                          value={pay.reference_no}
-                          onChange={(e) => updatePayment(pay.id, 'reference_no', sanitizeText(e.target.value, LIMITS.SHORT))}
-                          maxLength={LIMITS.SHORT}
-                          className={`${inputBase} font-mono`}
-                        />
-                        <input
-                          type="date" value={pay.transaction_date}
-                          onChange={(e) => updatePayment(pay.id, 'transaction_date', e.target.value)}
-                          className={inputBase}
-                        />
-                        <input
-                          type="text" placeholder="Remarks"
-                          value={pay.remarks}
-                          onChange={(e) => updatePayment(pay.id, 'remarks', sanitizeText(e.target.value, LIMITS.TEXT))}
-                          maxLength={LIMITS.TEXT}
-                          className={`${inputBase} col-span-2`}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="mt-4 space-y-1.5 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-slate-500">Total Paid</span>
-                  <span className="tabular-nums">₹{formatCurrency(summary.totalPaid)}</span>
-                </div>
-                <div className="flex justify-between font-medium">
-                  <span className="text-slate-700">Balance Due</span>
-                  <span className={`tabular-nums ${summary.balanceDue > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                    ₹{formatCurrency(summary.balanceDue)}
-                  </span>
-                </div>
-                {changeToReturn > 0 && (
-                  <div className="flex justify-between text-amber-600">
-                    <span>Change to Return</span>
-                    <span className="tabular-nums">₹{formatCurrency(changeToReturn)}</span>
+                    ))}
                   </div>
                 )}
+
+                <div className="mt-4 space-y-1.5 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Total Paid</span>
+                    <span className="tabular-nums">₹{formatCurrency(summary.totalPaid)}</span>
+                  </div>
+                  <div className="flex justify-between font-medium">
+                    <span className="text-slate-700">Balance Due</span>
+                    <span className={`tabular-nums ${summary.balanceDue > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                      ₹{formatCurrency(summary.balanceDue)}
+                    </span>
+                  </div>
+                  {changeToReturn > 0 && (
+                    <div className="flex justify-between text-amber-600">
+                      <span>Change to Return</span>
+                      <span className="tabular-nums">₹{formatCurrency(changeToReturn)}</span>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
+
+            {/* Read-only note when user can't record payments */}
+            {!canRecordPayments && (
+              <div className="mt-6 pt-5 border-t border-slate-100">
+                <p className="text-xs text-slate-400 flex items-center gap-1.5">
+                  <FiLock size={11} />
+                  You do not have permission to record payments. Payments can be added from the invoice page by an authorized user.
+                </p>
+              </div>
+            )}
 
             {(hasRunningTask || postTasks.length > 0) && (
               <div className="mt-6 pt-5 border-t border-slate-100">
@@ -2760,7 +2837,7 @@ export function CreateInvoicePage() {
       />
 
       {/* Customer offcanvas */}
-      {showCustomerOffcanvas && (
+      {showCustomerOffcanvas && canCreateCustomer && (
         <Suspense fallback={<OffcanvasFallback />}>
           <Offcanvas
             isOpen={showCustomerOffcanvas}
@@ -3001,7 +3078,7 @@ export function CreateInvoicePage() {
       )}
 
       {/* Product offcanvas */}
-      {showProductOffcanvas && (
+      {showProductOffcanvas && canCreateProduct && (
         <Suspense fallback={<OffcanvasFallback />}>
           <Offcanvas
             isOpen={showProductOffcanvas}
@@ -3169,3 +3246,5 @@ function OffcanvasFallback() {
     </div>
   );
 }
+
+export default CreateInvoicePage;

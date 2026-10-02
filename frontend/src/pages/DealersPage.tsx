@@ -26,11 +26,14 @@ import {
   FiX,
   FiChevronDown,
   FiClock,
+  FiLock,
 } from 'react-icons/fi';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -396,11 +399,42 @@ const StatCard = memo(
 StatCard.displayName = 'StatCard';
 
 /* ------------------------------------------------------------------ */
+/* No-access fallback                                                  */
+/* ------------------------------------------------------------------ */
+
+const NoAccessCard = ({
+  title = 'Restricted',
+  message = 'You do not have permission to view this section.',
+}: { title?: string; message?: string }) => (
+  <div className="flex items-center gap-3 rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 p-6">
+    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-white text-slate-400 ring-1 ring-slate-200">
+      <FiLock size={16} />
+    </div>
+    <div className="min-w-0">
+      <p className="text-xs font-semibold text-slate-700">{title}</p>
+      <p className="text-[11px] text-slate-500">{message}</p>
+    </div>
+  </div>
+);
+
+/* ------------------------------------------------------------------ */
 /* Main component                                                      */
 /* ------------------------------------------------------------------ */
 
 export function DealersPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* -------------------- RBAC flags -------------------- */
+  const canViewDealers    = isSuperAdmin || can('view dealers') || can('view customers');
+  const canCreateDealer   = isSuperAdmin || can('create dealers') || can('create customers');
+  const canEditDealer     = isSuperAdmin || can('edit dealers') || can('edit customers');
+  const canDeleteDealer   = isSuperAdmin || can('delete dealers') || can('delete customers');
+  const canExportDealers  = isSuperAdmin || can('export dealers') || can('export customers');
+  const canManageGroups   = isSuperAdmin || can('manage customer groups') || can('create customers');
+  const canAutoFillGst    = isSuperAdmin || can('create dealers') || can('edit dealers') || can('create customers');
 
   /* -------------------- Filters -------------------- */
   const [searchTerm, setSearchTerm] = useState('');
@@ -568,6 +602,10 @@ export function DealersPage() {
   };
 
   const handleAutoFill = async () => {
+    if (!canAutoFillGst) {
+      showError('Permission denied', 'You do not have permission to auto-fill GST details.');
+      return;
+    }
     if (!formData.gst_number || formData.gst_number.length < 10) {
       showError('Invalid GSTIN', 'Please enter a valid GSTIN (min 10 characters).');
       return;
@@ -618,6 +656,10 @@ export function DealersPage() {
 
   /* -------------------- Group add -------------------- */
   const handleAddGroup = async () => {
+    if (!canManageGroups) {
+      showError('Permission denied', 'You do not have permission to manage customer groups.');
+      return;
+    }
     if (!newGroupName.trim()) return;
     setAddingGroup(true);
     try {
@@ -686,12 +728,20 @@ export function DealersPage() {
   };
 
   const handleCreate = useCallback(() => {
+    if (!canCreateDealer) {
+      showError('Permission denied', 'You do not have permission to create dealers.');
+      return;
+    }
     setEditingId(null);
     resetForm();
     setIsPanelOpen(true);
-  }, []);
+  }, [canCreateDealer, showError]);
 
   const handleEdit = useCallback((dealer: Dealer) => {
+    if (!canEditDealer) {
+      showError('Permission denied', 'You do not have permission to edit dealers.');
+      return;
+    }
     setEditingId(dealer.id);
     setFormData({
       company_id: dealer.company_id,
@@ -745,10 +795,14 @@ export function DealersPage() {
     });
     setFormErrors({});
     setIsPanelOpen(true);
-  }, []);
+  }, [canEditDealer, showError]);
 
   const handleDelete = useCallback(
     async (dealer: Dealer) => {
+      if (!canDeleteDealer) {
+        showError('Permission denied', 'You do not have permission to delete dealers.');
+        return;
+      }
       if (!window.confirm(`Delete dealer ${dealer.name}?`)) return;
       try {
         await apiClient.deleteCustomer(dealer.id);
@@ -764,7 +818,7 @@ export function DealersPage() {
         showError('Delete failed', getErrorMessage(err, 'Delete failed.'));
       }
     },
-    [refreshCustomers, showSuccess, showError]
+    [refreshCustomers, canDeleteDealer, showSuccess, showError]
   );
 
   /* -------------------- Validation -------------------- */
@@ -797,6 +851,14 @@ export function DealersPage() {
   };
 
   const handleSubmit = useCallback(async () => {
+    if (editingId && !canEditDealer) {
+      showError('Permission denied', 'You do not have permission to edit dealers.');
+      return;
+    }
+    if (!editingId && !canCreateDealer) {
+      showError('Permission denied', 'You do not have permission to create dealers.');
+      return;
+    }
     if (!validateForm()) return;
     const { same_as_billing: _same, ...rest } = formData;
     const payload = {
@@ -849,9 +911,13 @@ export function DealersPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [formData, editingId, refreshCustomers, showSuccess, showError]);
+  }, [formData, editingId, refreshCustomers, canEditDealer, canCreateDealer, showSuccess, showError]);
 
   const handleExport = useCallback(() => {
+    if (!canExportDealers) {
+      showError('Permission denied', 'You do not have permission to export dealers.');
+      return;
+    }
     if (filteredDealers.length === 0) {
       showError('Export failed', 'No dealers to export.');
       return;
@@ -891,7 +957,7 @@ export function DealersPage() {
     a.click();
     URL.revokeObjectURL(url);
     showSuccess('Export', 'Dealer data exported.');
-  }, [filteredDealers, showSuccess, showError]);
+  }, [filteredDealers, canExportDealers, showSuccess, showError]);
 
   /* -------------------- Render field helper -------------------- */
   const renderField = (
@@ -1061,29 +1127,70 @@ export function DealersPage() {
       },
       {
         name: 'Actions',
-        cell: (row: Dealer) => (
-          <div className="flex items-center justify-end gap-1">
-            <button
-              onClick={() => handleEdit(row)}
-              className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
-              title="Edit"
-            >
-              <FiEdit size={15} />
-            </button>
-            <button
-              onClick={() => handleDelete(row)}
-              className="grid h-8 w-8 place-items-center rounded-lg text-rose-500 transition hover:bg-rose-50 hover:text-rose-700"
-              title="Delete"
-            >
-              <FiTrash2 size={15} />
-            </button>
-          </div>
-        ),
+        cell: (row: Dealer) => {
+          if (!canEditDealer && !canDeleteDealer) return null;
+          return (
+            <div className="flex items-center justify-end gap-1">
+              {canEditDealer && (
+                <button
+                  onClick={() => handleEdit(row)}
+                  className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
+                  title="Edit"
+                >
+                  <FiEdit size={15} />
+                </button>
+              )}
+              {canDeleteDealer && (
+                <button
+                  onClick={() => handleDelete(row)}
+                  className="grid h-8 w-8 place-items-center rounded-lg text-rose-500 transition hover:bg-rose-50 hover:text-rose-700"
+                  title="Delete"
+                >
+                  <FiTrash2 size={15} />
+                </button>
+              )}
+            </div>
+          );
+        },
         width: '100px',
       },
     ],
-    [handleEdit, handleDelete, companies]
+    [handleEdit, handleDelete, companies, canEditDealer, canDeleteDealer]
   );
+
+  /* ------------------------------------------------------------------ */
+  /* Loading guard                                                       */
+  /* ------------------------------------------------------------------ */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* No-access panel                                                     */
+  /* ------------------------------------------------------------------ */
+
+  if (!canViewDealers) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to view the dealer directory.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   /* -------------------- Error state -------------------- */
   if (custError) {
@@ -1174,22 +1281,26 @@ export function DealersPage() {
                   <FiRefreshCw className={`mr-2 ${custLoading ? 'animate-spin' : ''}`} size={14} />
                   Refresh
                 </Button>
-                <Button
-                  variant="outline"
-                  onClick={handleExport}
-                  disabled={custLoading || filteredDealers.length === 0}
-                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
-                >
-                  <FiDownload className="mr-2" size={14} />
-                  Export
-                </Button>
-                <Button
-                  onClick={handleCreate}
-                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
-                >
-                  <FiPlus className="mr-2" size={14} />
-                  Add dealer
-                </Button>
+                {canExportDealers && (
+                  <Button
+                    variant="outline"
+                    onClick={handleExport}
+                    disabled={custLoading || filteredDealers.length === 0}
+                    className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50"
+                  >
+                    <FiDownload className="mr-2" size={14} />
+                    Export
+                  </Button>
+                )}
+                {canCreateDealer && (
+                  <Button
+                    onClick={handleCreate}
+                    className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                  >
+                    <FiPlus className="mr-2" size={14} />
+                    Add dealer
+                  </Button>
+                )}
               </div>
             </div>
           </section>
@@ -1398,7 +1509,6 @@ export function DealersPage() {
 
                   {!custLoading && paginatedDealers.length > 0 && (
                     <>
-                      {columns.slice(0, 7).map((col) => null)}
                       {paginatedDealers.map((dealer) => {
                         const comp = (companies || []).find((c) => c.id === dealer.company_id);
                         const out = safeNum(dealer.outstanding_amount);
@@ -1472,22 +1582,30 @@ export function DealersPage() {
                             </TableCell>
 
                             <TableCell className="text-right">
-                              <div className="flex items-center justify-end gap-1">
-                                <button
-                                  onClick={() => handleEdit(dealer)}
-                                  className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
-                                  title="Edit"
-                                >
-                                  <FiEdit size={15} />
-                                </button>
-                                <button
-                                  onClick={() => handleDelete(dealer)}
-                                  className="grid h-8 w-8 place-items-center rounded-lg text-rose-500 transition hover:bg-rose-50 hover:text-rose-700"
-                                  title="Delete"
-                                >
-                                  <FiTrash2 size={15} />
-                                </button>
-                              </div>
+                              {canEditDealer || canDeleteDealer ? (
+                                <div className="flex items-center justify-end gap-1">
+                                  {canEditDealer && (
+                                    <button
+                                      onClick={() => handleEdit(dealer)}
+                                      className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
+                                      title="Edit"
+                                    >
+                                      <FiEdit size={15} />
+                                    </button>
+                                  )}
+                                  {canDeleteDealer && (
+                                    <button
+                                      onClick={() => handleDelete(dealer)}
+                                      className="grid h-8 w-8 place-items-center rounded-lg text-rose-500 transition hover:bg-rose-50 hover:text-rose-700"
+                                      title="Delete"
+                                    >
+                                      <FiTrash2 size={15} />
+                                    </button>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-xs text-slate-400">—</span>
+                              )}
                             </TableCell>
                           </TableRow>
                         );
@@ -1596,8 +1714,8 @@ export function DealersPage() {
         </div>
       </div>
 
-      {/* Offcanvas – Dealer form */}
-      {isPanelOpen && (
+      {/* Offcanvas – Dealer form (create/edit gated) */}
+      {isPanelOpen && (canCreateDealer || canEditDealer) && (
         <Suspense
           fallback={
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
@@ -1738,18 +1856,20 @@ export function DealersPage() {
                         className="h-10 flex-1 rounded-xl border-slate-200 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
                         placeholder="Enter GSTIN"
                       />
-                      <Button
-                        type="button"
-                        onClick={handleAutoFill}
-                        disabled={lookingUp || !formData.gst_number}
-                        className="h-10 shrink-0 rounded-xl bg-slate-900 px-4 text-xs font-semibold text-white hover:bg-slate-800"
-                      >
-                        {lookingUp ? (
-                          <FiRefreshCw className="animate-spin" size={14} />
-                        ) : (
-                          'Auto fill'
-                        )}
-                      </Button>
+                      {canAutoFillGst && (
+                        <Button
+                          type="button"
+                          onClick={handleAutoFill}
+                          disabled={lookingUp || !formData.gst_number}
+                          className="h-10 shrink-0 rounded-xl bg-slate-900 px-4 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+                        >
+                          {lookingUp ? (
+                            <FiRefreshCw className="animate-spin" size={14} />
+                          ) : (
+                            'Auto fill'
+                          )}
+                        </Button>
+                      )}
                     </div>
                   </div>
 
@@ -1986,14 +2106,16 @@ export function DealersPage() {
                         />
                       </div>
                     </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => setShowGroupModal(true)}
-                      className="h-10 shrink-0 rounded-xl"
-                    >
-                      <FiPlus className="mr-1.5" size={14} /> Add
-                    </Button>
+                    {canManageGroups && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setShowGroupModal(true)}
+                        className="h-10 shrink-0 rounded-xl"
+                      >
+                        <FiPlus className="mr-1.5" size={14} /> Add
+                      </Button>
+                    )}
                   </div>
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                     {renderField('Opening balance', 'opening_balance', 'number')}
@@ -2126,8 +2248,8 @@ export function DealersPage() {
         </Suspense>
       )}
 
-      {/* Add group modal */}
-      {showGroupModal && (
+      {/* Add group modal (only if permitted) */}
+      {showGroupModal && canManageGroups && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <div
             className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm"

@@ -18,6 +18,7 @@ import {
   Cpu,
   Database,
   HardDrive,
+  Lock,
   RefreshCw,
   Server,
   Shield,
@@ -40,6 +41,7 @@ import {
 } from 'recharts';
 
 import { useNotification } from '../components/NotificationContext';
+import { useAuthStore } from '../store/auth';
 
 import { HealthSummaryCard } from '../components/health/HealthSummaryCard';
 import { HealthStatusBadge } from '../components/health/HealthStatusBadge';
@@ -103,6 +105,60 @@ import {
   CardTitle,
 } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
+
+/* ==================================================================
+ * RBAC — Permission keys
+ * ================================================================== */
+
+const PERMISSIONS = {
+  HEALTH_VIEW: 'health.view',
+  HEALTH_REFRESH: 'health.refresh',
+  HEALTH_TEST: 'health.test',
+  HEALTH_BACKUP: 'health.backup',
+  HEALTH_ALERTS_RESOLVE: 'health.alerts.resolve',
+  HEALTH_LOGS_VIEW: 'health.logs.view',
+  HEALTH_SECURITY_VIEW: 'health.security.view',
+} as const;
+
+/* ==================================================================
+ * RBAC — Store-backed permissions (admin-aware + notation-insensitive)
+ * ================================================================== */
+
+interface UsePagePermissionsResult {
+  can: (permission: string | string[]) => boolean;
+  isAuthenticated: boolean;
+  isSuperAdmin: boolean;
+  loadingUser: boolean;
+}
+
+function usePagePermissions(): UsePagePermissionsResult {
+  const user = useAuthStore((s) => s.user);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const storeIsSuperAdmin = useAuthStore((s) => s.isSuperAdmin);
+  const storeHasAnyPermission = useAuthStore((s) => s.hasAnyPermission);
+
+  const isSuperAdmin = useMemo(() => {
+    return storeIsSuperAdmin();
+  }, [storeIsSuperAdmin, user]);
+
+  const can = useCallback(
+    (permission: string | string[]): boolean => {
+      if (!isAuthenticated) return false;
+      if (isSuperAdmin) return true;
+
+      const keys = Array.isArray(permission) ? permission : [permission];
+      return storeHasAnyPermission(keys);
+    },
+    [isAuthenticated, isSuperAdmin, storeHasAnyPermission, user],
+  );
+
+  return { can, isAuthenticated, isSuperAdmin, loadingUser };
+}
+
+/* ==================================================================
+ * Constants & helpers
+ * ================================================================== */
 
 const AUTO_REFRESH_OPTIONS = [
   { label: 'Off', value: 0 },
@@ -172,6 +228,25 @@ function healthColor(
 function chartData(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
+
+function errorMessage(error: unknown, fallback: string): string {
+  if (!error) return fallback;
+  if (typeof error === 'string') return error;
+  if (typeof error === 'object') {
+    const obj = error as { message?: unknown; backendMessage?: unknown };
+    if (typeof obj.backendMessage === 'string' && obj.backendMessage) {
+      return obj.backendMessage;
+    }
+    if (typeof obj.message === 'string' && obj.message) {
+      return obj.message;
+    }
+  }
+  return fallback;
+}
+
+/* ==================================================================
+ * Local presentational components
+ * ================================================================== */
 
 function SectionHeader({
   eyebrow,
@@ -283,113 +358,88 @@ function EmptyPanel({
   );
 }
 
+function AccessRestricted() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[#f6f8fc] p-6">
+      <div className="max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-rose-50 text-rose-500">
+          <Lock size={26} />
+        </div>
+
+        <h1 className="mt-4 text-lg font-bold text-slate-800">
+          Access restricted
+        </h1>
+
+        <p className="mt-2 text-sm leading-6 text-slate-500">
+          Your account does not have permission to view System Health Monitoring.
+          Contact your administrator to request the{' '}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px]">
+            health.view
+          </code>{' '}
+          permission.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ==================================================================
+ * Page
+ * ================================================================== */
+
 export function HealthMonitoringPage() {
-  const {
-    showSuccess,
-    showError,
-  } = useNotification();
+  const { showSuccess, showError } = useNotification();
+  const { can, isAuthenticated, loadingUser } = usePagePermissions();
 
-  const [overview, setOverview] =
-    useState<HealthOverview | null>(null);
+  const canView = can(PERMISSIONS.HEALTH_VIEW);
+  const canRefresh = can(PERMISSIONS.HEALTH_REFRESH);
+  const canTest = can(PERMISSIONS.HEALTH_TEST);
+  const canBackup = can(PERMISSIONS.HEALTH_BACKUP);
+  const canResolveAlerts = can(PERMISSIONS.HEALTH_ALERTS_RESOLVE);
 
-  const [server, setServer] =
-    useState<ServerHealth | null>(null);
+  const [overview, setOverview] = useState<HealthOverview | null>(null);
+  const [server, setServer] = useState<ServerHealth | null>(null);
+  const [database, setDatabase] = useState<DatabaseHealth | null>(null);
+  const [apiEntries, setApiEntries] = useState<ApiHealthEntry[]>([]);
+  const [integrationEntries, setIntegrationEntries] = useState<IntegrationHealthEntry[]>([]);
+  const [queue, setQueue] = useState<QueueHealth | null>(null);
+  const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
+  const [cronError, setCronError] = useState('');
+  const [storage, setStorage] = useState<StorageHealth | null>(null);
+  const [backup, setBackup] = useState<BackupHealth | null>(null);
+  const [security, setSecurity] = useState<SecurityHealth | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [performance, setPerformance] = useState<PerformanceHealth | null>(null);
+  const [uptime, setUptime] = useState<UptimeHealth | null>(null);
+  const [alerts, setAlerts] = useState<AlertEntry[]>([]);
+  const [history, setHistory] = useState<HistorySection[]>([]);
+  const [serviceStatuses, setServiceStatuses] = useState<ServiceStatusItem[]>([]);
 
-  const [database, setDatabase] =
-    useState<DatabaseHealth | null>(null);
-
-  const [apiEntries, setApiEntries] =
-    useState<ApiHealthEntry[]>([]);
-
-  const [integrationEntries, setIntegrationEntries] =
-    useState<IntegrationHealthEntry[]>([]);
-
-  const [queue, setQueue] =
-    useState<QueueHealth | null>(null);
-
-  const [cronTasks, setCronTasks] =
-    useState<CronTask[]>([]);
-
-  const [cronError, setCronError] =
-    useState('');
-
-  const [storage, setStorage] =
-    useState<StorageHealth | null>(null);
-
-  const [backup, setBackup] =
-    useState<BackupHealth | null>(null);
-
-  const [security, setSecurity] =
-    useState<SecurityHealth | null>(null);
-
-  const [logs, setLogs] =
-    useState<LogEntry[]>([]);
-
-  const [performance, setPerformance] =
-    useState<PerformanceHealth | null>(null);
-
-  const [uptime, setUptime] =
-    useState<UptimeHealth | null>(null);
-
-  const [alerts, setAlerts] =
-    useState<AlertEntry[]>([]);
-
-  const [history, setHistory] =
-    useState<HistorySection[]>([]);
-
-  const [serviceStatuses, setServiceStatuses] =
-    useState<ServiceStatusItem[]>([]);
-
-  const [
-    statusFilter,
-    setStatusFilter,
-  ] = useState<
+  const [statusFilter, setStatusFilter] = useState<
     'All' | 'Healthy' | 'Warning' | 'Critical' | 'Offline'
   >('All');
 
-  const [
-    autoRefreshEnabled,
-    setAutoRefreshEnabled,
-  ] = useState(true);
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
+  const [autoRefreshInterval, setAutoRefreshInterval] = useState(30);
+  const [nextRefreshIn, setNextRefreshIn] = useState(30);
+  const [loading, setLoading] = useState(false);
+  const [pageError, setPageError] = useState('');
+  const [selectedHistoryRange, setSelectedHistoryRange] = useState('');
 
-  const [
-    autoRefreshInterval,
-    setAutoRefreshInterval,
-  ] = useState(30);
+  const [testModal, setTestModal] = useState({
+    title: '',
+    message: '',
+    open: false,
+  });
 
-  const [
-    nextRefreshIn,
-    setNextRefreshIn,
-  ] = useState(30);
+  const [detailsModal, setDetailsModal] = useState({
+    title: '',
+    message: '',
+    open: false,
+  });
 
-  const [loading, setLoading] =
-    useState(false);
-
-  const [pageError, setPageError] =
-    useState('');
-
-  const [selectedHistoryRange, setSelectedHistoryRange] =
-    useState('');
-
-  const [testModal, setTestModal] =
-    useState({
-      title: '',
-      message: '',
-      open: false,
-    });
-
-  const [detailsModal, setDetailsModal] =
-    useState({
-      title: '',
-      message: '',
-      open: false,
-    });
-
-  const intervalRef =
-    useRef<number | null>(null);
-
-  const mountedRef =
-    useRef(true);
+  const intervalRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -404,31 +454,39 @@ export function HealthMonitoringPage() {
     };
   }, []);
 
+  /* ---------------------------------------------------------------
+   * Load health data
+   * --------------------------------------------------------------- */
+
   const loadHealth = useCallback(
     async (notify = false) => {
+      if (!canView) {
+        setLoading(false);
+        return;
+      }
+
       setLoading(true);
       setPageError('');
       setCronError('');
 
-      const results =
-        await Promise.allSettled([
-          getHealthOverview(),
-          getServerHealth(),
-          getDatabaseHealth(),
-          getApiHealth(),
-          getIntegrationHealth(),
-          getQueueHealth(),
-          getCronHealth(),
-          getStorageHealth(),
-          getBackupHealth(),
-          getSecurityHealth(),
-          getLogHealth(),
-          getPerformanceHealth(),
-          getUptimeHealth(),
-          getAlertHealth(),
-          getHistorySections(),
-          getServiceStatusGrid(),
-        ]);
+      const results = await Promise.allSettled([
+        getHealthOverview(),
+        getServerHealth(),
+        getDatabaseHealth(),
+        getApiHealth(),
+        getIntegrationHealth(),
+        getQueueHealth(),
+        getCronHealth(),
+        getStorageHealth(),
+        getBackupHealth(),
+        getSecurityHealth(),
+        getLogHealth(),
+        getPerformanceHealth(),
+        getUptimeHealth(),
+        getAlertHealth(),
+        getHistorySections(),
+        getServiceStatusGrid(),
+      ]);
 
       if (!mountedRef.current) return;
 
@@ -451,95 +509,21 @@ export function HealthMonitoringPage() {
         servicesRes,
       ] = results;
 
-      setOverview(
-        overviewRes.status === 'fulfilled'
-          ? overviewRes.value
-          : null,
-      );
-
-      setServer(
-        serverRes.status === 'fulfilled'
-          ? serverRes.value
-          : null,
-      );
-
-      setDatabase(
-        databaseRes.status === 'fulfilled'
-          ? databaseRes.value
-          : null,
-      );
-
-      setApiEntries(
-        apiRes.status === 'fulfilled'
-          ? apiRes.value
-          : [],
-      );
-
-      setIntegrationEntries(
-        integrationRes.status === 'fulfilled'
-          ? integrationRes.value
-          : [],
-      );
-
-      setQueue(
-        queueRes.status === 'fulfilled'
-          ? queueRes.value
-          : null,
-      );
-
-      setStorage(
-        storageRes.status === 'fulfilled'
-          ? storageRes.value
-          : null,
-      );
-
-      setBackup(
-        backupRes.status === 'fulfilled'
-          ? backupRes.value
-          : null,
-      );
-
-      setSecurity(
-        securityRes.status === 'fulfilled'
-          ? securityRes.value
-          : null,
-      );
-
-      setLogs(
-        logsRes.status === 'fulfilled'
-          ? logsRes.value
-          : [],
-      );
-
-      setPerformance(
-        performanceRes.status === 'fulfilled'
-          ? performanceRes.value
-          : null,
-      );
-
-      setUptime(
-        uptimeRes.status === 'fulfilled'
-          ? uptimeRes.value
-          : null,
-      );
-
-      setAlerts(
-        alertsRes.status === 'fulfilled'
-          ? alertsRes.value
-          : [],
-      );
-
-      setHistory(
-        historyRes.status === 'fulfilled'
-          ? historyRes.value
-          : [],
-      );
-
-      setServiceStatuses(
-        servicesRes.status === 'fulfilled'
-          ? servicesRes.value
-          : [],
-      );
+      setOverview(overviewRes.status === 'fulfilled' ? overviewRes.value : null);
+      setServer(serverRes.status === 'fulfilled' ? serverRes.value : null);
+      setDatabase(databaseRes.status === 'fulfilled' ? databaseRes.value : null);
+      setApiEntries(apiRes.status === 'fulfilled' ? apiRes.value : []);
+      setIntegrationEntries(integrationRes.status === 'fulfilled' ? integrationRes.value : []);
+      setQueue(queueRes.status === 'fulfilled' ? queueRes.value : null);
+      setStorage(storageRes.status === 'fulfilled' ? storageRes.value : null);
+      setBackup(backupRes.status === 'fulfilled' ? backupRes.value : null);
+      setSecurity(securityRes.status === 'fulfilled' ? securityRes.value : null);
+      setLogs(logsRes.status === 'fulfilled' ? logsRes.value : []);
+      setPerformance(performanceRes.status === 'fulfilled' ? performanceRes.value : null);
+      setUptime(uptimeRes.status === 'fulfilled' ? uptimeRes.value : null);
+      setAlerts(alertsRes.status === 'fulfilled' ? alertsRes.value : []);
+      setHistory(historyRes.status === 'fulfilled' ? historyRes.value : []);
+      setServiceStatuses(servicesRes.status === 'fulfilled' ? servicesRes.value : []);
 
       if (cronRes.status === 'fulfilled') {
         setCronTasks(cronRes.value);
@@ -547,37 +531,26 @@ export function HealthMonitoringPage() {
       } else {
         setCronTasks([]);
         setCronError(
-          cronRes.reason?.message ||
-            'Unable to load scheduled tasks.',
+          errorMessage(cronRes.reason, 'Unable to load scheduled tasks.'),
         );
       }
 
-      const failures = results.filter(
-        result => result.status === 'rejected',
-      );
+      const failures = results.filter((result) => result.status === 'rejected');
 
       if (failures.length > 0) {
         const firstFailure = failures[0];
-
         const message =
           firstFailure.status === 'rejected'
-            ? firstFailure.reason?.message ||
-              'Unable to load all health data.'
+            ? errorMessage(firstFailure.reason, 'Unable to load all health data.')
             : 'Unable to load health data.';
 
         setPageError(message);
 
         if (notify) {
-          showError(
-            'Health load failed',
-            message,
-          );
+          showError('Health load failed', message);
         }
       } else if (notify) {
-        showSuccess(
-          'Health updated',
-          'System health data refreshed successfully.',
-        );
+        showSuccess('Health updated', 'System health data refreshed successfully.');
       }
 
       if (autoRefreshInterval > 0) {
@@ -586,36 +559,27 @@ export function HealthMonitoringPage() {
 
       setLoading(false);
     },
-    [
-      autoRefreshInterval,
-      showError,
-      showSuccess,
-    ],
+    [autoRefreshInterval, showError, showSuccess, canView],
   );
 
   useEffect(() => {
+    if (!canView) return;
     void loadHealth(false);
-  }, [loadHealth]);
+  }, [loadHealth, canView]);
 
   useEffect(() => {
-    if (
-      !autoRefreshEnabled ||
-      autoRefreshInterval <= 0
-    ) {
+    if (!canView) return;
+    if (!autoRefreshEnabled || autoRefreshInterval <= 0) {
       if (intervalRef.current !== null) {
         window.clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
-
       return;
     }
 
-    intervalRef.current = window.setInterval(
-      () => {
-        void loadHealth(false);
-      },
-      autoRefreshInterval * 1000,
-    );
+    intervalRef.current = window.setInterval(() => {
+      void loadHealth(false);
+    }, autoRefreshInterval * 1000);
 
     return () => {
       if (intervalRef.current !== null) {
@@ -623,304 +587,286 @@ export function HealthMonitoringPage() {
         intervalRef.current = null;
       }
     };
-  }, [
-    autoRefreshEnabled,
-    autoRefreshInterval,
-    loadHealth,
-  ]);
+  }, [autoRefreshEnabled, autoRefreshInterval, loadHealth, canView]);
 
   useEffect(() => {
-    if (
-      !autoRefreshEnabled ||
-      autoRefreshInterval <= 0
-    ) {
-      return;
-    }
+    if (!canView) return;
+    if (!autoRefreshEnabled || autoRefreshInterval <= 0) return;
 
-    const countdown =
-      window.setInterval(() => {
-        setNextRefreshIn(current =>
-          current > 0
-            ? current - 1
-            : autoRefreshInterval,
-        );
-      }, 1000);
+    const countdown = window.setInterval(() => {
+      setNextRefreshIn((current) =>
+        current > 0 ? current - 1 : autoRefreshInterval,
+      );
+    }, 1000);
 
-    return () =>
-      window.clearInterval(countdown);
-  }, [
-    autoRefreshEnabled,
-    autoRefreshInterval,
-  ]);
+    return () => window.clearInterval(countdown);
+  }, [autoRefreshEnabled, autoRefreshInterval, canView]);
 
   useEffect(() => {
+    if (!canView) return;
+
     const visibilityHandler = () => {
       if (document.hidden) {
         if (intervalRef.current !== null) {
           window.clearInterval(intervalRef.current);
           intervalRef.current = null;
         }
-
         return;
       }
 
-      if (
-        autoRefreshEnabled &&
-        autoRefreshInterval > 0
-      ) {
+      if (autoRefreshEnabled && autoRefreshInterval > 0) {
         void loadHealth(false);
       }
     };
 
-    document.addEventListener(
-      'visibilitychange',
-      visibilityHandler,
-    );
+    document.addEventListener('visibilitychange', visibilityHandler);
 
     return () =>
-      document.removeEventListener(
-        'visibilitychange',
-        visibilityHandler,
-      );
-  }, [
-    autoRefreshEnabled,
-    autoRefreshInterval,
-    loadHealth,
-  ]);
+      document.removeEventListener('visibilitychange', visibilityHandler);
+  }, [autoRefreshEnabled, autoRefreshInterval, loadHealth, canView]);
 
-  const handleRefresh = () => {
+  /* ---------------------------------------------------------------
+   * Actions
+   * --------------------------------------------------------------- */
+
+  const handleRefresh = useCallback(() => {
+    if (!canRefresh) {
+      showError('Permission denied', 'You do not have permission to refresh health data.');
+      return;
+    }
     void loadHealth(true);
-  };
+  }, [canRefresh, loadHealth, showError]);
 
-  const handleTest = async (
-    action: () => Promise<{ message: string }>,
-    title: string,
-  ) => {
+  const handleTest = useCallback(
+    async (action: () => Promise<{ message: string }>, title: string) => {
+      if (!canTest) {
+        showError('Permission denied', 'You do not have permission to run health tests.');
+        return;
+      }
+
+      try {
+        setTestModal({
+          title,
+          message: 'Testing connection…',
+          open: true,
+        });
+
+        const result = await action();
+
+        if (!mountedRef.current) return;
+
+        setTestModal({
+          title,
+          message: result.message,
+          open: true,
+        });
+
+        showSuccess('Test complete', result.message);
+      } catch (error: unknown) {
+        const message = errorMessage(error, 'Test failed.');
+
+        if (mountedRef.current) {
+          setTestModal({
+            title,
+            message,
+            open: true,
+          });
+        }
+
+        showError('Test failed', message);
+      }
+    },
+    [canTest, showError, showSuccess],
+  );
+
+  const handleResolveAlert = useCallback(
+    async (alert: AlertEntry) => {
+      if (!canResolveAlerts) {
+        showError('Permission denied', 'You do not have permission to resolve alerts.');
+        return;
+      }
+
+      try {
+        await resolveAlert(alert.id);
+
+        if (!mountedRef.current) return;
+
+        setAlerts((current) =>
+          current.map((item) =>
+            item.id === alert.id
+              ? { ...item, status: 'Healthy' as HealthStatus }
+              : item,
+          ),
+        );
+
+        showSuccess('Alert resolved', `${alert.title} has been resolved.`);
+      } catch (error: unknown) {
+        showError('Resolve failed', errorMessage(error, 'Unable to resolve alert.'));
+      }
+    },
+    [canResolveAlerts, showError, showSuccess],
+  );
+
+  const handleBackupNow = useCallback(async () => {
+    if (!canBackup) {
+      showError('Permission denied', 'You do not have permission to trigger backups.');
+      return;
+    }
+
     try {
       setTestModal({
-        title,
-        message: 'Testing connection…',
+        title: 'Backup Now',
+        message: 'Running backup…',
         open: true,
       });
 
-      const result = await action();
+      const result = await triggerBackupNow();
 
       if (!mountedRef.current) return;
 
       setTestModal({
-        title,
+        title: 'Backup Now',
         message: result.message,
         open: true,
       });
 
-      showSuccess(
-        'Test complete',
-        result.message,
-      );
+      showSuccess('Backup started', result.message);
+
+      void loadHealth(false);
     } catch (error: unknown) {
-      const message =
-        (error as any)?.message ||
-        'Test failed.';
+      const message = errorMessage(error, 'Unable to trigger backup.');
 
-      setTestModal({
-        title,
-        message,
-        open: true,
-      });
+      if (mountedRef.current) {
+        setTestModal({
+          title: 'Backup Now',
+          message,
+          open: true,
+        });
+      }
 
-      showError(
-        'Test failed',
-        message,
-      );
+      showError('Backup failed', message);
     }
-  };
+  }, [canBackup, showError, showSuccess, loadHealth]);
 
-  const handleResolveAlert = async (
-    alert: AlertEntry,
-  ) => {
-    try {
-      await resolveAlert(alert.id);
-
-      setAlerts(current =>
-        current.map(item =>
-          item.id === alert.id
-            ? {
-                ...item,
-                status:
-                  'Healthy' as HealthStatus,
-              }
-            : item,
-        ),
-      );
-
-      showSuccess(
-        'Alert resolved',
-        `${alert.title} has been resolved.`,
-      );
-    } catch (error: unknown) {
-      showError(
-        'Resolve failed',
-        (error as any)?.message ||
-          'Unable to resolve alert.',
-      );
+  const handleSyncNow = useCallback(() => {
+    if (!canTest) {
+      showError('Permission denied', 'You do not have permission to run integrations.');
+      return;
     }
-  };
+    showSuccess('Sync requested', 'Integration sync request submitted.');
+  }, [canTest, showError, showSuccess]);
 
-  const serverMetrics = useMemo(
-    () => {
-      const cpu =
-        Number(server?.cpuUsage ?? 0);
+  /* ---------------------------------------------------------------
+   * Stable, memoized wrappers for child component callbacks.
+   * --------------------------------------------------------------- */
 
-      const ram =
-        Number(server?.ramUsage ?? 0);
+  const handleTestApiConnection = useCallback(() => {
+    void handleTest(testApiConnection, 'API Connection Test');
+  }, [handleTest]);
 
-      const storageUsage =
-        Number(
-          server?.storageUsage ?? 0,
-        );
+  const handleTestIntegrationConnection = useCallback(() => {
+    void handleTest(testIntegrationConnection, 'Integration Connection Test');
+  }, [handleTest]);
 
-      const load =
-        Number(
-          server?.serverLoad ?? 0,
-        );
+  /* ---------------------------------------------------------------
+   * Derived data
+   * --------------------------------------------------------------- */
 
-      return [
-        {
-          icon: <Cpu className="h-4 w-4" />,
-          label: 'CPU Usage',
-          value: server
-            ? `${server.cpuUsage}%`
-            : '—',
-          description:
-            'Healthy below 70%',
-          status:
-            cpu > 85
-              ? 'Critical'
-              : cpu > 70
-                ? 'Warning'
-                : 'Healthy',
-          width: cpu,
-        },
-        {
-          icon: <Cloud className="h-4 w-4" />,
-          label: 'RAM Usage',
-          value: server
-            ? `${server.ramUsage}%`
-            : '—',
-          description:
-            'Memory utilization',
-          status:
-            ram > 85
-              ? 'Critical'
-              : ram > 70
-                ? 'Warning'
-                : 'Healthy',
-          width: ram,
-        },
-        {
-          icon: <HardDrive className="h-4 w-4" />,
-          label: 'Storage',
-          value: server
-            ? `${server.storageUsage}%`
-            : '—',
-          description: storage
-            ? `${storage.used} used`
-            : 'Disk utilization',
-          status:
-            storageUsage > 85
-              ? 'Critical'
-              : storageUsage > 70
-                ? 'Warning'
-                : 'Healthy',
-          width: storageUsage,
-        },
-        {
-          icon: <Activity className="h-4 w-4" />,
-          label: 'Server Load',
-          value: server
-            ? String(server.serverLoad)
-            : '—',
-          description:
-            'Normal below 0.85',
-          status:
-            load > 0.85
+  const serverMetrics = useMemo(() => {
+    const cpu = Number(server?.cpuUsage ?? 0);
+    const ram = Number(server?.ramUsage ?? 0);
+    const storageUsage = Number(server?.storageUsage ?? 0);
+    const load = Number(server?.serverLoad ?? 0);
+
+    return [
+      {
+        icon: <Cpu className="h-4 w-4" />,
+        label: 'CPU Usage',
+        value: server ? `${server.cpuUsage}%` : '—',
+        description: 'Healthy below 70%',
+        status: cpu > 85 ? 'Critical' : cpu > 70 ? 'Warning' : 'Healthy',
+        width: cpu,
+      },
+      {
+        icon: <Cloud className="h-4 w-4" />,
+        label: 'RAM Usage',
+        value: server ? `${server.ramUsage}%` : '—',
+        description: 'Memory utilization',
+        status: ram > 85 ? 'Critical' : ram > 70 ? 'Warning' : 'Healthy',
+        width: ram,
+      },
+      {
+        icon: <HardDrive className="h-4 w-4" />,
+        label: 'Storage',
+        value: server ? `${server.storageUsage}%` : '—',
+        description: storage ? `${storage.used} used` : 'Disk utilization',
+        status:
+          storageUsage > 85
+            ? 'Critical'
+            : storageUsage > 70
               ? 'Warning'
               : 'Healthy',
-          width: Math.min(
-            100,
-            load * 100,
-          ),
-        },
-      ] as const;
-    },
-    [server, storage],
-  );
+        width: storageUsage,
+      },
+      {
+        icon: <Activity className="h-4 w-4" />,
+        label: 'Server Load',
+        value: server ? String(server.serverLoad) : '—',
+        description: 'Normal below 0.85',
+        status: load > 0.85 ? 'Warning' : 'Healthy',
+        width: Math.min(100, load * 100),
+      },
+    ] as const;
+  }, [server, storage]);
 
   const overviewCards = useMemo(() => {
-    const status =
-      overview?.status ?? 'Offline';
+    const status = overview?.status ?? 'Offline';
 
-    const uptimeStatus =
-      !overview
-        ? 'Offline'
-        : overview.uptimePercentage >=
-            99.9
-          ? 'Healthy'
-          : overview.uptimePercentage >=
-              99
-            ? 'Warning'
-            : 'Critical';
+    const uptimeStatus = !overview
+      ? 'Offline'
+      : overview.uptimePercentage >= 99.9
+        ? 'Healthy'
+        : overview.uptimePercentage >= 99
+          ? 'Warning'
+          : 'Critical';
 
-    const securityStatus =
-      !security
-        ? 'Offline'
-        : security.sslStatus === 'Valid'
-          ? 'Healthy'
-          : 'Warning';
+    const securityStatus = !security
+      ? 'Offline'
+      : security.sslStatus === 'Valid'
+        ? 'Healthy'
+        : 'Warning';
 
     return [
       {
         icon: <Server className="h-5 w-5" />,
         title: 'ERP Status',
-        value:
-          overview?.status ??
-          'Loading',
-        details:
-          statusDescription(status),
+        value: overview?.status ?? 'Loading',
+        details: statusDescription(status),
         status,
         trend: 'Calculated',
       },
       {
         icon: <Clock3 className="h-5 w-5" />,
         title: 'Uptime',
-        value: overview
-          ? `${overview.uptimePercentage}%`
-          : '—',
-        details:
-          '30-day availability',
+        value: overview ? `${overview.uptimePercentage}%` : '—',
+        details: '30-day availability',
         status: uptimeStatus,
         trend: 'Stable',
       },
       {
         icon: <Database className="h-5 w-5" />,
         title: 'Database',
-        value:
-          database?.connectionStatus ??
-          '—',
+        value: database?.connectionStatus ?? '—',
         details: database
           ? `${database.responseTimeMs} ms response`
           : 'Database monitoring',
-        status:
-          database?.status ??
-          'Offline',
+        status: database?.status ?? 'Offline',
         trend: 'Monitored',
       },
       {
         icon: <Shield className="h-5 w-5" />,
         title: 'Security',
-        value:
-          security?.sslStatus ??
-          '—',
+        value: security?.sslStatus ?? '—',
         details: security
           ? `${security.httpsStatus} · expiry ${security.sslExpiry}`
           : 'Security monitoring',
@@ -928,40 +874,43 @@ export function HealthMonitoringPage() {
         trend: 'Reviewed',
       },
     ] as const;
-  }, [
-    overview,
-    database,
-    security,
-  ]);
+  }, [overview, database, security]);
 
-  const activeAlerts = alerts.filter(
-    alert => alert.status !== 'Healthy',
-  );
+  const activeAlerts = alerts.filter((alert) => alert.status !== 'Healthy');
 
   const currentHistory =
-    history.find(
-      item =>
-        item.range ===
-        selectedHistoryRange,
-    ) ?? history[0];
+    history.find((item) => item.range === selectedHistoryRange) ?? history[0];
 
   useEffect(() => {
     if (
       history.length > 0 &&
-      !history.some(
-        item =>
-          item.range ===
-          selectedHistoryRange,
-      )
+      !history.some((item) => item.range === selectedHistoryRange)
     ) {
-      setSelectedHistoryRange(
-        history[0].range,
-      );
+      setSelectedHistoryRange(history[0].range);
     }
-  }, [
-    history,
-    selectedHistoryRange,
-  ]);
+  }, [history, selectedHistoryRange]);
+
+  /* ---------------------------------------------------------------
+   * RBAC page gate
+   * --------------------------------------------------------------- */
+
+  if (loadingUser && !isAuthenticated) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#f6f8fc]">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated || !canView) {
+    return <AccessRestricted />;
+  }
+
+  /* ---------------------------------------------------------------
+   * Render
+   * --------------------------------------------------------------- */
 
   return (
     <div className="min-h-screen bg-[#f6f8fc] p-4 text-slate-800 md:p-7">
@@ -984,97 +933,60 @@ export function HealthMonitoringPage() {
                   </h1>
 
                   <p className="mt-1 max-w-3xl text-sm text-slate-300">
-                    Monitor ERP infrastructure,
-                    database, APIs,
-                    integrations, queues,
+                    Monitor ERP infrastructure, database, APIs, integrations, queues,
                     backups, security and uptime.
                   </p>
 
                   <p className="mt-4 text-xs text-slate-400">
-                    Last checked:{' '}
-                    {safeDateTime(
-                      overview?.lastChecked,
-                    )}
+                    Last checked: {safeDateTime(overview?.lastChecked)}
                     {' · '}
-                    {loading
-                      ? 'Refreshing…'
-                      : 'Live'}
+                    {loading ? 'Refreshing…' : 'Live'}
                   </p>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    onClick={handleRefresh}
-                    disabled={loading}
-                    className="bg-cyan-400 text-slate-950 hover:bg-cyan-300"
-                  >
-                    <RefreshCw
-                      className={`mr-2 h-4 w-4 ${
-                        loading
-                          ? 'animate-spin'
-                          : ''
-                      }`}
-                    />
-                    Refresh All
-                  </Button>
+                  {canRefresh && (
+                    <Button
+                      onClick={handleRefresh}
+                      disabled={loading}
+                      className="bg-cyan-400 text-slate-950 hover:bg-cyan-300"
+                    >
+                      <RefreshCw
+                        className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`}
+                      />
+                      Refresh All
+                    </Button>
+                  )}
 
                   <label className="flex h-10 items-center gap-2 rounded-lg border border-white/15 bg-white/5 px-3 text-xs text-slate-200">
                     <input
                       type="checkbox"
-                      checked={
-                        autoRefreshEnabled
-                      }
-                      onChange={event =>
-                        setAutoRefreshEnabled(
-                          event.target.checked,
-                        )
-                      }
+                      checked={autoRefreshEnabled}
+                      onChange={(event) => setAutoRefreshEnabled(event.target.checked)}
                       className="h-4 w-4 rounded border-white/20"
                     />
                     Auto refresh
                   </label>
 
                   <select
-                    value={
-                      autoRefreshInterval
-                    }
-                    onChange={event => {
-                      const value =
-                        Number(
-                          event.target.value,
-                        );
-
-                      setAutoRefreshInterval(
-                        value,
-                      );
-                      setNextRefreshIn(
-                        value,
-                      );
+                    value={autoRefreshInterval}
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      setAutoRefreshInterval(value);
+                      setNextRefreshIn(value);
                     }}
                     className="h-10 rounded-lg border border-white/15 bg-white px-3 text-sm text-slate-900"
                   >
-                    {AUTO_REFRESH_OPTIONS.map(
-                      option => (
-                        <option
-                          key={
-                            option.value
-                          }
-                          value={
-                            option.value
-                          }
-                        >
-                          {option.label}
-                        </option>
-                      ),
-                    )}
+                    {AUTO_REFRESH_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
 
                   <span className="min-w-[120px] text-right text-xs text-slate-400">
-                    {autoRefreshEnabled &&
-                    autoRefreshInterval > 0
-                      ? refreshLabel(
-                          nextRefreshIn,
-                        )
+                    {autoRefreshEnabled && autoRefreshInterval > 0
+                      ? refreshLabel(nextRefreshIn)
                       : 'Auto refresh off'}
                   </span>
                 </div>
@@ -1089,30 +1001,27 @@ export function HealthMonitoringPage() {
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-rose-600" />
 
             <div className="min-w-0 flex-1">
-              <p className="font-medium">
-                Health data is partially unavailable
-              </p>
-
-              <p className="mt-1 text-xs text-rose-700">
-                {pageError}
-              </p>
+              <p className="font-medium">Health data is partially unavailable</p>
+              <p className="mt-1 text-xs text-rose-700">{pageError}</p>
             </div>
 
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={handleRefresh}
-              className="border-rose-200 bg-white"
-            >
-              Retry
-            </Button>
+            {canRefresh && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleRefresh}
+                className="border-rose-200 bg-white"
+              >
+                Retry
+              </Button>
+            )}
           </div>
         )}
 
         {/* Overview */}
         <div className="grid gap-4 xl:grid-cols-[1.4fr_0.6fr]">
           <div className="grid gap-4 sm:grid-cols-2">
-            {overviewCards.map(card => (
+            {overviewCards.map((card) => (
               <HealthSummaryCard
                 key={card.title}
                 icon={card.icon}
@@ -1124,8 +1033,7 @@ export function HealthMonitoringPage() {
                 onClick={() =>
                   setDetailsModal({
                     title: card.title,
-                    message:
-                      card.details,
+                    message: card.details,
                     open: true,
                   })
                 }
@@ -1134,33 +1042,13 @@ export function HealthMonitoringPage() {
           </div>
 
           <SystemHealthScore
-            score={
-              overview?.score ?? 0
-            }
-            uptimePercentage={
-              overview?.uptimePercentage ??
-              0
-            }
-            healthyServices={
-              overview?.healthyServices ??
-              0
-            }
-            warningServices={
-              overview?.warningServices ??
-              0
-            }
-            criticalServices={
-              overview?.criticalServices ??
-              0
-            }
-            offlineServices={
-              overview?.offlineServices ??
-              0
-            }
-            status={
-              overview?.status ??
-              'Offline'
-            }
+            score={overview?.score ?? 0}
+            uptimePercentage={overview?.uptimePercentage ?? 0}
+            healthyServices={overview?.healthyServices ?? 0}
+            warningServices={overview?.warningServices ?? 0}
+            criticalServices={overview?.criticalServices ?? 0}
+            offlineServices={overview?.offlineServices ?? 0}
+            status={overview?.status ?? 'Offline'}
           />
         </div>
 
@@ -1172,12 +1060,7 @@ export function HealthMonitoringPage() {
               title="Current component health"
               description="High-level view of monitored ERP services."
               action={
-                <HealthStatusBadge
-                  status={
-                    overview?.status ??
-                    'Offline'
-                  }
-                />
+                <HealthStatusBadge status={overview?.status ?? 'Offline'} />
               }
             />
           </CardHeader>
@@ -1185,42 +1068,24 @@ export function HealthMonitoringPage() {
           <CardContent>
             <div className="grid gap-4 sm:grid-cols-3">
               <MetricCard
-                icon={
-                  <Server className="h-5 w-5" />
-                }
+                icon={<Server className="h-5 w-5" />}
                 label="Total Services"
-                value={
-                  overview?.totalServices ??
-                  '—'
-                }
+                value={overview?.totalServices ?? '—'}
               />
 
               <MetricCard
-                icon={
-                  <CheckCircle2 className="h-5 w-5" />
-                }
+                icon={<CheckCircle2 className="h-5 w-5" />}
                 label="Healthy"
-                value={
-                  overview?.healthyServices ??
-                  '—'
-                }
+                value={overview?.healthyServices ?? '—'}
                 status="Healthy"
               />
 
               <MetricCard
-                icon={
-                  <XCircle className="h-5 w-5" />
-                }
+                icon={<XCircle className="h-5 w-5" />}
                 label="Offline"
-                value={
-                  overview?.offlineServices ??
-                  '—'
-                }
+                value={overview?.offlineServices ?? '—'}
                 status={
-                  (overview?.offlineServices ??
-                    0) > 0
-                    ? 'Critical'
-                    : 'Healthy'
+                  (overview?.offlineServices ?? 0) > 0 ? 'Critical' : 'Healthy'
                 }
               />
             </div>
@@ -1240,103 +1105,67 @@ export function HealthMonitoringPage() {
 
             <CardContent>
               <div className="space-y-5">
-                {serverMetrics.map(
-                  metric => (
-                    <div
-                      key={metric.label}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex min-w-0 items-center gap-3">
-                          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-600">
-                            {metric.icon}
-                          </div>
-
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold text-slate-900">
-                              {metric.label}
-                            </p>
-
-                            <p className="truncate text-xs text-slate-500">
-                              {metric.description}
-                            </p>
-                          </div>
+                {serverMetrics.map((metric) => (
+                  <div key={metric.label}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-600">
+                          {metric.icon}
                         </div>
 
-                        <div className="flex shrink-0 items-center gap-2">
-                          <span className="text-sm font-bold text-slate-900">
-                            {metric.value}
-                          </span>
-
-                          <HealthStatusBadge
-                            status={
-                              metric.status
-                            }
-                          />
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-900">
+                            {metric.label}
+                          </p>
+                          <p className="truncate text-xs text-slate-500">
+                            {metric.description}
+                          </p>
                         </div>
                       </div>
 
-                      <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
-                        <div
-                          className={`h-full rounded-full transition-all ${healthColor(
-                            metric.status,
-                          )}`}
-                          style={{
-                            width: `${percentageWidth(
-                              metric.width,
-                            )}%`,
-                          }}
-                        />
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span className="text-sm font-bold text-slate-900">
+                          {metric.value}
+                        </span>
+                        <HealthStatusBadge status={metric.status} />
                       </div>
                     </div>
-                  ),
-                )}
+
+                    <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
+                      <div
+                        className={`h-full rounded-full transition-all ${healthColor(metric.status)}`}
+                        style={{ width: `${percentageWidth(metric.width)}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
               </div>
 
               <Separator className="my-6" />
 
               <div className="grid gap-3 sm:grid-cols-4">
                 <MetricCard
-                  icon={
-                    <Zap className="h-4 w-4" />
-                  }
+                  icon={<Zap className="h-4 w-4" />}
                   label="PHP"
-                  value={
-                    server?.phpVersion ??
-                    '—'
-                  }
+                  value={server?.phpVersion ?? '—'}
                 />
 
                 <MetricCard
-                  icon={
-                    <Server className="h-4 w-4" />
-                  }
+                  icon={<Server className="h-4 w-4" />}
                   label="App"
-                  value={
-                    server?.appVersion ??
-                    '—'
-                  }
+                  value={server?.appVersion ?? '—'}
                 />
 
                 <MetricCard
-                  icon={
-                    <Database className="h-4 w-4" />
-                  }
+                  icon={<Database className="h-4 w-4" />}
                   label="DB"
-                  value={
-                    server?.dbVersion ??
-                    '—'
-                  }
+                  value={server?.dbVersion ?? '—'}
                 />
 
                 <MetricCard
-                  icon={
-                    <Wifi className="h-4 w-4" />
-                  }
+                  icon={<Wifi className="h-4 w-4" />}
                   label="Web Server"
-                  value={
-                    server?.webServer ??
-                    '—'
-                  }
+                  value={server?.webServer ?? '—'}
                 />
               </div>
             </CardContent>
@@ -1344,9 +1173,7 @@ export function HealthMonitoringPage() {
 
           <DatabaseHealthPanel
             data={database}
-            loading={
-              loading && !database
-            }
+            loading={loading && !database}
           />
         </div>
 
@@ -1354,35 +1181,16 @@ export function HealthMonitoringPage() {
         <ApiHealthTable
           entries={apiEntries}
           filter={statusFilter}
-          onFilterChange={
-            setStatusFilter
-          }
-          onTestApi={() =>
-            void handleTest(
-              testApiConnection,
-              'API Connection Test',
-            )
-          }
+          onFilterChange={setStatusFilter}
+          onTestApi={handleTestApiConnection}
         />
 
         {/* Integration + Queue */}
         <div className="grid gap-4 xl:grid-cols-2">
           <IntegrationStatusTable
-            entries={
-              integrationEntries
-            }
-            onTestConnection={() =>
-              void handleTest(
-                testIntegrationConnection,
-                'Integration Connection Test',
-              )
-            }
-            onSyncNow={() =>
-              showSuccess(
-                'Sync requested',
-                'Integration sync request submitted.',
-              )
-            }
+            entries={integrationEntries}
+            onTestConnection={handleTestIntegrationConnection}
+            onSyncNow={handleSyncNow}
           />
 
           <Card className="border-slate-200 shadow-sm">
@@ -1392,18 +1200,15 @@ export function HealthMonitoringPage() {
                 title="Worker activity"
                 description="Pending, processing, failed and scheduled jobs."
                 action={
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      void handleTest(
-                        testQueueConnection,
-                        'Queue Health Test',
-                      )
-                    }
-                  >
-                    Test Queue
-                  </Button>
+                  canTest ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void handleTest(testQueueConnection, 'Queue Health Test')}
+                    >
+                      Test Queue
+                    </Button>
+                  ) : undefined
                 }
               />
             </CardHeader>
@@ -1411,54 +1216,28 @@ export function HealthMonitoringPage() {
             <CardContent>
               <div className="grid gap-3 sm:grid-cols-2">
                 <MetricCard
-                  icon={
-                    <Clock3 className="h-5 w-5" />
-                  }
+                  icon={<Clock3 className="h-5 w-5" />}
                   label="Pending Jobs"
-                  value={
-                    queue?.pending ??
-                    '—'
-                  }
+                  value={queue?.pending ?? '—'}
                 />
 
                 <MetricCard
-                  icon={
-                    <Activity className="h-5 w-5" />
-                  }
+                  icon={<Activity className="h-5 w-5" />}
                   label="Processing"
-                  value={
-                    queue?.processing ??
-                    '—'
-                  }
+                  value={queue?.processing ?? '—'}
                 />
 
                 <MetricCard
-                  icon={
-                    <AlertCircle className="h-5 w-5" />
-                  }
+                  icon={<AlertCircle className="h-5 w-5" />}
                   label="Failed Jobs"
-                  value={
-                    queue?.failed ??
-                    '—'
-                  }
-                  status={
-                    Number(
-                      queue?.failed ?? 0,
-                    ) > 0
-                      ? 'Warning'
-                      : 'Healthy'
-                  }
+                  value={queue?.failed ?? '—'}
+                  status={Number(queue?.failed ?? 0) > 0 ? 'Warning' : 'Healthy'}
                 />
 
                 <MetricCard
-                  icon={
-                    <RefreshCw className="h-5 w-5" />
-                  }
+                  icon={<RefreshCw className="h-5 w-5" />}
                   label="Retry Count"
-                  value={
-                    queue?.retryCount ??
-                    '—'
-                  }
+                  value={queue?.retryCount ?? '—'}
                 />
               </div>
 
@@ -1468,17 +1247,13 @@ export function HealthMonitoringPage() {
                     <p className="text-xs uppercase tracking-wide text-slate-400">
                       Queue Delay
                     </p>
-
                     <p className="mt-1 text-xl font-bold text-slate-900">
-                      {queue?.delay ??
-                        '—'}
+                      {queue?.delay ?? '—'}
                     </p>
                   </div>
 
                   <Badge className="bg-slate-200 text-slate-700 hover:bg-slate-200">
-                    {queue?.scheduledJobs ??
-                      '—'}{' '}
-                    scheduled
+                    {queue?.scheduledJobs ?? '—'} scheduled
                   </Badge>
                 </div>
               </div>
@@ -1499,17 +1274,9 @@ export function HealthMonitoringPage() {
                     status={
                       cronError
                         ? 'Warning'
-                        : cronTasks.some(
-                              task =>
-                                task.status ===
-                                'Critical',
-                            )
+                        : cronTasks.some((task) => task.status === 'Critical')
                           ? 'Critical'
-                          : cronTasks.some(
-                                task =>
-                                  task.status ===
-                                  'Warning',
-                              )
+                          : cronTasks.some((task) => task.status === 'Warning')
                             ? 'Warning'
                             : 'Healthy'
                     }
@@ -1523,29 +1290,26 @@ export function HealthMonitoringPage() {
                 <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
                   <div className="flex items-start gap-3">
                     <AlertCircle className="h-5 w-5 text-amber-600" />
-
                     <div>
                       <p className="text-sm font-semibold text-amber-900">
                         Scheduled tasks unavailable
                       </p>
-
-                      <p className="mt-1 text-xs text-amber-800">
-                        {cronError}
-                      </p>
+                      <p className="mt-1 text-xs text-amber-800">{cronError}</p>
                     </div>
                   </div>
 
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleRefresh}
-                    className="mt-3 bg-white"
-                  >
-                    Retry
-                  </Button>
+                  {canRefresh && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleRefresh}
+                      className="mt-3 bg-white"
+                    >
+                      Retry
+                    </Button>
+                  )}
                 </div>
-              ) : cronTasks.length ===
-                0 ? (
+              ) : cronTasks.length === 0 ? (
                 <EmptyPanel
                   title="No scheduled tasks"
                   message="No scheduler tasks were returned by the backend."
@@ -1555,67 +1319,33 @@ export function HealthMonitoringPage() {
                   <table className="w-full min-w-[680px] text-sm">
                     <thead>
                       <tr className="border-b text-left text-xs uppercase tracking-wide text-slate-400">
-                        <th className="px-3 py-3">
-                          Task
-                        </th>
-                        <th className="px-3 py-3">
-                          Status
-                        </th>
-                        <th className="px-3 py-3">
-                          Last Run
-                        </th>
-                        <th className="px-3 py-3">
-                          Next Run
-                        </th>
-                        <th className="px-3 py-3">
-                          Duration
-                        </th>
-                        <th className="px-3 py-3">
-                          Failures
-                        </th>
+                        <th className="px-3 py-3">Task</th>
+                        <th className="px-3 py-3">Status</th>
+                        <th className="px-3 py-3">Last Run</th>
+                        <th className="px-3 py-3">Next Run</th>
+                        <th className="px-3 py-3">Duration</th>
+                        <th className="px-3 py-3">Failures</th>
                       </tr>
                     </thead>
 
                     <tbody>
-                      {cronTasks.map(
-                        task => (
-                          <tr
-                            key={
-                              task.id ??
-                              task.name
-                            }
-                            className="border-b border-slate-100 last:border-0 hover:bg-slate-50"
-                          >
-                            <td className="px-3 py-3 font-medium text-slate-900">
-                              {task.name}
-                            </td>
-
-                            <td className="px-3 py-3">
-                              <HealthStatusBadge
-                                status={
-                                  task.status
-                                }
-                              />
-                            </td>
-
-                            <td className="px-3 py-3 text-slate-600">
-                              {task.lastRun}
-                            </td>
-
-                            <td className="px-3 py-3 text-slate-600">
-                              {task.nextRun}
-                            </td>
-
-                            <td className="px-3 py-3 text-slate-600">
-                              {task.duration}
-                            </td>
-
-                            <td className="px-3 py-3 text-slate-600">
-                              {task.failures}
-                            </td>
-                          </tr>
-                        ),
-                      )}
+                      {cronTasks.map((task) => (
+                        <tr
+                          key={task.id ?? task.name}
+                          className="border-b border-slate-100 last:border-0 hover:bg-slate-50"
+                        >
+                          <td className="px-3 py-3 font-medium text-slate-900">
+                            {task.name}
+                          </td>
+                          <td className="px-3 py-3">
+                            <HealthStatusBadge status={task.status} />
+                          </td>
+                          <td className="px-3 py-3 text-slate-600">{task.lastRun}</td>
+                          <td className="px-3 py-3 text-slate-600">{task.nextRun}</td>
+                          <td className="px-3 py-3 text-slate-600">{task.duration}</td>
+                          <td className="px-3 py-3 text-slate-600">{task.failures}</td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>
@@ -1630,18 +1360,15 @@ export function HealthMonitoringPage() {
                 title="Disk and application storage"
                 description="Capacity and storage distribution."
                 action={
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      void handleTest(
-                        testStorageConnection,
-                        'Storage Connection Test',
-                      )
-                    }
-                  >
-                    Test Storage
-                  </Button>
+                  canTest ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void handleTest(testStorageConnection, 'Storage Connection Test')}
+                    >
+                      Test Storage
+                    </Button>
+                  ) : undefined
                 }
               />
             </CardHeader>
@@ -1656,105 +1383,54 @@ export function HealthMonitoringPage() {
                 <>
                   <div className="grid gap-3 sm:grid-cols-3">
                     <MetricCard
-                      icon={
-                        <HardDrive className="h-5 w-5" />
-                      }
+                      icon={<HardDrive className="h-5 w-5" />}
                       label="Total"
-                      value={
-                        storage.total
-                      }
+                      value={storage.total}
                     />
 
                     <MetricCard
-                      icon={
-                        <UploadCloud className="h-5 w-5" />
-                      }
+                      icon={<UploadCloud className="h-5 w-5" />}
                       label="Used"
-                      value={
-                        storage.used
-                      }
+                      value={storage.used}
                     />
 
                     <MetricCard
-                      icon={
-                        <Database className="h-5 w-5" />
-                      }
+                      icon={<Database className="h-5 w-5" />}
                       label="Free"
-                      value={
-                        storage.free
-                      }
+                      value={storage.free}
                     />
                   </div>
 
                   <div className="mt-5">
                     <div className="flex items-center justify-between text-xs text-slate-500">
-                      <span>
-                        Used storage
-                      </span>
-
-                      <span>
-                        {
-                          storage.usedPercentage
-                        }%
-                      </span>
+                      <span>Used storage</span>
+                      <span>{storage.usedPercentage}%</span>
                     </div>
 
                     <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-slate-100">
                       <div
                         className="h-full rounded-full bg-blue-500"
-                        style={{
-                          width: `${percentageWidth(
-                            storage.usedPercentage,
-                          )}%`,
-                        }}
+                        style={{ width: `${percentageWidth(storage.usedPercentage)}%` }}
                       />
                     </div>
                   </div>
 
                   <div className="mt-5 grid gap-3 sm:grid-cols-2">
                     {[
-                      [
-                        'Database',
-                        storage.databaseStorage,
-                      ],
-                      [
-                        'Invoice files',
-                        storage.invoiceStorage,
-                      ],
-                      [
-                        'Product images',
-                        storage.imageStorage,
-                      ],
-                      [
-                        'Backup',
-                        storage.backupStorage,
-                      ],
-                      [
-                        'Logs',
-                        storage.logStorage,
-                      ],
-                      [
-                        'Temp files',
-                        storage.tempStorage,
-                      ],
-                    ].map(
-                      ([label, value]) => (
-                        <div
-                          key={String(
-                            label,
-                          )}
-                          className="rounded-xl bg-slate-50 p-3"
-                        >
-                          <p className="text-[11px] uppercase tracking-wide text-slate-400">
-                            {label}
-                          </p>
-
-                          <p className="mt-1 font-semibold text-slate-900">
-                            {value}
-                          </p>
-                        </div>
-                      ),
-                    )}
+                      ['Database', storage.databaseStorage],
+                      ['Invoice files', storage.invoiceStorage],
+                      ['Product images', storage.imageStorage],
+                      ['Backup', storage.backupStorage],
+                      ['Logs', storage.logStorage],
+                      ['Temp files', storage.tempStorage],
+                    ].map(([label, value]) => (
+                      <div key={String(label)} className="rounded-xl bg-slate-50 p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                          {label}
+                        </p>
+                        <p className="mt-1 font-semibold text-slate-900">{value}</p>
+                      </div>
+                    ))}
                   </div>
                 </>
               )}
@@ -1771,18 +1447,15 @@ export function HealthMonitoringPage() {
                 title="Backup status"
                 description="Last successful run, destination, retention and history."
                 action={
-                  <Button
-                    size="sm"
-                    onClick={() =>
-                      void handleTest(
-                        triggerBackupNow,
-                        'Backup Now',
-                      )
-                    }
-                    className="bg-slate-950 text-white hover:bg-slate-800"
-                  >
-                    Backup Now
-                  </Button>
+                  canBackup ? (
+                    <Button
+                      size="sm"
+                      onClick={() => void handleBackupNow()}
+                      className="bg-slate-950 text-white hover:bg-slate-800"
+                    >
+                      Backup Now
+                    </Button>
+                  ) : undefined
                 }
               />
             </CardHeader>
@@ -1797,56 +1470,25 @@ export function HealthMonitoringPage() {
                 <>
                   <div className="grid gap-3 sm:grid-cols-2">
                     {[
-                      [
-                        'Last successful',
-                        backup.lastSuccessful,
-                      ],
-                      [
-                        'Last failed',
-                        backup.lastFailed,
-                      ],
-                      [
-                        'Backup size',
-                        backup.size,
-                      ],
-                      [
-                        'Destination',
-                        backup.destination,
-                      ],
-                      [
-                        'Schedule',
-                        backup.schedule,
-                      ],
-                      [
-                        'Retention',
-                        backup.retention,
-                      ],
-                    ].map(
-                      ([label, value]) => (
-                        <div
-                          key={String(
-                            label,
-                          )}
-                          className="rounded-xl bg-slate-50 p-3"
-                        >
-                          <p className="text-[11px] uppercase tracking-wide text-slate-400">
-                            {label}
+                      ['Last successful', backup.lastSuccessful],
+                      ['Last failed', backup.lastFailed],
+                      ['Backup size', backup.size],
+                      ['Destination', backup.destination],
+                      ['Schedule', backup.schedule],
+                      ['Retention', backup.retention],
+                    ].map(([label, value]) => (
+                      <div key={String(label)} className="rounded-xl bg-slate-50 p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                          {label}
+                        </p>
+                        <div className="mt-1 flex items-center justify-between gap-2">
+                          <p className="min-w-0 break-words font-semibold text-slate-900">
+                            {value}
                           </p>
-
-                          <div className="mt-1 flex items-center justify-between gap-2">
-                            <p className="min-w-0 break-words font-semibold text-slate-900">
-                              {value}
-                            </p>
-
-                            <HealthStatusBadge
-                              status={
-                                backup.status
-                              }
-                            />
-                          </div>
+                          <HealthStatusBadge status={backup.status} />
                         </div>
-                      ),
-                    )}
+                      </div>
+                    ))}
                   </div>
 
                   <Separator className="my-5" />
@@ -1855,64 +1497,31 @@ export function HealthMonitoringPage() {
                     <table className="w-full min-w-[720px] text-sm">
                       <thead>
                         <tr className="border-b text-left text-xs uppercase tracking-wide text-slate-400">
-                          <th className="px-3 py-3">
-                            Date
-                          </th>
-                          <th className="px-3 py-3">
-                            Type
-                          </th>
-                          <th className="px-3 py-3">
-                            Size
-                          </th>
-                          <th className="px-3 py-3">
-                            Status
-                          </th>
-                          <th className="px-3 py-3">
-                            Duration
-                          </th>
-                          <th className="px-3 py-3">
-                            Location
-                          </th>
+                          <th className="px-3 py-3">Date</th>
+                          <th className="px-3 py-3">Type</th>
+                          <th className="px-3 py-3">Size</th>
+                          <th className="px-3 py-3">Status</th>
+                          <th className="px-3 py-3">Duration</th>
+                          <th className="px-3 py-3">Location</th>
                         </tr>
                       </thead>
 
                       <tbody>
-                        {backup.history.map(
-                          item => (
-                            <tr
-                              key={`${item.date}-${item.type}`}
-                              className="border-b border-slate-100 last:border-0 hover:bg-slate-50"
-                            >
-                              <td className="px-3 py-3">
-                                {item.date}
-                              </td>
-
-                              <td className="px-3 py-3">
-                                {item.type}
-                              </td>
-
-                              <td className="px-3 py-3">
-                                {item.size}
-                              </td>
-
-                              <td className="px-3 py-3">
-                                <HealthStatusBadge
-                                  status={
-                                    item.status
-                                  }
-                                />
-                              </td>
-
-                              <td className="px-3 py-3">
-                                {item.duration}
-                              </td>
-
-                              <td className="px-3 py-3">
-                                {item.location}
-                              </td>
-                            </tr>
-                          ),
-                        )}
+                        {backup.history.map((item) => (
+                          <tr
+                            key={`${item.date}-${item.type}`}
+                            className="border-b border-slate-100 last:border-0 hover:bg-slate-50"
+                          >
+                            <td className="px-3 py-3">{item.date}</td>
+                            <td className="px-3 py-3">{item.type}</td>
+                            <td className="px-3 py-3">{item.size}</td>
+                            <td className="px-3 py-3">
+                              <HealthStatusBadge status={item.status} />
+                            </td>
+                            <td className="px-3 py-3">{item.duration}</td>
+                            <td className="px-3 py-3">{item.location}</td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
@@ -1930,8 +1539,7 @@ export function HealthMonitoringPage() {
                 action={
                   <HealthStatusBadge
                     status={
-                      security?.sslStatus ===
-                      'Valid'
+                      security?.sslStatus === 'Valid'
                         ? 'Healthy'
                         : security
                           ? 'Warning'
@@ -1954,78 +1562,47 @@ export function HealthMonitoringPage() {
                     [
                       'SSL status',
                       security.sslStatus,
-                      security.sslStatus ===
-                      'Valid'
-                        ? 'Healthy'
-                        : 'Warning',
+                      security.sslStatus === 'Valid' ? 'Healthy' : 'Warning',
                     ],
                     [
                       'HTTPS status',
                       security.httpsStatus,
-                      security.httpsStatus ===
-                      'Enabled'
-                        ? 'Healthy'
-                        : 'Warning',
+                      security.httpsStatus === 'Enabled' ? 'Healthy' : 'Warning',
                     ],
-                    [
-                      'SSL expiry',
-                      security.sslExpiry,
-                      'Healthy',
-                    ],
+                    ['SSL expiry', security.sslExpiry, 'Healthy'],
                     [
                       'Failed logins',
                       security.failedLogins,
-                      security.failedLogins >
-                      10
-                        ? 'Warning'
-                        : 'Healthy',
+                      security.failedLogins > 10 ? 'Warning' : 'Healthy',
                     ],
                     [
                       'API auth failures',
                       security.apiAuthFailures,
-                      security.apiAuthFailures >
-                      0
-                        ? 'Warning'
-                        : 'Healthy',
+                      security.apiAuthFailures > 0 ? 'Warning' : 'Healthy',
                     ],
                     [
                       'Expired tokens',
                       security.expiredTokens,
-                      security.expiredTokens >
-                      0
-                        ? 'Warning'
-                        : 'Healthy',
+                      security.expiredTokens > 0 ? 'Warning' : 'Healthy',
                     ],
-                  ].map(
-                    ([label, value, status]) => (
-                      <div
-                        key={String(
-                          label,
-                        )}
-                        className="rounded-xl border border-slate-100 bg-slate-50 p-3"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div>
-                            <p className="text-[11px] uppercase tracking-wide text-slate-400">
-                              {label}
-                            </p>
-
-                            <p className="mt-1 font-semibold text-slate-900">
-                              {String(
-                                value,
-                              )}
-                            </p>
-                          </div>
-
-                          <HealthStatusBadge
-                            status={
-                              status as HealthStatus
-                            }
-                          />
+                  ].map(([label, value, status]) => (
+                    <div
+                      key={String(label)}
+                      className="rounded-xl border border-slate-100 bg-slate-50 p-3"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                            {label}
+                          </p>
+                          <p className="mt-1 font-semibold text-slate-900">
+                            {String(value)}
+                          </p>
                         </div>
+                        <HealthStatusBadge status={status as HealthStatus} />
                       </div>
-                    ),
-                  )}
+                    </div>
+                  ))}
                 </div>
               )}
             </CardContent>
@@ -2054,50 +1631,31 @@ export function HealthMonitoringPage() {
                   <table className="w-full min-w-[680px] text-sm">
                     <thead>
                       <tr className="border-b text-left text-xs uppercase tracking-wide text-slate-400">
-                        <th className="px-3 py-3">
-                          Time
-                        </th>
-                        <th className="px-3 py-3">
-                          Service
-                        </th>
-                        <th className="px-3 py-3">
-                          Error
-                        </th>
-                        <th className="px-3 py-3">
-                          Severity
-                        </th>
+                        <th className="px-3 py-3">Time</th>
+                        <th className="px-3 py-3">Service</th>
+                        <th className="px-3 py-3">Error</th>
+                        <th className="px-3 py-3">Severity</th>
                       </tr>
                     </thead>
 
                     <tbody>
-                      {logs.map(
-                        (log, index) => (
-                          <tr
-                            key={`${log.time}-${log.service}-${index}`}
-                            className="border-b border-slate-100 last:border-0 hover:bg-slate-50"
-                          >
-                            <td className="px-3 py-3 text-slate-500">
-                              {log.time}
-                            </td>
-
-                            <td className="px-3 py-3 font-medium text-slate-900">
-                              {log.service}
-                            </td>
-
-                            <td className="max-w-[320px] px-3 py-3 text-slate-600">
-                              {log.error}
-                            </td>
-
-                            <td className="px-3 py-3">
-                              <HealthStatusBadge
-                                status={
-                                  log.status
-                                }
-                              />
-                            </td>
-                          </tr>
-                        ),
-                      )}
+                      {logs.map((log, index) => (
+                        <tr
+                          key={`${log.time}-${log.service}-${index}`}
+                          className="border-b border-slate-100 last:border-0 hover:bg-slate-50"
+                        >
+                          <td className="px-3 py-3 text-slate-500">{log.time}</td>
+                          <td className="px-3 py-3 font-medium text-slate-900">
+                            {log.service}
+                          </td>
+                          <td className="max-w-[320px] px-3 py-3 text-slate-600">
+                            {log.error}
+                          </td>
+                          <td className="px-3 py-3">
+                            <HealthStatusBadge status={log.status} />
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>
@@ -2121,22 +1679,12 @@ export function HealthMonitoringPage() {
                 </p>
 
                 <div className="mt-3 h-56">
-                  <ResponsiveContainer
-                    width="100%"
-                    height="100%"
-                  >
-                    <LineChart
-                      data={chartData(
-                        performance?.serverCpu,
-                      )}
-                    >
-                      <CartesianGrid
-                        strokeDasharray="3 3"
-                      />
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={chartData(performance?.serverCpu)}>
+                      <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="time" />
                       <YAxis />
                       <Tooltip />
-
                       <Line
                         type="monotone"
                         dataKey="value"
@@ -2156,22 +1704,12 @@ export function HealthMonitoringPage() {
                   </p>
 
                   <div className="mt-3 h-48">
-                    <ResponsiveContainer
-                      width="100%"
-                      height="100%"
-                    >
-                      <AreaChart
-                        data={chartData(
-                          performance?.apiResponse,
-                        )}
-                      >
-                        <CartesianGrid
-                          strokeDasharray="3 3"
-                        />
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={chartData(performance?.apiResponse)}>
+                        <CartesianGrid strokeDasharray="3 3" />
                         <XAxis dataKey="time" />
                         <YAxis />
                         <Tooltip />
-
                         <Area
                           type="monotone"
                           dataKey="value"
@@ -2190,22 +1728,12 @@ export function HealthMonitoringPage() {
                   </p>
 
                   <div className="mt-3 h-48">
-                    <ResponsiveContainer
-                      width="100%"
-                      height="100%"
-                    >
-                      <AreaChart
-                        data={chartData(
-                          performance?.databaseQuery,
-                        )}
-                      >
-                        <CartesianGrid
-                          strokeDasharray="3 3"
-                        />
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={chartData(performance?.databaseQuery)}>
+                        <CartesianGrid strokeDasharray="3 3" />
                         <XAxis dataKey="time" />
                         <YAxis />
                         <Tooltip />
-
                         <Area
                           type="monotone"
                           dataKey="value"
@@ -2231,12 +1759,7 @@ export function HealthMonitoringPage() {
                 title="Availability overview"
                 description="Current, daily, weekly and monthly uptime."
                 action={
-                  <HealthStatusBadge
-                    status={
-                      overview?.status ??
-                      'Offline'
-                    }
-                  />
+                  <HealthStatusBadge status={overview?.status ?? 'Offline'} />
                 }
               />
             </CardHeader>
@@ -2251,53 +1774,39 @@ export function HealthMonitoringPage() {
                 <>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <MetricCard
-                      icon={
-                        <Activity className="h-5 w-5" />
-                      }
+                      icon={<Activity className="h-5 w-5" />}
                       label="Current"
                       value={`${uptime.current}%`}
                     />
 
                     <MetricCard
-                      icon={
-                        <Clock3 className="h-5 w-5" />
-                      }
+                      icon={<Clock3 className="h-5 w-5" />}
                       label="Daily"
                       value={`${uptime.daily}%`}
                     />
 
                     <MetricCard
-                      icon={
-                        <Clock3 className="h-5 w-5" />
-                      }
+                      icon={<Clock3 className="h-5 w-5" />}
                       label="Weekly"
                       value={`${uptime.weekly}%`}
                     />
 
                     <MetricCard
-                      icon={
-                        <Clock3 className="h-5 w-5" />
-                      }
+                      icon={<Clock3 className="h-5 w-5" />}
                       label="Monthly"
                       value={`${uptime.monthly}%`}
                     />
 
                     <MetricCard
-                      icon={
-                        <AlertCircle className="h-5 w-5" />
-                      }
+                      icon={<AlertCircle className="h-5 w-5" />}
                       label="Downtime"
                       value={`${uptime.downtimeMinutes} min`}
                     />
 
                     <MetricCard
-                      icon={
-                        <XCircle className="h-5 w-5" />
-                      }
+                      icon={<XCircle className="h-5 w-5" />}
                       label="Incidents"
-                      value={
-                        uptime.incidents
-                      }
+                      value={uptime.incidents}
                     />
                   </div>
 
@@ -2307,23 +1816,12 @@ export function HealthMonitoringPage() {
                     </p>
 
                     <div className="mt-3 h-56">
-                      <ResponsiveContainer
-                        width="100%"
-                        height="100%"
-                      >
-                        <LineChart
-                          data={chartData(
-                            history[0]
-                              ?.trend,
-                          )}
-                        >
-                          <CartesianGrid
-                            strokeDasharray="3 3"
-                          />
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={chartData(history[0]?.trend)}>
+                          <CartesianGrid strokeDasharray="3 3" />
                           <XAxis dataKey="date" />
                           <YAxis />
                           <Tooltip />
-
                           <Line
                             type="monotone"
                             dataKey="value"
@@ -2348,8 +1846,7 @@ export function HealthMonitoringPage() {
                 description="Resolve confirmed incidents through the monitoring service."
                 action={
                   <Badge className="bg-slate-100 text-slate-700 hover:bg-slate-100">
-                    {activeAlerts.length}{' '}
-                    active
+                    {activeAlerts.length} active
                   </Badge>
                 }
               />
@@ -2363,7 +1860,7 @@ export function HealthMonitoringPage() {
                 />
               ) : (
                 <div className="space-y-3">
-                  {alerts.map(alert => (
+                  {alerts.map((alert) => (
                     <div
                       key={alert.id}
                       className="rounded-xl border border-slate-200 p-4"
@@ -2374,53 +1871,22 @@ export function HealthMonitoringPage() {
                             <p className="font-semibold text-slate-900">
                               {alert.title}
                             </p>
-
-                            <HealthStatusBadge
-                              status={
-                                alert.severity
-                              }
-                            />
+                            <HealthStatusBadge status={alert.severity} />
                           </div>
 
                           <div className="mt-2 grid gap-1 text-xs text-slate-500 sm:grid-cols-2">
-                            <span>
-                              Service:{' '}
-                              {
-                                alert.service
-                              }
-                            </span>
-
-                            <span>
-                              Time:{' '}
-                              {alert.time}
-                            </span>
-
-                            <span>
-                              Current:{' '}
-                              {
-                                alert.currentValue
-                              }
-                            </span>
-
-                            <span>
-                              Threshold:{' '}
-                              {
-                                alert.threshold
-                              }
-                            </span>
+                            <span>Service: {alert.service}</span>
+                            <span>Time: {alert.time}</span>
+                            <span>Current: {alert.currentValue}</span>
+                            <span>Threshold: {alert.threshold}</span>
                           </div>
                         </div>
 
-                        {alert.status !==
-                          'Healthy' && (
+                        {alert.status !== 'Healthy' && canResolveAlerts && (
                           <Button
                             size="sm"
                             variant="outline"
-                            onClick={() =>
-                              void handleResolveAlert(
-                                alert,
-                              )
-                            }
+                            onClick={() => void handleResolveAlert(alert)}
                           >
                             <CheckCircle2 className="mr-1.5 h-4 w-4" />
                             Resolve
@@ -2443,32 +1909,22 @@ export function HealthMonitoringPage() {
               title="Operational history"
               description="Historical health trends returned by the backend."
               action={
-                history.length >
-                0 ? (
+                history.length > 0 ? (
                   <div className="flex flex-wrap gap-1 rounded-lg bg-slate-100 p-1">
-                    {history.map(
-                      item => (
-                        <button
-                          key={
-                            item.range
-                          }
-                          type="button"
-                          onClick={() =>
-                            setSelectedHistoryRange(
-                              item.range,
-                            )
-                          }
-                          className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
-                            selectedHistoryRange ===
-                            item.range
-                              ? 'bg-white text-slate-900 shadow-sm'
-                              : 'text-slate-500 hover:text-slate-800'
-                          }`}
-                        >
-                          {item.range}
-                        </button>
-                      ),
-                    )}
+                    {history.map((item) => (
+                      <button
+                        key={item.range}
+                        type="button"
+                        onClick={() => setSelectedHistoryRange(item.range)}
+                        className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+                          selectedHistoryRange === item.range
+                            ? 'bg-white text-slate-900 shadow-sm'
+                            : 'text-slate-500 hover:text-slate-800'
+                        }`}
+                      >
+                        {item.range}
+                      </button>
+                    ))}
                   </div>
                 ) : undefined
               }
@@ -2490,40 +1946,23 @@ export function HealthMonitoringPage() {
                         <p className="text-xs uppercase tracking-wide text-slate-400">
                           Selected range
                         </p>
-
                         <p className="mt-1 text-lg font-semibold text-slate-900">
-                          {
-                            currentHistory.range
-                          }
+                          {currentHistory.range}
                         </p>
                       </div>
 
                       <Badge className="bg-white text-slate-700 hover:bg-white">
-                        {
-                          currentHistory
-                            .trend.length
-                        }{' '}
-                        points
+                        {currentHistory.trend.length} points
                       </Badge>
                     </div>
 
                     <div className="mt-4 h-56">
-                      <ResponsiveContainer
-                        width="100%"
-                        height="100%"
-                      >
-                        <LineChart
-                          data={chartData(
-                            currentHistory.trend,
-                          )}
-                        >
-                          <CartesianGrid
-                            strokeDasharray="3 3"
-                          />
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={chartData(currentHistory.trend)}>
+                          <CartesianGrid strokeDasharray="3 3" />
                           <XAxis dataKey="date" />
                           <YAxis />
                           <Tooltip />
-
                           <Line
                             type="monotone"
                             dataKey="value"
@@ -2541,80 +1980,42 @@ export function HealthMonitoringPage() {
                   <table className="w-full min-w-[760px] text-sm">
                     <thead>
                       <tr className="border-b text-left text-xs uppercase tracking-wide text-slate-400">
-                        <th className="px-3 py-3">
-                          Period
-                        </th>
-
-                        <th className="px-3 py-3">
-                          Latest Value
-                        </th>
-
-                        <th className="px-3 py-3">
-                          Points
-                        </th>
-
-                        <th className="px-3 py-3">
-                          Trend
-                        </th>
+                        <th className="px-3 py-3">Period</th>
+                        <th className="px-3 py-3">Latest Value</th>
+                        <th className="px-3 py-3">Points</th>
+                        <th className="px-3 py-3">Trend</th>
                       </tr>
                     </thead>
 
                     <tbody>
-                      {history.map(
-                        item => {
-                          const latest =
-                            item.trend[
-                              item.trend
-                                .length -
-                                1
-                            ]?.value;
+                      {history.map((item) => {
+                        const latest = item.trend[item.trend.length - 1]?.value;
 
-                          return (
-                            <tr
-                              key={
-                                item.range
-                              }
-                              className={`border-b border-slate-100 last:border-0 ${
-                                item.range ===
-                                selectedHistoryRange
-                                  ? 'bg-blue-50/60'
-                                  : 'hover:bg-slate-50'
-                              }`}
-                            >
-                              <td className="px-3 py-3 font-medium text-slate-900">
-                                {
-                                  item.range
-                                }
-                              </td>
-
-                              <td className="px-3 py-3">
-                                {latest ??
-                                  '—'}
-                              </td>
-
-                              <td className="px-3 py-3">
-                                {
-                                  item.trend
-                                    .length
-                                }
-                              </td>
-
-                              <td className="px-3 py-3">
-                                <div className="h-1.5 w-24 overflow-hidden rounded-full bg-slate-100">
-                                  <div
-                                    className="h-full rounded-full bg-blue-500"
-                                    style={{
-                                      width: `${percentageWidth(
-                                        latest,
-                                      )}%`,
-                                    }}
-                                  />
-                                </div>
-                              </td>
-                            </tr>
-                          );
-                        },
-                      )}
+                        return (
+                          <tr
+                            key={item.range}
+                            className={`border-b border-slate-100 last:border-0 ${
+                              item.range === selectedHistoryRange
+                                ? 'bg-blue-50/60'
+                                : 'hover:bg-slate-50'
+                            }`}
+                          >
+                            <td className="px-3 py-3 font-medium text-slate-900">
+                              {item.range}
+                            </td>
+                            <td className="px-3 py-3">{latest ?? '—'}</td>
+                            <td className="px-3 py-3">{item.trend.length}</td>
+                            <td className="px-3 py-3">
+                              <div className="h-1.5 w-24 overflow-hidden rounded-full bg-slate-100">
+                                <div
+                                  className="h-full rounded-full bg-blue-500"
+                                  style={{ width: `${percentageWidth(latest)}%` }}
+                                />
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -2635,9 +2036,7 @@ export function HealthMonitoringPage() {
 
           <CardContent>
             {serviceStatuses.length ? (
-              <ServiceStatusGrid
-                items={serviceStatuses}
-              />
+              <ServiceStatusGrid items={serviceStatuses} />
             ) : (
               <EmptyPanel
                 title="No service status data"
@@ -2653,30 +2052,16 @@ export function HealthMonitoringPage() {
           title={testModal.title}
           message={testModal.message}
           onClose={() =>
-            setTestModal(current => ({
-              ...current,
-              open: false,
-            }))
+            setTestModal((current) => ({ ...current, open: false }))
           }
         />
 
         <TestConnectionModal
-          isOpen={
-            detailsModal.open
-          }
-          title={
-            detailsModal.title
-          }
-          message={
-            detailsModal.message
-          }
+          isOpen={detailsModal.open}
+          title={detailsModal.title}
+          message={detailsModal.message}
           onClose={() =>
-            setDetailsModal(
-              current => ({
-                ...current,
-                open: false,
-              }),
-            )
+            setDetailsModal((current) => ({ ...current, open: false }))
           }
         />
       </div>

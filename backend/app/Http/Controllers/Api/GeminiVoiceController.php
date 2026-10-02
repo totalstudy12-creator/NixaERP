@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Crypt;
 use App\Models\Invoice;
 use App\Models\PurchaseInvoice;
 use App\Models\Customer;
@@ -57,8 +58,11 @@ class GeminiVoiceController extends Controller
     public function chat(Request $request)
     {
         $request->validate([
-            'message' => 'required|string|max:2000',
-            'history' => 'nullable|array',
+            'message' => 'required|string|max:5000',
+            'history' => 'nullable|array|max:20',
+            'history.*.role' => 'required|in:user,assistant',
+            'history.*.text' => 'required|string|max:5000',
+            'memory' => 'nullable|string|max:1500',
         ]);
 
         try {
@@ -66,9 +70,8 @@ class GeminiVoiceController extends Controller
 
             // Build context based on the latest user message
             $context = $this->buildErpContext($message);
-            $prompt = $this->buildPromptWithContext($message, $context);
-
-            $response = $this->callGemini($prompt);
+            $prompt = $this->buildPromptWithContext($message, $context, (string) $request->input('memory', ''));
+            $response = $this->callGemini($prompt, $request->input('history', []));
 
             return response()->json([
                 'success' => true,
@@ -77,12 +80,22 @@ class GeminiVoiceController extends Controller
             ]);
         } catch (\Exception $e) {
             Log::error('Gemini Chat Error: ' . $e->getMessage());
+            $error = $e->getMessage();
+            $status = str_contains(strtolower($error), 'not configured') ? 503 : 502;
+            $lower = strtolower($error);
+            $message = $status === 503
+                ? 'AI is not configured. Open Settings → AI, save a Gemini API key, then try again.'
+                : (str_contains($lower, 'quota') || str_contains($lower, 'rate limit') || str_contains($lower, 'resource_exhausted')
+                    ? 'Gemini quota or rate limit reached. Check the Google AI Studio project quota and retry.'
+                    : (str_contains($lower, 'api key') || str_contains($lower, 'api_key_invalid') || str_contains($lower, 'permission_denied')
+                        ? 'Gemini rejected the API key or its model permissions. Update the key in Settings → AI and run Test connection.'
+                        : (str_contains($lower, 'not found') || str_contains($lower, 'model')
+                            ? 'The configured Gemini model is unavailable for this key. Choose an available model in Settings → AI and run Test connection.'
+                            : 'Gemini request failed. Open Settings → AI and run Test connection for the provider response.')));
             return response()->json([
                 'success' => false,
-                'message' => 'Failed to process chat',
-                'response' => 'Sorry, I could not process your request. Please try again.',
-                'error' => $e->getMessage(),
-            ], 200);
+                'message' => $message,
+            ], $status);
         }
     }
 
@@ -154,7 +167,8 @@ class GeminiVoiceController extends Controller
      */
     private function getModel(): string
     {
-        return env('GEMINI_MODEL', 'gemini-3.6-flash');
+        $saved = \App\Models\Setting::where('key', 'ai_gemini_model')->value('value');
+        return $saved ?: config('services.gemini.model', env('GEMINI_MODEL', 'gemini-3.8-flash'));
     }
 
     /**
@@ -162,14 +176,21 @@ class GeminiVoiceController extends Controller
      */
     private function callGemini(string $prompt, array $history = [])
     {
-        $apiKey = env('GEMINI_API_KEY');
+        $savedKey = \App\Models\Setting::where('key', 'ai_gemini_api_key')->value('value');
+        $apiKey = null;
+        if ($savedKey) {
+            try { $apiKey = Crypt::decryptString($savedKey); } catch (\Throwable $e) {
+                Log::warning('Saved Gemini key could not be decrypted.');
+            }
+        }
+        $apiKey = $apiKey ?: config('services.gemini.api_key', env('GEMINI_API_KEY'));
 
         if (!$apiKey) {
             throw new \Exception('GEMINI_API_KEY not configured');
         }
 
         $model = $this->getModel();
-        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$apiKey}";
+        $url = "https://generativelanguage.googleapis.com/v1beta/models/" . rawurlencode($model) . ":generateContent";
 
         // Build contents array with history
         $contents = [];
@@ -196,17 +217,20 @@ class GeminiVoiceController extends Controller
         $response = Http::timeout(60)
             ->withHeaders([
                 'Content-Type' => 'application/json',
+                'x-goog-api-key' => $apiKey,
             ])
             ->post($url, [
                 'contents' => $contents,
+                'generationConfig' => ['temperature' => 0.35, 'maxOutputTokens' => 1200],
             ]);
 
         // Check for errors
         if ($response->failed()) {
             $errorData = $response->json();
-            $errorMessage = $errorData['error']['message'] ?? $errorData['error'] ?? 'API request failed';
-            Log::error('Gemini API Failed: ' . $response->body());
-            throw new \Exception($errorMessage);
+            $errorMessage = $errorData['error']['message'] ?? 'API request failed';
+            $googleStatus = $errorData['error']['status'] ?? '';
+            Log::error('Gemini API Failed', ['http_status' => $response->status(), 'provider_status' => $googleStatus, 'message' => $errorMessage]);
+            throw new \Exception($errorMessage . ' [' . $response->status() . ' ' . $googleStatus . ']');
         }
 
         $data = $response->json();
@@ -250,9 +274,13 @@ class GeminiVoiceController extends Controller
         $context = "Real-time NixaERP Business Data:\n";
 
         if ($includeSales) {
-            $totalSales = (float) Invoice::where('status', '!=', 'draft')->sum('total_amount');
-            $todaySales = (float) Invoice::where('status', '!=', 'draft')->whereDate('invoice_date', now()->toDateString())->sum('total_amount');
-            $monthSales = (float) Invoice::where('status', '!=', 'draft')->whereMonth('invoice_date', now()->month)->sum('total_amount');
+            $totalSales = (float) Invoice::where('invoices.status', '!=', 'draft')->sum('total_amount');
+            $todaySales = (float) Invoice::where('invoices.status', '!=', 'draft')
+                ->whereDate('invoices.invoice_date', now()->toDateString())
+                ->sum('total_amount');
+            $monthSales = (float) Invoice::where('invoices.status', '!=', 'draft')
+                ->whereMonth('invoices.invoice_date', now()->month)
+                ->sum('total_amount');
             $context .= "- Total Sales (all time): ₹" . number_format($totalSales) . "\n";
             $context .= "- Today's Sales: ₹" . number_format($todaySales) . "\n";
             $context .= "- This Month's Sales: ₹" . number_format($monthSales) . "\n";
@@ -266,10 +294,21 @@ class GeminiVoiceController extends Controller
         }
 
         if ($includeProfit) {
-            $totalSales = (float) Invoice::where('status', '!=', 'draft')->sum('total_amount');
-            $totalPurchases = (float) PurchaseInvoice::sum('grand_total');
-            $grossProfit = $totalSales - $totalPurchases;
-            $context .= "- Gross Profit: ₹" . number_format($grossProfit) . "\n";
+            $user = auth()->user();
+            $report = app(\App\Services\AiContextService::class)
+                ->getFinancialContextForQuery($query, $user?->company_id, $user?->branch_id);
+
+            if (($report['source'] ?? null) === 'Nexa ERP Profit & Loss' && !isset($report['error'])) {
+                $context .= "- Authorized ERP Profit & Loss (source: " . $report['source'] . "):\n";
+                $context .= "  - Period: " . ($report['period']['from'] ?? 'n/a') . " to " . ($report['period']['to'] ?? 'n/a') . "\n";
+                $context .= "  - Revenue: ₹" . number_format((float) ($report['net_revenue'] ?? 0), 2) . "\n";
+                $context .= "  - COGS: ₹" . number_format((float) ($report['cogs'] ?? 0), 2) . "\n";
+                $context .= "  - Gross Profit: ₹" . number_format((float) ($report['gross_profit'] ?? 0), 2) . "\n";
+                $context .= "  - Operating Expenses: ₹" . number_format((float) ($report['operating_expenses'] ?? 0), 2) . "\n";
+                $context .= "  - Net Profit: ₹" . number_format((float) ($report['net_profit'] ?? 0), 2) . "\n";
+            } else {
+                $context .= "- Profit & Loss: unavailable from the authoritative ERP report service (do not estimate or recalculate).\n";
+            }
         }
 
         if ($includeCustomers) {
@@ -278,8 +317,8 @@ class GeminiVoiceController extends Controller
             $context .= "- Total Customers: {$totalCustomers}\n";
             $context .= "- New Customers (last 30 days): {$newCustomers30}\n";
 
-            // Top 5 customers by revenue
-            $topCustomers = Invoice::where('status', '!=', 'draft')
+            // Top 5 customers by revenue (qualify columns — both invoices & customers have `status`)
+            $topCustomers = Invoice::where('invoices.status', '!=', 'draft')
                 ->join('customers', 'invoices.customer_id', '=', 'customers.id')
                 ->select('customers.name', DB::raw('SUM(invoices.total_amount) as total'))
                 ->groupBy('customers.id', 'customers.name')
@@ -289,7 +328,7 @@ class GeminiVoiceController extends Controller
             if ($topCustomers->isNotEmpty()) {
                 $context .= "- Top Customers:\n";
                 foreach ($topCustomers as $tc) {
-                    $context .= "  - {$tc->name}: ₹" . number_format($tc->total) . "\n";
+                    $context .= "  - {$tc->name}: ₹" . number_format((float) $tc->total) . "\n";
                 }
             }
         }
@@ -330,9 +369,10 @@ class GeminiVoiceController extends Controller
     /**
      * Combine user question with ERP context.
      */
-    private function buildPromptWithContext(string $question, string $context): string
+    private function buildPromptWithContext(string $question, string $context, string $memory = ''): string
     {
-        return "You are a business assistant for NixaERP. Use the following real-time ERP data to answer the user's question accurately and concisely.\n\n{$context}\n\nUser Question: {$question}\n\nProvide a helpful, specific answer based on the data above. Do not mention that you don't have access to internal data.";
+        $memoryBlock = trim($memory) !== '' ? "\n\nUser-approved working preferences and business context (treat as guidance, not verified ERP facts):\n" . trim($memory) : '';
+        return "You are the owner's practical business operations AI agent for NixaERP. Use real ERP context below, distinguish verified values from estimates, never invent records, and never claim to change data. Give a direct concise answer with useful next steps. If the owner has saved working preferences, follow them when relevant. End with 2 or 3 useful, specific follow-up questions based on this request and available data, each on a separate line beginning exactly FOLLOW_UP: .\n\n{$context}{$memoryBlock}\n\nOwner's question: {$question}";
     }
 
     /**
@@ -340,11 +380,13 @@ class GeminiVoiceController extends Controller
      */
     private function buildDashboardInsightPrompt(): string
     {
-        $totalSales = (float) Invoice::where('status', '!=', 'draft')->sum('total_amount');
+        $totalSales = (float) Invoice::where('invoices.status', '!=', 'draft')->sum('total_amount');
         $totalPurchases = (float) PurchaseInvoice::sum('grand_total');
         $totalCustomers = (int) Customer::count();
         $lowStock = (int) Product::where('stock_quantity', '<=', DB::raw('COALESCE(reorder_level, 0)'))->count();
-        $unpaidInvoices = (int) Invoice::where('status', '!=', 'paid')->where('status', '!=', 'draft')->count();
+        $unpaidInvoices = (int) Invoice::where('invoices.status', '!=', 'paid')
+            ->where('invoices.status', '!=', 'draft')
+            ->count();
 
         return "Based on the following NixaERP data, provide 3-5 actionable business insights with clear recommendations.\n\n" .
                "- Total Sales: ₹" . number_format($totalSales) . "\n" .

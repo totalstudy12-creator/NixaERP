@@ -1,13 +1,16 @@
+// src/pages/CreatePurchaseInvoicePage.tsx
 import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
 import type { KeyboardEvent } from 'react';
 import {
   FiPlus, FiTrash2, FiSearch, FiFileText, FiUser, FiBox, FiX, FiPrinter,
-  FiRefreshCw, FiLoader, FiChevronRight, FiSave, FiAlertCircle, FiCheckCircle
+  FiRefreshCw, FiLoader, FiChevronRight, FiSave, FiAlertCircle, FiCheckCircle, FiLock,
 } from 'react-icons/fi';
 import { useNavigate } from 'react-router-dom';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 
 const Offcanvas = lazy(() =>
   import('../components/Offcanvas').then((m) => ({ default: m.Offcanvas }))
@@ -137,6 +140,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 const isDebugEnabled = () => import.meta.env.DEV || localStorage.getItem('nixaerp:debug') === '1';
 const debug = (event: string, data?: unknown) => {
   if (!isDebugEnabled()) return;
+  // eslint-disable-next-line no-console
   console.debug(`[NIXA ERP][PurchaseInvoice] ${event}`, data ?? '');
 };
 
@@ -148,22 +152,13 @@ const nonNegative = (value: unknown) => Math.max(0, normalizeNumber(value));
 const round2 = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 const formatCurrency = (value: unknown) => nonNegative(value).toFixed(2);
 
-/**
- * Integer-paise-safe auto round-off.
- * Returns the delta needed to reach the nearest whole rupee.
- */
 function computeAutoRoundOff(total: number): number {
-  // Work in paise (integers) to avoid IEEE-754 drift.
   const totalPaise = Math.round(nonNegative(total) * 100);
   const roundedRupee = Math.round(totalPaise / 100);
   const roundedPaise = roundedRupee * 100;
   return (roundedPaise - totalPaise) / 100;
 }
 
-/**
- * Snaps a value to the nearest whole rupee when it is within `epsilon`
- * of that whole number. Used to kill residual ₹0.01 drift.
- */
 function snapToWholeRupee(value: number, epsilon = 0.02): number {
   const rounded = Math.round(value);
   return Math.abs(value - rounded) <= epsilon ? rounded : value;
@@ -274,7 +269,6 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = 300_000)
       cacheRef.current.set(key, { data: result, timestamp: Date.now() });
       setData(result);
     } catch (e) {
-      console.error(`[NIXA ERP] API load failed: ${key}`, e);
       setError(getUserFriendlyError(e, 'Unable to load data. Please try again.'));
     } finally {
       requestRef.current.delete(key);
@@ -329,6 +323,18 @@ function htmlEscape(value: unknown) {
 export function CreatePurchaseInvoicePage() {
   const navigate = useNavigate();
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
+
+  /* ── RBAC ── */
+  const canCreatePurchase = isSuperAdmin || can('create purchase invoices');
+  const canViewSuppliers = isSuperAdmin || can('view suppliers') || can('create suppliers');
+  const canCreateSupplier = isSuperAdmin || can('create suppliers');
+  const canViewProducts = isSuperAdmin || can('view products') || can('create products');
+  const canCreateProduct = isSuperAdmin || can('create products');
+  const canRecordPayments = isSuperAdmin || can('create payments');
+
   const [form, setForm] = useState<PurchaseFormData>(createInitialForm);
   const [items, setItems] = useState<PurchaseItem[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -359,11 +365,17 @@ export function CreatePurchaseInvoicePage() {
   const initialSnapshot = useRef('');
 
   const getCompanies = useCallback(() => apiClient.getCompanies().then((r: any) => normalizeList<Company>(r)), []);
-  const getSuppliers = useCallback(() => apiClient.getSuppliers().then((r: any) => normalizeList<Supplier>(r)), []);
-  const getProducts = useCallback(() => apiClient.getAllProducts().then((r: any) => normalizeList<Product>(r)), []);
+  const getSuppliers = useCallback(() => {
+    if (!canViewSuppliers) return Promise.resolve([] as Supplier[]);
+    return apiClient.getSuppliers().then((r: any) => normalizeList<Supplier>(r));
+  }, [canViewSuppliers]);
+  const getProducts = useCallback(() => {
+    if (!canViewProducts) return Promise.resolve([] as Product[]);
+    return apiClient.getAllProducts().then((r: any) => normalizeList<Product>(r));
+  }, [canViewProducts]);
   const getBanks = useCallback(async () => {
     try { return normalizeList<BankAccount>(await apiClient.request('GET', '/banks')); }
-    catch (e) { debug('banks.load.failed', e); return []; }
+    catch { return []; }
   }, []);
 
   const { data: companies, loading: companiesLoading, error: companiesError } = useApiCache<Company[]>('companies', getCompanies);
@@ -478,13 +490,6 @@ export function CreatePurchaseInvoicePage() {
   const tcsAmount = round2(totalBeforeTcs * Math.min(100, nonNegative(form.tcs_percent)) / 100);
   const totalBeforeRoundOff = round2(totalBeforeTcs + tcsAmount);
 
-  /**
-   * Auto round-off effect.
-   *
-   * Uses integer-paise arithmetic to avoid floating-point drift.
-   * Compares to `form.round_off` with a 0.001 tolerance so we don't
-   * cause infinite re-renders or split-second regressions.
-   */
   useEffect(() => {
     if (!autoRoundOff) return;
     const next = computeAutoRoundOff(totalBeforeRoundOff);
@@ -494,11 +499,6 @@ export function CreatePurchaseInvoicePage() {
     });
   }, [autoRoundOff, totalBeforeRoundOff]);
 
-  /**
-   * Final grand total.
-   * When auto-round-off is ON, snap the result to the nearest whole
-   * rupee (defends against any residual drift in the round-off value).
-   */
   const grandTotal = useMemo(() => {
     const raw = Math.max(0, totalBeforeRoundOff + normalizeNumber(form.round_off));
     const rounded = round2(raw);
@@ -510,9 +510,6 @@ export function CreatePurchaseInvoicePage() {
   const totalInward = useMemo(() => round2(form.payments.reduce((sum, p) => sum + (p.payment_direction === 'inward' ? nonNegative(p.amount) : 0), 0)), [form.payments]);
   const netPaid = round2(totalOutward - totalInward);
 
-  /**
-   * Balance due — snap to 0.00 when within 0.02 so we never display "₹0.01".
-   */
   const balanceDue = useMemo(() => {
     const diff = round2(grandTotal - netPaid);
     return Math.abs(diff) <= 0.02 ? 0 : diff;
@@ -561,6 +558,10 @@ export function CreatePurchaseInvoicePage() {
   };
 
   const createSupplier = async () => {
+    if (!canCreateSupplier) {
+      showError('Permission denied', 'You do not have permission to create suppliers.');
+      return;
+    }
     if (!newSupplier.company_id || !newSupplier.name.trim()) {
       showError('Validation', 'Company and supplier name are required.'); return;
     }
@@ -584,6 +585,10 @@ export function CreatePurchaseInvoicePage() {
   };
 
   const createProduct = async () => {
+    if (!canCreateProduct) {
+      showError('Permission denied', 'You do not have permission to create products.');
+      return;
+    }
     const errors: Record<string, boolean> = {};
     if (!newProduct.company_id) errors.company_id = true;
     if (!newProduct.name.trim()) errors.name = true;
@@ -618,20 +623,11 @@ export function CreatePurchaseInvoicePage() {
     } finally { setProductSubmitting(false); }
   };
 
-  /**
-   * Builds the create payload.
-   * - `round_off` is recomputed with integer-paise arithmetic.
-   * - `grand_total` and every payment amount are snapped to 2 decimals.
-   * - Payments are sent inline; the backend records them atomically.
-   * - `auto_round_off` flag tells the backend to snap the grand total too.
-   */
   const createPurchasePayload = (status: 'draft' | 'ordered') => {
     const safeRoundOff = autoRoundOff
       ? computeAutoRoundOff(totalBeforeRoundOff)
       : round2(normalizeNumber(form.round_off));
 
-    // Recompose grand total from scratch here so we are guaranteed the
-    // payload matches the display exactly.
     const computedGrandTotal = (() => {
       const raw = Math.max(0, totalBeforeRoundOff + safeRoundOff);
       const rounded = round2(raw);
@@ -690,7 +686,6 @@ export function CreatePurchaseInvoicePage() {
       general_discount_amount: generalDiscountType === 'amount' ? nonNegative(form.general_discount_amount) : 0,
       tcs_percent: nonNegative(form.tcs_percent),
 
-      /* ✅ Send the exact round-off value AND the auto flag */
       round_off: safeRoundOff,
       auto_round_off: autoRoundOff,
 
@@ -738,6 +733,20 @@ export function CreatePurchaseInvoicePage() {
   }, [items, form.invoice_no, form.invoice_date, form.supplier_name, form.place_of_supply, itemSubtotal, itemDiscountTotal, generalDiscountAmount, totalTaxWithPacking, additionalChargesTotal, packingAmount, tcsAmount, form.round_off, grandTotal, totalInWords]);
 
   const handleSubmit = useCallback(async (action: 'save' | 'save_print' | 'save_draft') => {
+    if (!canCreatePurchase) {
+      showError('Permission denied', 'You do not have permission to create purchase invoices.');
+      return;
+    }
+    // If payments are attached, require create payments
+    const hasPayments = form.payments.some((p) => nonNegative(p.amount) > 0);
+    if (hasPayments && !canRecordPayments) {
+      showError(
+        'Permission denied',
+        'You do not have permission to record payments. Remove the payments or ask an administrator.',
+      );
+      return;
+    }
+
     if (submitting || savingDraft || submittedIdRef.current) return;
     const isDraft = action === 'save_draft';
     if (!validate(isDraft)) {
@@ -785,20 +794,46 @@ export function CreatePurchaseInvoicePage() {
       setSubmitting(false); setSavingDraft(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form, items, grandTotal, submitting, savingDraft, generalDiscountType, generalDiscountApplyType, packingApplyType, createPurchasePayload, printSavedPurchase]);
+  }, [canCreatePurchase, canRecordPayments, form, items, grandTotal, submitting, savingDraft, generalDiscountType, generalDiscountApplyType, packingApplyType, createPurchasePayload, printSavedPurchase]);
 
-  const openSupplier = () => { setNewSupplier((p) => ({ ...p, company_id: form.company_id ? String(form.company_id) : '' })); setShowSupplierOffcanvas(true); };
-  const openProduct = () => { setNewProduct((p) => ({ ...p, company_id: form.company_id ? String(form.company_id) : '' })); setProductFormErrors({}); setShowProductOffcanvas(true); };
+  const openSupplier = () => {
+    if (!canCreateSupplier) {
+      showError('Permission denied', 'You do not have permission to create suppliers.');
+      return;
+    }
+    setNewSupplier((p) => ({ ...p, company_id: form.company_id ? String(form.company_id) : '' }));
+    setShowSupplierOffcanvas(true);
+  };
+  const openProduct = () => {
+    if (!canCreateProduct) {
+      showError('Permission denied', 'You do not have permission to create products.');
+      return;
+    }
+    setNewProduct((p) => ({ ...p, company_id: form.company_id ? String(form.company_id) : '' }));
+    setProductFormErrors({}); setShowProductOffcanvas(true);
+  };
   const generateInvoiceNo = () => updateForm('invoice_no', `PUR-${new Date().getFullYear()}-${Date.now().toString().slice(-6)}${Math.floor(Math.random() * 10)}`);
   const addCharge = () => setForm((p) => ({ ...p, additional_charges: [...p.additional_charges, { id: `${Date.now()}-${Math.random()}`, label: '', amount: 0 }] }));
   const updateCharge = (id: string, patch: Partial<AdditionalCharge>) => setForm((p) => ({ ...p, additional_charges: p.additional_charges.map((c) => c.id === id ? { ...c, ...patch } : c) }));
   const removeCharge = (id: string) => setForm((p) => ({ ...p, additional_charges: p.additional_charges.filter((c) => c.id !== id) }));
-  const addPayment = () => setForm((p) => ({ ...p, payments: [...p.payments, { id: `${Date.now()}-${Math.random()}`, amount: 0, payment_method: 'bank_transfer', reference_no: '', transaction_date: today(), bank_name: '', account_number: '', remarks: '', payment_direction: 'outward' }] }));
+  const addPayment = () => {
+    if (!canRecordPayments) {
+      showError('Permission denied', 'You do not have permission to record payments.');
+      return;
+    }
+    setForm((p) => ({ ...p, payments: [...p.payments, { id: `${Date.now()}-${Math.random()}`, amount: 0, payment_method: 'bank_transfer', reference_no: '', transaction_date: today(), bank_name: '', account_number: '', remarks: '', payment_direction: 'outward' }] }));
+  };
   const updatePayment = (id: string, patch: Partial<PaymentEntry>) => setForm((p) => ({ ...p, payments: p.payments.map((x) => x.id === id ? { ...x, ...patch } : x) }));
-  const removePayment = (id: string) => setForm((p) => ({ ...p, payments: p.payments.filter((x) => x.id !== id) }));
+  const removePayment = (id: string) => {
+    if (!canRecordPayments) return;
+    setForm((p) => ({ ...p, payments: p.payments.filter((x) => x.id !== id) }));
+  };
 
-  /** "Pay Full Amount" helper — uses the exact grand total so paid === grand. */
   const payFullAmount = () => {
+    if (!canRecordPayments) {
+      showError('Permission denied', 'You do not have permission to record payments.');
+      return;
+    }
     setForm((p) => {
       const alreadyPaid = p.payments.reduce(
         (sum, x) => sum + (x.payment_direction === 'inward' ? -nonNegative(x.amount) : nonNegative(x.amount)),
@@ -848,6 +883,46 @@ export function CreatePurchaseInvoicePage() {
 
   const balanceIsZero = Math.abs(balanceDue) < 0.005;
 
+  /* ────────────────────────────────────────────────────────────────────────
+   * Loading guard
+   * ──────────────────────────────────────────────────────────────────────── */
+
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* ────────────────────────────────────────────────────────────────────────
+   * No-access panel
+   * ──────────────────────────────────────────────────────────────────────── */
+
+  if (!canCreatePurchase) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to create purchase invoices.
+          </p>
+          <button
+            onClick={() => navigate('/purchases')}
+            className="mt-5 inline-flex h-10 items-center rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-800 transition"
+          >
+            Back to purchases
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 text-slate-800 pb-24">
       {(companiesError || suppliersError || productsError) && (
@@ -864,7 +939,7 @@ export function CreatePurchaseInvoicePage() {
             <h2 className={`${sectionTitleClass} text-blue-700`}><FiUser /> Supplier Information</h2>
             <div className="space-y-5">
               <div><label className={labelClass}>Company *</label><select value={form.company_id} disabled={submitting || savingDraft} onChange={(e) => { updateForm('company_id', e.target.value ? Number(e.target.value) : ''); updateForm('supplier_id', ''); setSupplierSearch(''); }} className={`${inputClass} ${formErrors.company_id ? 'border-red-400' : ''}`}><option value="">{companiesLoading ? 'Loading companies...' : 'Select Company'}</option>{companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>{formErrors.company_id && <p className="text-xs text-red-500 mt-1">{formErrors.company_id}</p>}</div>
-              <div ref={supplierDropdownRef}><label className={labelClass}>Supplier *</label><div className="flex gap-2"><div className="relative flex-1"><input value={supplierSearch} onChange={(e) => { setSupplierSearch(e.target.value); setShowSupplierDropdown(true); setSupplierHighlight(-1); }} onFocus={() => setShowSupplierDropdown(true)} onKeyDown={supplierKeyDown} placeholder="Search supplier by name, code, GST, phone..." className={`${inputClass} ${formErrors.supplier_id ? 'border-red-400' : ''}`} />{supplierSearch && <button type="button" onClick={() => { setSupplierSearch(''); updateForm('supplier_id', ''); }} className="absolute right-3 top-3 text-slate-400"><FiX /></button>}{showSupplierDropdown && <div className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-64 overflow-y-auto">{suppliersLoading ? <div className="p-4 text-sm text-slate-500 flex justify-center"><FiLoader className="animate-spin mr-2" />Loading...</div> : filteredSuppliers.length === 0 ? <div className="p-4 text-sm text-slate-500">No suppliers found.</div> : filteredSuppliers.map((s, idx) => <button type="button" key={s.id} className={`w-full text-left px-4 py-3 flex items-center justify-between border-b border-slate-100 ${idx === supplierHighlight ? 'bg-blue-50' : 'hover:bg-blue-50'}`} onMouseEnter={() => setSupplierHighlight(idx)} onClick={() => selectSupplier(s)}><span className="min-w-0"><span className="block font-medium truncate">{s.name}</span><span className="block text-xs text-slate-500 truncate">{s.gst_number ? `GST: ${s.gst_number}` : ''}{s.phone || s.contact_no ? `  •  ${s.phone || s.contact_no}` : ''}</span></span>{idx === supplierHighlight && <FiChevronRight className="text-blue-500 shrink-0" />}</button>)}</div>}</div><button type="button" onClick={openSupplier} className="px-4 rounded-xl border border-blue-200 text-blue-600 hover:bg-blue-50">Add Supplier</button></div>{formErrors.supplier_id && <p className="text-xs text-red-500 mt-1">{formErrors.supplier_id}</p>}</div>
+              <div ref={supplierDropdownRef}><label className={labelClass}>Supplier *</label><div className="flex gap-2"><div className="relative flex-1"><input value={supplierSearch} onChange={(e) => { setSupplierSearch(e.target.value); setShowSupplierDropdown(true); setSupplierHighlight(-1); }} onFocus={() => canViewSuppliers && setShowSupplierDropdown(true)} onKeyDown={supplierKeyDown} placeholder={canViewSuppliers ? 'Search supplier by name, code, GST, phone...' : 'Supplier search disabled'} disabled={!canViewSuppliers} className={`${inputClass} ${formErrors.supplier_id ? 'border-red-400' : ''}`} />{supplierSearch && <button type="button" onClick={() => { setSupplierSearch(''); updateForm('supplier_id', ''); }} className="absolute right-3 top-3 text-slate-400"><FiX /></button>}{showSupplierDropdown && canViewSuppliers && <div className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-64 overflow-y-auto">{suppliersLoading ? <div className="p-4 text-sm text-slate-500 flex justify-center"><FiLoader className="animate-spin mr-2" />Loading...</div> : filteredSuppliers.length === 0 ? <div className="p-4 text-sm text-slate-500">No suppliers found.</div> : filteredSuppliers.map((s, idx) => <button type="button" key={s.id} className={`w-full text-left px-4 py-3 flex items-center justify-between border-b border-slate-100 ${idx === supplierHighlight ? 'bg-blue-50' : 'hover:bg-blue-50'}`} onMouseEnter={() => setSupplierHighlight(idx)} onClick={() => selectSupplier(s)}><span className="min-w-0"><span className="block font-medium truncate">{s.name}</span><span className="block text-xs text-slate-500 truncate">{s.gst_number ? `GST: ${s.gst_number}` : ''}{s.phone || s.contact_no ? `  •  ${s.phone || s.contact_no}` : ''}</span></span>{idx === supplierHighlight && <FiChevronRight className="text-blue-500 shrink-0" />}</button>)}</div>}</div>{canCreateSupplier && (<button type="button" onClick={openSupplier} className="px-4 rounded-xl border border-blue-200 text-blue-600 hover:bg-blue-50">Add Supplier</button>)}</div>{formErrors.supplier_id && <p className="text-xs text-red-500 mt-1">{formErrors.supplier_id}</p>}</div>
               <div><label className={labelClass}>M/S.</label><input value={form.supplier_name} onChange={(e) => updateForm('supplier_name', e.target.value)} className={inputClass} /></div>
               <div className="grid grid-cols-2 gap-3"><div><label className={labelClass}>Contact Person</label><input value={form.contact_person} onChange={(e) => updateForm('contact_person', e.target.value)} className={inputClass} /></div><div><label className={labelClass}>Phone No</label><input value={form.phone_no} onChange={(e) => updateForm('phone_no', e.target.value)} className={inputClass} /></div></div>
               <div className="grid grid-cols-2 gap-3"><div><label className={labelClass}>Email</label><input type="email" value={form.email} onChange={(e) => updateForm('email', e.target.value)} className={inputClass} /></div><div><label className={labelClass}>GSTIN / PAN</label><input value={form.gstin_pan} onChange={(e) => updateForm('gstin_pan', e.target.value.toUpperCase())} className={inputClass} /></div></div>
@@ -885,7 +960,7 @@ export function CreatePurchaseInvoicePage() {
         </div>
 
         <section className={`${cardClass} p-0 overflow-hidden`}>
-          <div ref={productDropdownRef} className="p-4 md:p-6 border-b border-slate-100 bg-slate-50/50"><div className="flex gap-2"><div className="relative flex-1"><FiSearch className="absolute left-4 top-3.5 text-slate-400" /><input value={productSearch} onChange={(e) => { setProductSearch(e.target.value); setShowProductDropdown(true); setProductHighlight(-1); }} onFocus={() => setShowProductDropdown(true)} onKeyDown={productKeyDown} placeholder="Search product by name, SKU, barcode or HSN..." className="w-full pl-12 pr-10 py-3 rounded-xl border-0 bg-white shadow-sm focus:ring-2 focus:ring-blue-500/30 outline-none" />{productSearch && <button type="button" onClick={() => { setProductSearch(''); setShowProductDropdown(false); }} className="absolute right-3 top-3 text-slate-400"><FiX /></button>}{showProductDropdown && <div className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-72 overflow-y-auto">{productsLoading ? <div className="p-4 flex justify-center text-sm text-slate-500"><FiLoader className="animate-spin mr-2" />Loading...</div> : filteredProducts.length === 0 ? <div className="p-4 text-sm text-slate-500">No products found.</div> : filteredProducts.map((p, idx) => <button type="button" key={p.id} onMouseEnter={() => setProductHighlight(idx)} onClick={() => addItem(p)} className={`w-full text-left px-4 py-3 flex justify-between items-center border-b border-slate-100 ${idx === productHighlight ? 'bg-blue-50' : 'hover:bg-blue-50'}`}><span className="min-w-0"><span className="block font-medium truncate">{p.name}</span><span className="block text-xs text-slate-500 truncate">{p.sku ? `SKU: ${p.sku}  ` : ''}{p.uom || p.unit || 'NOS'}{p.stock_quantity != null ? `  •  Stock: ${p.stock_quantity}` : ''}</span></span><span className="font-medium">₹{formatCurrency(p.purchase_price)}</span></button>)}</div>}</div><button type="button" onClick={openProduct} className="px-4 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 flex items-center gap-1"><FiPlus />Add Product</button></div></div>
+          <div ref={productDropdownRef} className="p-4 md:p-6 border-b border-slate-100 bg-slate-50/50"><div className="flex gap-2"><div className="relative flex-1"><FiSearch className="absolute left-4 top-3.5 text-slate-400" /><input value={productSearch} onChange={(e) => { setProductSearch(e.target.value); setShowProductDropdown(true); setProductHighlight(-1); }} onFocus={() => canViewProducts && setShowProductDropdown(true)} onKeyDown={productKeyDown} placeholder={canViewProducts ? 'Search product by name, SKU, barcode or HSN...' : 'Product search disabled'} disabled={!canViewProducts} className="w-full pl-12 pr-10 py-3 rounded-xl border-0 bg-white shadow-sm focus:ring-2 focus:ring-blue-500/30 outline-none" />{productSearch && <button type="button" onClick={() => { setProductSearch(''); setShowProductDropdown(false); }} className="absolute right-3 top-3 text-slate-400"><FiX /></button>}{showProductDropdown && canViewProducts && <div className="absolute z-30 w-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-72 overflow-y-auto">{productsLoading ? <div className="p-4 flex justify-center text-sm text-slate-500"><FiLoader className="animate-spin mr-2" />Loading...</div> : filteredProducts.length === 0 ? <div className="p-4 text-sm text-slate-500">No products found.</div> : filteredProducts.map((p, idx) => <button type="button" key={p.id} onMouseEnter={() => setProductHighlight(idx)} onClick={() => addItem(p)} className={`w-full text-left px-4 py-3 flex justify-between items-center border-b border-slate-100 ${idx === productHighlight ? 'bg-blue-50' : 'hover:bg-blue-50'}`}><span className="min-w-0"><span className="block font-medium truncate">{p.name}</span><span className="block text-xs text-slate-500 truncate">{p.sku ? `SKU: ${p.sku}  ` : ''}{p.uom || p.unit || 'NOS'}{p.stock_quantity != null ? `  •  Stock: ${p.stock_quantity}` : ''}</span></span><span className="font-medium">₹{formatCurrency(p.purchase_price)}</span></button>)}</div>}</div>{canCreateProduct && (<button type="button" onClick={openProduct} className="px-4 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 flex items-center gap-1"><FiPlus />Add Product</button>)}</div></div>
 
           <div className="hidden md:block overflow-x-auto"><table className="w-full text-sm min-w-[1150px]"><thead><tr className="text-left text-xs font-medium text-slate-500 uppercase bg-slate-50/80"><th className="p-3">Item</th><th className="p-3 text-center">Qty</th><th className="p-3">Unit</th><th className="p-3 text-right">Price</th><th className="p-3">Discount</th><th className="p-3">GST</th><th className="p-3">Tax Mode</th><th className="p-3 text-right">Total</th><th></th></tr></thead><tbody>{items.length === 0 ? <tr><td colSpan={9} className="text-center py-16 text-slate-400"><FiBox size={40} className="mx-auto mb-3 opacity-30" />No products added yet.</td></tr> : items.map((item, idx) => <tr key={`${item.product_id}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50"><td className="p-2 max-w-[240px]"><input value={item.product_name} onChange={(e) => updateItem(idx, { product_name: e.target.value })} className="w-full bg-transparent border-0 focus:ring-0 p-1 truncate" /></td><td className="p-2"><input type="number" min="1" step="0.01" value={item.qty} onChange={(e) => updateItem(idx, { qty: normalizeNumber(e.target.value) })} className={`w-20 bg-transparent border-0 focus:ring-0 text-center ${item.qty <= 0 ? 'text-red-500' : ''}`} /></td><td className="p-2"><input value={item.uom} onChange={(e) => updateItem(idx, { uom: e.target.value })} className="w-16 bg-transparent border-0 focus:ring-0 text-center" /></td><td className="p-2"><input type="number" min="0" step="0.01" value={item.price} onChange={(e) => updateItem(idx, { price: normalizeNumber(e.target.value) })} className="w-24 bg-transparent border-0 focus:ring-0 text-right" /></td><td className="p-2"><div className="flex gap-1"><select value={item.discount_type} onChange={(e) => updateItem(idx, { discount_type: e.target.value as DiscountType, discount_percent: e.target.value === 'amount' ? 0 : item.discount_percent, discount_amount: e.target.value === 'percent' ? 0 : item.discount_amount })} className="bg-transparent border-0 focus:ring-0"><option value="percent">%</option><option value="amount">₹</option></select><input type="number" min="0" step="0.01" value={item.discount_type === 'percent' ? item.discount_percent : item.discount_amount} onChange={(e) => updateItem(idx, item.discount_type === 'percent' ? { discount_percent: normalizeNumber(e.target.value) } : { discount_amount: normalizeNumber(e.target.value) })} className="w-20 bg-transparent border-0 focus:ring-0 text-right" /></div></td><td className="p-2"><select value={item.gst_slab} onChange={(e) => updateItem(idx, { gst_slab: Number(e.target.value) })} className="bg-transparent border-0 focus:ring-0"><option value={0}>0%</option><option value={5}>5%</option><option value={12}>12%</option><option value={18}>18%</option><option value={28}>28%</option><option value={-1}>Custom</option></select>{item.gst_slab === -1 && <input type="number" min="0" max="100" step="0.01" value={item.custom_gst_rate} onChange={(e) => updateItem(idx, { custom_gst_rate: normalizeNumber(e.target.value) })} className="w-20 mt-1 bg-white border border-slate-200 rounded px-1 py-0.5 text-xs" />}</td><td className="p-2"><label className="inline-flex items-center gap-1 text-xs"><input type="checkbox" checked={item.is_inter_state} onChange={(e) => updateItem(idx, { is_inter_state: e.target.checked })} />IGST</label></td><td className="p-2 text-right font-semibold">₹{formatCurrency(item.total)}</td><td className="p-2"><button type="button" onClick={() => removeItem(idx)} className="text-red-400 hover:text-red-600"><FiTrash2 /></button></td></tr>)}</tbody></table></div>
 
@@ -922,25 +997,43 @@ export function CreatePurchaseInvoicePage() {
 
               <div className="border-t pt-4 mt-5"><div className="flex justify-between items-center mb-3"><h3 className="font-semibold">Additional Charges Detail</h3><button type="button" onClick={addCharge} className="text-blue-600 text-xs flex gap-1 items-center"><FiPlus />Add</button></div>{form.additional_charges.map((charge) => <div key={charge.id} className="flex gap-2 mb-2"><input value={charge.label} onChange={(e) => updateCharge(charge.id, { label: e.target.value })} placeholder="Charge name" className="flex-1 border rounded-lg px-2 py-1.5 text-xs" /><input type="number" min="0" step="0.01" value={charge.amount} onChange={(e) => updateCharge(charge.id, { amount: nonNegative(e.target.value) })} className="w-28 border rounded-lg px-2 py-1.5 text-xs text-right" /><button type="button" onClick={() => removeCharge(charge.id)} className="text-red-400"><FiTrash2 /></button></div>)}</div>
 
-              <div className="border-t pt-4 mt-5">
-                <div className="flex justify-between items-center mb-3">
-                  <h3 className="font-semibold">Payments</h3>
-                  <div className="flex items-center gap-3">
-                    <button type="button" onClick={payFullAmount} disabled={balanceIsZero} className="text-emerald-600 text-xs font-semibold hover:underline disabled:text-slate-300 disabled:cursor-not-allowed">Pay Full</button>
-                    <button type="button" onClick={addPayment} className="text-blue-600 text-xs flex items-center gap-1"><FiPlus />Add Payment</button>
+              {/* Payments — hidden when not permitted */}
+              {canRecordPayments ? (
+                <div className="border-t pt-4 mt-5">
+                  <div className="flex justify-between items-center mb-3">
+                    <h3 className="font-semibold">Payments</h3>
+                    <div className="flex items-center gap-3">
+                      <button type="button" onClick={payFullAmount} disabled={balanceIsZero} className="text-emerald-600 text-xs font-semibold hover:underline disabled:text-slate-300 disabled:cursor-not-allowed">Pay Full</button>
+                      <button type="button" onClick={addPayment} className="text-blue-600 text-xs flex items-center gap-1"><FiPlus />Add Payment</button>
+                    </div>
                   </div>
+                  {form.payments.length === 0 ? <p className="text-xs text-slate-400">No payments recorded.</p> : form.payments.map((pay, idx) => <div key={pay.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200 mb-3"><div className="flex justify-between mb-2"><span className="text-xs font-semibold text-slate-500">Payment #{idx + 1}</span><button type="button" onClick={() => removePayment(pay.id)} className="text-red-400"><FiTrash2 /></button></div><div className="grid grid-cols-2 gap-2"><div><label className="block text-xs text-slate-500">Amount</label><input type="number" min="0" step="0.01" value={pay.amount} onChange={(e) => updatePayment(pay.id, { amount: nonNegative(e.target.value) })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Method</label><select value={pay.payment_method} onChange={(e) => updatePayment(pay.id, { payment_method: e.target.value as PaymentMethod })} className="w-full border rounded-lg px-2 py-1.5 text-xs"><option value="UPI">UPI</option><option value="cash">Cash</option><option value="cheque">Cheque</option><option value="bank_transfer">Bank Transfer</option><option value="other">Other</option></select></div><div><label className="block text-xs text-slate-500">Reference No</label><input value={pay.reference_no} onChange={(e) => updatePayment(pay.id, { reference_no: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Date</label><input type="date" value={pay.transaction_date} onChange={(e) => updatePayment(pay.id, { transaction_date: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Direction</label><select value={pay.payment_direction} onChange={(e) => updatePayment(pay.id, { payment_direction: e.target.value as PaymentDirection })} className="w-full border rounded-lg px-2 py-1.5 text-xs"><option value="outward">Outward</option><option value="inward">Inward / Refund</option></select></div><div><label className="block text-xs text-slate-500">Bank Name</label><input value={pay.bank_name} onChange={(e) => updatePayment(pay.id, { bank_name: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div className="col-span-2"><label className="block text-xs text-slate-500">Remarks</label><input value={pay.remarks} onChange={(e) => updatePayment(pay.id, { remarks: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div></div></div>)}<div className="flex justify-between text-sm"><span>Total Outward</span><span>₹{formatCurrency(totalOutward)}</span></div><div className="flex justify-between text-sm"><span>Total Inward</span><span>₹{formatCurrency(totalInward)}</span></div><div className="flex justify-between mt-1 font-semibold"><span>Balance Due</span><span className={balanceDue > 0.01 ? 'text-red-600' : 'text-emerald-600'}>₹{formatCurrency(balanceDue)}</span></div>
                 </div>
-                {form.payments.length === 0 ? <p className="text-xs text-slate-400">No payments recorded.</p> : form.payments.map((pay, idx) => <div key={pay.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200 mb-3"><div className="flex justify-between mb-2"><span className="text-xs font-semibold text-slate-500">Payment #{idx + 1}</span><button type="button" onClick={() => removePayment(pay.id)} className="text-red-400"><FiTrash2 /></button></div><div className="grid grid-cols-2 gap-2"><div><label className="block text-xs text-slate-500">Amount</label><input type="number" min="0" step="0.01" value={pay.amount} onChange={(e) => updatePayment(pay.id, { amount: nonNegative(e.target.value) })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Method</label><select value={pay.payment_method} onChange={(e) => updatePayment(pay.id, { payment_method: e.target.value as PaymentMethod })} className="w-full border rounded-lg px-2 py-1.5 text-xs"><option value="UPI">UPI</option><option value="cash">Cash</option><option value="cheque">Cheque</option><option value="bank_transfer">Bank Transfer</option><option value="other">Other</option></select></div><div><label className="block text-xs text-slate-500">Reference No</label><input value={pay.reference_no} onChange={(e) => updatePayment(pay.id, { reference_no: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Date</label><input type="date" value={pay.transaction_date} onChange={(e) => updatePayment(pay.id, { transaction_date: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div><label className="block text-xs text-slate-500">Direction</label><select value={pay.payment_direction} onChange={(e) => updatePayment(pay.id, { payment_direction: e.target.value as PaymentDirection })} className="w-full border rounded-lg px-2 py-1.5 text-xs"><option value="outward">Outward</option><option value="inward">Inward / Refund</option></select></div><div><label className="block text-xs text-slate-500">Bank Name</label><input value={pay.bank_name} onChange={(e) => updatePayment(pay.id, { bank_name: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div><div className="col-span-2"><label className="block text-xs text-slate-500">Remarks</label><input value={pay.remarks} onChange={(e) => updatePayment(pay.id, { remarks: e.target.value })} className="w-full border rounded-lg px-2 py-1.5 text-xs" /></div></div></div>)}<div className="flex justify-between text-sm"><span>Total Outward</span><span>₹{formatCurrency(totalOutward)}</span></div><div className="flex justify-between text-sm"><span>Total Inward</span><span>₹{formatCurrency(totalInward)}</span></div><div className="flex justify-between mt-1 font-semibold"><span>Balance Due</span><span className={balanceDue > 0.01 ? 'text-red-600' : 'text-emerald-600'}>₹{formatCurrency(balanceDue)}</span></div></div>
+              ) : (
+                <div className="border-t pt-4 mt-5">
+                  <p className="text-xs text-slate-400 flex items-center gap-1.5">
+                    <FiLock size={11} />
+                    You do not have permission to record payments. Payments can be added from the purchase page by an authorized user.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
       </div>
 
-      <div className="sticky bottom-0 bg-white/90 backdrop-blur-md border-t border-slate-200 shadow-2xl p-4 flex flex-wrap justify-end gap-3 z-40"><button type="button" onClick={() => navigate('/purchases')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl border border-slate-300 text-sm">Cancel</button><button type="button" onClick={() => handleSubmit('save_draft')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl border border-slate-300 text-sm flex items-center gap-2">{savingDraft ? <FiLoader className="animate-spin" /> : <FiSave />}Save Draft</button><button type="button" onClick={() => handleSubmit('save')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl bg-slate-800 text-white text-sm flex items-center gap-2">{submitting ? <FiLoader className="animate-spin" /> : <FiCheckCircle />}Save Purchase</button><button type="button" onClick={() => handleSubmit('save_print')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-white text-sm flex items-center gap-2">{submitting ? <FiLoader className="animate-spin" /> : <FiPrinter />}Print & Save</button></div>
+      <div className="sticky bottom-0 bg-white/90 backdrop-blur-md border-t border-slate-200 shadow-2xl p-4 flex flex-wrap justify-end gap-3 z-40">
+        <button type="button" onClick={() => navigate('/purchases')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl border border-slate-300 text-sm">Cancel</button>
+        <button type="button" onClick={() => handleSubmit('save_draft')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl border border-slate-300 text-sm flex items-center gap-2">{savingDraft ? <FiLoader className="animate-spin" /> : <FiSave />}Save Draft</button>
+        <button type="button" onClick={() => handleSubmit('save')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl bg-slate-800 text-white text-sm flex items-center gap-2">{submitting ? <FiLoader className="animate-spin" /> : <FiCheckCircle />}Save Purchase</button>
+        <button type="button" onClick={() => handleSubmit('save_print')} disabled={submitting || savingDraft} className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-white text-sm flex items-center gap-2">{submitting ? <FiLoader className="animate-spin" /> : <FiPrinter />}Print & Save</button>
+      </div>
 
-      {showSupplierOffcanvas && <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}><Offcanvas isOpen={showSupplierOffcanvas} title="Add Supplier" onClose={() => !supplierSubmitting && setShowSupplierOffcanvas(false)} footer={<div className="flex justify-between w-full"><button onClick={() => setShowSupplierOffcanvas(false)} disabled={supplierSubmitting} className="px-4 py-2 rounded-lg border">Close</button><button onClick={createSupplier} disabled={supplierSubmitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white">{supplierSubmitting ? 'Creating...' : 'Create Supplier'}</button></div>}><div className="space-y-5 overflow-y-auto pr-2" style={{ maxHeight: '70vh' }}><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Basic Information</legend><div className="space-y-4 mt-2"><div><label className={labelClass}>Company *</label><select value={newSupplier.company_id} onChange={(e) => setNewSupplier((p) => ({ ...p, company_id: e.target.value }))} className={inputClass}><option value="">Select Company</option>{companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div><div><label className={labelClass}>Supplier Name *</label><input value={newSupplier.name} onChange={(e) => setNewSupplier((p) => ({ ...p, name: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="Contact Person" value={newSupplier.contact_person} onChange={(e) => setNewSupplier((p) => ({ ...p, contact_person: e.target.value }))} className={inputClass} /><input placeholder="Contact No" value={newSupplier.contact_no} onChange={(e) => setNewSupplier((p) => ({ ...p, contact_no: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="Email" type="email" value={newSupplier.email} onChange={(e) => setNewSupplier((p) => ({ ...p, email: e.target.value }))} className={inputClass} /><input placeholder="Phone" value={newSupplier.phone} onChange={(e) => setNewSupplier((p) => ({ ...p, phone: e.target.value }))} className={inputClass} /></div></div></fieldset><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Tax Details</legend><div className="grid grid-cols-2 gap-4 mt-2"><input placeholder="GST Number" value={newSupplier.gst_number} onChange={(e) => setNewSupplier((p) => ({ ...p, gst_number: e.target.value.toUpperCase() }))} className={inputClass} /><input placeholder="PAN" value={newSupplier.pan} onChange={(e) => setNewSupplier((p) => ({ ...p, pan: e.target.value.toUpperCase() }))} className={inputClass} /></div></fieldset><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Billing Address</legend><div className="space-y-3 mt-2"><textarea rows={2} value={newSupplier.billing_street} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_street: e.target.value }))} className={inputClass} placeholder="Street Address" /><div className="grid grid-cols-2 gap-3"><input placeholder="City" value={newSupplier.billing_city} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_city: e.target.value }))} className={inputClass} /><input placeholder="State" value={newSupplier.billing_state} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_state: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-3"><input placeholder="Country" value={newSupplier.billing_country} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_country: e.target.value }))} className={inputClass} /><input placeholder="Pincode" value={newSupplier.billing_pincode} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_pincode: e.target.value }))} className={inputClass} /></div></div></fieldset></div></Offcanvas></Suspense>}
+      {showSupplierOffcanvas && canCreateSupplier && <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}><Offcanvas isOpen={showSupplierOffcanvas} title="Add Supplier" onClose={() => !supplierSubmitting && setShowSupplierOffcanvas(false)} footer={<div className="flex justify-between w-full"><button onClick={() => setShowSupplierOffcanvas(false)} disabled={supplierSubmitting} className="px-4 py-2 rounded-lg border">Close</button><button onClick={createSupplier} disabled={supplierSubmitting} className="px-5 py-2 rounded-lg bg-blue-600 text-white">{supplierSubmitting ? 'Creating...' : 'Create Supplier'}</button></div>}><div className="space-y-5 overflow-y-auto pr-2" style={{ maxHeight: '70vh' }}><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Basic Information</legend><div className="space-y-4 mt-2"><div><label className={labelClass}>Company *</label><select value={newSupplier.company_id} onChange={(e) => setNewSupplier((p) => ({ ...p, company_id: e.target.value }))} className={inputClass}><option value="">Select Company</option>{companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div><div><label className={labelClass}>Supplier Name *</label><input value={newSupplier.name} onChange={(e) => setNewSupplier((p) => ({ ...p, name: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="Contact Person" value={newSupplier.contact_person} onChange={(e) => setNewSupplier((p) => ({ ...p, contact_person: e.target.value }))} className={inputClass} /><input placeholder="Contact No" value={newSupplier.contact_no} onChange={(e) => setNewSupplier((p) => ({ ...p, contact_no: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="Email" type="email" value={newSupplier.email} onChange={(e) => setNewSupplier((p) => ({ ...p, email: e.target.value }))} className={inputClass} /><input placeholder="Phone" value={newSupplier.phone} onChange={(e) => setNewSupplier((p) => ({ ...p, phone: e.target.value }))} className={inputClass} /></div></div></fieldset><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Tax Details</legend><div className="grid grid-cols-2 gap-4 mt-2"><input placeholder="GST Number" value={newSupplier.gst_number} onChange={(e) => setNewSupplier((p) => ({ ...p, gst_number: e.target.value.toUpperCase() }))} className={inputClass} /><input placeholder="PAN" value={newSupplier.pan} onChange={(e) => setNewSupplier((p) => ({ ...p, pan: e.target.value.toUpperCase() }))} className={inputClass} /></div></fieldset><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Billing Address</legend><div className="space-y-3 mt-2"><textarea rows={2} value={newSupplier.billing_street} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_street: e.target.value }))} className={inputClass} placeholder="Street Address" /><div className="grid grid-cols-2 gap-3"><input placeholder="City" value={newSupplier.billing_city} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_city: e.target.value }))} className={inputClass} /><input placeholder="State" value={newSupplier.billing_state} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_state: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-3"><input placeholder="Country" value={newSupplier.billing_country} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_country: e.target.value }))} className={inputClass} /><input placeholder="Pincode" value={newSupplier.billing_pincode} onChange={(e) => setNewSupplier((p) => ({ ...p, billing_pincode: e.target.value }))} className={inputClass} /></div></div></fieldset></div></Offcanvas></Suspense>}
 
-      {showProductOffcanvas && <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}><Offcanvas isOpen={showProductOffcanvas} title="Add Product" onClose={() => !productSubmitting && setShowProductOffcanvas(false)} footer={<div className="flex justify-between w-full"><button onClick={() => setShowProductOffcanvas(false)} disabled={productSubmitting} className="px-4 py-2 rounded-lg border">Close</button><button onClick={createProduct} disabled={productSubmitting} className="px-5 py-2 rounded-lg bg-emerald-600 text-white">{productSubmitting ? 'Creating...' : 'Create Product'}</button></div>}><div className="space-y-5 overflow-y-auto pr-2" style={{ maxHeight: '70vh' }}><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Basic Information</legend><div className="space-y-4 mt-2"><div className="grid grid-cols-2 gap-4"><div><label className={labelClass}>Company *</label><select value={newProduct.company_id} onChange={(e) => setNewProduct((p) => ({ ...p, company_id: e.target.value }))} className={`${inputClass} ${productFormErrors.company_id ? 'border-red-400' : ''}`}><option value="">Select Company</option>{companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div><div><label className={labelClass}>Branch</label><input value={newProduct.branch_id} onChange={(e) => setNewProduct((p) => ({ ...p, branch_id: e.target.value }))} className={inputClass} placeholder="Branch ID (optional)" /></div></div><div><label className={labelClass}>Product Name *</label><input value={newProduct.name} onChange={(e) => setNewProduct((p) => ({ ...p, name: e.target.value }))} className={`${inputClass} ${productFormErrors.name ? 'border-red-400' : ''}`} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="SKU" value={newProduct.sku} onChange={(e) => setNewProduct((p) => ({ ...p, sku: e.target.value }))} className={inputClass} /><input placeholder="HSN/SAC Code" value={newProduct.hsn_sac_code} onChange={(e) => setNewProduct((p) => ({ ...p, hsn_sac_code: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="Unit" value={newProduct.unit} onChange={(e) => setNewProduct((p) => ({ ...p, unit: e.target.value }))} className={`${inputClass} ${productFormErrors.unit ? 'border-red-400' : ''}`} /><input type="number" min="0" step="0.01" placeholder="Purchase Price" value={newProduct.purchase_price} onChange={(e) => setNewProduct((p) => ({ ...p, purchase_price: e.target.value }))} className={`${inputClass} ${productFormErrors.purchase_price ? 'border-red-400' : ''}`} /></div><div className="grid grid-cols-2 gap-4"><input type="number" min="0" step="0.01" placeholder="Sale Price" value={newProduct.sale_price} onChange={(e) => setNewProduct((p) => ({ ...p, sale_price: e.target.value }))} className={inputClass} /><input type="number" min="0" max="100" step="0.01" placeholder="Tax Rate %" value={newProduct.tax_rate} onChange={(e) => setNewProduct((p) => ({ ...p, tax_rate: e.target.value }))} className={inputClass} /></div></div></fieldset><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Stock & Notes</legend><div className="grid grid-cols-2 gap-4 mt-2"><input type="number" placeholder="Stock Quantity" value={newProduct.stock_quantity} onChange={(e) => setNewProduct((p) => ({ ...p, stock_quantity: e.target.value }))} className={inputClass} /><input type="number" placeholder="Reorder Level" value={newProduct.reorder_level} onChange={(e) => setNewProduct((p) => ({ ...p, reorder_level: e.target.value }))} className={inputClass} /></div><textarea rows={3} placeholder="Description" value={newProduct.description} onChange={(e) => setNewProduct((p) => ({ ...p, description: e.target.value }))} className={`${inputClass} mt-4`} /></fieldset></div></Offcanvas></Suspense>}
+      {showProductOffcanvas && canCreateProduct && <Suspense fallback={<div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center"><div className="bg-white p-8 rounded-2xl">Loading...</div></div>}><Offcanvas isOpen={showProductOffcanvas} title="Add Product" onClose={() => !productSubmitting && setShowProductOffcanvas(false)} footer={<div className="flex justify-between w-full"><button onClick={() => setShowProductOffcanvas(false)} disabled={productSubmitting} className="px-4 py-2 rounded-lg border">Close</button><button onClick={createProduct} disabled={productSubmitting} className="px-5 py-2 rounded-lg bg-emerald-600 text-white">{productSubmitting ? 'Creating...' : 'Create Product'}</button></div>}><div className="space-y-5 overflow-y-auto pr-2" style={{ maxHeight: '70vh' }}><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Basic Information</legend><div className="space-y-4 mt-2"><div className="grid grid-cols-2 gap-4"><div><label className={labelClass}>Company *</label><select value={newProduct.company_id} onChange={(e) => setNewProduct((p) => ({ ...p, company_id: e.target.value }))} className={`${inputClass} ${productFormErrors.company_id ? 'border-red-400' : ''}`}><option value="">Select Company</option>{companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div><div><label className={labelClass}>Branch</label><input value={newProduct.branch_id} onChange={(e) => setNewProduct((p) => ({ ...p, branch_id: e.target.value }))} className={inputClass} placeholder="Branch ID (optional)" /></div></div><div><label className={labelClass}>Product Name *</label><input value={newProduct.name} onChange={(e) => setNewProduct((p) => ({ ...p, name: e.target.value }))} className={`${inputClass} ${productFormErrors.name ? 'border-red-400' : ''}`} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="SKU" value={newProduct.sku} onChange={(e) => setNewProduct((p) => ({ ...p, sku: e.target.value }))} className={inputClass} /><input placeholder="HSN/SAC Code" value={newProduct.hsn_sac_code} onChange={(e) => setNewProduct((p) => ({ ...p, hsn_sac_code: e.target.value }))} className={inputClass} /></div><div className="grid grid-cols-2 gap-4"><input placeholder="Unit" value={newProduct.unit} onChange={(e) => setNewProduct((p) => ({ ...p, unit: e.target.value }))} className={`${inputClass} ${productFormErrors.unit ? 'border-red-400' : ''}`} /><input type="number" min="0" step="0.01" placeholder="Purchase Price" value={newProduct.purchase_price} onChange={(e) => setNewProduct((p) => ({ ...p, purchase_price: e.target.value }))} className={`${inputClass} ${productFormErrors.purchase_price ? 'border-red-400' : ''}`} /></div><div className="grid grid-cols-2 gap-4"><input type="number" min="0" step="0.01" placeholder="Sale Price" value={newProduct.sale_price} onChange={(e) => setNewProduct((p) => ({ ...p, sale_price: e.target.value }))} className={inputClass} /><input type="number" min="0" max="100" step="0.01" placeholder="Tax Rate %" value={newProduct.tax_rate} onChange={(e) => setNewProduct((p) => ({ ...p, tax_rate: e.target.value }))} className={inputClass} /></div></div></fieldset><fieldset className="border rounded-xl p-4"><legend className="font-semibold px-2">Stock & Notes</legend><div className="grid grid-cols-2 gap-4 mt-2"><input type="number" placeholder="Stock Quantity" value={newProduct.stock_quantity} onChange={(e) => setNewProduct((p) => ({ ...p, stock_quantity: e.target.value }))} className={inputClass} /><input type="number" placeholder="Reorder Level" value={newProduct.reorder_level} onChange={(e) => setNewProduct((p) => ({ ...p, reorder_level: e.target.value }))} className={inputClass} /></div><textarea rows={3} placeholder="Description" value={newProduct.description} onChange={(e) => setNewProduct((p) => ({ ...p, description: e.target.value }))} className={`${inputClass} mt-4`} /></fieldset></div></Offcanvas></Suspense>}
     </div>
   );
 }
+
+export default CreatePurchaseInvoicePage;

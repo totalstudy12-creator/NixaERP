@@ -17,6 +17,7 @@ import {
   FiTrash2,
   FiDownload,
   FiEye,
+  FiEyeOff,
   FiEdit,
   FiCheckCircle,
   FiXCircle,
@@ -39,12 +40,15 @@ import {
   FiMoreVertical,
   FiUser,
   FiMapPin,
+  FiLock,
 } from 'react-icons/fi';
 import { MdWarehouse } from 'react-icons/md';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import { useAuthStore } from '../store/auth';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -204,19 +208,15 @@ interface ApiErrorLike {
 /* ------------------------------------------------------------------ */
 
 const CACHE_TTL_MS = 300_000;
-const TABLE_COLUMN_COUNT = 8;
+const TABLE_COLUMN_COUNT = 9;
 const WAREHOUSE_STOCK_CONCURRENCY = 6;
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 const TAB_PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 const PAGE_SIZE_STORAGE_KEY = 'inventory:pageSize';
+const SHOW_PURCHASE_PRICE_KEY = 'inventory:showPurchasePrice';
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_BUTTONS = 5;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-/**
- * Stock-movements and purchase-price-history endpoints accept per_page and
- * benefit from a higher window. The /transactions endpoint does NOT accept
- * per_page — sending it causes a 500 on some backend builds.
- */
 const TAB_FETCH_LIMIT = 200;
 
 function readStoredPageSize(): number {
@@ -227,9 +227,21 @@ function readStoredPageSize(): number {
   } catch { /* localStorage may be disabled */ }
   return DEFAULT_PAGE_SIZE;
 }
-
 function persistPageSize(size: number): void {
   try { window.localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(size)); } catch { /* no-op */ }
+}
+
+/** Purchase price visibility — defaults to HIDDEN for safety. */
+function readStoredShowPurchasePrice(): boolean {
+  try {
+    const raw = window.localStorage.getItem(SHOW_PURCHASE_PRICE_KEY);
+    if (raw === '1') return true;
+    if (raw === '0') return false;
+  } catch { /* localStorage may be disabled */ }
+  return false;
+}
+function persistShowPurchasePrice(show: boolean): void {
+  try { window.localStorage.setItem(SHOW_PURCHASE_PRICE_KEY, show ? '1' : '0'); } catch { /* no-op */ }
 }
 
 const UNIT_OPTIONS = [
@@ -290,6 +302,15 @@ function safeCurrency(value: unknown): string {
   return new Intl.NumberFormat('en-IN', {
     style: 'currency', currency: 'INR', maximumFractionDigits: 2,
   }).format(safeNumber(value));
+}
+
+/** Mask helper: hides purchase-price values when `show` is false. */
+const MASK = '••••';
+function maskCurrency(value: unknown, show: boolean): string {
+  return show ? safeCurrency(value) : MASK;
+}
+function maskNumber(value: unknown, show: boolean): string {
+  return show ? String(safeNumber(value)) : MASK;
 }
 
 function safeDate(value: unknown): string {
@@ -511,12 +532,14 @@ const MENU_MARGIN = 8;
 
 const ActionDropdown = memo(
   ({
-    item, onView, onEdit, onDelete,
+    item, onView, onEdit, onDelete, canEdit, canDelete,
   }: {
     item: InventoryItem;
     onView: (i: InventoryItem) => void;
     onEdit: (i: InventoryItem) => void;
     onDelete: (i: InventoryItem) => void;
+    canEdit: boolean;
+    canDelete: boolean;
   }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
@@ -586,17 +609,26 @@ const ActionDropdown = memo(
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
               <FiEye size={14} className="text-slate-500" /> View
             </button>
-            <button type="button" role="menuitem"
-              onClick={() => { setIsOpen(false); onEdit(item); }}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
-              <FiEdit size={14} className="text-indigo-500" /> Edit
-            </button>
-            <div className="my-1 border-t border-slate-100" />
-            <button type="button" role="menuitem"
-              onClick={() => { setIsOpen(false); onDelete(item); }}
-              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-red-600 transition hover:bg-red-50">
-              <FiTrash2 size={14} /> Delete
-            </button>
+            {canEdit && (
+              <button type="button" role="menuitem"
+                onClick={() => { setIsOpen(false); onEdit(item); }}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
+                <FiEdit size={14} className="text-indigo-500" /> Edit
+              </button>
+            )}
+            {canDelete && (
+              <>
+                <div className="my-1 border-t border-slate-100" />
+                <button type="button" role="menuitem"
+                  onClick={() => { setIsOpen(false); onDelete(item); }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-red-600 transition hover:bg-red-50">
+                  <FiTrash2 size={14} /> Delete
+                </button>
+              </>
+            )}
+            {!canEdit && !canDelete && (
+              <div className="px-3 py-1.5 text-[11px] text-slate-400">Read-only</div>
+            )}
           </div>,
           document.body
         )}
@@ -670,7 +702,7 @@ const Modal = ({ onClose, children, title, width = 'max-w-5xl' }: ModalProps) =>
 };
 
 /* ------------------------------------------------------------------ */
-/* Tabs — underline style (clean, scrollable on narrow screens)        */
+/* Tabs                                                                */
 /* ------------------------------------------------------------------ */
 
 const Tabs = ({
@@ -710,7 +742,7 @@ const Tabs = ({
 );
 
 /* ------------------------------------------------------------------ */
-/* Pagination — page level                                             */
+/* Pagination                                                          */
 /* ------------------------------------------------------------------ */
 
 interface PaginationProps {
@@ -780,7 +812,6 @@ const Pagination = memo(({
 });
 Pagination.displayName = 'Pagination';
 
-/** Compact pagination used inside modal tabs. */
 const MiniPagination = memo(({
   page, size, total, totalPages, onPageChange, onSizeChange,
 }: {
@@ -823,7 +854,6 @@ const MiniPagination = memo(({
 });
 MiniPagination.displayName = 'MiniPagination';
 
-/** Generic client-side pagination hook used by every modal tab. */
 function usePagination<T>(items: T[], initialSize: number = 10) {
   const [page, setPage] = useState(1);
   const [size, setSize] = useState(initialSize);
@@ -848,7 +878,6 @@ const EmptyState = ({ title, hint }: { title: string; hint?: string }) => (
   </div>
 );
 
-/** Reusable inline stat tile for the modal (label on top, value below, no wrap). */
 const StatTile = ({ label, value, tone = 'text-slate-900' }: { label: string; value: string | number; tone?: string }) => (
   <div className="min-w-0 rounded-xl border border-slate-200 bg-white p-2.5 sm:p-3">
     <p className="truncate text-[10px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
@@ -864,12 +893,17 @@ type BillTypeFilter = 'all' | 'sale' | 'purchase';
 
 const ProductDetailModal = ({
   product, onClose, onEdit, onStockIn, onStockOut,
+  showPurchasePrice, onTogglePurchasePrice,
+  canEditProduct,
 }: {
   product: InventoryItem;
   onClose: () => void;
   onEdit: (i: InventoryItem) => void;
   onStockIn: (i: InventoryItem) => void;
   onStockOut: (i: InventoryItem) => void;
+  showPurchasePrice: boolean;
+  onTogglePurchasePrice: () => void;
+  canEditProduct: boolean;
 }) => {
   const [activeTab, setActiveTab] = useState('summary');
   const [summaryData, setSummaryData] = useState<Record<string, unknown> | null>(null);
@@ -930,7 +964,6 @@ const ProductDetailModal = ({
             break;
           }
           case 'billwise': {
-            // NOTE: /transactions does NOT accept per_page on the backend.
             const res = await apiClient.get(
               `/products/${product.id}/transactions`,
               { signal: controller.signal }
@@ -983,8 +1016,6 @@ const ProductDetailModal = ({
     if (activeTab === 'summary' || activeTab === 'warehouse') return;
     fetchTabData(activeTab);
   }, [activeTab, fetchTabData]);
-
-  /* ------------ Sorted & filtered data ------------ */
 
   const sortedMovements = useMemo(
     () =>
@@ -1049,8 +1080,6 @@ const ProductDetailModal = ({
   const isLoading = tabLoading[activeTab] || false;
   const activeTabError = tabErrors[activeTab] || null;
 
-  /* ---------------- Renders ---------------- */
-
   const renderBillwise = () => (
     <div className="overflow-hidden rounded-xl border border-slate-200">
       <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-slate-50/60 px-3 py-2">
@@ -1101,7 +1130,7 @@ const ProductDetailModal = ({
                 <td className="px-3 py-2 text-xs text-slate-700">{t.bill_number}</td>
                 <td className="max-w-[180px] truncate px-3 py-2 text-xs text-slate-700">{t.party_name}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-700">{safeDate(t.date)}</td>
-                <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeCurrency(t.unit_price)}</td>
+                <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{maskCurrency(t.unit_price, showPurchasePrice)}</td>
                 <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeCurrency(t.price_with_tax)}</td>
                 <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeNumber(t.quantity)}</td>
                 <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeNumber(t.item_discount)}%</td>
@@ -1272,7 +1301,7 @@ const ProductDetailModal = ({
                 <td className="max-w-[180px] truncate px-3 py-2 text-xs text-slate-700">{p.supplier?.name || '—'}</td>
                 <td className="px-3 py-2 text-xs text-slate-700">{p.bill_number || '—'}</td>
                 <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeNumber(p.quantity)}</td>
-                <td className="px-3 py-2 text-right text-xs font-semibold tabular-nums text-slate-900">{safeCurrency(p.unit_price)}</td>
+                <td className="px-3 py-2 text-right text-xs font-semibold tabular-nums text-slate-900">{maskCurrency(p.unit_price, showPurchasePrice)}</td>
               </tr>
             ))}
             {purchaseHistoryPager.paged.length === 0 && (
@@ -1313,8 +1342,8 @@ const ProductDetailModal = ({
                 <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeNumber(w.quantity)}</td>
                 <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeNumber(w.reserved_quantity)}</td>
                 <td className="px-3 py-2 text-right text-xs font-semibold tabular-nums text-emerald-700">{safeNumber(w.available_quantity)}</td>
-                <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeCurrency(w.average_cost)}</td>
-                <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeCurrency(w.last_purchase_price)}</td>
+                <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{maskCurrency(w.average_cost, showPurchasePrice)}</td>
+                <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{maskCurrency(w.last_purchase_price, showPurchasePrice)}</td>
               </tr>
             ))}
             {warehousePager.paged.length === 0 && (
@@ -1363,34 +1392,51 @@ const ProductDetailModal = ({
                     }`}>
                     {toBoolean(product.active) ? 'Active' : 'Inactive'}
                   </Badge>
+                  {/* Local eye toggle inside the modal header */}
+                  <button
+                    type="button"
+                    onClick={onTogglePurchasePrice}
+                    title={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
+                    aria-pressed={showPurchasePrice}
+                    className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-600 transition hover:bg-slate-50 sm:px-2.5 sm:text-[11px]"
+                  >
+                    {showPurchasePrice ? <FiEyeOff size={11} /> : <FiEye size={11} />}
+                    {showPurchasePrice ? 'Hide prices' : 'Show prices'}
+                  </button>
                 </div>
               </div>
             </div>
             <div className="flex flex-wrap gap-1.5 sm:gap-2">
-              <Button onClick={() => onEdit(product)} variant="outline" className="h-8 rounded-lg text-xs sm:h-9 sm:rounded-xl sm:text-sm">
-                <FiEdit className="mr-1.5" size={14} /> Edit
-              </Button>
-              <Button onClick={() => onStockIn(product)}
-                className="h-8 rounded-lg bg-emerald-600 text-xs font-semibold hover:bg-emerald-700 sm:h-9 sm:rounded-xl sm:text-sm">
-                <FiPackage className="mr-1.5" size={14} /> Stock IN
-              </Button>
-              <Button onClick={() => onStockOut(product)}
-                className="h-8 rounded-lg bg-rose-600 text-xs font-semibold hover:bg-rose-700 sm:h-9 sm:rounded-xl sm:text-sm">
-                <FiTruck className="mr-1.5" size={14} /> Stock OUT
-              </Button>
+              {canEditProduct && (
+                <Button onClick={() => onEdit(product)} variant="outline" className="h-8 rounded-lg text-xs sm:h-9 sm:rounded-xl sm:text-sm">
+                  <FiEdit className="mr-1.5" size={14} /> Edit
+                </Button>
+              )}
+              {canEditProduct && (
+                <>
+                  <Button onClick={() => onStockIn(product)}
+                    className="h-8 rounded-lg bg-emerald-600 text-xs font-semibold hover:bg-emerald-700 sm:h-9 sm:rounded-xl sm:text-sm">
+                    <FiPackage className="mr-1.5" size={14} /> Stock IN
+                  </Button>
+                  <Button onClick={() => onStockOut(product)}
+                    className="h-8 rounded-lg bg-rose-600 text-xs font-semibold hover:bg-rose-700 sm:h-9 sm:rounded-xl sm:text-sm">
+                    <FiTruck className="mr-1.5" size={14} /> Stock OUT
+                  </Button>
+                </>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Summary tiles — responsive grid, no label wrap */}
+        {/* Summary tiles */}
         {summaryData && (
           <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
             <StatTile label="Sale price" value={safeCurrency(product.sale_price)} />
             <StatTile label="Total stock" value={safeNumber(summaryData.total_stock)} />
             <StatTile label="Available" value={safeNumber(summaryData.available_stock)} tone="text-emerald-700" />
             <StatTile label="Reserved" value={safeNumber(summaryData.reserved_stock)} tone="text-amber-700" />
-            <StatTile label="Avg purchase" value={safeCurrency(summaryData.average_purchase_price)} />
-            <StatTile label="Last purchase" value={safeCurrency(summaryData.last_purchase_price)} />
+            <StatTile label="Avg purchase" value={maskCurrency(summaryData.average_purchase_price, showPurchasePrice)} />
+            <StatTile label="Last purchase" value={maskCurrency(summaryData.last_purchase_price, showPurchasePrice)} />
           </div>
         )}
 
@@ -1415,8 +1461,8 @@ const ProductDetailModal = ({
             <>
               {activeTab === 'summary' && summaryData && (
                 <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-                  <StatTile label="Last purchase price" value={safeCurrency(summaryData.last_purchase_price)} />
-                  <StatTile label="Average purchase price" value={safeCurrency(summaryData.average_purchase_price)} />
+                  <StatTile label="Last purchase price" value={maskCurrency(summaryData.last_purchase_price, showPurchasePrice)} />
+                  <StatTile label="Average purchase price" value={maskCurrency(summaryData.average_purchase_price, showPurchasePrice)} />
                   <StatTile label="Last sale price" value={safeCurrency(summaryData.last_sale_price)} />
                 </div>
               )}
@@ -1436,7 +1482,13 @@ const ProductDetailModal = ({
                       { key: 'dealer_price', label: 'Dealer' },
                       { key: 'distributor_price', label: 'Distributor' },
                     ].map((row) => (
-                      <StatTile key={row.key} label={row.label} value={safeCurrency(priceList[row.key])} />
+                      <StatTile
+                        key={row.key}
+                        label={row.label}
+                        value={row.key === 'purchase_price'
+                          ? maskCurrency(priceList[row.key], showPurchasePrice)
+                          : safeCurrency(priceList[row.key])}
+                      />
                     ))}
                   </dl>
                 ) : <EmptyState title="No price list available" />
@@ -1457,11 +1509,12 @@ const ProductDetailModal = ({
 /* ------------------------------------------------------------------ */
 
 const StockInModal = ({
-  product, onClose, onSuccess,
+  product, onClose, onSuccess, showPurchasePrice,
 }: {
   product: InventoryItem;
   onClose: () => void;
   onSuccess: () => void;
+  showPurchasePrice: boolean;
 }) => {
   const [form, setForm] = useState({
     warehouse_id: '',
@@ -1569,8 +1622,14 @@ const StockInModal = ({
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Unit cost</label>
-            <input type="number" min="0" step="0.01" inputMode="decimal" value={form.unit_cost}
-              onChange={(e) => setForm({ ...form, unit_cost: e.target.value })} className={inputClass} />
+            <input
+              type={showPurchasePrice ? 'number' : 'password'}
+              min="0" step="0.01"
+              inputMode="decimal"
+              value={form.unit_cost}
+              onChange={(e) => setForm({ ...form, unit_cost: e.target.value })}
+              className={inputClass}
+            />
           </div>
         </div>
         <div>
@@ -1621,11 +1680,12 @@ const StockInModal = ({
 /* ------------------------------------------------------------------ */
 
 const StockOutModal = ({
-  product, onClose, onSuccess,
+  product, onClose, onSuccess, showPurchasePrice,
 }: {
   product: InventoryItem;
   onClose: () => void;
   onSuccess: () => void;
+  showPurchasePrice: boolean;
 }) => {
   const [form, setForm] = useState({
     warehouse_id: '',
@@ -1736,8 +1796,14 @@ const StockOutModal = ({
           </div>
           <div>
             <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Unit price</label>
-            <input type="number" min="0" step="0.01" inputMode="decimal" value={form.unit_price}
-              onChange={(e) => setForm({ ...form, unit_price: e.target.value })} className={inputClass} />
+            <input
+              type={showPurchasePrice ? 'number' : 'password'}
+              min="0" step="0.01"
+              inputMode="decimal"
+              value={form.unit_price}
+              onChange={(e) => setForm({ ...form, unit_price: e.target.value })}
+              className={inputClass}
+            />
           </div>
         </div>
         <div>
@@ -1789,7 +1855,26 @@ const StockOutModal = ({
 
 export function InventoryPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+  const loadingUser = useAuthStore((s) => s.loadingUser);
+  const hasUser = useAuthStore((s) => Boolean(s.user));
 
+  /* ---- Capability flags ---- */
+  const canViewInventory    = isSuperAdmin || can('view products');
+  const canCreateProduct    = isSuperAdmin || can('create products');
+  const canEditProduct      = isSuperAdmin || can('edit products');
+  const canDeleteProduct    = isSuperAdmin || can('delete products');
+  const canImportInventory  = isSuperAdmin || can('import inventory');
+  const canExportInventory  = isSuperAdmin || can('export inventory');
+
+  const canManageProducts = canCreateProduct || canEditProduct || canDeleteProduct;
+
+  /* ---- Purchase price visibility ---- */
+  const [showPurchasePrice, setShowPurchasePrice] = useState<boolean>(() => readStoredShowPurchasePrice());
+  useEffect(() => { persistShowPurchasePrice(showPurchasePrice); }, [showPurchasePrice]);
+  const togglePurchasePrice = useCallback(() => setShowPurchasePrice((v) => !v), []);
+
+  /* ---- Cache hooks ---- */
   const { data: companies, refresh: refreshComps } = useApiCache<Company[]>(
     'companies', () => apiClient.getCompanies()
   );
@@ -1798,16 +1883,17 @@ export function InventoryPage() {
     'branches', () => apiClient.getBranches()
   );
 
-  const {
-    data: warehouses, loading: warehousesLoading,
-  } = useApiCache<Warehouse[]>(
+  const { data: warehouses, loading: warehousesLoading } = useApiCache<Warehouse[]>(
     'warehouses',
     async () => extractArray<Warehouse>((await apiClient.get('/warehouses?per_page=all')).data)
   );
 
   const {
     data: items, loading: itemsLoading, error: itemsError, refresh: refreshItems,
-  } = useApiCache<InventoryItem[]>('inventory', () => apiClient.getAllProducts());
+  } = useApiCache<InventoryItem[]>('inventory', () => {
+    if (!canViewInventory) return Promise.resolve([]);
+    return apiClient.getAllProducts();
+  });
 
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCompany, setFilterCompany] = useState('all');
@@ -2074,6 +2160,10 @@ export function InventoryPage() {
   }, []);
 
   const handleBulkDelete = useCallback(async () => {
+    if (!canDeleteProduct) {
+      showError('Permission denied', 'You do not have permission to delete products.');
+      return;
+    }
     if (selectedIds.length === 0) return;
     if (!window.confirm(`Delete ${selectedIds.length} item(s)? This cannot be undone.`)) return;
     try {
@@ -2085,10 +2175,14 @@ export function InventoryPage() {
       setSelectedIds([]);
       refreshItems();
     } catch (error: unknown) { showError('Bulk delete failed', getApiErrorMessage(error)); }
-  }, [selectedIds, refreshItems, showSuccess, showError]);
+  }, [canDeleteProduct, selectedIds, refreshItems, showSuccess, showError]);
 
   const handleBulkStatusChange = useCallback(
     async (active: boolean) => {
+      if (!canEditProduct) {
+        showError('Permission denied', 'You do not have permission to update products.');
+        return;
+      }
       if (selectedIds.length === 0) return;
       const label = active ? 'activate' : 'deactivate';
       if (!window.confirm(`Are you sure you want to ${label} ${selectedIds.length} item(s)?`)) return;
@@ -2104,14 +2198,7 @@ export function InventoryPage() {
         refreshItems();
       } catch (error: unknown) { showError('Bulk update failed', getApiErrorMessage(error)); }
     },
-    [selectedIds, refreshItems, showSuccess, showError]
-  );
-
-  const handleBulkUpdateStock = useCallback(
-    async (_quantity: number) => {
-      showError('Disabled', 'Direct bulk stock overwrite is not allowed. Use Stock IN/OUT or a proper stock adjustment flow.');
-    },
-    [showError]
+    [canEditProduct, selectedIds, refreshItems, showSuccess, showError]
   );
 
   const handleView = useCallback((item: InventoryItem) => {
@@ -2119,6 +2206,10 @@ export function InventoryPage() {
   }, []);
 
   const handleCreate = useCallback(() => {
+    if (!canCreateProduct) {
+      showError('Permission denied', 'You do not have permission to create products.');
+      return;
+    }
     setEditingId(null);
     setFormData({
       company_id: '', branch_id: '', name: '', sku: '', barcode: '', brand: '',
@@ -2127,9 +2218,13 @@ export function InventoryPage() {
     });
     setFormErrors({});
     setIsPanelOpen(true);
-  }, []);
+  }, [canCreateProduct, showError]);
 
   const handleEdit = useCallback((item: InventoryItem) => {
+    if (!canEditProduct) {
+      showError('Permission denied', 'You do not have permission to edit products.');
+      return;
+    }
     setEditingId(item.id);
     setFormData({
       company_id: item.company_id || '', branch_id: item.branch_id ?? '',
@@ -2142,10 +2237,14 @@ export function InventoryPage() {
     });
     setFormErrors({});
     setIsPanelOpen(true);
-  }, []);
+  }, [canEditProduct, showError]);
 
   const handleDelete = useCallback(
     async (item: InventoryItem) => {
+      if (!canDeleteProduct) {
+        showError('Permission denied', 'You do not have permission to delete products.');
+        return;
+      }
       if (!window.confirm(`Delete "${item.name}"? This cannot be undone.`)) return;
       try {
         await apiClient.deleteProduct(item.id);
@@ -2154,7 +2253,7 @@ export function InventoryPage() {
         refreshItems();
       } catch (error: unknown) { showError('Delete failed', getApiErrorMessage(error)); }
     },
-    [refreshItems, showSuccess, showError]
+    [canDeleteProduct, refreshItems, showSuccess, showError]
   );
 
   const validateForm = useCallback((): boolean => {
@@ -2204,6 +2303,15 @@ export function InventoryPage() {
   }, [formData, branches, showError]);
 
   const handleSubmit = useCallback(async () => {
+    const isUpdate = Boolean(editingId);
+    if (isUpdate && !canEditProduct) {
+      showError('Permission denied', 'You do not have permission to edit products.');
+      return;
+    }
+    if (!isUpdate && !canCreateProduct) {
+      showError('Permission denied', 'You do not have permission to create products.');
+      return;
+    }
     if (!validateForm()) return;
 
     const payload = {
@@ -2241,10 +2349,14 @@ export function InventoryPage() {
       showError('Save failed', msg);
       safeLog({ module: 'Inventory', action: 'Save', status: 'error', message: msg });
     } finally { setSubmitting(false); }
-  }, [formData, editingId, validateForm, refreshItems, refreshComps, refreshBranches, showSuccess, showError]);
+  }, [canEditProduct, canCreateProduct, formData, editingId, validateForm, refreshItems, refreshComps, refreshBranches, showSuccess, showError]);
 
   const handleExport = useCallback(
     async (mode: 'current' | 'selected' | 'all') => {
+      if (!canExportInventory) {
+        showError('Permission denied', 'You do not have permission to export inventory.');
+        return;
+      }
       try {
         let params: Record<string, unknown> = {};
         if (mode === 'current') {
@@ -2276,16 +2388,20 @@ export function InventoryPage() {
       }
       setExportMenuOpen(false);
     },
-    [searchTerm, filterCompany, filterBranch, filterBrand, filterStatus, filterWarehouse, selectedIds, showSuccess, showError]
+    [canExportInventory, searchTerm, filterCompany, filterBranch, filterBrand, filterStatus, filterWarehouse, selectedIds, showSuccess, showError]
   );
 
   const handleImportOpen = useCallback(() => {
+    if (!canImportInventory) {
+      showError('Permission denied', 'You do not have permission to import inventory.');
+      return;
+    }
     setIsImportOpen(true);
     setImportStep('select'); setImportFile(null); setImportPreview([]);
     setImportSummary(null); setImportErrors([]);
     setImportResultMessage(''); setImportSuccess(false); setDragOver(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, []);
+  }, [canImportInventory, showError]);
 
   const handlePreview = useCallback(
     async (file: File) => {
@@ -2338,6 +2454,10 @@ export function InventoryPage() {
   const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragOver(false); }, []);
 
   const handleImport = useCallback(async () => {
+    if (!canImportInventory) {
+      showError('Permission denied', 'You do not have permission to import inventory.');
+      return;
+    }
     if (!importFile) return;
     const allowed: DuplicateAction[] = ['skip', 'update', 'stop'];
     const safeAction = allowed.includes(duplicateAction) ? duplicateAction : 'skip';
@@ -2363,7 +2483,7 @@ export function InventoryPage() {
       setImportStep('preview');
       safeLog({ module: 'Inventory', action: 'Import', status: 'error', message: msg });
     } finally { setImportLoading(false); }
-  }, [importFile, duplicateAction, refreshItems, showSuccess, showError]);
+  }, [canImportInventory, importFile, duplicateAction, refreshItems, showSuccess, showError]);
 
   const handleDownloadTemplate = useCallback(async () => {
     try {
@@ -2408,10 +2528,25 @@ export function InventoryPage() {
         ? 'border-rose-300 ring-2 ring-rose-200'
         : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10';
 
+      // Special handling for purchase_price — mask with type=password when hidden
+      const isPurchasePrice = field === 'purchase_price';
+      const inputType = isPurchasePrice ? (showPurchasePrice ? 'number' : 'password') : type;
+
       return (
         <div className="min-w-0">
-          <label htmlFor={id} className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+          <label htmlFor={id} className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
             {label} {required && <span className="text-rose-500">*</span>}
+            {isPurchasePrice && (
+              <button
+                type="button"
+                onClick={togglePurchasePrice}
+                title={showPurchasePrice ? 'Hide purchase price' : 'Show purchase price'}
+                aria-pressed={showPurchasePrice}
+                className="ml-1 inline-flex items-center rounded-md p-0.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+              >
+                {showPurchasePrice ? <FiEyeOff size={12} /> : <FiEye size={12} />}
+              </button>
+            )}
           </label>
           {type === 'select' ? (
             <div className="relative min-w-0">
@@ -2431,7 +2566,7 @@ export function InventoryPage() {
               className={`${baseInput} min-h-[80px] resize-y py-2.5 ${stateClass}`}
               placeholder={`Enter ${label}`} aria-invalid={!!errorMsg} />
           ) : (
-            <input id={id} type={type} value={value as string | number}
+            <input id={id} type={inputType} value={value as string | number}
               onChange={(e) => setFormData((prev) => ({ ...prev, [field]: e.target.value }))}
               className={`${baseInput} ${stateClass}`}
               placeholder={`Enter ${label}`}
@@ -2443,12 +2578,40 @@ export function InventoryPage() {
         </div>
       );
     },
-    [formData, formErrors]
+    [formData, formErrors, showPurchasePrice, togglePurchasePrice]
   );
 
   const isLoading = itemsLoading;
   const isWarehouseScoped = filterWarehouse !== 'all';
   const stockColumnLabel = isWarehouseScoped ? 'Warehouse Stock' : 'Total Stock';
+
+  /* -------------------- Loading guard -------------------- */
+  if (loadingUser && !hasUser) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
+          Loading permissions…
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------- No-access panel -------------------- */
+  if (!canViewInventory) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <FiLock size={22} />
+          </div>
+          <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
+          <p className="mt-1.5 text-sm text-slate-500">
+            You don't have permission to view inventory.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   if (itemsError) {
     return (
@@ -2511,37 +2674,59 @@ export function InventoryPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <Button variant="outline" onClick={handleImportOpen}
-                  className="h-9 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white sm:h-10">
-                  <FiUpload className="mr-1.5 sm:mr-2" size={14} /> Import
+                {!canManageProducts && (
+                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                    Read-only
+                  </span>
+                )}
+                {/* Purchase-price eye toggle */}
+                <Button
+                  variant="outline"
+                  onClick={togglePurchasePrice}
+                  title={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
+                  aria-pressed={showPurchasePrice}
+                  className="h-9 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white sm:h-10"
+                >
+                  {showPurchasePrice ? <FiEyeOff className="mr-1.5 sm:mr-2" size={14} /> : <FiEye className="mr-1.5 sm:mr-2" size={14} />}
+                  {showPurchasePrice ? 'Hide cost' : 'Show cost'}
                 </Button>
-                <div className="relative">
-                  <Button variant="outline" onClick={() => setExportMenuOpen((v) => !v)}
+                {canImportInventory && (
+                  <Button variant="outline" onClick={handleImportOpen}
                     className="h-9 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white sm:h-10">
-                    <FiDownload className="mr-1.5 sm:mr-2" size={14} /> Export
-                    <FiChevronDown className="ml-1.5" size={12} />
+                    <FiUpload className="mr-1.5 sm:mr-2" size={14} /> Import
                   </Button>
-                  {exportMenuOpen && (
-                    <div className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10">
-                      <button type="button" onClick={() => handleExport('current')}
-                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
-                        <FiDownload size={14} className="text-slate-400" /> Export current view
-                      </button>
-                      <button type="button" onClick={() => handleExport('selected')} disabled={selectedIds.length === 0}
-                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">
-                        <FiDownload size={14} className="text-slate-400" /> Export selected ({selectedIds.length})
-                      </button>
-                      <button type="button" onClick={() => handleExport('all')}
-                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
-                        <FiDownload size={14} className="text-slate-400" /> Export all
-                      </button>
-                    </div>
-                  )}
-                </div>
-                <Button onClick={handleCreate}
-                  className="h-9 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300 sm:h-10">
-                  <FiPlus className="mr-1.5 sm:mr-2" size={14} /> Add item
-                </Button>
+                )}
+                {canExportInventory && (
+                  <div className="relative">
+                    <Button variant="outline" onClick={() => setExportMenuOpen((v) => !v)}
+                      className="h-9 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white sm:h-10">
+                      <FiDownload className="mr-1.5 sm:mr-2" size={14} /> Export
+                      <FiChevronDown className="ml-1.5" size={12} />
+                    </Button>
+                    {exportMenuOpen && (
+                      <div className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10">
+                        <button type="button" onClick={() => handleExport('current')}
+                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
+                          <FiDownload size={14} className="text-slate-400" /> Export current view
+                        </button>
+                        <button type="button" onClick={() => handleExport('selected')} disabled={selectedIds.length === 0}
+                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50">
+                          <FiDownload size={14} className="text-slate-400" /> Export selected ({selectedIds.length})
+                        </button>
+                        <button type="button" onClick={() => handleExport('all')}
+                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
+                          <FiDownload size={14} className="text-slate-400" /> Export all
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {canCreateProduct && (
+                  <Button onClick={handleCreate}
+                    className="h-9 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300 sm:h-10">
+                    <FiPlus className="mr-1.5 sm:mr-2" size={14} /> Add item
+                  </Button>
+                )}
               </div>
             </div>
           </section>
@@ -2668,10 +2853,6 @@ export function InventoryPage() {
                   <MdWarehouse size={14} />
                   <span className="font-semibold">Warehouse view:</span>
                   <span>{filteredWarehousesFilter.find((w) => String(w.id) === filterWarehouse)?.name || `#${filterWarehouse}`}</span>
-                  <span className="hidden text-indigo-500/80 sm:inline">
-                    · Stock numbers now come from{' '}
-                    <code className="rounded bg-white/60 px-1 py-0.5 font-mono">product_warehouse_stocks</code>
-                  </span>
                   {warehouseStockLoading && (
                     <span className="ml-1 inline-flex items-center gap-1 text-indigo-600">
                       <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-indigo-500" />
@@ -2688,31 +2869,30 @@ export function InventoryPage() {
           </Card>
 
           {/* Bulk toolbar */}
-          {selectedIds.length > 0 && (
+          {selectedIds.length > 0 && (canEditProduct || canDeleteProduct) && (
             <div className="sticky top-2 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/95 shadow-lg shadow-slate-900/5 backdrop-blur sm:top-3">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
                 <div className="mr-1 flex items-center gap-2 rounded-lg bg-indigo-50 px-2.5 py-1 text-indigo-700 ring-1 ring-indigo-500/10">
                   <span className="text-sm font-bold">{selectedIds.length}</span>
                   <span className="text-xs font-medium">selected</span>
                 </div>
-                <Button size="sm" variant="outline" className="hidden h-9 rounded-lg sm:inline-flex"
-                  onClick={() => {
-                    const qty = window.prompt('Enter new stock quantity:');
-                    if (qty !== null && !isNaN(Number(qty)) && Number(qty) >= 0) handleBulkUpdateStock(Number(qty));
-                  }}>
-                  <FiEdit className="mr-1.5 text-indigo-600" size={14} /> Update stock
-                </Button>
-                <Button size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => handleBulkStatusChange(true)}>
-                  <FiCheckCircle className="mr-1.5 text-emerald-600" size={14} /> Activate
-                </Button>
-                <Button size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => handleBulkStatusChange(false)}>
-                  <FiXCircle className="mr-1.5 text-amber-600" size={14} /> Deactivate
-                </Button>
-                <Button size="sm"
-                  className="h-9 rounded-lg border border-red-600 bg-red-600 font-semibold text-white shadow-none hover:border-red-700 hover:bg-red-700"
-                  onClick={handleBulkDelete}>
-                  <FiTrash2 className="mr-1.5" size={14} /> Delete
-                </Button>
+                {canEditProduct && (
+                  <>
+                    <Button size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => handleBulkStatusChange(true)}>
+                      <FiCheckCircle className="mr-1.5 text-emerald-600" size={14} /> Activate
+                    </Button>
+                    <Button size="sm" variant="outline" className="h-9 rounded-lg" onClick={() => handleBulkStatusChange(false)}>
+                      <FiXCircle className="mr-1.5 text-amber-600" size={14} /> Deactivate
+                    </Button>
+                  </>
+                )}
+                {canDeleteProduct && (
+                  <Button size="sm"
+                    className="h-9 rounded-lg border border-red-600 bg-red-600 font-semibold text-white shadow-none hover:border-red-700 hover:bg-red-700"
+                    onClick={handleBulkDelete}>
+                    <FiTrash2 className="mr-1.5" size={14} /> Delete
+                  </Button>
+                )}
                 <Button size="sm" variant="ghost" className="ml-auto h-9 rounded-lg text-slate-500 hover:text-slate-800" onClick={() => setSelectedIds([])}>
                   Clear
                 </Button>
@@ -2738,10 +2918,20 @@ export function InventoryPage() {
                   </CardDescription>
                 </div>
               </div>
+              {/* Purchase price toggle also shown near table for quick access */}
+              <button
+                type="button"
+                onClick={togglePurchasePrice}
+                className="inline-flex items-center gap-1.5 self-start rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:bg-slate-50 sm:self-auto"
+                title={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
+              >
+                {showPurchasePrice ? <FiEyeOff size={12} /> : <FiEye size={12} />}
+                {showPurchasePrice ? 'Hide cost' : 'Show cost'}
+              </button>
             </CardHeader>
 
             <div className="overflow-x-auto">
-              <Table className="min-w-[1000px]">
+              <Table className="min-w-[1120px]">
                 <TableHeader>
                   <TableRow className="border-slate-100 bg-slate-50/70 hover:bg-slate-50/70">
                     <TableHead className="w-11 px-3">
@@ -2755,6 +2945,21 @@ export function InventoryPage() {
                     <TableHead><TableHeadLabel>SKU</TableHeadLabel></TableHead>
                     <TableHead><TableHeadLabel>Brand</TableHeadLabel></TableHead>
                     <TableHead className="text-right"><TableHeadLabel align="right">{stockColumnLabel}</TableHeadLabel></TableHead>
+                    <TableHead className="text-right">
+                      <TableHeadLabel align="right">
+                        <span className="inline-flex items-center gap-1">
+                          Purchase price
+                          <button
+                            type="button"
+                            onClick={togglePurchasePrice}
+                            className="rounded p-0.5 text-slate-400 transition hover:bg-slate-200/60 hover:text-slate-700"
+                            aria-label={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
+                          >
+                            {showPurchasePrice ? <FiEyeOff size={11} /> : <FiEye size={11} />}
+                          </button>
+                        </span>
+                      </TableHeadLabel>
+                    </TableHead>
                     <TableHead className="text-right"><TableHeadLabel align="right">Sale price</TableHeadLabel></TableHead>
                     <TableHead><TableHeadLabel>Status</TableHeadLabel></TableHead>
                     <TableHead className="w-12" />
@@ -2850,6 +3055,20 @@ export function InventoryPage() {
                           </div>
                         </TableCell>
 
+                        {/* Purchase price — masked unless showPurchasePrice */}
+                        <TableCell className="whitespace-nowrap text-right">
+                          {showPurchasePrice ? (
+                            <span className="text-sm font-semibold tabular-nums text-slate-700">{safeCurrency(item.purchase_price)}</span>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-sm font-semibold text-slate-400 select-none"
+                              title="Purchase price hidden — click the eye icon to reveal"
+                            >
+                              <FiEyeOff size={11} /> {MASK}
+                            </span>
+                          )}
+                        </TableCell>
+
                         <TableCell className="whitespace-nowrap text-right text-sm font-semibold tabular-nums text-slate-900">
                           {safeCurrency(item.sale_price)}
                         </TableCell>
@@ -2866,7 +3085,14 @@ export function InventoryPage() {
                         </TableCell>
 
                         <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                          <ActionDropdown item={item} onView={handleView} onEdit={handleEdit} onDelete={handleDelete} />
+                          <ActionDropdown
+                            item={item}
+                            onView={handleView}
+                            onEdit={handleEdit}
+                            onDelete={handleDelete}
+                            canEdit={canEditProduct}
+                            canDelete={canDeleteProduct}
+                          />
                         </TableCell>
                       </TableRow>
                     );
@@ -2921,11 +3147,15 @@ export function InventoryPage() {
           onEdit={(item) => { setIsViewPanelOpen(false); handleEdit(item); }}
           onStockIn={(item) => { setIsViewPanelOpen(false); setViewingItem(item); setShowStockIn(true); }}
           onStockOut={(item) => { setIsViewPanelOpen(false); setViewingItem(item); setShowStockOut(true); }}
+          showPurchasePrice={showPurchasePrice}
+          onTogglePurchasePrice={togglePurchasePrice}
+          canEditProduct={canEditProduct}
         />
       )}
 
       {showStockIn && viewingItem && (
         <StockInModal product={viewingItem}
+          showPurchasePrice={showPurchasePrice}
           onClose={() => setShowStockIn(false)}
           onSuccess={() => {
             refreshItems();
@@ -2935,6 +3165,7 @@ export function InventoryPage() {
       )}
       {showStockOut && viewingItem && (
         <StockOutModal product={viewingItem}
+          showPurchasePrice={showPurchasePrice}
           onClose={() => setShowStockOut(false)}
           onSuccess={() => {
             refreshItems();
@@ -2943,7 +3174,7 @@ export function InventoryPage() {
           }} />
       )}
 
-      {isPanelOpen && (
+      {isPanelOpen && (editingId ? canEditProduct : canCreateProduct) && (
         <Suspense fallback={
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
             <div className="rounded-2xl bg-white p-8 text-sm text-slate-600 shadow-xl">Loading form…</div>
@@ -3056,7 +3287,7 @@ export function InventoryPage() {
         </Suspense>
       )}
 
-      {isImportOpen && (
+      {isImportOpen && canImportInventory && (
         <Suspense fallback={
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
             <div className="rounded-2xl bg-white p-8 text-sm text-slate-600 shadow-xl">Loading…</div>

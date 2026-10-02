@@ -16,27 +16,24 @@ import {
   FiTrash2,
   FiEdit,
   FiChevronDown,
-  FiChevronRight,
   FiAlertCircle,
   FiSearch,
   FiUsers,
   FiMail,
   FiLock,
   FiKey,
-  FiCheck,
-  FiFolder,
-  FiFile,
 } from 'react-icons/fi';
 
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
+import { usePermission } from '../hooks/usePermission';
+import PermissionGate from '../components/PermissionGate';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Card,
-  CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
@@ -75,8 +72,16 @@ interface Role {
   description: string | null;
   active: boolean;
   permissions: number[];
+  permission_names?: string[];
+  users_count?: number;
   created_at?: string;
   updated_at?: string;
+}
+
+interface UserRole {
+  id: number;
+  name: string;
+  group?: string | null;
 }
 
 interface User {
@@ -84,7 +89,8 @@ interface User {
   name: string;
   email: string;
   email_verified_at?: string | null;
-  roles: Role[];
+  roles: UserRole[];
+  role_names?: string[];
   created_at?: string;
   updated_at?: string;
 }
@@ -111,6 +117,11 @@ const ROWS_PER_PAGE = 15;
 const USER_COLUMN_COUNT = 5;
 const ROLE_COLUMN_COUNT = 6;
 const TABLE_HEAD_CLASS = 'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
+const SYSTEM_ADMIN_ROLE_NAMES = new Set(['Admin', 'Super Admin']);
+
+function isSystemAdminRole(name: string): boolean {
+  return SYSTEM_ADMIN_ROLE_NAMES.has(name);
+}
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -126,6 +137,15 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
+function unwrapList<T>(res: unknown): T[] {
+  if (Array.isArray(res)) return res as T[];
+  if (res && typeof res === 'object') {
+    const record = res as { data?: unknown };
+    if (Array.isArray(record.data)) return record.data as T[];
+  }
+  return [];
+}
+
 function safeLog(entry: AppLogEntry): void {
   try {
     addAppLog(entry);
@@ -135,14 +155,91 @@ function safeLog(entry: AppLogEntry): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* Cache hook (race-safe)                                              */
+/* Permission grouping helpers                                         */
+/* ------------------------------------------------------------------ */
+/*
+ * The backend seeds permissions by NAME only (group column is usually
+ * null), so we derive a logical module for the UI grouping from the
+ * existing name. Three notations are supported:
+ *
+ *   SPACE  "view employees"          → "Employees"
+ *   COLON  "payroll:view"            → "Payroll"
+ *   DOT    "sales.returns.view"      → "Sales"
+ *
+ * If the backend later populates `permission.group`, that value wins.
+ * These helpers are UI-only — the saved payload still uses `id`s.
+ */
+
+const GROUP_VERB_PREFIXES = new Set([
+  'view', 'create', 'edit', 'update', 'delete', 'export', 'import', 'print',
+  'bulk', 'run', 'approve', 'generate', 'assign', 'manage', 'adjust',
+  'download', 'upload', 'register', 'sync', 'restart', 'start', 'resolve',
+  'clear', 'refresh', 'test', 'backup', 'restore', 'add', 'duplicate',
+  'ask', 'chat', 'use', 'apply', 'hold', 'resume', 'email', 'schedule',
+  'publish', 'reply', 'connect', 'disconnect', 'copy', 'confirm', 'lookup',
+  'mark', 'reorder', 'rename', 'move',
+]);
+
+const GROUP_NAME_CASING: Record<string, string> = {
+  ai: 'AI',
+  api: 'API',
+  hr: 'HR',
+  pos: 'POS',
+  gst: 'GST',
+  mcp: 'MCP',
+  rbac: 'RBAC',
+  sms: 'SMS',
+  ui: 'UI',
+};
+
+function formatGroupName(word: string): string {
+  const lower = word.toLowerCase();
+  if (GROUP_NAME_CASING[lower]) return GROUP_NAME_CASING[lower];
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+function deriveGroupFromPermissionName(name: string): string | null {
+  const trimmed = (name ?? '').trim();
+  if (!trimmed) return null;
+
+  // DOT:  "sales.returns.view" → "sales"
+  if (trimmed.includes('.')) {
+    const head = trimmed.split('.')[0].trim();
+    if (head) return head;
+  }
+
+  // COLON: "payroll:view" → "payroll"
+  if (trimmed.includes(':')) {
+    const head = trimmed.split(':')[0].trim();
+    if (head) return head;
+  }
+
+  // SPACE: "view employees" / "bulk update attendance" → "employees" / "attendance"
+  const words = trimmed.toLowerCase().split(/\s+/).filter(Boolean);
+  while (words.length > 1 && GROUP_VERB_PREFIXES.has(words[0])) {
+    words.shift();
+  }
+  return words[0] ?? null;
+}
+
+function resolvePermissionGroup(p: Permission): string {
+  const explicit = (p.group ?? '').trim();
+  if (explicit) return explicit;
+
+  const derived = deriveGroupFromPermissionName(p.name);
+  if (derived) return formatGroupName(derived);
+
+  return 'Other';
+}
+
+/* ------------------------------------------------------------------ */
+/* Cache hook                                                          */
 /* ------------------------------------------------------------------ */
 
 interface CacheEntry<T> {
   data: T;
   timestamp: number;
 }
-
 const cache = new Map<string, CacheEntry<unknown>>();
 
 function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TTL_MS) {
@@ -178,11 +275,8 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
       try {
         const res = await fetcherRef.current();
         if (!mountedRef.current || requestId !== requestIdRef.current) return;
-        const result = Array.isArray(res)
-          ? (res as T)
-          : ((res as { data?: T })?.data ?? ([] as unknown as T));
-        cache.set(key, { data: result, timestamp: Date.now() });
-        setData(result);
+        cache.set(key, { data: res, timestamp: Date.now() });
+        setData(res);
       } catch (err: unknown) {
         if (!mountedRef.current || requestId !== requestIdRef.current) return;
         setError(getErrorMessage(err, 'Failed to load'));
@@ -190,7 +284,7 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
         if (mountedRef.current && requestId === requestIdRef.current) setLoading(false);
       }
     },
-    [key, ttlMs]
+    [key, ttlMs],
   );
 
   useEffect(() => {
@@ -211,7 +305,7 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
 }
 
 /* ------------------------------------------------------------------ */
-/* Table header label                                                  */
+/* Table head label                                                    */
 /* ------------------------------------------------------------------ */
 
 function TableHeadLabel({
@@ -230,7 +324,29 @@ function TableHeadLabel({
 }
 
 /* ------------------------------------------------------------------ */
-/* Permission tree                                                     */
+/* Search highlighter                                                  */
+/* ------------------------------------------------------------------ */
+
+function highlightMatch(text: string, term: string): React.ReactNode {
+  const clean = term.trim();
+  if (!clean) return text;
+  const lower = text.toLowerCase();
+  const needle = clean.toLowerCase();
+  const idx = lower.indexOf(needle);
+  if (idx === -1) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="rounded bg-amber-100 px-0.5 text-slate-900">
+        {text.slice(idx, idx + needle.length)}
+      </mark>
+      {text.slice(idx + needle.length)}
+    </>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Permission tree — simple, single-column, easy to scan               */
 /* ------------------------------------------------------------------ */
 
 interface PermissionGroup {
@@ -238,18 +354,17 @@ interface PermissionGroup {
   permissions: Permission[];
 }
 
-/**
- * Tri-state checkbox — handles checked / unchecked / indeterminate.
- */
 function TreeCheckbox({
   checked,
   indeterminate,
   onChange,
+  disabled = false,
   className = '',
 }: {
   checked: boolean;
   indeterminate: boolean;
   onChange: (checked: boolean) => void;
+  disabled?: boolean;
   className?: string;
 }) {
   const ref = useRef<HTMLInputElement>(null);
@@ -263,8 +378,11 @@ function TreeCheckbox({
       ref={ref}
       type="checkbox"
       checked={checked}
+      disabled={disabled}
       onChange={(e) => onChange(e.target.checked)}
-      className={`h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30 ${className}`}
+      className={`h-4 w-4 shrink-0 rounded border-slate-300 text-indigo-600 focus:ring-2 focus:ring-indigo-500/30 ${
+        disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer'
+      } ${className}`}
     />
   );
 }
@@ -276,25 +394,24 @@ const PermissionTree = memo(
     onToggle,
     onToggleMany,
     searchTerm,
+    readOnly = false,
   }: {
     groups: PermissionGroup[];
     selectedIds: number[];
     onToggle: (id: number, checked: boolean) => void;
     onToggleMany: (ids: number[], checked: boolean) => void;
     searchTerm: string;
+    readOnly?: boolean;
   }) => {
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
-    // Auto-expand groups that have matched permissions when searching
+    // Auto-expand all groups when a search is active.
     useEffect(() => {
-      if (searchTerm.trim()) {
-        setCollapsed({});
-      }
+      if (searchTerm.trim()) setCollapsed({});
     }, [searchTerm]);
 
     const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
 
-    // Filter groups by search
     const visibleGroups = useMemo(() => {
       const term = searchTerm.trim().toLowerCase();
       if (!term) return groups;
@@ -313,22 +430,24 @@ const PermissionTree = memo(
 
     if (visibleGroups.length === 0) {
       return (
-        <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 py-8 text-center">
-          <FiLock className="mx-auto h-5 w-5 text-slate-400" />
-          <p className="mt-2 text-sm font-semibold text-slate-700">
+        <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/60 py-10 text-center">
+          <div className="mx-auto grid h-11 w-11 place-items-center rounded-2xl bg-white ring-1 ring-slate-200">
+            <FiLock className="h-5 w-5 text-slate-400" />
+          </div>
+          <p className="mt-3 text-sm font-semibold text-slate-700">
             {searchTerm.trim() ? 'No matching permissions' : 'No permissions configured'}
           </p>
-          <p className="mt-0.5 text-xs text-slate-500">
+          <p className="mt-1 text-xs text-slate-500">
             {searchTerm.trim()
               ? 'Try a different search term.'
-              : 'Permissions will appear here once they are defined in the backend.'}
+              : 'Permissions will appear once they are defined in the backend.'}
           </p>
         </div>
       );
     }
 
     return (
-      <div className="space-y-1.5">
+      <div className="space-y-2">
         {visibleGroups.map((group) => {
           const groupIds = group.permissions.map((p) => p.id);
           const selectedInGroup = groupIds.filter((id) => selectedSet.has(id)).length;
@@ -340,10 +459,12 @@ const PermissionTree = memo(
           return (
             <div
               key={group.group}
-              className="overflow-hidden rounded-xl border border-slate-200 bg-white"
+              className={`overflow-hidden rounded-xl border bg-white transition-colors ${
+                someChecked ? 'border-indigo-200' : 'border-slate-200'
+              }`}
             >
               {/* Group header */}
-              <div className="flex items-center gap-2 border-b border-slate-100 bg-slate-50/70 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2.5 border-b border-slate-100 bg-slate-50/70 px-3 py-2.5">
                 <button
                   type="button"
                   onClick={() =>
@@ -352,34 +473,67 @@ const PermissionTree = memo(
                   className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-slate-500 transition hover:bg-slate-200/60 hover:text-slate-700"
                   aria-label={isCollapsed ? 'Expand group' : 'Collapse group'}
                 >
-                  {isCollapsed ? <FiChevronRight size={12} /> : <FiChevronDown size={12} />}
+                  <FiChevronDown
+                    size={14}
+                    className={`transition-transform duration-200 ${
+                      isCollapsed ? '-rotate-90' : ''
+                    }`}
+                  />
                 </button>
 
-                <TreeCheckbox
-                  checked={allChecked}
-                  indeterminate={!allChecked && someChecked}
-                  onChange={(checked) => onToggleMany(groupIds, checked)}
-                />
-
-                <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                  <FiFolder size={12} className="shrink-0 text-indigo-500" />
-                  <span className="truncate text-[11px] font-bold uppercase tracking-wide text-slate-700">
-                    {group.group}
+                <label
+                  className={`flex min-w-0 flex-1 items-center gap-2.5 ${
+                    readOnly ? 'cursor-default' : 'cursor-pointer'
+                  }`}
+                >
+                  <TreeCheckbox
+                    checked={allChecked}
+                    indeterminate={!allChecked && someChecked}
+                    disabled={readOnly}
+                    onChange={(checked) => onToggleMany(groupIds, checked)}
+                  />
+                  <span className="truncate text-sm font-semibold text-slate-800">
+                    {highlightMatch(group.group, searchTerm)}
                   </span>
-                </div>
+                </label>
 
                 <span
-                  className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                    selectedInGroup > 0
-                      ? 'bg-indigo-100 text-indigo-700'
-                      : 'bg-slate-200 text-slate-500'
+                  className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold tabular-nums ${
+                    allChecked
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : someChecked
+                        ? 'bg-indigo-100 text-indigo-700'
+                        : 'bg-slate-200 text-slate-500'
                   }`}
                 >
                   {selectedInGroup}/{totalInGroup}
                 </span>
+
+                {!readOnly && (
+                  <div className="ml-auto flex shrink-0 items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => onToggleMany(groupIds, true)}
+                      disabled={allChecked || totalInGroup === 0}
+                      title={`Enable all ${group.group} permissions`}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600 transition hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Enable All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onToggleMany(groupIds, false)}
+                      disabled={selectedInGroup === 0}
+                      title={`Disable all ${group.group} permissions`}
+                      className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-600 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Disable All
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {/* Children */}
+              {/* Permissions list */}
               {!isCollapsed && (
                 <div className="divide-y divide-slate-100">
                   {group.permissions.map((perm) => {
@@ -387,25 +541,23 @@ const PermissionTree = memo(
                     return (
                       <label
                         key={perm.id}
-                        className={`flex cursor-pointer items-start gap-2.5 py-2 pl-9 pr-3 transition ${
-                          checked ? 'bg-indigo-50/40' : 'hover:bg-slate-50'
-                        }`}
+                        className={`flex items-start gap-3 px-3.5 py-2.5 transition ${
+                          readOnly ? 'cursor-default' : 'cursor-pointer'
+                        } ${checked ? 'bg-indigo-50/40' : 'hover:bg-slate-50'}`}
                       >
                         <TreeCheckbox
                           checked={checked}
                           indeterminate={false}
+                          disabled={readOnly}
                           onChange={(v) => onToggle(perm.id, v)}
                           className="mt-0.5"
                         />
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <FiFile size={11} className="shrink-0 text-slate-400" />
-                            <span className="truncate text-sm font-medium text-slate-800">
-                              {perm.name}
-                            </span>
-                          </div>
+                          <p className="text-[13px] font-medium leading-snug text-slate-800">
+                            {highlightMatch(perm.name, searchTerm)}
+                          </p>
                           {perm.description && (
-                            <p className="mt-0.5 text-[11px] text-slate-500">
+                            <p className="mt-0.5 text-[11px] leading-snug text-slate-500">
                               {perm.description}
                             </p>
                           )}
@@ -430,6 +582,13 @@ PermissionTree.displayName = 'PermissionTree';
 
 export function UserRoleManagementPage() {
   const { showSuccess, showError } = useNotification();
+  const { can, isSuperAdmin } = usePermission();
+
+  const canCreateRole = isSuperAdmin || can('create roles');
+  const canEditRole = isSuperAdmin || can('edit roles');
+  const canDeleteRole = isSuperAdmin || can('delete roles');
+  const canDeleteUser = isSuperAdmin || can('delete users');
+  const canAssignRoles = isSuperAdmin || can('assign roles to user');
 
   const [activeTab, setActiveTab] = useState<'users' | 'roles'>('users');
   const [userSearch, setUserSearch] = useState('');
@@ -444,6 +603,7 @@ export function UserRoleManagementPage() {
   /* Role create / edit panel */
   const [isRolePanelOpen, setIsRolePanelOpen] = useState(false);
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
+  const editingSystemAdminRole = selectedRole !== null && isSystemAdminRole(selectedRole.name);
   const [roleForm, setRoleForm] = useState({
     name: '',
     group: '',
@@ -461,24 +621,35 @@ export function UserRoleManagementPage() {
     loading: usersLoading,
     error: usersError,
     refresh: refreshUsers,
-  } = useApiCache<User[]>('users', () => apiClient.getUsers());
+  } = useApiCache<User[]>('users', async () => {
+    const res = await apiClient.getUsers();
+    return unwrapList<User>(res);
+  });
 
   const {
     data: roles,
     loading: rolesLoading,
     error: rolesError,
     refresh: refreshRoles,
-  } = useApiCache<Role[]>('roles', () => apiClient.getRoles());
+  } = useApiCache<Role[]>('roles', async () => {
+    const res = await apiClient.getRoles();
+    return unwrapList<Role>(res);
+  });
 
   const {
     data: allPermissions,
     loading: permsLoading,
     error: permsError,
     refresh: refreshPerms,
-  } = useApiCache<Permission[]>('permissions', () => apiClient.getPermissions());
+  } = useApiCache<Permission[]>('permissions', async () => {
+    const res = await apiClient.getPermissions();
+    return unwrapList<Permission>(res);
+  });
 
   const isLoading = usersLoading || rolesLoading || permsLoading;
-  const combinedError = [usersError, rolesError, permsError].filter(Boolean).join(' · ');
+  const combinedError = [usersError, rolesError, permsError]
+    .filter((e): e is string => Boolean(e && e.trim()))
+    .join(' · ');
 
   /* -------------------- Filtering -------------------- */
 
@@ -505,12 +676,12 @@ export function UserRoleManagementPage() {
     );
   }, [roles, roleSearch]);
 
-  /* -------------------- Permission groups (tree) -------------------- */
+  /* -------------------- Permission groups -------------------- */
 
   const permissionGroups = useMemo<PermissionGroup[]>(() => {
     const map = new Map<string, Permission[]>();
     (allPermissions ?? []).forEach((p) => {
-      const key = (p.group || 'General').trim() || 'General';
+      const key = resolvePermissionGroup(p);
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(p);
     });
@@ -543,21 +714,25 @@ export function UserRoleManagementPage() {
   useEffect(() => {
     setUserPage(1);
   }, [userSearch]);
-
   useEffect(() => {
     setRolePage(1);
   }, [roleSearch]);
 
   /* -------------------- User actions -------------------- */
 
-  const handleEditUser = useCallback((user: User) => {
-    setSelectedUser(user);
-    setUserRoleForm({ roleIds: (user.roles || []).map((r) => r.id) });
-    setIsUserPanelOpen(true);
-  }, []);
+  const handleEditUser = useCallback(
+    (user: User) => {
+      if (!canAssignRoles) return;
+      setSelectedUser(user);
+      setUserRoleForm({ roleIds: (user.roles || []).map((r) => r.id) });
+      setIsUserPanelOpen(true);
+    },
+    [canAssignRoles],
+  );
 
   const handleDeleteUser = useCallback(
     async (user: User) => {
+      if (!canDeleteUser) return;
       if (!window.confirm(`Delete user "${user.name}"? This cannot be undone.`)) return;
       try {
         await apiClient.deleteUser(user.id);
@@ -573,11 +748,11 @@ export function UserRoleManagementPage() {
         showError('Delete failed', getErrorMessage(err, 'Delete failed.'));
       }
     },
-    [refreshUsers, showError, showSuccess],
+    [canDeleteUser, refreshUsers, showError, showSuccess],
   );
 
   const handleSaveUserRoles = useCallback(async () => {
-    if (!selectedUser) return;
+    if (!selectedUser || !canAssignRoles) return;
     setSubmitting(true);
     try {
       await apiClient.assignRolesToUser(selectedUser.id, userRoleForm.roleIds);
@@ -596,7 +771,7 @@ export function UserRoleManagementPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [selectedUser, userRoleForm, refreshUsers, showError, showSuccess]);
+  }, [selectedUser, userRoleForm, refreshUsers, showError, showSuccess, canAssignRoles]);
 
   const toggleUserRole = useCallback((roleId: number, checked: boolean) => {
     setUserRoleForm((prev) => ({
@@ -609,35 +784,35 @@ export function UserRoleManagementPage() {
   /* -------------------- Role actions -------------------- */
 
   const handleCreateRole = useCallback(() => {
+    if (!canCreateRole) return;
     setSelectedRole(null);
-    setRoleForm({
-      name: '',
-      group: '',
-      description: '',
-      permissionIds: [],
-      active: true,
-    });
+    setRoleForm({ name: '', group: '', description: '', permissionIds: [], active: true });
     setRoleFormError(null);
     setPermissionSearch('');
     setIsRolePanelOpen(true);
-  }, []);
+  }, [canCreateRole]);
 
-  const handleEditRole = useCallback((role: Role) => {
-    setSelectedRole(role);
-    setRoleForm({
-      name: role.name || '',
-      group: role.group || '',
-      description: role.description || '',
-      permissionIds: role.permissions || [],
-      active: role.active ?? true,
-    });
-    setRoleFormError(null);
-    setPermissionSearch('');
-    setIsRolePanelOpen(true);
-  }, []);
+  const handleEditRole = useCallback(
+    (role: Role) => {
+      if (!canEditRole) return;
+      setSelectedRole(role);
+      setRoleForm({
+        name: role.name || '',
+        group: role.group || '',
+        description: role.description || '',
+        permissionIds: role.permissions || [],
+        active: role.active ?? true,
+      });
+      setRoleFormError(null);
+      setPermissionSearch('');
+      setIsRolePanelOpen(true);
+    },
+    [canEditRole],
+  );
 
   const handleDeleteRole = useCallback(
     async (role: Role) => {
+      if (!canDeleteRole) return;
       if (!window.confirm(`Delete role "${role.name}"? This cannot be undone.`)) return;
       try {
         await apiClient.deleteRole(role.id);
@@ -653,7 +828,7 @@ export function UserRoleManagementPage() {
         showError('Delete failed', getErrorMessage(err, 'Delete failed.'));
       }
     },
-    [refreshRoles, showError, showSuccess],
+    [canDeleteRole, refreshRoles, showError, showSuccess],
   );
 
   const handleSaveRole = useCallback(async () => {
@@ -675,6 +850,7 @@ export function UserRoleManagementPage() {
     setSubmitting(true);
     try {
       if (selectedRole) {
+        if (!canEditRole) return;
         await apiClient.updateRole(selectedRole.id, payload);
         showSuccess('Role updated', `${trimmed} updated.`);
         safeLog({
@@ -684,6 +860,7 @@ export function UserRoleManagementPage() {
           message: `Updated role ${trimmed}`,
         });
       } else {
+        if (!canCreateRole) return;
         await apiClient.createRole(payload);
         showSuccess('Role created', `${trimmed} created.`);
         safeLog({
@@ -701,9 +878,8 @@ export function UserRoleManagementPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [roleForm, selectedRole, refreshRoles, showError, showSuccess]);
+  }, [roleForm, selectedRole, refreshRoles, showError, showSuccess, canCreateRole, canEditRole]);
 
-  // ✅ FIX: spread `...prev` so all other form fields are preserved.
   const toggleRolePermission = useCallback((permissionId: number, checked: boolean) => {
     setRoleForm((prev) => ({
       ...prev,
@@ -713,7 +889,6 @@ export function UserRoleManagementPage() {
     }));
   }, []);
 
-  // ✅ FIX: spread `...prev` so all other form fields are preserved.
   const toggleManyPermissions = useCallback((ids: number[], checked: boolean) => {
     setRoleForm((prev) => ({
       ...prev,
@@ -755,8 +930,7 @@ export function UserRoleManagementPage() {
             }}
             className="mt-5 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800"
           >
-            <FiRefreshCw className="mr-2" size={14} />
-            Try again
+            <FiRefreshCw className="mr-2" size={14} /> Try again
           </Button>
         </div>
       </div>
@@ -765,6 +939,15 @@ export function UserRoleManagementPage() {
 
   /* -------------------- Render -------------------- */
 
+  const isRoleReadOnly = !canCreateRole && !canEditRole && !canDeleteRole;
+  const isUserReadOnly = !canAssignRoles && !canDeleteUser;
+  const treeReadOnly = selectedRole ? !canEditRole : !canCreateRole;
+
+  /* Progress stats for the permissions toolbar */
+  const totalPermissions = allPermissions?.length ?? 0;
+  const selectedCount = roleForm.permissionIds.length;
+  const selectedPct = totalPermissions > 0 ? Math.round((selectedCount / totalPermissions) * 100) : 0;
+
   return (
     <>
       <style>{`
@@ -772,8 +955,8 @@ export function UserRoleManagementPage() {
         @keyframes fadeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
 
         .rbac-offcanvas-wide {
-          width: min(720px, 96vw) !important;
-          max-width: min(720px, 96vw) !important;
+          width: min(760px, 96vw) !important;
+          max-width: min(760px, 96vw) !important;
         }
         @media (max-width: 640px) {
           .rbac-offcanvas-wide { width: 100vw !important; max-width: 100vw !important; }
@@ -807,11 +990,10 @@ export function UserRoleManagementPage() {
             <div className="relative flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
               <div className="min-w-0">
                 <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200 backdrop-blur">
-                  <FiLock size={12} />
-                  Access · RBAC
+                  <FiLock size={12} /> Access · RBAC
                 </div>
                 <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl lg:text-[32px]">
-                  Users & roles
+                  Users &amp; roles
                 </h1>
                 <p className="mt-1.5 max-w-2xl text-sm text-slate-300">
                   Manage system users, role definitions, and granular permissions.
@@ -819,6 +1001,16 @@ export function UserRoleManagementPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                {activeTab === 'roles' && isRoleReadOnly && (
+                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                    Read-only
+                  </span>
+                )}
+                {activeTab === 'users' && isUserReadOnly && (
+                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-amber-200">
+                    Read-only
+                  </span>
+                )}
                 <Button
                   variant="outline"
                   onClick={() => {
@@ -832,15 +1024,18 @@ export function UserRoleManagementPage() {
                   <FiRefreshCw className={`mr-2 ${isLoading ? 'animate-spin' : ''}`} size={14} />
                   Refresh
                 </Button>
-                {activeTab === 'roles' && (
-                  <Button
-                    onClick={handleCreateRole}
-                    className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
-                  >
-                    <FiPlus className="mr-2" size={14} />
-                    New role
-                  </Button>
-                )}
+
+                <PermissionGate permissions={['create roles']}>
+                  {activeTab === 'roles' && (
+                    <Button
+                      onClick={handleCreateRole}
+                      className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                    >
+                      <FiPlus className="mr-2" size={14} />
+                      New role
+                    </Button>
+                  )}
+                </PermissionGate>
               </div>
             </div>
           </section>
@@ -862,9 +1057,7 @@ export function UserRoleManagementPage() {
                   Users
                   <span
                     className={`ml-1 rounded-full px-1.5 text-[10px] ${
-                      activeTab === 'users'
-                        ? 'bg-white/20 text-white'
-                        : 'bg-slate-200 text-slate-600'
+                      activeTab === 'users' ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-600'
                     }`}
                   >
                     {users?.length ?? 0}
@@ -883,9 +1076,7 @@ export function UserRoleManagementPage() {
                   Roles
                   <span
                     className={`ml-1 rounded-full px-1.5 text-[10px] ${
-                      activeTab === 'roles'
-                        ? 'bg-white/20 text-white'
-                        : 'bg-slate-200 text-slate-600'
+                      activeTab === 'roles' ? 'bg-white/20 text-white' : 'bg-slate-200 text-slate-600'
                     }`}
                   >
                     {roles?.length ?? 0}
@@ -976,9 +1167,7 @@ export function UserRoleManagementPage() {
                               </TableCell>
 
                               <TableCell>
-                                <span className="truncate text-sm text-slate-700">
-                                  {user.email}
-                                </span>
+                                <span className="truncate text-sm text-slate-700">{user.email}</span>
                               </TableCell>
 
                               <TableCell>
@@ -1014,20 +1203,27 @@ export function UserRoleManagementPage() {
 
                               <TableCell className="text-right">
                                 <div className="flex items-center justify-end gap-1">
-                                  <button
-                                    onClick={() => handleEditUser(user)}
-                                    className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
-                                    title="Manage roles"
-                                  >
-                                    <FiShield size={15} />
-                                  </button>
-                                  <button
-                                    onClick={() => handleDeleteUser(user)}
-                                    className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
-                                    title="Delete user"
-                                  >
-                                    <FiTrash2 size={15} />
-                                  </button>
+                                  {canAssignRoles && (
+                                    <button
+                                      onClick={() => handleEditUser(user)}
+                                      className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
+                                      title="Manage roles"
+                                    >
+                                      <FiShield size={15} />
+                                    </button>
+                                  )}
+                                  {canDeleteUser && (
+                                    <button
+                                      onClick={() => handleDeleteUser(user)}
+                                      className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
+                                      title="Delete user"
+                                    >
+                                      <FiTrash2 size={15} />
+                                    </button>
+                                  )}
+                                  {!canAssignRoles && !canDeleteUser && (
+                                    <span className="text-[11px] text-slate-400">Read-only</span>
+                                  )}
                                 </div>
                               </TableCell>
                             </TableRow>
@@ -1170,20 +1366,31 @@ export function UserRoleManagementPage() {
 
                             <TableCell className="text-right">
                               <div className="flex items-center justify-end gap-1">
-                                <button
-                                  onClick={() => handleEditRole(role)}
-                                  className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
-                                  title="Edit role"
-                                >
-                                  <FiEdit size={15} />
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteRole(role)}
-                                  className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
-                                  title="Delete role"
-                                >
-                                  <FiTrash2 size={15} />
-                                </button>
+                                {canEditRole && (!isSystemAdminRole(role.name) || isSuperAdmin) && (
+                                  <button
+                                    onClick={() => handleEditRole(role)}
+                                    className="grid h-8 w-8 place-items-center rounded-lg text-indigo-500 transition hover:bg-indigo-50 hover:text-indigo-700"
+                                    title="Edit role"
+                                  >
+                                    <FiEdit size={15} />
+                                  </button>
+                                )}
+                                {canDeleteRole && !isSystemAdminRole(role.name) && (
+                                  <button
+                                    onClick={() => handleDeleteRole(role)}
+                                    className="grid h-8 w-8 place-items-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-700"
+                                    title="Delete role"
+                                  >
+                                    <FiTrash2 size={15} />
+                                  </button>
+                                )}
+                                {isSystemAdminRole(role.name) ? (
+                                  <span className="text-[11px] text-slate-400">
+                                    {isSuperAdmin ? 'Protected' : 'System role'}
+                                  </span>
+                                ) : !canEditRole && !canDeleteRole ? (
+                                  <span className="text-[11px] text-slate-400">Read-only</span>
+                                ) : null}
                               </div>
                             </TableCell>
                           </TableRow>
@@ -1204,14 +1411,13 @@ export function UserRoleManagementPage() {
                                   ? 'Try a different search term.'
                                   : 'Create your first role to get started.'}
                               </p>
-                              {!roleSearch.trim() && (
+                              {!roleSearch.trim() && canCreateRole && (
                                 <Button
                                   className="mt-5 rounded-lg"
                                   variant="outline"
                                   onClick={handleCreateRole}
                                 >
-                                  <FiPlus className="mr-2" size={14} />
-                                  Create role
+                                  <FiPlus className="mr-2" size={14} /> Create role
                                 </Button>
                               )}
                             </div>
@@ -1269,13 +1475,15 @@ export function UserRoleManagementPage() {
                 >
                   Cancel
                 </Button>
-                <Button
-                  onClick={handleSaveUserRoles}
-                  disabled={submitting}
-                  className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
-                >
-                  {submitting ? 'Saving…' : 'Save roles'}
-                </Button>
+                {canAssignRoles && (
+                  <Button
+                    onClick={handleSaveUserRoles}
+                    disabled={submitting}
+                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                  >
+                    {submitting ? 'Saving…' : 'Save roles'}
+                  </Button>
+                )}
               </div>
             }
           >
@@ -1322,9 +1530,7 @@ export function UserRoleManagementPage() {
                 {(roles ?? []).length === 0 ? (
                   <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 py-8 text-center">
                     <FiShield className="mx-auto h-5 w-5 text-slate-400" />
-                    <p className="mt-2 text-sm font-semibold text-slate-700">
-                      No roles defined
-                    </p>
+                    <p className="mt-2 text-sm font-semibold text-slate-700">No roles defined</p>
                     <p className="mt-0.5 text-xs text-slate-500">
                       Create roles first from the Roles tab.
                     </p>
@@ -1333,20 +1539,23 @@ export function UserRoleManagementPage() {
                   <div className="space-y-1.5">
                     {(roles ?? []).map((role) => {
                       const checked = userRoleForm.roleIds.includes(role.id);
+                      const canSelectRole = canAssignRoles
+                        && (!isSystemAdminRole(role.name) || isSuperAdmin);
                       return (
                         <label
                           key={role.id}
-                          className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition ${
+                          className={`flex items-start gap-3 rounded-xl border p-3 transition ${
                             checked
                               ? 'border-indigo-300 bg-indigo-50/50 ring-1 ring-indigo-500/10'
                               : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/60'
-                          }`}
+                          } ${!canSelectRole ? 'cursor-default opacity-80' : 'cursor-pointer'}`}
                         >
                           <input
                             type="checkbox"
                             checked={checked}
+                            disabled={!canSelectRole}
                             onChange={(e) => toggleUserRole(role.id, e.target.checked)}
-                            className="mt-0.5 h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                            className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
                           />
                           <div className="min-w-0 flex-1">
                             <div className="flex items-center gap-2">
@@ -1365,9 +1574,7 @@ export function UserRoleManagementPage() {
                               )}
                             </div>
                             {role.description && (
-                              <p className="mt-0.5 text-xs text-slate-500">
-                                {role.description}
-                              </p>
+                              <p className="mt-0.5 text-xs text-slate-500">{role.description}</p>
                             )}
                           </div>
                         </label>
@@ -1415,8 +1622,8 @@ export function UserRoleManagementPage() {
                 </Button>
                 <Button
                   onClick={handleSaveRole}
-                  disabled={submitting}
-                  className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700"
+                  disabled={submitting || treeReadOnly}
+                  className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700 disabled:opacity-50"
                 >
                   {submitting ? 'Saving…' : selectedRole ? 'Update role' : 'Create role'}
                 </Button>
@@ -1431,7 +1638,6 @@ export function UserRoleManagementPage() {
                 </div>
               )}
 
-              {/* Basic information */}
               <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
                 <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
                   <span className="h-2 w-2 rounded-full bg-indigo-500" /> Basic information
@@ -1444,12 +1650,18 @@ export function UserRoleManagementPage() {
                     <input
                       type="text"
                       value={roleForm.name}
+                      readOnly={editingSystemAdminRole}
                       onChange={(e) =>
                         setRoleForm((prev) => ({ ...prev, name: e.target.value }))
                       }
                       placeholder="e.g., Admin"
-                      className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                      className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 read-only:bg-slate-100 read-only:text-slate-500"
                     />
+                    {editingSystemAdminRole && (
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        Built-in administrator names are fixed. You can still update their grants.
+                      </p>
+                    )}
                   </div>
                   <div className="min-w-0">
                     <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -1486,10 +1698,14 @@ export function UserRoleManagementPage() {
                     <div className="relative">
                       <select
                         value={roleForm.active ? '1' : '0'}
+                        disabled={editingSystemAdminRole}
                         onChange={(e) =>
-                          setRoleForm((prev) => ({ ...prev, active: e.target.value === '1' }))
+                          setRoleForm((prev) => ({
+                            ...prev,
+                            active: e.target.value === '1',
+                          }))
                         }
-                        className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                        className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
                       >
                         <option value="1">Active</option>
                         <option value="0">Inactive</option>
@@ -1503,72 +1719,95 @@ export function UserRoleManagementPage() {
                 </div>
               </fieldset>
 
-              {/* Permissions tree */}
+              {/* ================= PERMISSIONS — simplified & easy to scan ================= */}
               <fieldset className="min-w-0 rounded-xl border border-slate-200 p-4">
                 <legend className="flex items-center gap-2 px-2 text-sm font-semibold text-slate-700">
-                  <span className="h-2 w-2 rounded-full bg-violet-500" /> Permissions
+                  <span className="h-2 w-2 rounded-full bg-violet-500" />
+                  Permissions
                 </legend>
 
                 <div className="mt-3 space-y-3">
-                  {/* Header: count + actions */}
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 text-xs text-slate-500">
-                      <span className="inline-flex items-center gap-1 rounded-lg bg-indigo-50 px-2 py-1 font-semibold text-indigo-700">
-                        <FiCheck size={11} />
-                        {roleForm.permissionIds.length} selected
-                      </span>
-                      <span>of {allPermissions?.length ?? 0}</span>
+                  {/* Toolbar — simple counter + Enable/Disable All + search */}
+                  <div className="rounded-xl border border-slate-200 bg-white p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold text-slate-800">
+                          {selectedCount}
+                        </span>
+                        <span className="text-xs text-slate-500">
+                          of {totalPermissions} selected
+                        </span>
+                        {selectedCount > 0 && (
+                          <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-bold text-indigo-700">
+                            {selectedPct}%
+                          </span>
+                        )}
+                      </div>
+
+                      {!treeReadOnly && totalPermissions > 0 && (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={selectAllPermissions}
+                            title="Enable every loaded permission"
+                            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 transition hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700"
+                          >
+                            Enable All Permissions
+                          </button>
+                          <button
+                            type="button"
+                            onClick={clearAllPermissions}
+                            disabled={selectedCount === 0}
+                            title="Disable every loaded permission"
+                            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 transition hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            Disable All Permissions
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    {allPermissions && allPermissions.length > 0 && (
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={selectAllPermissions}
-                          className="rounded-md px-2 py-1 text-[11px] font-semibold text-indigo-600 transition hover:bg-indigo-50"
-                        >
-                          Select all
-                        </button>
-                        <button
-                          type="button"
-                          onClick={clearAllPermissions}
-                          disabled={roleForm.permissionIds.length === 0}
-                          className="rounded-md px-2 py-1 text-[11px] font-semibold text-slate-500 transition hover:bg-slate-100 disabled:opacity-50"
-                        >
-                          Clear
-                        </button>
+
+                    {totalPermissions > 0 && (
+                      <div className="relative mt-2">
+                        <FiSearch
+                          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                          size={13}
+                        />
+                        <input
+                          type="text"
+                          value={permissionSearch}
+                          onChange={(e) => setPermissionSearch(e.target.value)}
+                          placeholder="Search permissions…"
+                          className="h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-9 text-xs text-slate-700 outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        {permissionSearch && (
+                          <button
+                            type="button"
+                            onClick={() => setPermissionSearch('')}
+                            className="absolute right-2 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                            aria-label="Clear filter"
+                          >
+                            ×
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
 
-                  {/* Search */}
-                  {allPermissions && allPermissions.length > 0 && (
-                    <div className="relative">
-                      <FiSearch
-                        className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
-                        size={13}
-                      />
-                      <input
-                        type="text"
-                        value={permissionSearch}
-                        onChange={(e) => setPermissionSearch(e.target.value)}
-                        placeholder="Filter permissions…"
-                        className="h-9 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-3 text-xs text-slate-700 shadow-sm outline-none transition placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                        autoComplete="off"
-                        spellCheck={false}
-                      />
-                    </div>
-                  )}
-
-                  {/* Tree */}
+                  {/* Tree — grouped, single column, easy to scan */}
                   <PermissionTree
                     groups={permissionGroups}
                     selectedIds={roleForm.permissionIds}
                     onToggle={toggleRolePermission}
                     onToggleMany={toggleManyPermissions}
                     searchTerm={permissionSearch}
+                    readOnly={treeReadOnly}
                   />
                 </div>
               </fieldset>
+              {/* ================= /PERMISSIONS ================= */}
             </div>
           </Offcanvas>
         </Suspense>
