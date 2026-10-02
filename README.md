@@ -1,52 +1,87 @@
-# Business OS - Enterprise ERP System
+# RaptorERP
 
-A comprehensive multi-company, multi-branch ERP system built with Laravel 12 and React.
+RaptorERP is a Laravel 12 + React ERP platform for multi-company, multi-branch operations with role-based access, sales workflows, notifications, and WhatsApp integrations.
 
 ## Overview
 
-Business OS is a complete Enterprise Resource Planning system designed for wholesale and distribution businesses. It supports:
+The current system includes:
 
-- **Multi-Company Operations**: Manage multiple companies/brands from a single system
-- **Multi-Branch Management**: Control operations across multiple branches/warehouses
-- **RBAC Authorization**: Role-based access control with granular permissions
-- **JWT Authentication**: Secure API authentication with token management
-- **Sales & Invoicing**: Complete order-to-cash workflow
-- **Inventory Management**: Product and warehouse tracking
-- **Customer Management**: Full customer relationship capabilities
+- Multi-company and multi-branch business structure
+- Laravel API backend with permission-based access control
+- React + Vite frontend for a dashboard-driven ERP workflow
+- Sales, invoicing, products, customers, and reporting modules
+- Notification delivery via queue jobs for email, SMS, WhatsApp, and browser push
+- Local WhatsApp service support using the Web.js worker pattern
 
-## Architecture
+## Stack
 
 ### Backend
-- **Framework**: Laravel 12 (PHP 8.2+)
-- **Database**: SQLite
-- **Authentication**: JWT (lcobucci/jwt)
-- **API**: RESTful API with resource controllers
+- PHP 8.2+
+- Laravel 12
+- MySQL support with local development defaults
+- Sanctum + custom RBAC patterns
+- Queue workers for notifications
+- Twilio, Web Push, IMAP, Gemini, Google, and social login integrations
 
 ### Frontend
-- **Framework**: React 18.3.1
-- **Build Tool**: Vite 5.4.1
-- **Language**: TypeScript 5.5.4
-- **Styling**: CSS3
+- React 18
+- TypeScript
+- Vite
+- Ant Design + Tailwind-inspired UI tooling
 
-## Quick Start
+## Project structure
 
-### Backend Setup
+```text
+RaptorERP/
+├── backend/          # Laravel API and queue workers
+├── frontend/         # React frontend
+├── docs/             # Additional technical docs
+├── data/             # Seed/reference data files
+├── README.md         # Project overview
+├── INSTALLATION.md   # Local setup
+├── NOTIFICATION_DELIVERY_SETUP.md
+├── API_DOCUMENTATION.md
+├── QUICK_REFERENCE.md
+└── INDEX.html / index.php
+```
+
+## Quick start
+
+### 1) Backend setup
 
 ```bash
 cd backend
 composer install
+```
+
+Make sure the backend `.env` is configured with your database and app settings before bootstrapping:
+
+```dotenv
+APP_NAME="RaptorERP"
+APP_ENV=local
+APP_DEBUG=true
+APP_URL=http://localhost:8000
+
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=raptore_db
+DB_USERNAME=root
+DB_PASSWORD=
+```
+
+Then run:
+
+```bash
+php artisan key:generate
 php artisan migrate --force
 php artisan db:seed
 php artisan serve
 ```
 
-The backend runs on `http://localhost:8000`
+The API will be available at `http://localhost:8000`.
 
-**Demo Credentials**:
-- Email: `test@example.com`
-- Password: `password`
-
-### Frontend Setup
+### 2) Frontend setup
 
 ```bash
 cd frontend
@@ -54,227 +89,78 @@ npm install
 npm run dev
 ```
 
-The frontend runs on `http://localhost:5173`
+The frontend runs at `http://localhost:5173`.
 
-### Environment Variables
+### 3) Notifications / queue worker
 
-**Backend** (`backend/.env`):
-```
-APP_NAME="Business OS"
-APP_ENV=local
-APP_DEBUG=true
-APP_URL=http://localhost:8000
+For email, SMS, WhatsApp, and push delivery, run the queue worker in a separate terminal:
 
-DB_CONNECTION=sqlite
-
-JWT_SECRET=your-secret-key
+```bash
+cd backend
+php artisan queue:work --tries=3 --backoff=10
 ```
 
-**Frontend** (`frontend/.env.local`):
-```
-VITE_API_BASE=http://localhost:8000/api
-```
+The project also supports a local WhatsApp bridge:
 
-## API Documentation
-
-### Authentication
-
-**Login**
-```
-POST /api/login
-Content-Type: application/json
-
-{
-  "email": "test@example.com",
-  "password": "password"
-}
-
-Response:
-{
-  "access_token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
-  "token_type": "Bearer",
-  "expires_in": 3600
-}
+```dotenv
+WHATSAPP_WEB_JS_ENABLED=true
+WHATSAPP_SERVICE_URL=http://127.0.0.1:3010
+WHATSAPP_SERVICE_TOKEN=erp-whatsapp-local-token
+WHATSAPP_SERVICE_PORT=3010
+WHATSAPP_SERVICE_HOST=127.0.0.1
+WWEBJS_AUTH_PATH=/xampp/htdocs/RaptorERP/backend/storage/whatsapp-session
+WWEBJS_CLIENT_ID=nexa-erp
 ```
 
-**Get Current User**
-```
-GET /api/me
-Authorization: Bearer {token}
-```
+## Default login
 
-**Logout**
-```
-POST /api/logout
-Authorization: Bearer {token}
-```
+If the seeders are enabled, the demo login is typically:
 
-### Resources
+- Email: `test@example.com`
+- Password: `password`
 
-All endpoints follow RESTful conventions:
+## Key environment values
 
-- `GET /api/{resource}` - List all (paginated)
-- `POST /api/{resource}` - Create new
-- `GET /api/{resource}/{id}` - Get single
-- `PUT /api/{resource}/{id}` - Update
-- `DELETE /api/{resource}/{id}` - Delete
+The current project relies on these environment groups in `backend/.env`:
 
-**Available Resources**:
-- `companies` - Company management
-- `branches` - Branch management
-- `warehouses` - Warehouse management
-- `customers` - Customer management
-- `products` - Product catalog
-- `orders` - Sales orders
-- `invoices` - Invoices and billing
-- `payments` - Payment tracking
+```dotenv
+TWILIO_SID=...
+TWILIO_AUTH_TOKEN=...
+TWILIO_SMS_FROM=...
+TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
 
-### Example: Create Company
+WEBPUSH_SUBJECT=mailto:admin@example.com
+WEBPUSH_VAPID_PUBLIC_KEY=...
+WEBPUSH_VAPID_PRIVATE_KEY=...
 
-```
-POST /api/companies
-Authorization: Bearer {token}
-Content-Type: application/json
-
-{
-  "name": "ABC Wholesale",
-  "code": "ABC",
-  "email": "info@abcwholesale.com",
-  "phone": "+1-234-567-8900"
-}
+WHATSAPP_SERVICE_URL=http://127.0.0.1:3010
+WHATSAPP_SERVICE_TOKEN=erp-whatsapp-local-token
 ```
 
-## Database Schema
+Keep provider secrets in the backend only. Do not expose them in the browser build.
 
-### Core Tables
-
-- **companies** - Business entities
-- **branches** - Company branches/locations
-- **warehouses** - Storage facilities
-- **customers** - Customer records
-- **products** - Product catalog
-
-### RBAC Tables
-
-- **roles** - User roles
-- **permissions** - System permissions
-- **user_roles** - User-to-role assignment
-- **role_permissions** - Role-to-permission assignment
-
-### Sales & Invoicing
-
-- **quotations** - Sales quotations
-- **orders** - Sales orders
-- **order_items** - Order line items
-- **invoices** - Invoices
-- **invoice_items** - Invoice line items
-- **payments** - Payment records
-
-### Authentication
-
-- **jwt_tokens** - Token revocation tracking
-
-## Features
-
-### Implemented ✅
-
-- Multi-company/multi-branch architecture
-- JWT authentication with token revocation
-- RBAC with role-based permissions
-- Complete CRUD APIs for all core resources
-- Sales and invoicing workflow
-- React-based SPA frontend
-- Login and authentication UI
-- Dashboard with statistics
-- Companies, Customers, Orders, Invoices pages
-
-### Roadmap 🚀
-
-- Inventory tracking and management
-- Purchase orders and supplier management
-- Accounting and financial reports
-- User management interface
-- Role and permission management UI
-- Advanced reporting and analytics
-- Mobile app
-- Real-time notifications
-- Document generation (PDF invoices)
-- Email integration
-- Audit logging
-- Two-factor authentication
-
-## Development
-
-### Backend Testing
+## Useful commands
 
 ```bash
 cd backend
 php artisan test
-```
+php artisan route:list
+php artisan queue:work --tries=3 --backoff=10
 
-### Frontend Testing
-
-```bash
 cd frontend
-npm run test
+npm run build
+npm run dev
 ```
 
-### Code Structure
+## Documentation
 
-**Backend**:
-- `app/Http/Controllers/Api/` - API controllers
-- `app/Models/` - Eloquent models
-- `app/Http/Middleware/` - Custom middleware
-- `app/Http/Requests/` - Form requests
-- `database/migrations/` - Schema migrations
+- [INSTALLATION.md](INSTALLATION.md) — local setup and environment configuration
+- [NOTIFICATION_DELIVERY_SETUP.md](NOTIFICATION_DELIVERY_SETUP.md) — email, SMS, WhatsApp, and push setup
+- [API_DOCUMENTATION.md](API_DOCUMENTATION.md) — API reference
+- [QUICK_REFERENCE.md](QUICK_REFERENCE.md) — quick developer notes
 
-**Frontend**:
-- `src/pages/` - Page components
-- `src/api.ts` - API client
-- `src/App.tsx` - Main app component
-- `src/styles.css` - Global styles
+## Notes
 
-## Security Considerations
-
-- JWT tokens expire after 60 minutes
-- Tokens can be revoked via logout
-- CORS middleware enables controlled cross-origin requests
-- Password stored using Laravel's bcrypt hashing
-- SQL injection protection via Eloquent ORM
-
-## Troubleshooting
-
-### Frontend Can't Connect to Backend
-
-1. Ensure backend is running: `php artisan serve` (port 8000)
-2. Check `VITE_API_BASE` environment variable
-3. Verify CORS middleware is enabled in `bootstrap/app.php`
-
-### JWT Token Errors
-
-1. Clear local storage: `localStorage.clear()`
-2. Check JWT secret matches in `.env`
-3. Verify token hasn't expired (60 minutes)
-
-### Database Errors
-
-1. Ensure SQLite database exists: `touch database/database.sqlite`
-2. Run migrations: `php artisan migrate --force`
-3. Run seeders: `php artisan db:seed`
-
-## Contributing
-
-Guidelines for contributing to Business OS:
-
-1. Create feature branches from `main`
-2. Follow PSR-12 (backend) and ESLint (frontend) standards
-3. Write tests for new features
-4. Create pull requests with clear descriptions
-
-## License
-
-Proprietary - All rights reserved
-
-## Support
-
-For issues and feature requests, please contact the development team.
+- The project keeps sensitive tokens in `backend/.env`.
+- The WhatsApp worker must be reachable on the configured local service URL.
+- Notification delivery depends on the Laravel queue worker running in the background.
