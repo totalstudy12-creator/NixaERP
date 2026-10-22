@@ -18,6 +18,7 @@ export const RequirePermission: React.FC<Props> = ({
   children,
 }) => {
   const location = useLocation();
+  const user = useAuthStore((s) => s.user);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const hasAnyPermission = useAuthStore((s) => s.hasAnyPermission);
   const hasAllPermissions = useAuthStore((s) => s.hasAllPermissions);

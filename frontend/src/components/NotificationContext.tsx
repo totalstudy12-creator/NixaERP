@@ -48,7 +48,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   return (
     <NotificationContext.Provider value={value}>
       {children}
-      <div className="pointer-events-none fixed bottom-5 right-5 z-50 flex w-full max-w-sm flex-col gap-3 px-4 sm:px-0">
+      <div className="pointer-events-none fixed top-5 right-5 z-50 flex w-full max-w-sm flex-col gap-3 px-4 sm:px-0">
         {notifications.map((notification) => (
           <div
             key={notification.id}

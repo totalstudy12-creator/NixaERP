@@ -1,5 +1,4 @@
 <?php
-// app/Http/Middleware/ApiTokenMiddleware.php
 
 namespace App\Http\Middleware;
 
@@ -20,7 +19,9 @@ class ApiTokenMiddleware
             ], 401);
         }
 
-        $apiToken = ApiToken::where('token', $token)->first();
+        // Dual-lookup: support modern SHA-256 hashed tokens and legacy plain tokens
+        $hashed = hash('sha256', $token);
+        $apiToken = ApiToken::where('token', $hashed)->orWhere('token', $token)->first();
 
         if (!$apiToken) {
             return response()->json([
@@ -38,7 +39,7 @@ class ApiTokenMiddleware
 
         $apiToken->update(['last_used_at' => now()]);
 
-        // Attach token to request for later use
+        // Attach token abilities to request for authorization gates
         $request->merge(['api_token_abilities' => $apiToken->abilities]);
 
         return $next($request);

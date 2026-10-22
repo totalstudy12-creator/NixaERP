@@ -468,6 +468,26 @@ class MarketingController extends Controller
     /**
      * Helper: Publish a post to all its platforms
      */
+
+    /**
+     * Retrieve locations for connected Google Business Profile account.
+     */
+    public function gbpLocations()
+    {
+        $googleAccount = SocialAccount::where('platform', 'google')->where('status', 'connected')->first();
+        if (!$googleAccount) {
+            return response()->json(['success' => true, 'data' => []]);
+        }
+
+        try {
+            $service = app(GoogleMyBusinessService::class);
+            $token = $googleAccount->getRawOriginal('access_token');
+            $locations = $token ? $service->getLocations($token) : [];
+            return response()->json(['success' => true, 'data' => $locations]);
+        } catch (\Throwable $e) {
+            return response()->json(['success' => true, 'data' => []]);
+        }
+    }
     private function publishToPlatforms(SocialPost $post)
     {
         $platforms = $post->platforms ?? [];

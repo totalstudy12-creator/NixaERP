@@ -149,7 +149,7 @@ const CARDS: SecurityCard[] = [
     detail:
       'Define roles, assign granular permissions, and control access by module, company and branch. Every ERP action is gated by real permissions.',
     icon: FiShield,
-    route: '/user-role-management',
+    route: '/user-roles',
     permission: PERMISSIONS.SECURITY_ROLES_VIEW,
   },
   {
@@ -158,7 +158,7 @@ const CARDS: SecurityCard[] = [
     detail:
       'Create ERP users, assign them to roles, and monitor their login activity and account status.',
     icon: FiUsers,
-    route: '/user-role-management',
+    route: '/user-roles',
     permission: PERMISSIONS.SECURITY_USERS_VIEW,
   },
   {

@@ -1,5 +1,5 @@
 // src/pages/AttendancePage.tsx
-import { useEffect, useState, useCallback, useMemo, memo, lazy, Suspense } from 'react';
+import { useEffect, useState, useCallback, useMemo, memo, lazy, Suspense, useRef } from 'react';
 import {
   FiRefreshCw, FiDownload, FiUser, FiUsers, FiCheckCircle, FiXCircle,
   FiUserCheck, FiUserX, FiSun, FiEye, FiX, FiSearch,
@@ -309,6 +309,16 @@ const StatCards = memo(({ todayStats }: any) => {
 
 // ---------- Main Component ----------
 export function AttendancePage() {
+  const enrollmentTimerRef = useRef<any>(null);
+
+  useEffect(() => {
+    return () => {
+      if (enrollmentTimerRef.current) {
+        clearInterval(enrollmentTimerRef.current);
+        enrollmentTimerRef.current = null;
+      }
+    };
+  }, []);
   const { showSuccess, showError } = useNotification();
   const { can, isSuperAdmin } = usePermission();
   const loadingUser = useAuthStore((s) => s.loadingUser);

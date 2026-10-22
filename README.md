@@ -1,4 +1,4 @@
-# RaptorERP
+﻿# RaptorERP
 
 RaptorERP is a Laravel 12 + React ERP platform for multi-company, multi-branch operations with role-based access, sales workflows, notifications, and WhatsApp integrations.
 
@@ -153,6 +153,14 @@ npm run dev
 ```
 
 ## Documentation
+
+- [AGENTS.md](AGENTS.md) — Autonomous agent development & safety guide
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — System architecture, tiers, and data flow
+- [docs/SECURITY.md](docs/SECURITY.md) — Security policies, token hashing, and upload defenses
+- [docs/TESTING.md](docs/TESTING.md) — Test suites, PHPUnit execution, and quality assurance
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — Production deployment, Nginx, Supervisor, and disaster recovery
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — Version release history and audit changes
+- [docs/audit/2026-10-22-audit-report.md](docs/audit/2026-10-22-audit-report.md) — Comprehensive technical audit & remediation report
 
 - [INSTALLATION.md](INSTALLATION.md) — local setup and environment configuration
 - [NOTIFICATION_DELIVERY_SETUP.md](NOTIFICATION_DELIVERY_SETUP.md) — email, SMS, WhatsApp, and push setup

@@ -99,9 +99,13 @@ function AuthBootstrap() {
         const payload =
           (res as { data?: AuthUser }).data ?? (res as unknown as AuthUser);
         if (!cancelled) setUser(payload);
-      } catch {
-        // 401 is handled by apiClient — it wipes the store and redirects.
-        if (!cancelled) logout();
+      } catch (err: any) {
+        // Only evict session on an explicit 401 Unauthorized status.
+        // Prevent logout on transient network drops or server restarts.
+        const status = err?.status ?? err?.response?.status;
+        if (status === 401) {
+          if (!cancelled) logout();
+        }
       } finally {
         if (!cancelled) setLoadingUser(false);
       }

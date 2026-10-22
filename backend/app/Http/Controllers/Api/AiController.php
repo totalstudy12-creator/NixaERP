@@ -366,6 +366,20 @@ class AiController extends Controller
         $context['top_customers'] = $this->contextService->getTopCustomers(5);
         $context['profit_loss_report'] = $this->contextService->getFinancialContextForQuery($message, $user?->company_id, $user?->branch_id);
 
+        try {
+            $context['inventory_sample'] = \App\Models\Product::limit(15)->get(['id', 'name', 'sku', 'barcode', 'stock_quantity', 'minimum_stock', 'sale_price', 'cost_price'])->toArray();
+        } catch (\Throwable $e) {
+            $context['inventory_sample'] = [];
+        }
+
+        $agentRole = $request->input('agent', 'general_operations');
+        $agentPersona = match ($agentRole) {
+            'inventory_auditor' => 'You are the Nexa WMS Inventory & Cycle Audit Agent. You specialize in verifying physical stocks, detecting bin discrepancies, tracking shelf variances, and auditing warehouse bays.',
+            'reorder_specialist' => 'You are the Nexa WMS Purchasing & Restock Agent. You analyze low-stock items against minimum thresholds, suggest restock quantities, calculate reorder costs, and prepare Purchase Order drafts.',
+            'dispatch_coordinator' => 'You are the Nexa WMS Logistics & Dispatch Coordinator. You optimize pick-pack routes, bay staging, shipping thermal labels, and warehouse transfer orders.',
+            default => 'You are the Nexa WMS Senior Operations AI Copilot. You assist warehouse operators and managers with live stock status, cycle counts, stock in/out, bin locations, and barcode printing.',
+        };
+
         $providerId = $request->input('provider_id');
         if ($providerId) {
             $providerModel = \App\Models\AiProvider::find($providerId);
@@ -411,7 +425,7 @@ class AiController extends Controller
 
             $messages = [[
                 'role' => 'system',
-                'content' => 'You are a practical business operations agent for this ERP. '
+                'content' => $agentPersona . ' '
                     . 'Help with sales, inventory, customers, purchasing, payments, accounting, '
                     . 'payroll and reports. Use only the ERP context provided below for business '
                     . 'facts; say when a fact is unavailable, never invent records or figures, '

@@ -17,7 +17,17 @@ class AiManager
     {
         $provider = AiProvider::where('enabled', true)->first();
 
-        if (!$provider && env('OPENAI_API_KEY')) {
+        if (!$provider && env('GEMINI_API_KEY')) {
+            $provider = new AiProvider([
+                'name' => 'Google Gemini (Production)',
+                'key' => env('GEMINI_API_KEY'),
+                'config' => [
+                    'type' => 'gemini',
+                    'model' => env('GEMINI_MODEL', 'gemini-3.1-flash-lite'),
+                ],
+                'enabled' => true,
+            ]);
+        } elseif (!$provider && env('OPENAI_API_KEY')) {
             $provider = new AiProvider([
                 'name' => 'OpenAI (env)',
                 'key' => env('OPENAI_API_KEY'),

@@ -666,24 +666,23 @@ class SettingsController extends Controller
 
             $data = $validator->validated();
 
+            $plainToken = \Illuminate\Support\Str::random(64);
             $token = ApiToken::create([
                 'name' => $data['name'],
-
-                'token' =>
-                    ApiToken::generateToken(),
-
-                'abilities' =>
-                    $data['abilities'] ?? ['*'],
-
-                'expires_at' =>
-                    $data['expires_at'] ?? null,
+                'token' => hash('sha256', $plainToken),
+                'abilities' => $data['abilities'] ?? ['*'],
+                'expires_at' => $data['expires_at'] ?? null,
             ]);
+
+            $responseData = $token->toArray();
+            $responseData['plain_text_token'] = $plainToken;
+            $responseData['token'] = $plainToken;
 
             return response()->json([
                 'success' => true,
                 'message' =>
                     'API token generated successfully.',
-                'data' => $token,
+                'data' => $responseData,
             ], 201);
         } catch (Throwable $e) {
             report($e);

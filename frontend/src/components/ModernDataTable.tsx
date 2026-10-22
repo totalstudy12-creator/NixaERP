@@ -143,7 +143,7 @@ export function ModernDataTable({
         onSelectedRowsChange={selectable ? ({ selectedRows }: { selectedRows: any[] }) => {
           onSelectionChange?.(selectedRows.map((row: any) => row.id));
         } : undefined}
-        selectedRows={selectedIds.map((id) => filteredData.find((row: any) => row.id === id)).filter(Boolean)}
+        selectableRowSelected={selectable ? (row: any) => selectedIds.includes(row.id) : undefined}
         customStyles={customStyles}
         pagination
         paginationPerPage={10}
