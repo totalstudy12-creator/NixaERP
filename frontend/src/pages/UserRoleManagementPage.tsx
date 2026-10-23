@@ -11,6 +11,10 @@ import {
 } from 'react';
 import {
   FiPlus,
+  FiPhone,
+  FiEye,
+  FiEyeOff,
+  FiCheck,
   FiRefreshCw,
   FiShield,
   FiTrash2,
@@ -589,6 +593,20 @@ export function UserRoleManagementPage() {
   const canDeleteRole = isSuperAdmin || can('delete roles');
   const canDeleteUser = isSuperAdmin || can('delete users');
   const canAssignRoles = isSuperAdmin || can('assign roles to user');
+  const canCreateUser = isSuperAdmin || can('create users');
+
+  /* Create user panel state */
+  const [isCreateUserPanelOpen, setIsCreateUserPanelOpen] = useState(false);
+  const [createUserForm, setCreateUserForm] = useState({
+    name: '',
+    email: '',
+    password: '',
+    phone: '',
+    roleIds: [] as number[],
+  });
+  const [createUserError, setCreateUserError] = useState<string | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
+  const [userPermSearch, setUserPermSearch] = useState('');
 
   const [activeTab, setActiveTab] = useState<'users' | 'roles'>('users');
   const [userSearch, setUserSearch] = useState('');
@@ -780,6 +798,78 @@ export function UserRoleManagementPage() {
         : prev.roleIds.filter((id) => id !== roleId),
     }));
   }, []);
+
+  /* -------------------- Create User actions -------------------- */
+
+  const handleOpenCreateUser = useCallback(() => {
+    if (!canCreateUser) return;
+    setCreateUserForm({
+      name: '',
+      email: '',
+      password: '',
+      phone: '',
+      roleIds: [],
+    });
+    setCreateUserError(null);
+    setShowPassword(false);
+    setUserPermSearch('');
+    setIsCreateUserPanelOpen(true);
+  }, [canCreateUser]);
+
+  const handleToggleCreateUserRole = useCallback((roleId: number, checked: boolean) => {
+    setCreateUserForm((prev) => ({
+      ...prev,
+      roleIds: checked
+        ? Array.from(new Set([...prev.roleIds, roleId]))
+        : prev.roleIds.filter((id) => id !== roleId),
+    }));
+  }, []);
+
+  const handleSaveNewUser = useCallback(async () => {
+    if (!canCreateUser) return;
+    if (!createUserForm.name.trim()) {
+      setCreateUserError('Full name is required.');
+      return;
+    }
+    if (!createUserForm.email.trim() || !createUserForm.email.includes('@')) {
+      setCreateUserError('A valid email address is required.');
+      return;
+    }
+    if (!createUserForm.password || createUserForm.password.length < 6) {
+      setCreateUserError('Password must be at least 6 characters.');
+      return;
+    }
+
+    setCreateUserError(null);
+    setSubmitting(true);
+    try {
+      await apiClient.createUser({
+        name: createUserForm.name.trim(),
+        email: createUserForm.email.trim(),
+        password: createUserForm.password,
+        phone: createUserForm.phone.trim() || undefined,
+        role_ids: createUserForm.roleIds,
+      });
+
+      showSuccess('User Created', `User "${createUserForm.name}" created successfully with ${createUserForm.roleIds.length} assigned roles.`);
+      safeLog({
+        module: 'UserRoles',
+        action: 'Create user',
+        status: 'success',
+        message: `Created user ${createUserForm.name} (${createUserForm.email})`,
+      });
+
+      setIsCreateUserPanelOpen(false);
+      setCreateUserForm({ name: '', email: '', password: '', phone: '', roleIds: [] });
+      refreshUsers();
+    } catch (err: unknown) {
+      const msg = getErrorMessage(err, 'Failed to create user.');
+      setCreateUserError(msg);
+      showError('Creation failed', msg);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [canCreateUser, createUserForm, refreshUsers, showError, showSuccess]);
 
   /* -------------------- Role actions -------------------- */
 
@@ -1024,6 +1114,18 @@ export function UserRoleManagementPage() {
                   <FiRefreshCw className={`mr-2 ${isLoading ? 'animate-spin' : ''}`} size={14} />
                   Refresh
                 </Button>
+
+                <PermissionGate permissions={['create users']}>
+                  {activeTab === 'users' && (
+                    <Button
+                      onClick={handleOpenCreateUser}
+                      className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
+                    >
+                      <FiPlus className="mr-2" size={14} />
+                      New user
+                    </Button>
+                  )}
+                </PermissionGate>
 
                 <PermissionGate permissions={['create roles']}>
                   {activeTab === 'roles' && (
@@ -1580,6 +1682,291 @@ export function UserRoleManagementPage() {
                         </label>
                       );
                     })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </Offcanvas>
+        </Suspense>
+      )}
+
+      {/* ─────────── Create User with Roles & Permissions Offcanvas ─────────── */}
+      {isCreateUserPanelOpen && (
+        <Suspense
+          fallback={
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
+              <div className="rounded-2xl bg-white p-8 text-sm text-slate-600 shadow-xl">
+                Loading form…
+              </div>
+            </div>
+          }
+        >
+          <Offcanvas
+            isOpen={isCreateUserPanelOpen}
+            title="Create New User with Roles & Permissions"
+            onClose={() => {
+              setIsCreateUserPanelOpen(false);
+            }}
+            className="rbac-offcanvas-wide"
+            footer={
+              <div className="flex w-full justify-between items-center">
+                <Button
+                  variant="outline"
+                  onClick={() => setIsCreateUserPanelOpen(false)}
+                  disabled={submitting}
+                  className="rounded-xl"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleSaveNewUser}
+                  disabled={submitting}
+                  className="rounded-xl bg-indigo-600 font-semibold text-white hover:bg-indigo-700 shadow-md shadow-indigo-500/20"
+                >
+                  {submitting ? 'Creating User…' : 'Create user with roles'}
+                </Button>
+              </div>
+            }
+          >
+            <div className="rbac-form-scroll space-y-6 pr-2">
+              {/* Error banner */}
+              {createUserError && (
+                <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-700">
+                  <FiAlertCircle className="shrink-0 text-red-500" size={16} />
+                  <span>{createUserError}</span>
+                </div>
+              )}
+
+              {/* Account Credentials */}
+              <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                  User Account Credentials
+                </h4>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700">Full Name *</label>
+                  <div className="relative mt-1">
+                    <FiUsers className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. Sarah Jenkins"
+                      value={createUserForm.name}
+                      onChange={(e) => setCreateUserForm((p) => ({ ...p, name: e.target.value }))}
+                      className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700">Email Address *</label>
+                  <div className="relative mt-1">
+                    <FiMail className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                    <input
+                      type="email"
+                      required
+                      placeholder="e.g. sarah.jenkins@company.com"
+                      value={createUserForm.email}
+                      onChange={(e) => setCreateUserForm((p) => ({ ...p, email: e.target.value }))}
+                      className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700">Password * (min 6 characters)</label>
+                  <div className="relative mt-1">
+                    <FiLock className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      required
+                      placeholder="••••••••"
+                      value={createUserForm.password}
+                      onChange={(e) => setCreateUserForm((p) => ({ ...p, password: e.target.value }))}
+                      className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-10 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((p) => !p)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      {showPassword ? <FiEyeOff size={14} /> : <FiEye size={14} />}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700">Phone Number (Optional)</label>
+                  <div className="relative mt-1">
+                    <FiPhone className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                    <input
+                      type="tel"
+                      placeholder="e.g. +91 98765 43210"
+                      value={createUserForm.phone}
+                      onChange={(e) => setCreateUserForm((p) => ({ ...p, phone: e.target.value }))}
+                      className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Roles Selection */}
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <div>
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                      Security Roles
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Select one or more roles. The user automatically receives all permissions assigned to these roles.
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-indigo-100 px-2.5 py-0.5 text-[11px] font-bold text-indigo-700">
+                    {createUserForm.roleIds.length} selected
+                  </span>
+                </div>
+
+                <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                  {(roles ?? []).map((role) => {
+                    const checked = createUserForm.roleIds.includes(role.id);
+                    const isSystemRole = isSystemAdminRole(role.name);
+                    const canSelect = !isSystemRole || isSuperAdmin;
+                    return (
+                      <label
+                        key={role.id}
+                        className={`flex items-start gap-3 rounded-xl border p-3 transition ${
+                          checked
+                            ? 'border-indigo-300 bg-indigo-50/50 ring-1 ring-indigo-500/10'
+                            : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/60'
+                        } ${!canSelect ? 'cursor-default opacity-80' : 'cursor-pointer'}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={!canSelect}
+                          onChange={(e) => handleToggleCreateUserRole(role.id, e.target.checked)}
+                          className="mt-0.5 h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 disabled:cursor-not-allowed"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="truncate text-sm font-semibold text-slate-800">
+                              {role.name}
+                            </span>
+                            {role.group && (
+                              <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                                {role.group}
+                              </span>
+                            )}
+                            <span className="shrink-0 text-[10px] text-slate-400">
+                              ({(role.permissions ?? []).length} permissions)
+                            </span>
+                          </div>
+                          {role.description && (
+                            <p className="mt-0.5 text-xs text-slate-500">{role.description}</p>
+                          )}
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Live Effective Permissions Inspector */}
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-100 pb-3">
+                  <div>
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                      Effective Permissions Granted
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Live audit preview of capabilities this user will inherit upon creation.
+                    </p>
+                  </div>
+                  <div className="relative">
+                    <FiSearch className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" size={12} />
+                    <input
+                      type="text"
+                      placeholder="Filter permissions..."
+                      value={userPermSearch}
+                      onChange={(e) => setUserPermSearch(e.target.value)}
+                      className="rounded-lg border border-slate-200 py-1 pl-7 pr-2.5 text-xs text-slate-900 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {createUserForm.roleIds.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-slate-400">
+                    <FiKey className="mx-auto mb-1 text-slate-300" size={18} />
+                    No roles selected yet. Select one or more roles above to grant permissions to this user.
+                  </div>
+                ) : (
+                  <div className="mt-3 max-h-60 overflow-y-auto space-y-3 pr-1">
+                    {(() => {
+                      const grantedPermIds = new Set<number>();
+                      const permGrantedByRoles: Record<number, string[]> = {};
+
+                      (roles ?? []).forEach((r) => {
+                        if (createUserForm.roleIds.includes(r.id)) {
+                          (r.permissions ?? []).forEach((pid) => {
+                            grantedPermIds.add(pid);
+                            if (!permGrantedByRoles[pid]) permGrantedByRoles[pid] = [];
+                            permGrantedByRoles[pid].push(r.name);
+                          });
+                        }
+                      });
+
+                      const grantedPerms = (allPermissions ?? []).filter((p) => {
+                        if (!grantedPermIds.has(p.id)) return false;
+                        if (!userPermSearch) return true;
+                        const term = userPermSearch.toLowerCase();
+                        return (
+                          p.name.toLowerCase().includes(term) ||
+                          (p.group && p.group.toLowerCase().includes(term)) ||
+                          (p.description && p.description.toLowerCase().includes(term))
+                        );
+                      });
+
+                      if (grantedPerms.length === 0) {
+                        return (
+                          <p className="py-4 text-center text-xs text-slate-400">
+                            No permissions match filter &quot;{userPermSearch}&quot;.
+                          </p>
+                        );
+                      }
+
+                      const grouped: Record<string, Permission[]> = {};
+                      grantedPerms.forEach((p) => {
+                        const g = p.group || 'General';
+                        if (!grouped[g]) grouped[g] = [];
+                        grouped[g].push(p);
+                      });
+
+                      return Object.entries(grouped).map(([grp, pList]) => (
+                        <div key={grp} className="space-y-1">
+                          <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-700">
+                            {grp} ({pList.length})
+                          </p>
+                          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                            {pList.map((perm) => (
+                              <div
+                                key={perm.id}
+                                className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50/80 px-2.5 py-1.5 text-xs"
+                              >
+                                <div className="min-w-0 pr-2">
+                                  <p className="font-medium text-slate-800 truncate">{perm.name}</p>
+                                  {perm.description && (
+                                    <p className="text-[10px] text-slate-500 truncate">{perm.description}</p>
+                                  )}
+                                </div>
+                                <span className="shrink-0 rounded bg-indigo-50 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-600">
+                                  {permGrantedByRoles[perm.id]?.join(', ')}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ));
+                    })()}
                   </div>
                 )}
               </div>

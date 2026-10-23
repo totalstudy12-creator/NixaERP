@@ -49,6 +49,11 @@ class InvoiceItem extends Model
         return $this->belongsTo(Invoice::class);
     }
 
+    public function sale()
+    {
+        return $this->invoice();
+    }
+
     public function product()
     {
         return $this->belongsTo(Product::class);

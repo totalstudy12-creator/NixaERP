@@ -72,6 +72,11 @@ class PurchaseInvoiceItem extends Model
         );
     }
 
+    public function purchase()
+    {
+        return $this->purchaseInvoice();
+    }
+
     public function product()
     {
         return $this->belongsTo(

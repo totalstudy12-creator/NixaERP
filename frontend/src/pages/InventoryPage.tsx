@@ -299,9 +299,12 @@ function toBoolean(value: unknown): boolean {
 function safeNumber(value: unknown): number { return toFiniteNumber(value, 0); }
 
 function safeCurrency(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '—';
+  const num = toFiniteNumber(value, NaN);
+  if (Number.isNaN(num)) return '—';
   return new Intl.NumberFormat('en-IN', {
     style: 'currency', currency: 'INR', maximumFractionDigits: 2,
-  }).format(safeNumber(value));
+  }).format(num);
 }
 
 /** Mask helper: hides purchase-price values when `show` is false. */
@@ -894,7 +897,7 @@ type BillTypeFilter = 'all' | 'sale' | 'purchase';
 const ProductDetailModal = ({
   product, onClose, onEdit, onStockIn, onStockOut,
   showPurchasePrice, onTogglePurchasePrice,
-  canEditProduct,
+  canEditProduct, canViewPurchasePrice = true,
 }: {
   product: InventoryItem;
   onClose: () => void;
@@ -904,6 +907,7 @@ const ProductDetailModal = ({
   showPurchasePrice: boolean;
   onTogglePurchasePrice: () => void;
   canEditProduct: boolean;
+  canViewPurchasePrice?: boolean;
 }) => {
   const [activeTab, setActiveTab] = useState('summary');
   const [summaryData, setSummaryData] = useState<Record<string, unknown> | null>(null);
@@ -963,7 +967,8 @@ const ProductDetailModal = ({
             setMovements(extractArray<StockMovementRecord>(res.data));
             break;
           }
-          case 'billwise': {
+          case 'billwise':
+          case 'party': {
             const res = await apiClient.get(
               `/products/${product.id}/transactions`,
               { signal: controller.signal }
@@ -1130,11 +1135,17 @@ const ProductDetailModal = ({
                 <td className="px-3 py-2 text-xs text-slate-700">{t.bill_number}</td>
                 <td className="max-w-[180px] truncate px-3 py-2 text-xs text-slate-700">{t.party_name}</td>
                 <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-700">{safeDate(t.date)}</td>
-                <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{maskCurrency(t.unit_price, showPurchasePrice)}</td>
-                <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeCurrency(t.price_with_tax)}</td>
+                <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">
+                  {t.type === 'purchase' ? maskCurrency(t.unit_price, showPurchasePrice) : safeCurrency(t.unit_price)}
+                </td>
+                <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">
+                  {t.type === 'purchase' ? maskCurrency(t.price_with_tax, showPurchasePrice) : safeCurrency(t.price_with_tax)}
+                </td>
                 <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeNumber(t.quantity)}</td>
                 <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeNumber(t.item_discount)}%</td>
-                <td className="px-3 py-2 text-right text-xs font-semibold tabular-nums text-slate-900">{safeCurrency(t.item_total)}</td>
+                <td className="px-3 py-2 text-right text-xs font-semibold tabular-nums text-slate-900">
+                  {t.type === 'purchase' ? maskCurrency(t.item_total, showPurchasePrice) : safeCurrency(t.item_total)}
+                </td>
               </tr>
             ))}
             {billwisePager.paged.length === 0 && (
@@ -1233,6 +1244,29 @@ const ProductDetailModal = ({
 
   const renderParty = () => (
     <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Show</span>
+        <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5 text-[11px]">
+          {([
+            { key: 'all', label: 'All' },
+            { key: 'sale', label: 'Sales' },
+            { key: 'purchase', label: 'Purchases' },
+          ] as const).map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              onClick={() => setBillTypeFilter(opt.key as BillTypeFilter)}
+              className={`rounded-md px-2.5 py-0.5 font-semibold transition ${
+                billTypeFilter === opt.key ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <span className="text-[11px] text-slate-400">({filteredTransactions.length})</span>
+      </div>
+
       {partyGroups.length === 0 ? (
         <EmptyState title="No party transactions" hint="No party transactions found for this product." />
       ) : (
@@ -1248,6 +1282,7 @@ const ProductDetailModal = ({
               <table className="w-full min-w-[400px] text-sm">
                 <thead className="bg-slate-50/40">
                   <tr>
+                    <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">Type</th>
                     <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">Bill #</th>
                     <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">Date</th>
                     <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-wide text-slate-500">Qty</th>
@@ -1257,10 +1292,23 @@ const ProductDetailModal = ({
                 <tbody>
                   {group.items.map((t, i) => (
                     <tr key={`${group.party}-${i}`} className="border-t border-slate-100">
+                      <td className="px-3 py-2">
+                        <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                          t.type === 'sale'
+                            ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200/60'
+                            : 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200/60'
+                        }`}>
+                          {t.type === 'sale' ? 'SALE' : 'PURCHASE'}
+                        </span>
+                      </td>
                       <td className="px-3 py-2 text-xs text-slate-700">{t.bill_number}</td>
                       <td className="whitespace-nowrap px-3 py-2 text-xs text-slate-700">{safeDate(t.date)}</td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-slate-700">{safeNumber(t.quantity)}</td>
-                      <td className="px-3 py-2 text-right text-xs font-semibold tabular-nums text-slate-900">{safeCurrency(t.item_total)}</td>
+                      <td className="px-3 py-2 text-right text-xs font-semibold tabular-nums text-slate-900">
+                        {t.type === 'purchase'
+                          ? maskCurrency(t.item_total, showPurchasePrice)
+                          : safeCurrency(t.item_total)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1393,16 +1441,18 @@ const ProductDetailModal = ({
                     {toBoolean(product.active) ? 'Active' : 'Inactive'}
                   </Badge>
                   {/* Local eye toggle inside the modal header */}
-                  <button
-                    type="button"
-                    onClick={onTogglePurchasePrice}
-                    title={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
-                    aria-pressed={showPurchasePrice}
-                    className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-600 transition hover:bg-slate-50 sm:px-2.5 sm:text-[11px]"
-                  >
-                    {showPurchasePrice ? <FiEyeOff size={11} /> : <FiEye size={11} />}
-                    {showPurchasePrice ? 'Hide prices' : 'Show prices'}
-                  </button>
+                  {canViewPurchasePrice && (
+                    <button
+                      type="button"
+                      onClick={onTogglePurchasePrice}
+                      title={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
+                      aria-pressed={showPurchasePrice}
+                      className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-600 transition hover:bg-slate-50 sm:px-2.5 sm:text-[11px]"
+                    >
+                      {showPurchasePrice ? <FiEyeOff size={11} /> : <FiEye size={11} />}
+                      {showPurchasePrice ? 'Hide prices' : 'Show prices'}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -1866,13 +1916,20 @@ export function InventoryPage() {
   const canDeleteProduct    = isSuperAdmin || can('delete products');
   const canImportInventory  = isSuperAdmin || can('import inventory');
   const canExportInventory  = isSuperAdmin || can('export inventory');
+  const canViewPurchasePrice = isSuperAdmin || can('products.purchase_price.view') || can('view purchase price') || can('wms.inventory.view_cost');
+  const canEditPurchasePrice = isSuperAdmin || can('products.purchase_price.edit') || can('edit purchase price') || canViewPurchasePrice;
 
   const canManageProducts = canCreateProduct || canEditProduct || canDeleteProduct;
 
   /* ---- Purchase price visibility ---- */
-  const [showPurchasePrice, setShowPurchasePrice] = useState<boolean>(() => readStoredShowPurchasePrice());
-  useEffect(() => { persistShowPurchasePrice(showPurchasePrice); }, [showPurchasePrice]);
-  const togglePurchasePrice = useCallback(() => setShowPurchasePrice((v) => !v), []);
+  const [storedShowPurchasePrice, setStoredShowPurchasePrice] = useState<boolean>(() => readStoredShowPurchasePrice());
+  useEffect(() => { persistShowPurchasePrice(storedShowPurchasePrice); }, [storedShowPurchasePrice]);
+  const togglePurchasePrice = useCallback(() => {
+    if (!canViewPurchasePrice) return;
+    setStoredShowPurchasePrice((v) => !v);
+  }, [canViewPurchasePrice]);
+
+  const showPurchasePrice = canViewPurchasePrice && storedShowPurchasePrice;
 
   /* ---- Cache hooks ---- */
   const { data: companies, refresh: refreshComps } = useApiCache<Company[]>(
@@ -2536,7 +2593,7 @@ export function InventoryPage() {
         <div className="min-w-0">
           <label htmlFor={id} className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
             {label} {required && <span className="text-rose-500">*</span>}
-            {isPurchasePrice && (
+            {isPurchasePrice && canViewPurchasePrice && (
               <button
                 type="button"
                 onClick={togglePurchasePrice}
@@ -2680,16 +2737,18 @@ export function InventoryPage() {
                   </span>
                 )}
                 {/* Purchase-price eye toggle */}
-                <Button
-                  variant="outline"
-                  onClick={togglePurchasePrice}
-                  title={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
-                  aria-pressed={showPurchasePrice}
-                  className="h-9 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white sm:h-10"
-                >
-                  {showPurchasePrice ? <FiEyeOff className="mr-1.5 sm:mr-2" size={14} /> : <FiEye className="mr-1.5 sm:mr-2" size={14} />}
-                  {showPurchasePrice ? 'Hide cost' : 'Show cost'}
-                </Button>
+                {canViewPurchasePrice && (
+                  <Button
+                    variant="outline"
+                    onClick={togglePurchasePrice}
+                    title={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
+                    aria-pressed={showPurchasePrice}
+                    className="h-9 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white sm:h-10"
+                  >
+                    {showPurchasePrice ? <FiEyeOff className="mr-1.5 sm:mr-2" size={14} /> : <FiEye className="mr-1.5 sm:mr-2" size={14} />}
+                    {showPurchasePrice ? 'Hide cost' : 'Show cost'}
+                  </Button>
+                )}
                 {canImportInventory && (
                   <Button variant="outline" onClick={handleImportOpen}
                     className="h-9 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white sm:h-10">
@@ -2919,15 +2978,17 @@ export function InventoryPage() {
                 </div>
               </div>
               {/* Purchase price toggle also shown near table for quick access */}
-              <button
-                type="button"
-                onClick={togglePurchasePrice}
-                className="inline-flex items-center gap-1.5 self-start rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:bg-slate-50 sm:self-auto"
-                title={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
-              >
-                {showPurchasePrice ? <FiEyeOff size={12} /> : <FiEye size={12} />}
-                {showPurchasePrice ? 'Hide cost' : 'Show cost'}
-              </button>
+              {canViewPurchasePrice && (
+                <button
+                  type="button"
+                  onClick={togglePurchasePrice}
+                  className="inline-flex items-center gap-1.5 self-start rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:bg-slate-50 sm:self-auto"
+                  title={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
+                >
+                  {showPurchasePrice ? <FiEyeOff size={12} /> : <FiEye size={12} />}
+                  {showPurchasePrice ? 'Hide cost' : 'Show cost'}
+                </button>
+              )}
             </CardHeader>
 
             <div className="overflow-x-auto">
@@ -2949,14 +3010,16 @@ export function InventoryPage() {
                       <TableHeadLabel align="right">
                         <span className="inline-flex items-center gap-1">
                           Purchase price
-                          <button
-                            type="button"
-                            onClick={togglePurchasePrice}
-                            className="rounded p-0.5 text-slate-400 transition hover:bg-slate-200/60 hover:text-slate-700"
-                            aria-label={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
-                          >
-                            {showPurchasePrice ? <FiEyeOff size={11} /> : <FiEye size={11} />}
-                          </button>
+                          {canViewPurchasePrice && (
+                            <button
+                              type="button"
+                              onClick={togglePurchasePrice}
+                              className="rounded p-0.5 text-slate-400 transition hover:bg-slate-200/60 hover:text-slate-700"
+                              aria-label={showPurchasePrice ? 'Hide purchase prices' : 'Show purchase prices'}
+                            >
+                              {showPurchasePrice ? <FiEyeOff size={11} /> : <FiEye size={11} />}
+                            </button>
+                          )}
                         </span>
                       </TableHeadLabel>
                     </TableHead>
@@ -3057,12 +3120,20 @@ export function InventoryPage() {
 
                         {/* Purchase price — masked unless showPurchasePrice */}
                         <TableCell className="whitespace-nowrap text-right">
-                          {showPurchasePrice ? (
+                          {!canViewPurchasePrice ? (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-lg bg-slate-100/70 px-2 py-0.5 text-xs font-medium text-slate-400 select-none"
+                              title="Purchase price restricted by role permissions"
+                            >
+                              <FiLock size={10} /> Hidden
+                            </span>
+                          ) : showPurchasePrice ? (
                             <span className="text-sm font-semibold tabular-nums text-slate-700">{safeCurrency(item.purchase_price)}</span>
                           ) : (
                             <span
-                              className="inline-flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-sm font-semibold text-slate-400 select-none"
-                              title="Purchase price hidden — click the eye icon to reveal"
+                              className="inline-flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-sm font-semibold text-slate-400 select-none cursor-pointer"
+                              onClick={togglePurchasePrice}
+                              title="Purchase price hidden — click to reveal"
                             >
                               <FiEyeOff size={11} /> {MASK}
                             </span>
@@ -3150,6 +3221,7 @@ export function InventoryPage() {
           showPurchasePrice={showPurchasePrice}
           onTogglePurchasePrice={togglePurchasePrice}
           canEditProduct={canEditProduct}
+          canViewPurchasePrice={canViewPurchasePrice}
         />
       )}
 

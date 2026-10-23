@@ -354,6 +354,16 @@ class PermissionCanonicalizer
             'label'       => 'Import Products',
             'description' => 'Bulk import product catalogs from Excel/CSV',
         ],
+        'products.purchase_price.view' => [
+            'group'       => 'Products',
+            'label'       => 'View Purchase / Cost Price',
+            'description' => 'Inspect product purchase costs, valuation, and margin calculations',
+        ],
+        'products.purchase_price.edit' => [
+            'group'       => 'Products',
+            'label'       => 'Edit Purchase / Cost Price',
+            'description' => 'Modify purchase rates and cost prices on products',
+        ],
 
         // ==========================================
         // 5. CUSTOMERS & CRM
@@ -544,6 +554,41 @@ class PermissionCanonicalizer
             'group'       => 'Income & Expenses',
             'label'       => 'Export Income & Expenses',
             'description' => 'Download income and expense reports to Excel/CSV',
+        ],
+        'income_expenses.manage_categories' => [
+            'group'       => 'Income & Expenses',
+            'label'       => 'Manage Categories',
+            'description' => 'Create and edit income and expense chart categories',
+        ],
+        'income_expenses.manage_accounts' => [
+            'group'       => 'Income & Expenses',
+            'label'       => 'Manage Accounts',
+            'description' => 'Manage income and expense bank and cash accounts',
+        ],
+        'income_expenses.manage_recurring' => [
+            'group'       => 'Income & Expenses',
+            'label'       => 'Manage Recurring Entries',
+            'description' => 'Manage recurring schedules for repetitive bills and income',
+        ],
+        'income_expenses.view_reports' => [
+            'group'       => 'Income & Expenses',
+            'label'       => 'View Income & Expense Reports',
+            'description' => 'Inspect comprehensive financial analytics and category breakdowns',
+        ],
+        'income_expenses.approve' => [
+            'group'       => 'Income & Expenses',
+            'label'       => 'Approve Expenses',
+            'description' => 'Authorize and approve submitted expense vouchers',
+        ],
+        'income_expenses.reject' => [
+            'group'       => 'Income & Expenses',
+            'label'       => 'Reject Expenses',
+            'description' => 'Reject submitted expense vouchers',
+        ],
+        'income_expenses.reverse' => [
+            'group'       => 'Income & Expenses',
+            'label'       => 'Reverse Expenses',
+            'description' => 'Reverse posted income or expense transactions',
         ],
         'accounting.view' => [
             'group'       => 'Accounting',
@@ -753,6 +798,18 @@ class PermissionCanonicalizer
         'create products'               => 'products.create',
         'edit products'                 => 'products.update',
         'delete products'               => 'products.delete',
+        'view purchase price'           => 'products.purchase_price.view',
+        'products.purchase_price.view'  => 'products.purchase_price.view',
+        'products.view_purchase_price'  => 'products.purchase_price.view',
+        'products.purchase_price:view'  => 'products.purchase_price.view',
+        'purchase_price.view'           => 'products.purchase_price.view',
+        'view product purchase price'   => 'products.purchase_price.view',
+        'products.view_cost'            => 'products.purchase_price.view',
+        'edit purchase price'           => 'products.purchase_price.edit',
+        'products.purchase_price.edit'  => 'products.purchase_price.edit',
+        'products.edit_purchase_price'  => 'products.purchase_price.edit',
+        'products.purchase_price:edit'  => 'products.purchase_price.edit',
+        'purchase_price.edit'           => 'products.purchase_price.edit',
 
         // --- Customers ---
         'view customers'                => 'customers.view',

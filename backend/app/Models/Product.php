@@ -61,4 +61,24 @@ class Product extends Model
     {
         return $this->hasMany(ProductPurchasePriceHistory::class);
     }
+
+    public function invoiceItems()
+    {
+        return $this->hasMany(InvoiceItem::class);
+    }
+
+    public function saleItems()
+    {
+        return $this->invoiceItems();
+    }
+
+    public function purchaseInvoiceItems()
+    {
+        return $this->hasMany(PurchaseInvoiceItem::class);
+    }
+
+    public function purchaseItems()
+    {
+        return $this->purchaseInvoiceItems();
+    }
 }

@@ -522,6 +522,163 @@ Authorization: Bearer {token}
 Response: 204 No Content
 ```
 
+#### Product Bill-Wise Transactions
+```
+GET /products/{id}/transactions
+Authorization: Bearer {token}
+
+Query Parameters:
+  type=all            [optional: all | sale | purchase]
+
+Response: 200 OK
+{
+  "success": true,
+  "data": [
+    {
+      "type": "sale",
+      "bill_number": "INV-2026-0001",
+      "party_name": "Acme Buyer",
+      "date": "2026-10-23",
+      "unit_price": 450.00,
+      "price_with_tax": 450.00,
+      "quantity": 2,
+      "item_discount": 0,
+      "item_net": 900.00,
+      "item_total": 900.00
+    },
+    {
+      "type": "purchase",
+      "bill_number": "BILL-2026-0099",
+      "party_name": "Global Supplier",
+      "date": "2026-10-23",
+      "unit_price": 250.00,       // null if user lacks 'products.purchase_price.view'
+      "price_with_tax": 250.00,   // null if user lacks 'products.purchase_price.view'
+      "quantity": 2,
+      "item_discount": 0,
+      "item_net": 500.00,         // null if user lacks 'products.purchase_price.view'
+      "item_total": 500.00        // null if user lacks 'products.purchase_price.view'
+    }
+  ]
+}
+```
+
+#### Product Party-Wise Transactions
+```
+GET /products/{id}/party-transactions
+Authorization: Bearer {token}
+
+Query Parameters:
+  type=all            [optional: all | sale | purchase]
+
+Response: 200 OK
+{
+  "success": true,
+  "data": {
+    "Acme Buyer": [
+      {
+        "type": "sale",
+        "bill_number": "INV-2026-0001",
+        "party_name": "Acme Buyer",
+        "date": "2026-10-23",
+        "unit_price": 450.00,
+        "price_with_tax": 450.00,
+        "quantity": 2,
+        "item_discount": 0,
+        "item_net": 900.00,
+        "item_total": 900.00
+      }
+    ]
+  }
+}
+```
+
+#### Product Inventory Summary
+```
+GET /products/{id}/inventory-summary
+Authorization: Bearer {token}
+
+Response: 200 OK
+{
+  "success": true,
+  "data": {
+    "total_stock": 100,
+    "available_stock": 90,
+    "reserved_stock": 10,
+    "last_purchase_price": 250.75,    // null if user lacks 'products.purchase_price.view'
+    "average_purchase_price": 245.50, // null if user lacks 'products.purchase_price.view'
+    "last_sale_price": 450.00
+  }
+}
+```
+
+#### Product Warehouse Stock
+```
+GET /products/{id}/warehouse-stock
+Authorization: Bearer {token}
+
+Response: 200 OK
+{
+  "success": true,
+  "data": [
+    {
+      "id": 1,
+      "warehouse_id": 1,
+      "warehouse_name": "Main Warehouse",
+      "quantity": 100,
+      "available_quantity": 90,
+      "reserved_quantity": 10,
+      "average_cost": 245.50,         // null if user lacks 'products.purchase_price.view'
+      "last_purchase_price": 250.75   // null if user lacks 'products.purchase_price.view'
+    }
+  ]
+}
+```
+
+#### Product Stock Movements (Timeline)
+```
+GET /products/{id}/stock-movements
+Authorization: Bearer {token}
+
+Query Parameters:
+  per_page=50         [optional]
+
+Response: 200 OK
+{
+  "success": true,
+  "data": [
+    {
+      "id": 101,
+      "transaction_type": "IN",
+      "reference_type": "Purchase Invoice",
+      "quantity": 50,
+      "stock_before": 50,
+      "stock_after": 100,
+      "transaction_date": "2026-10-23",
+      "warehouse": { "id": 1, "name": "Main Warehouse" },
+      "creator": { "id": 1, "name": "Admin" }
+    }
+  ]
+}
+```
+
+#### Product Price List
+```
+GET /products/{id}/price-list
+Authorization: Bearer {token}
+
+Response: 200 OK
+{
+  "success": true,
+  "data": {
+    "purchase_price": 250.75,         // null if user lacks 'products.purchase_price.view'
+    "sale_price": 450.00,
+    "mrp": 500.00,
+    "wholesale_price": 400.00,
+    "dealer_price": 380.00
+  }
+}
+```
+
 ---
 
 ### Orders

@@ -2286,6 +2286,33 @@ export const apiClient = {
   async getAutomationStats() {
     return this.request('GET', '/automation/stats');
   },
+
+  // ---------------------------------------------------------------------------
+  // WMS / STOCK TRANSFERS
+  // ---------------------------------------------------------------------------
+  async getWmsTransfers(params?: any) {
+    return this.request('GET', '/wms/transfers', undefined, { params });
+  },
+
+  async createWmsTransfer(data: any) {
+    return this.request('POST', '/wms/transfers', data);
+  },
+
+  async approveWmsTransfer(id: number) {
+    return this.request('POST', `/wms/transfers/${id}/approve`);
+  },
+
+  async dispatchWmsTransfer(id: number) {
+    return this.request('POST', `/wms/transfers/${id}/dispatch`);
+  },
+
+  async receiveWmsTransfer(id: number) {
+    return this.request('POST', `/wms/transfers/${id}/receive`);
+  },
+
+  async cancelWmsTransfer(id: number, reason?: string) {
+    return this.request('POST', `/wms/transfers/${id}/cancel`, { reason });
+  },
 };
 
 export default apiClient;

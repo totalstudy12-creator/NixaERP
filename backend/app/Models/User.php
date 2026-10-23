@@ -123,17 +123,26 @@ class User extends Authenticatable
 
     public function hasPermission(string|int $permission): bool
     {
+        if (is_int($permission)) {
+            return $this->resolvePermissions()->contains('id', $permission);
+        }
+
+        $canonical = \App\Services\PermissionCanonicalizer::canonicalKey($permission);
+        $aliases = \App\Services\PermissionCanonicalizer::aliasesFor($canonical);
+
         return $this->resolvePermissions()->contains(
-            fn ($item) => $item->id === $permission || $item->name === $permission
+            fn ($item) => in_array($item->name, $aliases, true) || $item->name === $permission
         );
     }
 
     public function hasAnyPermission(array $permissions): bool
     {
-        return $this->resolvePermissions()->contains(
-            fn ($item) => in_array($item->id, $permissions, true)
-                       || in_array($item->name, $permissions, true)
-        );
+        foreach ($permissions as $p) {
+            if ($this->hasPermission($p)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public function hasAllPermissions(array $permissions): bool

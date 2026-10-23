@@ -4,6 +4,32 @@ All notable changes to the RaptorERP project are documented in this file.
 
 ---
 
+## [2.2.0] — 2026-10-23
+
+### Bug Fixes & Stability
+- **Inventory Bill-Wise & Party-Wise HTTP 500 Resolution**:
+  - Resolved `BadMethodCallException: Call to undefined method App\Models\Product::saleItems() / purchaseItems()` triggered when opening the "Bill-Wise" or "Party" tabs in the product details modal.
+  - Added `invoiceItems()`, `saleItems()`, `purchaseInvoiceItems()`, and `purchaseItems()` relationships to `App\Models\Product`.
+  - Added backward-compatible relationship aliases: `sale()` on `App\Models\InvoiceItem` and `purchase()` on `App\Models\PurchaseInvoiceItem`.
+  - Refactored `ProductController::transactions` and `ProductController::partyTransactions` to accurately query real `invoice_items` and `purchase_invoice_items`, correctly joining `invoices` (`invoice_no`, `invoice_date`, `customer`) and `purchase_invoices` (`bill_number`, `purchase_number`, `purchase_date`, `supplier`).
+  - Added direct tab-loading support for `case 'party':` in `fetchTabData` within `InventoryPage.tsx`, enabling seamless direct navigation to the "Party" tab without requiring a prior click on "Bill-Wise".
+
+### Security & RBAC Enforcement
+- **Purchase Price Privacy in Product Transactions**:
+  - Enforced `canViewPurchasePrice` authorization checks on `GET /api/products/{id}/transactions` and `GET /api/products/{id}/party-transactions`.
+  - Unauthorized users (e.g. Sales Executives or staff without `products.purchase_price.view`) receive sanitized transactions where purchase bill amounts (`unit_price`, `price_with_tax`, `item_net`, and `item_total`) are nullified in the JSON response, while sales retail prices remain visible.
+  - In `InventoryPage.tsx`, updated `renderBillwise()` and `renderParty()` to conditionally mask purchase cost values while preserving clear visibility for sales billing prices.
+  - Added `Show: [All | Sales | Purchases]` filter pills and transaction `Type` badges (`SALE` / `PURCHASE`) to the "Party" tab.
+  - Gated the local modal eye toggle button behind `canViewPurchasePrice` so unprivileged users are not presented with non-functional price toggle controls.
+
+### Automated Testing
+- **New Feature Tests in `PurchasePricePermissionTest.php`**:
+  - `test_product_transactions_shows_sales_and_masks_purchase_without_permission()`: Validates that sales prices are intact and purchase rates are masked for users without permission, and properly revealed once permission is granted.
+  - Verified party grouping semantics via `GET /api/products/{id}/party-transactions`.
+  - Full suite verified: 87 passed tests with 0 failures, and `npm run build` passing with 0 errors.
+
+---
+
 ## [2.1.0] — 2026-10-22
 
 ### Security Hardening

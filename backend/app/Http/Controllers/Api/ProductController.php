@@ -19,27 +19,80 @@ class ProductController extends Controller
     /**
      * Display a listing of products with optional pagination or all.
      */
+    /**
+     * Check if user can view purchase price.
+     */
+    private function canViewPurchasePrice(?Request $request = null): bool
+    {
+        $user = $request?->user() ?? Auth::user();
+        if (!$user) {
+            return false;
+        }
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+            return true;
+        }
+        return $user->hasPermission('products.purchase_price.view')
+            || $user->hasPermission('view purchase price')
+            || $user->hasPermission('wms.inventory.view_cost');
+    }
+
+    /**
+     * Check if user can edit purchase price.
+     */
+    private function canEditPurchasePrice(?Request $request = null): bool
+    {
+        $user = $request?->user() ?? Auth::user();
+        if (!$user) {
+            return false;
+        }
+        if ($user->hasRole('Admin') || $user->hasRole('Super Admin')) {
+            return true;
+        }
+        return $user->hasPermission('products.purchase_price.edit')
+            || $user->hasPermission('edit purchase price')
+            || $this->canViewPurchasePrice($request);
+    }
+
     public function index(Request $request)
     {
         $perPage = $request->input('per_page', 15);
 
         if ($perPage === 'all') {
             try {
-                return Product::with(['company', 'branch'])
+                $products = Product::with(['company', 'branch'])
                     ->orderBy('name')
                     ->get();
             } catch (\Exception $e) {
-                return Product::orderBy('name')->get();
+                $products = Product::orderBy('name')->get();
             }
+            if (!$this->canViewPurchasePrice($request)) {
+                $products->each(function ($product) {
+                    $product->makeHidden('purchase_price');
+                    $product->purchase_price = null;
+                });
+            }
+            return $products;
         }
 
         try {
-            return Product::with(['company', 'branch'])
+            $products = Product::with(['company', 'branch'])
                 ->orderBy('name')
                 ->paginate((int) $perPage);
         } catch (\Exception $e) {
-            return Product::orderBy('name')->paginate((int) $perPage);
+            $products = Product::orderBy('name')->paginate((int) $perPage);
         }
+
+        if (!$this->canViewPurchasePrice($request)) {
+            $items = ($products instanceof \Illuminate\Contracts\Pagination\LengthAwarePaginator)
+                ? $products->getCollection()
+                : $products;
+            $items->each(function ($product) {
+                $product->makeHidden('purchase_price');
+                $product->purchase_price = null;
+            });
+        }
+
+        return $products;
     }
 
     /**
@@ -71,6 +124,10 @@ class ProductController extends Controller
         }
 
         $data = $this->prepareProductData($data);
+
+        if (!$this->canEditPurchasePrice($request)) {
+            unset($data['purchase_price']);
+        }
 
         $product = Product::create($data);
 
@@ -437,7 +494,9 @@ class ProductController extends Controller
             'Reorder Level', 'Description', 'Status', 'Created At', 'Updated At',
         ];
 
-        $rows = $products->map(function ($product) {
+        $canViewPrice = $this->canViewPurchasePrice($request);
+
+        $rows = $products->map(function ($product) use ($canViewPrice) {
             return [
                 $product->id,
                 $product->company->name ?? '',
@@ -449,7 +508,7 @@ class ProductController extends Controller
                 $product->barcode,
                 $product->brand,
                 $product->unit,
-                number_format($product->purchase_price, 2),
+                $canViewPrice ? number_format($product->purchase_price, 2) : '***',
                 number_format($product->sale_price, 2),
                 number_format($product->tax_rate, 2),
                 $product->stock_quantity,
@@ -504,7 +563,12 @@ class ProductController extends Controller
      */
     public function show(Product $product)
     {
-        return $product->load(['company', 'branch']);
+        $product->load(['company', 'branch']);
+        if (!$this->canViewPurchasePrice(request())) {
+            $product->makeHidden('purchase_price');
+            $product->purchase_price = null;
+        }
+        return $product;
     }
 
     /**
@@ -533,6 +597,10 @@ class ProductController extends Controller
         // Handle stock_quantity separately — it must be driven by warehouse stock
         $requestedStock = $data['stock_quantity'] ?? null;
         unset($data['stock_quantity']);
+
+        if (!$this->canEditPurchasePrice($request)) {
+            unset($data['purchase_price']);
+        }
 
         $data = $this->prepareProductData($data);
         $product->update($data);
@@ -571,12 +639,16 @@ class ProductController extends Controller
         $reservedStock  = $product->warehouseStocks()->sum('reserved_quantity');
         $availableStock = $product->warehouseStocks()->sum('available_quantity');
 
-        $lastPurchase = $product->purchasePriceHistory()
-            ->latest('purchase_date')
-            ->first();
-
-        $averagePurchase = $product->purchasePriceHistory()
-            ->avg('unit_price');
+        $canViewPrice = $this->canViewPurchasePrice(request());
+        $lastPurchase = null;
+        $averagePurchase = null;
+        if ($canViewPrice) {
+            $lastPurchase = $product->purchasePriceHistory()
+                ->latest('purchase_date')
+                ->first();
+            $averagePurchase = $product->purchasePriceHistory()
+                ->avg('unit_price');
+        }
 
         $lastSale = $product->stockMovements()
             ->where('reference_type', 'sale')
@@ -598,18 +670,19 @@ class ProductController extends Controller
 
     public function warehouseStock(Product $product)
     {
+        $canViewPrice = $this->canViewPurchasePrice(request());
         $stocks = $product->warehouseStocks()
             ->with('warehouse:id,name')
             ->get()
-            ->map(function ($stock) {
+            ->map(function ($stock) use ($canViewPrice) {
                 return [
                     'warehouse_id'        => $stock->warehouse_id,
                     'warehouse_name'      => $stock->warehouse->name ?? 'Unknown',
                     'quantity'            => $stock->quantity,
                     'reserved_quantity'   => $stock->reserved_quantity,
                     'available_quantity'  => $stock->available_quantity,
-                    'average_cost'        => $stock->average_cost,
-                    'last_purchase_price' => $stock->last_purchase_price,
+                    'average_cost'        => $canViewPrice ? $stock->average_cost : null,
+                    'last_purchase_price' => $canViewPrice ? $stock->last_purchase_price : null,
                 ];
             });
 
@@ -644,6 +717,12 @@ class ProductController extends Controller
 
     public function purchasePriceHistory(Request $request, Product $product)
     {
+        if (!$this->canViewPurchasePrice($request)) {
+            return response()->json([
+                'success' => false,
+                'message' => "You don't have permission to view purchase prices.",
+            ], 403);
+        }
         $perPage = $request->input('per_page', 20);
 
         $history = $product->purchasePriceHistory()
@@ -659,47 +738,87 @@ class ProductController extends Controller
 
     public function transactions(Request $request, Product $product)
     {
-        $sales = $product->saleItems()
-            ->with(['sale.customer:id,name', 'sale' => function ($q) {
-                $q->select('id', 'customer_id', 'invoice_number', 'sale_date', 'total_amount', 'discount', 'tax');
-            }])
-            ->get()
-            ->map(function ($item) {
-                return [
-                    'type'           => 'sale',
-                    'bill_number'    => $item->sale->invoice_number ?? 'N/A',
-                    'party_name'     => $item->sale->customer->name ?? 'Unknown',
-                    'date'           => $item->sale->sale_date ?? $item->created_at,
-                    'unit_price'     => $item->unit_price,
-                    'price_with_tax' => $item->unit_price * (1 + $item->tax_rate / 100),
-                    'quantity'       => $item->quantity,
-                    'item_discount'  => $item->discount_percentage ?? 0,
-                    'item_net'       => $item->total_price,
-                    'item_total'     => $item->total_price,
-                ];
-            });
+        $canViewPurchase = $this->canViewPurchasePrice($request);
+        $type = $request->query('type', 'all');
 
-        $purchases = $product->purchaseItems()
-            ->with(['purchase.supplier:id,name', 'purchase' => function ($q) {
-                $q->select('id', 'supplier_id', 'bill_number', 'purchase_date', 'total_amount');
-            }])
-            ->get()
-            ->map(function ($item) {
-                return [
-                    'type'           => 'purchase',
-                    'bill_number'    => $item->purchase->bill_number ?? 'N/A',
-                    'party_name'     => $item->purchase->supplier->name ?? 'Unknown',
-                    'date'           => $item->purchase->purchase_date ?? $item->created_at,
-                    'unit_price'     => $item->unit_price,
-                    'price_with_tax' => $item->unit_price,
-                    'quantity'       => $item->quantity,
-                    'item_discount'  => 0,
-                    'item_net'       => $item->total_price,
-                    'item_total'     => $item->total_price,
-                ];
-            });
+        $sales = collect();
+        if ($type === 'all' || $type === 'sale') {
+            $sales = $product->invoiceItems()
+                ->whereHas('invoice')
+                ->with(['invoice.customer:id,name', 'invoice'])
+                ->get()
+                ->map(function ($item) {
+                    $invoice = $item->invoice;
+                    $qty = (float) $item->quantity;
+                    $unitPrice = (float) $item->unit_price;
+                    $taxRate = (float) ($item->tax_rate ?? (($item->cgst_percent ?? 0) + ($item->sgst_percent ?? 0) + ($item->igst_percent ?? 0)));
+                    $priceWithTax = $qty > 0 && (float) $item->total > 0
+                        ? round((float) $item->total / $qty, 2)
+                        : round($unitPrice * (1 + $taxRate / 100), 2);
+                    $net = (float) ($item->subtotal ?? ($unitPrice * $qty));
+                    $total = (float) ($item->total ?? $net);
 
-        $all = $sales->concat($purchases)->sortByDesc('date');
+                    $partyName = $invoice->customer->name ?? ($invoice->customer_name ?? 'Unknown');
+                    $billNumber = $invoice->invoice_no ?? 'N/A';
+                    $date = $invoice->invoice_date
+                        ? (is_string($invoice->invoice_date) ? substr($invoice->invoice_date, 0, 10) : $invoice->invoice_date->format('Y-m-d'))
+                        : ($invoice->created_at ? $invoice->created_at->format('Y-m-d') : null);
+
+                    return [
+                        'type'           => 'sale',
+                        'bill_number'    => $billNumber,
+                        'party_name'     => $partyName,
+                        'date'           => $date,
+                        'unit_price'     => $unitPrice,
+                        'price_with_tax' => $priceWithTax,
+                        'quantity'       => $qty,
+                        'item_discount'  => (float) ($item->discount_percent ?? 0),
+                        'item_net'       => $net,
+                        'item_total'     => $total,
+                    ];
+                });
+        }
+
+        $purchases = collect();
+        if ($type === 'all' || $type === 'purchase') {
+            $purchases = $product->purchaseInvoiceItems()
+                ->whereHas('purchaseInvoice')
+                ->with(['purchaseInvoice.supplier:id,name', 'purchaseInvoice'])
+                ->get()
+                ->map(function ($item) use ($canViewPurchase) {
+                    $purchase = $item->purchaseInvoice;
+                    $qty = (float) $item->quantity;
+                    $unitPrice = (float) $item->purchase_price;
+                    $priceWithTax = $qty > 0 && (float) $item->total > 0
+                        ? round((float) $item->total / $qty, 2)
+                        : $unitPrice;
+                    $net = round($qty * $unitPrice - (float) ($item->discount_amount ?? 0), 2);
+                    $total = (float) $item->total;
+
+                    $partyName = $purchase->supplier->name ?? 'Unknown';
+                    $billNumber = $purchase->bill_number ?: ($purchase->purchase_number ?: 'N/A');
+                    $date = $purchase->purchase_date
+                        ? (is_string($purchase->purchase_date) ? substr($purchase->purchase_date, 0, 10) : $purchase->purchase_date->format('Y-m-d'))
+                        : ($purchase->created_at ? $purchase->created_at->format('Y-m-d') : null);
+
+                    return [
+                        'type'           => 'purchase',
+                        'bill_number'    => $billNumber,
+                        'party_name'     => $partyName,
+                        'date'           => $date,
+                        'unit_price'     => $canViewPurchase ? $unitPrice : null,
+                        'price_with_tax' => $canViewPurchase ? $priceWithTax : null,
+                        'quantity'       => $qty,
+                        'item_discount'  => (float) ($item->discount_percent ?? 0),
+                        'item_net'       => $canViewPurchase ? $net : null,
+                        'item_total'     => $canViewPurchase ? $total : null,
+                    ];
+                });
+        }
+
+        $all = $sales->concat($purchases)->sortByDesc(function ($item) {
+            return $item['date'] ?? '';
+        });
 
         return response()->json([
             'success' => true,
@@ -709,8 +828,10 @@ class ProductController extends Controller
 
     public function partyTransactions(Request $request, Product $product)
     {
-        $transactions = $this->transactions($request, $product)->original['data'] ?? [];
-        $grouped      = collect($transactions)->groupBy('party_name');
+        $response = $this->transactions($request, $product);
+        $data = $response->getData(true);
+        $transactions = $data['data'] ?? [];
+        $grouped = collect($transactions)->groupBy('party_name');
 
         return response()->json([
             'success' => true,
@@ -720,10 +841,11 @@ class ProductController extends Controller
 
     public function priceList(Product $product)
     {
+        $canViewPrice = $this->canViewPurchasePrice(request());
         return response()->json([
             'success' => true,
             'data'    => [
-                'purchase_price'    => $product->purchase_price,
+                'purchase_price'    => $canViewPrice ? $product->purchase_price : null,
                 'sale_price'        => $product->sale_price,
                 'mrp'               => $product->mrp ?? null,
                 'wholesale_price'   => $product->wholesale_price ?? null,
