@@ -43,6 +43,10 @@ use App\Http\Controllers\Api\UploadController;
 use App\Http\Controllers\Api\UserAccessController;
 use App\Http\Controllers\Api\WarehouseController;
 use App\Http\Controllers\Api\WhatsAppWebhookController;
+use App\Http\Controllers\Api\PrinterController;
+use App\Http\Controllers\Api\ThermalPaperProfileController;
+use App\Http\Controllers\Api\LabelTemplateController;
+use App\Http\Controllers\Api\PrintJobController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -687,4 +691,48 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /* ---------------------- Legacy profitability ----------------------- */
     Route::get('/reports/invoice-profitability', [ReportController::class, 'invoiceProfitability'])->middleware('permission:view dashboard profit');
+
+    /* ---------------------- Thermal Printing & Bluetooth ---------------- */
+    // Printer Management
+    Route::prefix('printers')->group(function () {
+        Route::get('/',                          [PrinterController::class, 'index'])->middleware('permission:printers.view');
+        Route::post('/',                         [PrinterController::class, 'store'])->middleware('permission:printers.manage');
+        Route::get('/{printer}',                 [PrinterController::class, 'show'])->middleware('permission:printers.view');
+        Route::match(['put', 'patch'], '/{printer}', [PrinterController::class, 'update'])->middleware('permission:printers.manage');
+        Route::delete('/{printer}',              [PrinterController::class, 'destroy'])->middleware('permission:printers.manage');
+        Route::post('/{printer}/default',        [PrinterController::class, 'setDefault'])->middleware('permission:printing.manage_defaults');
+        Route::post('/{printer}/test-connection',[PrinterController::class, 'testConnection'])->middleware('permission:printers.connect');
+    });
+
+    // Thermal Paper Profiles
+    Route::prefix('thermal-paper-profiles')->group(function () {
+        Route::get('/',                          [ThermalPaperProfileController::class, 'index'])->middleware('permission:printing.manage_paper_profiles');
+        Route::post('/',                         [ThermalPaperProfileController::class, 'store'])->middleware('permission:printing.manage_paper_profiles');
+        Route::get('/{paperProfile}',            [ThermalPaperProfileController::class, 'show'])->middleware('permission:printing.manage_paper_profiles');
+        Route::match(['put', 'patch'], '/{paperProfile}', [ThermalPaperProfileController::class, 'update'])->middleware('permission:printing.manage_paper_profiles');
+        Route::delete('/{paperProfile}',         [ThermalPaperProfileController::class, 'destroy'])->middleware('permission:printing.manage_paper_profiles');
+        Route::post('/{paperProfile}/default',   [ThermalPaperProfileController::class, 'setDefault'])->middleware('permission:printing.manage_defaults');
+    });
+
+    // Label Templates
+    Route::prefix('label-templates')->group(function () {
+        Route::get('/',                          [LabelTemplateController::class, 'index'])->middleware('permission:printing.manage_templates');
+        Route::post('/',                         [LabelTemplateController::class, 'store'])->middleware('permission:printing.manage_templates');
+        Route::get('/{template}',                [LabelTemplateController::class, 'show'])->middleware('permission:printing.manage_templates');
+        Route::match(['put', 'patch'], '/{template}', [LabelTemplateController::class, 'update'])->middleware('permission:printing.manage_templates');
+        Route::delete('/{template}',             [LabelTemplateController::class, 'destroy'])->middleware('permission:printing.manage_templates');
+        Route::post('/{template}/duplicate',     [LabelTemplateController::class, 'duplicate'])->middleware('permission:printing.manage_templates');
+        Route::post('/{template}/default',       [LabelTemplateController::class, 'setDefault'])->middleware('permission:printing.manage_defaults');
+    });
+
+    // Print Jobs & Queue
+    Route::prefix('print-jobs')->group(function () {
+        Route::get('/',                          [PrintJobController::class, 'index'])->middleware('permission:printing.view_history');
+        Route::get('/queue',                     [PrintJobController::class, 'queue'])->middleware('permission:printing.print_labels');
+        Route::post('/',                         [PrintJobController::class, 'store'])->middleware('permission:printing.print_labels,printing.quick_print,printing.bulk_print');
+        Route::get('/{printJob}',                [PrintJobController::class, 'show'])->middleware('permission:printing.view_history');
+        Route::patch('/{printJob}/status',       [PrintJobController::class, 'updateStatus'])->middleware('permission:printing.print_labels');
+        Route::post('/{printJob}/cancel',        [PrintJobController::class, 'cancel'])->middleware('permission:printing.cancel_jobs');
+        Route::post('/{printJob}/reprint',       [PrintJobController::class, 'reprint'])->middleware('permission:printing.reprint');
+    });
 });
