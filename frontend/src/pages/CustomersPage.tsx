@@ -11,6 +11,7 @@ import {
   FiAlertTriangle, FiChevronDown, FiEye, FiEyeOff, FiMoreVertical,
   FiBookOpen, FiFileText, FiCreditCard, FiActivity, FiExternalLink,
   FiMail, FiPhone, FiMapPin, FiCalendar, FiPrinter, FiDollarSign, FiLock,
+  FiSearch, FiChevronLeft, FiChevronRight, FiChevronsLeft, FiChevronsRight,
 } from 'react-icons/fi';
 
 import { apiClient } from '../api';
@@ -147,6 +148,9 @@ const CACHE_TTL_MS = 300_000;
 const TABLE_COLUMN_COUNT = 9;
 const RELATED_LIMIT = 10;
 const MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
+const SEARCH_DEBOUNCE_MS = 300;
+const PAGE_SIZE_OPTIONS = [15, 25, 50, 100] as const;
+const DEFAULT_PAGE_SIZE = 25;
 
 const TYPE_OPTIONS = [
   { value: 'all', label: 'All types' },
@@ -915,21 +919,36 @@ export function CustomersPage() {
   const canBulkDelete       = isSuperAdmin || can('delete customers');
   const canAutoFillGst      = isSuperAdmin || can('create customers') || can('edit customers');
 
+  /* ── Filters state ── */
   const [filterType, setFilterType] = useState('all');
   const [filterCompany, setFilterCompany] = useState('all');
   const [filterBranch, setFilterBranch] = useState('all');
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
+  /* ── Search state ── */
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+
+  /* ── Pagination state ── */
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+
+  /* ── Form state ── */
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [formData, setFormData] = useState<CustomerFormData>(createEmptyForm);
   const [submitting, setSubmitting] = useState(false);
   const [formErrors, setFormErrors] = useState<Record<string, boolean>>({});
 
+  /* ── Selection ── */
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+
+  /* ── Group modal ── */
   const [showGroupModal, setShowGroupModal] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [addingGroup, setAddingGroup] = useState(false);
 
+  /* ── Import state ── */
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importStep, setImportStep] = useState<'select' | 'preview' | 'result'>('select');
@@ -943,6 +962,8 @@ export function CustomersPage() {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  /* ── Quick view & detail ── */
+  const [quickViewCustomer, setQuickViewCustomer] = useState<Customer | null>(null);
   const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>('overview');
   const [detailLoading, setDetailLoading] = useState(false);
@@ -951,8 +972,9 @@ export function CustomersPage() {
   const [customerOrders, setCustomerOrders] = useState<OrderSummaryRow[]>([]);
   const detailRequestRef = useRef(0);
 
+  /* ── Misc ── */
   const [ledgerLoadingId, setLedgerLoadingId] = useState<number | null>(null);
-  const [outstandingVisibleIds, setOutstandingVisibleIds] = useState<Set<number>>(new Set());
+  const [hiddenOutstandingIds, setHiddenOutstandingIds] = useState<Set<number>>(new Set());
   const [lookingUp, setLookingUp] = useState(false);
 
   const { data: customers, loading: custLoading, error: custError, refresh: refreshCustomers } =
@@ -963,9 +985,30 @@ export function CustomersPage() {
     'customerGroups', () => apiClient.getCustomerGroups(),
   );
 
+  /* ── Debounce search ── */
+  useEffect(() => {
+    const t = window.setTimeout(() => setSearch(searchInput.trim().toLowerCase()), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(t);
+  }, [searchInput]);
+
+  /* ── Reset page & selection on filter/search/pageSize change ── */
+  useEffect(() => { setPage(1); }, [search, filterType, filterCompany, filterBranch, pageSize]);
+  useEffect(() => { setSelectedIds([]); }, [search, filterType, filterCompany, filterBranch, pageSize]);
+
+  /* ── Filtered customers (search + type + company + branch) ── */
   const filteredCustomers = useMemo(() => {
     if (!customers) return [];
     let list = customers;
+
+    if (search) {
+      list = list.filter((c) => {
+        const haystack = [
+          c.name, c.email, c.contact_no, c.contact_person,
+          c.gst_number, c.pan, c.billing_city, c.billing_state,
+        ].filter(Boolean).join(' ').toLowerCase();
+        return haystack.includes(search);
+      });
+    }
     if (filterType !== 'all') list = list.filter((c) => c.type === filterType);
     if (filterCompany !== 'all') {
       const cid = Number.parseInt(filterCompany, 10);
@@ -976,7 +1019,19 @@ export function CustomersPage() {
       if (!Number.isNaN(bid)) list = list.filter((c) => c.branch_id === bid);
     }
     return list;
-  }, [customers, filterType, filterCompany, filterBranch]);
+  }, [customers, search, filterType, filterCompany, filterBranch]);
+
+  /* ── Pagination math ── */
+  const totalPages = Math.max(1, Math.ceil(filteredCustomers.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const paginatedCustomers = useMemo(
+    () => filteredCustomers.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filteredCustomers, safePage, pageSize],
+  );
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   const summary = useMemo(() => {
     const list = customers ?? [];
@@ -1002,21 +1057,26 @@ export function CustomersPage() {
     [filterType, filterCompany, filterBranch],
   );
 
+  const showReset = activeFilterCount > 0 || searchInput.trim() !== '';
+
   const clearFilters = useCallback(() => {
     setFilterType('all'); setFilterCompany('all'); setFilterBranch('all');
+    setSearchInput(''); setSearch('');
+    setPage(1);
+    setSelectedIds([]);
   }, []);
 
   const allSelected = useMemo(
-    () => filteredCustomers.length > 0 && filteredCustomers.every((c) => selectedIds.includes(c.id)),
-    [filteredCustomers, selectedIds],
+    () => paginatedCustomers.length > 0 && paginatedCustomers.every((c) => selectedIds.includes(c.id)),
+    [paginatedCustomers, selectedIds],
   );
 
   const toggleSelectAll = useCallback(() => {
-    const ids = filteredCustomers.map((c) => c.id);
+    const ids = paginatedCustomers.map((c) => c.id);
     if (!ids.length) return;
     if (allSelected) setSelectedIds((cur) => cur.filter((id) => !ids.includes(id)));
     else setSelectedIds((cur) => Array.from(new Set([...cur, ...ids])));
-  }, [allSelected, filteredCustomers]);
+  }, [allSelected, paginatedCustomers]);
 
   const toggleSelected = useCallback((id: number) => {
     setSelectedIds((cur) => cur.includes(id) ? cur.filter((v) => v !== id) : [...cur, id]);
@@ -1315,6 +1375,7 @@ export function CustomersPage() {
     const errors: Record<string, boolean> = {};
     let valid = true;
     if (!formData.name.trim()) { errors.name = true; valid = false; }
+    if (!formData.company_id) { errors.company_id = true; valid = false; }
     if (!formData.billing_city.trim()) { errors.billing_city = true; valid = false; }
     if (formData.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
       errors.email = true; valid = false;
@@ -1524,16 +1585,16 @@ export function CustomersPage() {
   }, [importErrors]);
 
   const toggleOutstandingVisibility = useCallback((id: number) => {
-    setOutstandingVisibleIds((prev) => {
+    setHiddenOutstandingIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
   }, []);
 
-  /* ────────────────────────────────────────────────────────────────────────
-   * Loading guard
-   * ──────────────────────────────────────────────────────────────────────── */
+  const closeFiltersOnBackdrop = useCallback(() => setFiltersOpen(false), []);
+
+  /* ── Loading / access guards ── */
 
   if (loadingUser && !hasUser) {
     return (
@@ -1544,10 +1605,6 @@ export function CustomersPage() {
       </div>
     );
   }
-
-  /* ────────────────────────────────────────────────────────────────────────
-   * No-access panel
-   * ──────────────────────────────────────────────────────────────────────── */
 
   if (!canViewCustomers) {
     return (
@@ -1610,7 +1667,8 @@ export function CustomersPage() {
 
       <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
         <div className="mx-auto w-full max-w-[1900px] space-y-5 p-3 sm:p-4 lg:space-y-6 lg:p-6">
-          {/* Hero */}
+
+          {/* ── Hero ── */}
           <section className="relative overflow-hidden rounded-2xl border border-slate-800/10 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 px-5 py-6 shadow-[0_20px_40px_-20px_rgba(15,23,42,0.45)] sm:px-7 lg:px-8">
             <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-indigo-500/20 blur-3xl" />
             <div className="pointer-events-none absolute -bottom-24 right-24 h-56 w-56 rounded-full bg-cyan-500/10 blur-3xl" />
@@ -1678,7 +1736,7 @@ export function CustomersPage() {
             </div>
           </section>
 
-          {/* KPI — counts */}
+          {/* ── KPI counts ── */}
           <section className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
             {customers ? (
               <>
@@ -1690,7 +1748,7 @@ export function CustomersPage() {
             ) : Array.from({ length: 4 }).map((_, i) => <StatCardSkeleton key={i} />)}
           </section>
 
-          {/* KPI — outstanding */}
+          {/* ── KPI outstanding ── */}
           <section className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
             {customers ? (
               <>
@@ -1702,60 +1760,203 @@ export function CustomersPage() {
             ) : Array.from({ length: 4 }).map((_, i) => <StatCardSkeleton key={`o-${i}`} />)}
           </section>
 
-          {/* Filters */}
-          <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-            <CardHeader className="flex flex-row items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-5">
-              <div className="flex items-center gap-2.5">
-                <div className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600 ring-1 ring-indigo-500/10">
-                  <FiFilter size={14} />
-                </div>
-                <div>
-                  <CardTitle className="text-sm font-semibold text-slate-800">Filters</CardTitle>
-                  <CardDescription className="text-[11px] text-slate-500">
-                    {activeFilterCount > 0
-                      ? `${activeFilterCount} active filter${activeFilterCount > 1 ? 's' : ''}`
-                      : 'Refine by type, company, or branch'}
-                  </CardDescription>
-                </div>
+          {/* ── Toolbar: Search + Filters button + Reset ── */}
+          <section className="rounded-2xl border border-slate-200/80 bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+
+              {/* Search */}
+              <div className="relative flex-1">
+                <FiSearch className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                <Input
+                  type="text"
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  placeholder="Search name, email, phone, GST, city…"
+                  className="h-10 rounded-xl border-slate-200 pl-10 pr-10 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
+                  autoComplete="off"
+                />
+                {searchInput && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchInput('')}
+                    aria-label="Clear search"
+                    className="absolute right-2.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                  >
+                    <FiX size={14} />
+                  </button>
+                )}
               </div>
-              {activeFilterCount > 0 && (
-                <Button type="button" variant="ghost" size="sm"
-                  className="h-9 rounded-lg text-slate-500 hover:text-slate-800" onClick={clearFilters}>
-                  <FiX className="mr-1.5" size={14} /> Reset
+
+              {/* Filters button + popover */}
+              <div className="relative z-30">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setFiltersOpen((v) => !v)}
+                  aria-expanded={filtersOpen}
+                  className={`h-10 w-full gap-2 rounded-xl text-sm font-semibold transition sm:w-auto ${
+                    filtersOpen || activeFilterCount > 0
+                      ? 'border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  <FiFilter size={15} />
+                  <span>Filters</span>
+                  {activeFilterCount > 0 && (
+                    <span className="grid h-5 min-w-[1.25rem] place-items-center rounded-full bg-indigo-600 px-1.5 text-[10px] font-bold text-white">
+                      {activeFilterCount}
+                    </span>
+                  )}
+                  <FiChevronDown className={`transition-transform duration-200 ${filtersOpen ? 'rotate-180' : ''}`} size={14} />
+                </Button>
+
+                {filtersOpen && (
+                  <div className="absolute right-0 top-full z-40 mt-2 w-[min(460px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/10">
+                    {/* Header */}
+                    <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/70 px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <div className="grid h-7 w-7 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                          <FiFilter size={13} />
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-slate-800">Reporting Filters</p>
+                          <p className="text-[10px] text-slate-500">
+                            {activeFilterCount > 0 ? `${activeFilterCount} active` : 'No filters applied'}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        {activeFilterCount > 0 && (
+                          <button
+                            onClick={clearFilters}
+                            className="rounded-lg px-2 py-1 text-[11px] font-semibold text-rose-600 transition hover:bg-rose-50"
+                          >
+                            Reset all
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setFiltersOpen(false)}
+                          aria-label="Close filters"
+                          className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                        >
+                          <FiX size={14} />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Body */}
+                    <div className="space-y-4 p-4">
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Type</label>
+                        <div className="relative">
+                          <select
+                            aria-label="Type"
+                            value={filterType}
+                            onChange={(e) => setFilterType(e.target.value)}
+                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                          >
+                            {TYPE_OPTIONS.map((o) => (
+                              <option key={o.value} value={o.value}>{o.label}</option>
+                            ))}
+                          </select>
+                          <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Company</label>
+                        <div className="relative">
+                          <select
+                            aria-label="Company"
+                            value={filterCompany}
+                            onChange={(e) => { setFilterCompany(e.target.value); setFilterBranch('all'); }}
+                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                          >
+                            <option value="all">All companies</option>
+                            {companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                          </select>
+                          <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Branch</label>
+                        <div className="relative">
+                          <select
+                            aria-label="Branch"
+                            value={filterBranch}
+                            onChange={(e) => setFilterBranch(e.target.value)}
+                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                          >
+                            <option value="all">All branches</option>
+                            {filteredBranchesFilter.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                          </select>
+                          <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                        </div>
+                      </div>
+
+                      {activeFilterCount > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-3">
+                          <span className="text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Active:</span>
+                          {filterType !== 'all' && (
+                            <span className="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">
+                              {filterType}
+                            </span>
+                          )}
+                          {filterCompany !== 'all' && (
+                            <span className="inline-flex items-center rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
+                              {companies?.find((c) => String(c.id) === filterCompany)?.name || 'Company'}
+                            </span>
+                          )}
+                          {filterBranch !== 'all' && (
+                            <span className="inline-flex items-center rounded-md bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700">
+                              {branches?.find((b) => String(b.id) === filterBranch)?.name || 'Branch'}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Footer */}
+                    <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50/70 px-4 py-2.5">
+                      <p className="text-[11px] text-slate-500">
+                        {filteredCustomers.length.toLocaleString('en-IN')} matching record{filteredCustomers.length === 1 ? '' : 's'}
+                      </p>
+                      <button
+                        onClick={() => setFiltersOpen(false)}
+                        className="rounded-lg bg-slate-900 px-3.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-slate-800"
+                      >
+                        Done
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {showReset && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={clearFilters}
+                  className="h-10 rounded-xl text-sm font-medium text-slate-500 hover:text-slate-800"
+                >
+                  <FiX className="mr-1.5" size={16} />
+                  Reset
                 </Button>
               )}
-            </CardHeader>
-            <CardContent className="bg-white p-4 sm:p-5">
-              <div className="grid gap-3 sm:grid-cols-3">
-                <div className="relative">
-                  <select aria-label="Type" value={filterType} onChange={(e) => setFilterType(e.target.value)}
-                    className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
-                    {TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                  <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                </div>
-                <div className="relative">
-                  <select aria-label="Company" value={filterCompany}
-                    onChange={(e) => { setFilterCompany(e.target.value); setFilterBranch('all'); }}
-                    className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
-                    <option value="all">All companies</option>
-                    {companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
-                  <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                </div>
-                <div className="relative">
-                  <select aria-label="Branch" value={filterBranch} onChange={(e) => setFilterBranch(e.target.value)}
-                    className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
-                    <option value="all">All branches</option>
-                    {filteredBranchesFilter.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-                  </select>
-                  <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+            </div>
+          </section>
 
-          {/* Bulk toolbar */}
+          {/* Backdrop */}
+          {filtersOpen && (
+            <div
+              className="fixed inset-0 z-20 bg-slate-900/10 backdrop-blur-[1px]"
+              onClick={closeFiltersOnBackdrop}
+              aria-hidden="true"
+            />
+          )}
+
+          {/* ── Bulk toolbar ── */}
           {selectedIds.length > 0 && (canBulkUpdateType || canBulkDelete) && (
             <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
@@ -1791,7 +1992,7 @@ export function CustomersPage() {
             </div>
           )}
 
-          {/* Table */}
+          {/* ── Table card ── */}
           <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
             <CardHeader className="flex flex-col gap-3 border-b border-slate-100 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
               <div className="flex items-center gap-2.5">
@@ -1803,8 +2004,22 @@ export function CustomersPage() {
                   <CardDescription className="text-[11px] text-slate-500">
                     {custLoading
                       ? 'Loading customers…'
-                      : `${filteredCustomers.length.toLocaleString('en-IN')} record${filteredCustomers.length === 1 ? '' : 's'} · Click a row to view details`}
+                      : `${filteredCustomers.length.toLocaleString('en-IN')} record${filteredCustomers.length === 1 ? '' : 's'} · Click a row for quick view`}
                   </CardDescription>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Rows</span>
+                <div className="relative">
+                  <select
+                    value={String(pageSize)}
+                    onChange={(e) => setPageSize(Number(e.target.value))}
+                    aria-label="Rows per page"
+                    className="h-9 w-[76px] appearance-none rounded-lg border border-slate-200 bg-white px-2.5 pr-7 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                  >
+                    {PAGE_SIZE_OPTIONS.map((v) => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                  <FiChevronDown className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400" size={13} />
                 </div>
               </div>
             </CardHeader>
@@ -1814,7 +2029,7 @@ export function CustomersPage() {
                 <TableHeader>
                   <TableRow className="border-slate-100 bg-slate-50/70 hover:bg-slate-50/70">
                     <TableHead className="w-11 px-3">
-                      <input aria-label="Select all" type="checkbox" checked={allSelected}
+                      <input aria-label="Select all on page" type="checkbox" checked={allSelected}
                         onChange={(e) => { e.stopPropagation(); toggleSelectAll(); }}
                         onClick={(e) => e.stopPropagation()}
                         className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30" />
@@ -1839,14 +2054,14 @@ export function CustomersPage() {
                     </TableRow>
                   ))}
 
-                  {!custLoading && filteredCustomers.map((customer) => {
+                  {!custLoading && paginatedCustomers.map((customer) => {
                     const selected = selectedIds.includes(customer.id);
                     const typeColors: Record<CustomerType, string> = {
                       customer: 'border-emerald-200/70 bg-emerald-50 text-emerald-700',
                       dealer: 'border-violet-200/70 bg-violet-50 text-violet-700',
                       distributor: 'border-teal-200/70 bg-teal-50 text-teal-700',
                     };
-                    const isVisible = outstandingVisibleIds.has(customer.id);
+                    const isVisible = !hiddenOutstandingIds.has(customer.id);
                     const amount = getOutstanding(customer);
                     const isLedgerLoading = ledgerLoadingId === customer.id;
 
@@ -1854,7 +2069,7 @@ export function CustomersPage() {
                       <TableRow key={customer.id}
                         data-state={selected ? 'selected' : undefined}
                         className={`cursor-pointer border-slate-100 transition-colors hover:bg-slate-50/70 ${selected ? 'bg-indigo-50/40 hover:bg-indigo-50/60' : ''}`}
-                        onClick={() => handleViewCustomer(customer)}>
+                        onClick={() => setQuickViewCustomer(customer)}>
                         <TableCell className="px-3" onClick={(e) => e.stopPropagation()}>
                           <input aria-label={`Select ${customer.name}`} type="checkbox" checked={selected}
                             onChange={(e) => { e.stopPropagation(); toggleSelected(customer.id); }}
@@ -1926,7 +2141,9 @@ export function CustomersPage() {
                             <FiFilter className="h-6 w-6 text-slate-400" />
                           </div>
                           <p className="mt-4 text-base font-semibold text-slate-800">No customers found</p>
-                          <p className="mt-1 text-sm text-slate-500">Try adjusting the type, company, or branch filter.</p>
+                          <p className="mt-1 text-sm text-slate-500">
+                            Try adjusting the search term, type, company, or branch filter.
+                          </p>
                           <Button type="button" className="mt-5 rounded-lg" variant="outline" onClick={clearFilters}>
                             <FiFilter className="mr-2" size={14} /> Reset filters
                           </Button>
@@ -1937,11 +2154,188 @@ export function CustomersPage() {
                 </TableBody>
               </Table>
             </div>
+
+            {/* ── Pagination footer ── */}
+            <div className="flex flex-col gap-3 border-t border-slate-100 bg-white px-4 py-3.5 sm:px-5 md:flex-row md:items-center md:justify-between">
+              <p className="text-xs text-slate-500 sm:text-[13px]">
+                Showing{' '}
+                <span className="font-semibold text-slate-700">
+                  {filteredCustomers.length === 0 ? 0 : (safePage - 1) * pageSize + 1}
+                </span>
+                {' – '}
+                <span className="font-semibold text-slate-700">
+                  {Math.min(safePage * pageSize, filteredCustomers.length)}
+                </span>
+                {' of '}
+                <span className="font-semibold text-slate-700">{filteredCustomers.length.toLocaleString('en-IN')}</span>
+              </p>
+              <div className="flex items-center justify-between gap-1.5 sm:justify-end">
+                <Button type="button" variant="outline" size="icon" className="h-9 w-9 rounded-lg"
+                  disabled={safePage <= 1 || custLoading} onClick={() => setPage(1)} aria-label="First page">
+                  <FiChevronsLeft size={16} />
+                </Button>
+                <Button type="button" variant="outline" size="icon" className="h-9 w-9 rounded-lg"
+                  disabled={safePage <= 1 || custLoading} onClick={() => setPage((p) => Math.max(1, p - 1))} aria-label="Previous page">
+                  <FiChevronLeft size={16} />
+                </Button>
+                <div className="mx-1 min-w-[76px] rounded-lg bg-slate-100 px-3 py-1.5 text-center text-xs font-semibold text-slate-700">
+                  {safePage} / {totalPages}
+                </div>
+                <Button type="button" variant="outline" size="icon" className="h-9 w-9 rounded-lg"
+                  disabled={safePage >= totalPages || custLoading} onClick={() => setPage((p) => Math.min(totalPages, p + 1))} aria-label="Next page">
+                  <FiChevronRight size={16} />
+                </Button>
+                <Button type="button" variant="outline" size="icon" className="h-9 w-9 rounded-lg"
+                  disabled={safePage >= totalPages || custLoading} onClick={() => setPage(totalPages)} aria-label="Last page">
+                  <FiChevronsRight size={16} />
+                </Button>
+              </div>
+            </div>
           </Card>
         </div>
       </div>
 
-      {/* Detail offcanvas */}
+      {/* ── Quick view modal ── */}
+      {quickViewCustomer && (
+        <div className="fixed inset-0 z-[55] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-slate-950/50 backdrop-blur-sm"
+            onClick={() => setQuickViewCustomer(null)} aria-hidden="true" />
+          <div className="animate-fadeIn relative w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            {/* Header */}
+            <div className="relative overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-900 px-5 py-4 text-white">
+              <div className="pointer-events-none absolute -right-8 -top-8 h-28 w-28 rounded-full bg-cyan-500/20 blur-2xl" />
+              <button
+                type="button"
+                onClick={() => setQuickViewCustomer(null)}
+                className="absolute right-3 top-3 grid h-7 w-7 place-items-center rounded-lg text-slate-300 transition hover:bg-white/10 hover:text-white"
+                aria-label="Close"
+              >
+                <FiX size={16} />
+              </button>
+              <div className="relative flex items-center gap-3">
+                <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-gradient-to-br from-cyan-400 to-indigo-500 text-base font-bold shadow-lg">
+                  {(quickViewCustomer.name || 'C')[0]?.toUpperCase()}
+                </div>
+                <div className="min-w-0">
+                  <p className="truncate text-base font-bold">{quickViewCustomer.name}</p>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px]">
+                    <span className="rounded-full bg-white/10 px-2 py-0.5 font-semibold capitalize">{quickViewCustomer.type}</span>
+                    <span className={`rounded-full px-2 py-0.5 font-semibold ${quickViewCustomer.is_active ? 'bg-emerald-500/20 text-emerald-200' : 'bg-slate-500/20 text-slate-300'}`}>
+                      {quickViewCustomer.is_active ? 'Active' : 'Inactive'}
+                    </span>
+                    <span className="font-mono text-slate-300">#{quickViewCustomer.id}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="space-y-3 p-5">
+              {/* Financials */}
+              <div className="grid grid-cols-3 gap-2">
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Outstanding</p>
+                  <p className={`mt-0.5 text-sm font-bold tabular-nums ${getOutstanding(quickViewCustomer) > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                    {formatCurrency(getOutstanding(quickViewCustomer))}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Credit limit</p>
+                  <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">
+                    {formatCurrency(quickViewCustomer.credit_limit)}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Opening</p>
+                  <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">
+                    {formatCurrency(quickViewCustomer.opening_balance)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Contact + location */}
+              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                {quickViewCustomer.email && (
+                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
+                    <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                      <FiMail size={12} /> Email
+                    </span>
+                    <span className="min-w-0 truncate text-xs font-semibold text-slate-800">{quickViewCustomer.email}</span>
+                  </div>
+                )}
+                {quickViewCustomer.contact_no && (
+                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
+                    <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                      <FiPhone size={12} /> Phone
+                    </span>
+                    <span className="text-xs font-semibold text-slate-800">{quickViewCustomer.contact_no}</span>
+                  </div>
+                )}
+                {quickViewCustomer.gst_number && (
+                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">GSTIN</span>
+                    <span className="text-xs font-mono font-semibold text-slate-800">{quickViewCustomer.gst_number}</span>
+                  </div>
+                )}
+                {(quickViewCustomer.billing_city || quickViewCustomer.billing_street) && (
+                  <div className="flex items-start justify-between gap-3 px-3.5 py-2.5">
+                    <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+                      <FiMapPin size={12} /> Address
+                    </span>
+                    <span className="min-w-0 text-right text-xs text-slate-700">
+                      {[quickViewCustomer.billing_city, quickViewCustomer.billing_state, quickViewCustomer.billing_pincode].filter(Boolean).join(', ') || '—'}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Company / branch */}
+              {(quickViewCustomer.company?.name || quickViewCustomer.branch?.name) && (
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-[11px]">
+                  {quickViewCustomer.company?.name && (
+                    <span className="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 font-semibold text-slate-700 ring-1 ring-slate-200">
+                      {quickViewCustomer.company.name}
+                    </span>
+                  )}
+                  {quickViewCustomer.branch?.name && (
+                    <span className="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 font-semibold text-slate-700 ring-1 ring-slate-200">
+                      {quickViewCustomer.branch.name}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-3">
+              <Button type="button" variant="outline" onClick={() => setQuickViewCustomer(null)} className="h-9 rounded-xl text-sm">
+                Close
+              </Button>
+              {canViewLedger && (
+                <Button type="button" variant="outline"
+                  onClick={() => { const c = quickViewCustomer; setQuickViewCustomer(null); handleLedger(c); }}
+                  className="h-9 rounded-xl text-sm text-emerald-600">
+                  <FiBookOpen className="mr-1.5" size={14} /> Ledger
+                </Button>
+              )}
+              {canEditCustomer && (
+                <Button type="button" variant="outline"
+                  onClick={() => { const c = quickViewCustomer; setQuickViewCustomer(null); handleEdit(c); }}
+                  className="h-9 rounded-xl text-sm text-indigo-600">
+                  <FiEdit className="mr-1.5" size={14} /> Edit
+                </Button>
+              )}
+              <Button type="button"
+                onClick={() => { const c = quickViewCustomer; setQuickViewCustomer(null); void handleViewCustomer(c); }}
+                className="h-9 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800">
+                <FiExternalLink className="mr-1.5" size={14} /> Full details
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Detail offcanvas ── */}
       {viewingCustomer && (
         <Suspense fallback={
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
@@ -2240,7 +2634,7 @@ export function CustomersPage() {
         </Suspense>
       )}
 
-      {/* Form offcanvas */}
+      {/* ── Form offcanvas ── */}
       {isPanelOpen && (
         <Suspense fallback={
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
@@ -2522,7 +2916,7 @@ export function CustomersPage() {
         </Suspense>
       )}
 
-      {/* Add group modal */}
+      {/* ── Add group modal ── */}
       {showGroupModal && canManageGroups && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm"
@@ -2557,7 +2951,7 @@ export function CustomersPage() {
         </div>
       )}
 
-      {/* Import offcanvas */}
+      {/* ── Import offcanvas ── */}
       {isImportOpen && canImportCustomers && (
         <Suspense fallback={
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">

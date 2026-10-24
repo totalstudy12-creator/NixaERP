@@ -74,7 +74,7 @@ type PaymentMethod =
   | 'net_banking'
   | 'wallet'
   | 'other'
-  | (string & {}); // allow any additional value coming from the API
+  | (string & {});
 
 type PaymentStatus = 'pending' | 'completed' | 'failed' | 'reconciled';
 type PaymentDirection = 'inward' | 'outward';
@@ -159,29 +159,16 @@ const PER_PAGE = [15, 25, 50, 100] as const;
 const HEAD = 'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
 
 const STATUS: Record<PaymentStatus, { label: string; cls: string; dot: string }> = {
-  pending:    { label: 'Pending',    cls: 'border-amber-200 bg-amber-50 text-amber-700',     dot: 'bg-amber-500' },
+  pending:    { label: 'Pending',    cls: 'border-amber-200 bg-amber-50 text-amber-700',       dot: 'bg-amber-500' },
   completed:  { label: 'Completed',  cls: 'border-emerald-200 bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500' },
-  failed:     { label: 'Failed',     cls: 'border-rose-200 bg-rose-50 text-rose-700',       dot: 'bg-rose-500' },
-  reconciled: { label: 'Reconciled', cls: 'border-indigo-200 bg-indigo-50 text-indigo-700', dot: 'bg-indigo-500' },
+  failed:     { label: 'Failed',     cls: 'border-rose-200 bg-rose-50 text-rose-700',          dot: 'bg-rose-500' },
+  reconciled: { label: 'Reconciled', cls: 'border-indigo-200 bg-indigo-50 text-indigo-700',    dot: 'bg-indigo-500' },
 };
 
-/**
- * Canonical payment methods that we always show as filter options,
- * even when no payment in the current dataset uses them.
- */
 const CANONICAL_METHODS: PaymentMethod[] = [
-  'qr',
-  'upi',
-  'bank_transfer',
-  'cash',
-  'card',
-  'cheque',
-  'net_banking',
-  'wallet',
-  'other',
+  'qr', 'upi', 'bank_transfer', 'cash', 'card', 'cheque', 'net_banking', 'wallet', 'other',
 ];
 
-/** Human-friendly labels for known methods. */
 const METHOD_LABELS: Record<string, string> = {
   qr: 'QR Code',
   upi: 'UPI',
@@ -194,22 +181,32 @@ const METHOD_LABELS: Record<string, string> = {
   other: 'Other',
 };
 
+const STATUS_OPTIONS = [
+  { value: 'all', label: 'All statuses' },
+  { value: 'pending', label: 'Pending' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'reconciled', label: 'Reconciled' },
+];
+
+const DIRECTION_OPTIONS = [
+  { value: 'all', label: 'IN + OUT' },
+  { value: 'inward', label: 'INWARD · Money in' },
+  { value: 'outward', label: 'OUTWARD · Money out' },
+];
+
+const BILL_OPTIONS = [
+  { value: 'all', label: 'All bill links' },
+  { value: 'sales', label: 'Sales bills' },
+  { value: 'purchase', label: 'Purchase bills' },
+  { value: 'other', label: 'Other bills' },
+  { value: 'unlinked', label: 'Unlinked' },
+];
+
 /* ------------------------------------------------------------------ */
-/* Payment method normalization — the core fix                        */
+/* Payment-method normalization                                       */
 /* ------------------------------------------------------------------ */
 
-/**
- * Normalize ANY payment-method value coming from the API or the form
- * into a canonical lowercase-underscore key.
- *
- *   "UPI"              → "upi"
- *   " Cash "           → "cash"
- *   "Bank Transfer"    → "bank_transfer"
- *   "bank-transfer"    → "bank_transfer"
- *   "net banking"      → "net_banking"
- *   "net_banking"      → "net_banking"
- *   "QR Code"          → "qr_code" (still usable; label falls back)
- */
 function methodKey(value: unknown): string {
   return String(value ?? '')
     .trim()
@@ -219,7 +216,6 @@ function methodKey(value: unknown): string {
     .replace(/^_+|_+$/g, '');
 }
 
-/** Pretty label for any method key (known or unknown). */
 function methodLabel(value: unknown): string {
   const key = methodKey(value);
   if (!key) return '—';
@@ -228,7 +224,7 @@ function methodLabel(value: unknown): string {
 }
 
 /* ------------------------------------------------------------------ */
-/* Other helpers                                                      */
+/* Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
 const n = (v: unknown) => { const x = Number(v); return Number.isFinite(x) ? x : 0; };
@@ -420,11 +416,11 @@ function Kpi({
   return (
     <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
       <div className="flex items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">{title}</p>
           <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">{value}</p>
         </div>
-        <div className={`grid h-10 w-10 place-items-center rounded-xl ${styles[tone]}`}>
+        <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${styles[tone]}`}>
           <Icon className="h-5 w-5" />
         </div>
       </div>
@@ -442,7 +438,6 @@ export function PaymentsPage() {
   const loadingUser = useAuthStore((s) => s.loadingUser);
   const hasUser = useAuthStore((s) => Boolean(s.user));
 
-  /* ---- RBAC capability flags ---- */
   const canViewPayments   = isSuperAdmin || can('view payments');
   const canCreatePayment  = isSuperAdmin || can('create payments');
   const canEditPayment    = isSuperAdmin || can('edit payments');
@@ -560,18 +555,12 @@ export function PaymentsPage() {
     }
   }, [branchFilter, companyBranches]);
 
-  /**
-   * Dynamic payment-method options built from the actual dataset.
-   * Always includes the canonical list so the dropdown is stable even
-   * before data is loaded; adds any unknown methods the API returns.
-   */
   const availableMethods = useMemo(() => {
     const found = new Set<string>();
     payments.forEach((p) => {
       const k = methodKey(p.payment_method);
       if (k) found.add(k);
     });
-    // Merge canonical + discovered, dedupe, then sort alphabetically by label.
     const merged = new Set<string>([...CANONICAL_METHODS.map(methodKey), ...found]);
     return Array.from(merged).sort((a, b) => methodLabel(a).localeCompare(methodLabel(b)));
   }, [payments]);
@@ -585,7 +574,6 @@ export function PaymentsPage() {
     if (branchFilter !== 'all') rows = rows.filter((p) => p.branch_id === Number(branchFilter));
     if (statusFilter !== 'all') rows = rows.filter((p) => p.status === statusFilter);
 
-    // ✅ FIXED: compare normalized keys so "UPI" === "upi" === " upi "
     if (methodFilter !== 'all') {
       const target = methodKey(methodFilter);
       rows = rows.filter((p) => methodKey(p.payment_method) === target);
@@ -664,6 +652,22 @@ export function PaymentsPage() {
     else { setSortBy(field); setSortDir('asc'); }
   };
 
+  /* ---------------- Active filter count (excludes search, includes dates) ---------------- */
+
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (companyFilter !== 'all') count++;
+    if (branchFilter !== 'all') count++;
+    if (statusFilter !== 'all') count++;
+    if (methodFilter !== 'all') count++;
+    if (directionFilter !== 'all') count++;
+    if (billFilter !== 'all') count++;
+    if (dateFrom !== today() || dateTo !== today()) count++;
+    return count;
+  }, [companyFilter, branchFilter, statusFilter, methodFilter, directionFilter, billFilter, dateFrom, dateTo]);
+
+  const showReset = activeFilterCount > 0 || searchInput.trim() !== '';
+
   const clearFilters = () => {
     setSearchInput(''); setSearch('');
     setCompanyFilter('all'); setBranchFilter('all');
@@ -715,7 +719,6 @@ export function PaymentsPage() {
       invoice_id: p.invoice_id || p.sales_invoice_id || null,
       reference_no: p.reference_no || '',
       amount: p.amount ?? '',
-      // ✅ FIXED: normalize on load so the select pre-fills correctly
       payment_method: methodKey(p.payment_method) || 'qr',
       status: p.status || 'pending',
       payment_direction: p.payment_direction || 'inward',
@@ -814,7 +817,6 @@ export function PaymentsPage() {
       branch_id: form.branch_id ? Number(form.branch_id) : null,
       invoice_id: form.invoice_id || null,
       amount: n(form.amount),
-      // ✅ FIXED: send normalized key so backend columns stay consistent
       payment_method: methodKey(form.payment_method) || 'other',
       reference_no: reference,
     };
@@ -865,16 +867,6 @@ export function PaymentsPage() {
   };
 
   const formBranches = branches.filter((b) => b.company_id === Number(form.company_id));
-
-  const activeFilters = [
-    search,
-    companyFilter !== 'all' ? companyFilter : '',
-    branchFilter !== 'all' ? branchFilter : '',
-    statusFilter !== 'all' ? statusFilter : '',
-    methodFilter !== 'all' ? methodFilter : '',
-    directionFilter !== 'all' ? directionFilter : '',
-    billFilter !== 'all' ? billFilter : '',
-  ].filter(Boolean).length;
 
   /* ---------------- Due-invoice picker ---------------- */
 
@@ -947,8 +939,6 @@ export function PaymentsPage() {
     );
   }
 
-  /* ---------------- No-access panel ---------------- */
-
   if (!canViewPayments) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
@@ -974,7 +964,7 @@ export function PaymentsPage() {
     <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
       <div className="mx-auto w-full max-w-[1900px] space-y-5 p-3 sm:p-4 lg:space-y-6 lg:p-6">
 
-        {/* Header */}
+        {/* ── Header ── */}
         <section className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 px-5 py-6 shadow-[0_20px_40px_-20px_rgba(15,23,42,0.45)] sm:px-7">
           <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-indigo-500/20 blur-3xl" />
 
@@ -1032,7 +1022,7 @@ export function PaymentsPage() {
           </div>
         </section>
 
-        {/* KPIs */}
+        {/* ── KPIs ── */}
         <section className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
           <Kpi title="Payments" value={summary.total.toLocaleString('en-IN')} icon={ReceiptText} tone="indigo" />
           <Kpi title="Total value" value={money(summary.totalAmount)} icon={CircleDollarSign} tone="violet" />
@@ -1042,118 +1032,257 @@ export function PaymentsPage() {
           <Kpi title="Failed" value={String(summary.failed)} icon={AlertCircle} tone="rose" />
         </section>
 
-        {/* Filters */}
-        <Card className="overflow-hidden rounded-2xl border-slate-200/80">
-          <CardHeader className="flex flex-row items-center justify-between border-b border-slate-100 px-4 py-3.5 sm:px-5">
-            <div className="flex items-center gap-2.5">
-              <div className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                <Filter className="h-4 w-4" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-slate-800">Filters</p>
-                <p className="text-[11px] text-slate-500">
-                  {activeFilters ? `${activeFilters} active filter${activeFilters > 1 ? 's' : ''}` : 'Scope, date, payment and bill tracking'}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" className="h-9 rounded-lg lg:hidden" onClick={() => setFiltersOpen((v) => !v)}>
-                <Filter className="mr-2 h-3.5 w-3.5" />
-                {filtersOpen ? 'Hide' : 'Show'}
-              </Button>
-              {(activeFilters > 0 || dateFrom !== today() || dateTo !== today()) && (
-                <Button variant="ghost" size="sm" onClick={clearFilters} className="h-9 rounded-lg text-slate-500">
-                  <X className="mr-1.5 h-3.5 w-3.5" />
-                  Reset
-                </Button>
+        {/* ── Toolbar: Search + single Filters button ── */}
+        <section className="rounded-2xl border border-slate-200/80 bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+
+            {/* Search */}
+            <div className="relative flex-1">
+              <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <Input
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder="Search reference, bill, bank, customer, ledger…"
+                className="h-10 rounded-xl pl-10 pr-10"
+              />
+              {searchInput && (
+                <button
+                  type="button"
+                  onClick={() => setSearchInput('')}
+                  aria-label="Clear search"
+                  className="absolute right-2.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
               )}
             </div>
-          </CardHeader>
 
-          <CardContent className={`${filtersOpen ? 'block' : 'hidden'} p-4 sm:p-5 lg:block`}>
-            <div className="grid gap-3 lg:grid-cols-12">
-              <div className="relative lg:col-span-4">
-                <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <Input value={searchInput} onChange={(e) => setSearchInput(e.target.value)}
-                  placeholder="Search reference, bill, bank, customer, ledger…"
-                  className="h-10 rounded-xl pl-10" />
-              </div>
+            {/* Filters button + popover */}
+            <div className="relative z-30">
+              <Button
+                variant="outline"
+                onClick={() => setFiltersOpen((v) => !v)}
+                aria-expanded={filtersOpen}
+                className={`h-10 w-full gap-2 rounded-xl text-sm font-semibold transition sm:w-auto ${
+                  filtersOpen || activeFilterCount > 0
+                    ? 'border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <Filter className="h-4 w-4" />
+                <span>Filters</span>
+                {activeFilterCount > 0 && (
+                  <span className="grid h-5 min-w-[1.25rem] place-items-center rounded-full bg-indigo-600 px-1.5 text-[10px] font-bold text-white">
+                    {activeFilterCount}
+                  </span>
+                )}
+                <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${filtersOpen ? 'rotate-180' : ''}`} />
+              </Button>
 
-              <Select value={companyFilter}
-                onChange={(v) => { setCompanyFilter(v); setBranchFilter('all'); }}
-                label="Company"
-                options={[{ value: 'all', label: 'All companies' }, ...companies.map((c) => ({ value: String(c.id), label: c.name }))]}
-                className="lg:col-span-2" />
+              {filtersOpen && (
+                <div className="absolute right-0 top-full z-40 mt-2 w-[min(560px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/10">
 
-              <Select value={branchFilter} onChange={setBranchFilter} label="Branch"
-                options={[{ value: 'all', label: 'All branches' }, ...companyBranches.map((b) => ({ value: String(b.id), label: b.name }))]}
-                className="lg:col-span-2" />
+                  {/* Popover header */}
+                  <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/70 px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <div className="grid h-7 w-7 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                        <Filter className="h-3.5 w-3.5" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-800">Reporting Filters</p>
+                        <p className="text-[10px] text-slate-500">
+                          {activeFilterCount > 0 ? `${activeFilterCount} active` : 'No filters applied'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {activeFilterCount > 0 && (
+                        <button
+                          onClick={clearFilters}
+                          className="rounded-lg px-2 py-1 text-[11px] font-semibold text-rose-600 transition hover:bg-rose-50"
+                        >
+                          Reset all
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setFiltersOpen(false)}
+                        aria-label="Close filters"
+                        className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
 
-              <Select value={statusFilter} onChange={setStatusFilter} label="Status"
-                options={[
-                  { value: 'all', label: 'All statuses' },
-                  { value: 'pending', label: 'Pending' },
-                  { value: 'completed', label: 'Completed' },
-                  { value: 'failed', label: 'Failed' },
-                  { value: 'reconciled', label: 'Reconciled' },
-                ]}
-                className="lg:col-span-2" />
+                  {/* Popover body */}
+                  <div className="max-h-[70vh] space-y-4 overflow-y-auto p-4">
 
-              {/* ✅ FIXED: dynamic payment-method filter */}
-              <Select value={methodFilter} onChange={setMethodFilter} label="Payment method"
-                options={[
-                  { value: 'all', label: 'All methods' },
-                  ...availableMethods.map((m) => ({ value: m, label: methodLabel(m) })),
-                ]}
-                className="lg:col-span-2" />
+                    {/* Company / Branch */}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Company</label>
+                        <Select value={companyFilter}
+                          onChange={(v) => { setCompanyFilter(v); setBranchFilter('all'); }}
+                          label="Company"
+                          options={[{ value: 'all', label: 'All companies' }, ...companies.map((c) => ({ value: String(c.id), label: c.name }))]} />
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Branch</label>
+                        <Select value={branchFilter} onChange={setBranchFilter} label="Branch"
+                          options={[{ value: 'all', label: 'All branches' }, ...companyBranches.map((b) => ({ value: String(b.id), label: b.name }))]} />
+                      </div>
+                    </div>
+
+                    {/* Status / Method */}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Status</label>
+                        <Select value={statusFilter} onChange={setStatusFilter} label="Status" options={STATUS_OPTIONS} />
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Payment method</label>
+                        <Select value={methodFilter} onChange={setMethodFilter} label="Payment method"
+                          options={[{ value: 'all', label: 'All methods' }, ...availableMethods.map((m) => ({ value: m, label: methodLabel(m) }))]} />
+                      </div>
+                    </div>
+
+                    {/* Direction / Bill */}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Direction</label>
+                        <Select value={directionFilter} onChange={setDirectionFilter} label="Direction" options={DIRECTION_OPTIONS} />
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Bill type</label>
+                        <Select value={billFilter} onChange={setBillFilter} label="Bill type" options={BILL_OPTIONS} />
+                      </div>
+                    </div>
+
+                    {/* Date range */}
+                    <div>
+                      <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Date range</label>
+                      <div className="flex items-center gap-2">
+                        <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
+                          aria-label="Date from" className="h-10 rounded-xl" />
+                        <span className="text-xs text-slate-400">to</span>
+                        <Input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)}
+                          aria-label="Date to" className="h-10 rounded-xl" />
+                      </div>
+
+                      {/* Quick presets */}
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        {[
+                          { label: 'Today', from: today(), to: today() },
+                          { label: '7 days', from: addDays(today(), -6), to: today() },
+                          { label: '30 days', from: addDays(today(), -29), to: today() },
+                          { label: 'This month', from: `${today().slice(0, 7)}-01`, to: today() },
+                          { label: 'All time', from: '', to: '' },
+                        ].map((preset) => {
+                          const active = dateFrom === preset.from && dateTo === preset.to;
+                          return (
+                            <button
+                              key={preset.label}
+                              type="button"
+                              onClick={() => { setDateFrom(preset.from); setDateTo(preset.to); }}
+                              className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition ${
+                                active
+                                  ? 'bg-slate-900 text-white shadow-sm'
+                                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                              }`}
+                            >
+                              {preset.label === 'Today' && <CalendarDays className="h-3 w-3" />}
+                              {preset.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Active chips */}
+                    {activeFilterCount > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-3">
+                        <span className="text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Active:</span>
+                        {companyFilter !== 'all' && (
+                          <span className="inline-flex items-center rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
+                            {companies.find((c) => String(c.id) === companyFilter)?.name || 'Company'}
+                          </span>
+                        )}
+                        {branchFilter !== 'all' && (
+                          <span className="inline-flex items-center rounded-md bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700">
+                            {branches.find((b) => String(b.id) === branchFilter)?.name || 'Branch'}
+                          </span>
+                        )}
+                        {statusFilter !== 'all' && (
+                          <span className="inline-flex items-center rounded-md bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                            {STATUS_OPTIONS.find((o) => o.value === statusFilter)?.label}
+                          </span>
+                        )}
+                        {methodFilter !== 'all' && (
+                          <span className="inline-flex items-center rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                            {methodLabel(methodFilter)}
+                          </span>
+                        )}
+                        {directionFilter !== 'all' && (
+                          <span className={`inline-flex items-center rounded-md px-2 py-0.5 text-[10px] font-semibold ${
+                            directionFilter === 'inward' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+                          }`}>
+                            {directionFilter === 'inward' ? 'INWARD' : 'OUTWARD'}
+                          </span>
+                        )}
+                        {billFilter !== 'all' && (
+                          <span className="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">
+                            {BILL_OPTIONS.find((o) => o.value === billFilter)?.label}
+                          </span>
+                        )}
+                        {(dateFrom !== today() || dateTo !== today()) && (
+                          <span className="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                            {dateFrom || '…'} → {dateTo || '…'}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Popover footer */}
+                  <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50/70 px-4 py-2.5">
+                    <p className="text-[11px] text-slate-500">
+                      {filtered.length.toLocaleString('en-IN')} matching record{filtered.length === 1 ? '' : 's'}
+                    </p>
+                    <button
+                      onClick={() => setFiltersOpen(false)}
+                      className="rounded-lg bg-slate-900 px-3.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-slate-800"
+                    >
+                      Done
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="mt-3 grid gap-3 md:grid-cols-2 lg:grid-cols-12">
-              <div className="flex gap-2 lg:col-span-5">
-                <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} aria-label="Date from" className="h-10 rounded-xl" />
-                <Input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => setDateTo(e.target.value)} aria-label="Date to" className="h-10 rounded-xl" />
-              </div>
+            {/* Reset (visible when search or filters are active) */}
+            {showReset && (
+              <Button
+                variant="ghost"
+                onClick={clearFilters}
+                className="h-10 rounded-xl text-sm font-medium text-slate-500 hover:text-slate-800"
+              >
+                <X className="mr-1.5 h-4 w-4" />
+                Reset
+              </Button>
+            )}
+          </div>
+        </section>
 
-              <Select value={directionFilter} onChange={setDirectionFilter} label="Direction"
-                options={[
-                  { value: 'all', label: 'IN + OUT' },
-                  { value: 'inward', label: 'INWARD · Money in' },
-                  { value: 'outward', label: 'OUTWARD · Money out' },
-                ]}
-                className="lg:col-span-2" />
+        {/* Backdrop */}
+        {filtersOpen && (
+          <div
+            className="fixed inset-0 z-20 bg-slate-900/10 backdrop-blur-[1px]"
+            onClick={() => setFiltersOpen(false)}
+            aria-hidden="true"
+          />
+        )}
 
-              <Select value={billFilter} onChange={setBillFilter} label="Bill type"
-                options={[
-                  { value: 'all', label: 'All bill links' },
-                  { value: 'sales', label: 'Sales bills' },
-                  { value: 'purchase', label: 'Purchase bills' },
-                  { value: 'other', label: 'Other bills' },
-                  { value: 'unlinked', label: 'Unlinked' },
-                ]}
-                className="lg:col-span-2" />
-
-              <div className="flex flex-wrap items-center justify-end gap-1 rounded-xl border border-slate-200 bg-white p-1 lg:col-span-3">
-                {[
-                  ['Today', today(), today()],
-                  ['7 days', addDays(today(), -6), today()],
-                  ['30 days', addDays(today(), -29), today()],
-                  ['All', '', ''],
-                ].map(([label, from, to]) => (
-                  <button key={label} type="button"
-                    onClick={() => { setDateFrom(from); setDateTo(to); }}
-                    className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold ${
-                      dateFrom === from && dateTo === to ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
-                    }`}>
-                    {label === 'Today' && <CalendarDays className="mr-1 inline h-3.5 w-3.5" />}
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Error */}
+        {/* ── Error banner ── */}
         {error && (
           <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-rose-600" />
@@ -1167,7 +1296,7 @@ export function PaymentsPage() {
           </div>
         )}
 
-        {/* Tracking */}
+        {/* ── Tracking ── */}
         <Card className="rounded-2xl border-slate-200/80">
           <CardContent className="grid gap-3 p-4 sm:grid-cols-2 sm:p-5 lg:grid-cols-4">
             <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
@@ -1189,7 +1318,7 @@ export function PaymentsPage() {
           </CardContent>
         </Card>
 
-        {/* Bulk */}
+        {/* ── Bulk toolbar ── */}
         {showBulkToolbar && (
           <div className="sticky top-3 z-30 rounded-2xl border border-slate-200 bg-white/95 p-2.5 shadow-lg backdrop-blur">
             <div className="flex flex-wrap items-center gap-2">
@@ -1220,7 +1349,7 @@ export function PaymentsPage() {
           </div>
         )}
 
-        {/* Table */}
+        {/* ── Table card ── */}
         <Card className="overflow-hidden rounded-2xl border-slate-200/80">
           <CardHeader className="flex flex-col gap-3 border-b border-slate-100 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
             <div className="flex items-center gap-2.5">
@@ -1308,7 +1437,6 @@ export function PaymentsPage() {
                         </span>
                       </TableCell>
 
-                      {/* ✅ FIXED: use methodLabel for display */}
                       <TableCell>
                         <Badge variant="outline" className="rounded-full border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px]">
                           {methodLabel(p.payment_method)}
@@ -1430,7 +1558,7 @@ export function PaymentsPage() {
         </Card>
       </div>
 
-      {/* View */}
+      {/* ── View sheet ── */}
       <Sheet open={viewOpen} onOpenChange={(open) => { setViewOpen(open); if (!open) setViewPayment(null); }}>
         <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-lg">
           {viewPayment && (
@@ -1517,7 +1645,6 @@ export function PaymentsPage() {
                   <div className="divide-y divide-slate-100">
                     <div className="flex justify-between gap-3 px-3.5 py-3">
                       <span className="text-[11px] text-slate-400">Method</span>
-                      {/* ✅ FIXED: uses methodLabel */}
                       <span className="text-xs font-semibold">{methodLabel(viewPayment.payment_method)}</span>
                     </div>
                     <div className="flex justify-between gap-3 px-3.5 py-3">
@@ -1583,7 +1710,7 @@ export function PaymentsPage() {
         </SheetContent>
       </Sheet>
 
-      {/* Create/Edit */}
+      {/* ── Create/Edit sheet ── */}
       {editOpen && (editingId ? canEditPayment : canCreatePayment) && (
         <Sheet open={editOpen} onOpenChange={setEditOpen}>
           <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-xl">
@@ -1662,7 +1789,6 @@ export function PaymentsPage() {
                       )}
                     </div>
 
-                    {/* ✅ FIXED: form select uses canonical + dynamic list, labels via methodLabel */}
                     <Select label="Payment method" value={methodKey(form.payment_method) || 'qr'}
                       onChange={(v) => setForm((x) => ({ ...x, payment_method: v }))}
                       options={availableMethods.map((m) => ({ value: m, label: methodLabel(m) }))} />

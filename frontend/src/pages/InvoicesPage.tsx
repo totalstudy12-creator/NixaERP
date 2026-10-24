@@ -55,7 +55,7 @@ import {
 } from '@/components/ui/table';
 
 /* ------------------------------------------------------------------ */
-/* RBAC — Permission keys                                              */
+/* RBAC — Permission keys                                             */
 /* ------------------------------------------------------------------ */
 
 const PERMISSIONS = {
@@ -70,17 +70,9 @@ const PERMISSIONS = {
 type PermissionKey = typeof PERMISSIONS[keyof typeof PERMISSIONS];
 
 /* ------------------------------------------------------------------ */
-/* RBAC — Store-backed permissions (admin-aware + notation-insensitive) */
+/* RBAC — Store-backed permissions                                    */
 /* ------------------------------------------------------------------ */
 
-/**
- * Collapse a permission key so different notations of the SAME permission
- * match each other:
- *
- *   "invoices.view"      → "invoices view"
- *   "view invoices"      → "invoices view"
- *   "invoices:view"      → "invoices view"
- */
 function normalisePermission(input: string): string {
   return input
     .toLowerCase()
@@ -111,26 +103,17 @@ function usePagePermissions(): UsePagePermissionsResult {
     (permission: string | string[]): boolean => {
       if (!isAuthenticated) return false;
       if (isSuperAdmin) return true;
-
       const keys = Array.isArray(permission) ? permission : [permission];
-
       if (storeHasAnyPermission(keys)) return true;
-
       const hasMetadata =
         (user?.permission_names?.length ?? 0) > 0 ||
         (user?.permissions?.length ?? 0) > 0 ||
         (user?.roles?.length ?? 0) > 0 ||
         (user?.role_names?.length ?? 0) > 0;
       if (!hasMetadata) return false;
-
       const normalised = new Set<string>();
-      (user?.permission_names ?? []).forEach((p) =>
-        normalised.add(normalisePermission(p)),
-      );
-      (user?.permissions ?? []).forEach((p) =>
-        normalised.add(normalisePermission(p.name)),
-      );
-
+      (user?.permission_names ?? []).forEach((p) => normalised.add(normalisePermission(p)));
+      (user?.permissions ?? []).forEach((p) => normalised.add(normalisePermission(p.name)));
       return keys.some((k) => normalised.has(normalisePermission(k)));
     },
     [isAuthenticated, isSuperAdmin, storeHasAnyPermission, user],
@@ -140,7 +123,7 @@ function usePagePermissions(): UsePagePermissionsResult {
 }
 
 /* ------------------------------------------------------------------ */
-/* Access-restricted screen                                            */
+/* Access-restricted screen                                           */
 /* ------------------------------------------------------------------ */
 
 function AccessRestricted() {
@@ -152,12 +135,8 @@ function AccessRestricted() {
         </div>
         <h1 className="mt-4 text-lg font-bold text-slate-900">Access restricted</h1>
         <p className="mt-2 text-sm leading-6 text-slate-500">
-          Your account does not have permission to view Invoices. Contact your
-          administrator to request the{' '}
-          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px]">
-            view invoices
-          </code>{' '}
-          permission.
+          Your account does not have permission to view Invoices. Contact your administrator to request the{' '}
+          <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px]">view invoices</code> permission.
         </p>
       </div>
     </div>
@@ -165,33 +144,16 @@ function AccessRestricted() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Types                                                               */
+/* Types                                                              */
 /* ------------------------------------------------------------------ */
 
 type PaymentState = 'paid' | 'partial' | 'unpaid' | 'overdue';
 
 type SelectOption = { value: string; label: string };
 
-interface Customer {
-  id: number;
-  name: string;
-  email?: string | null;
-  phone?: string | null;
-  gst_number?: string | null;
-}
-
-interface Company {
-  id: number;
-  name: string;
-  code?: string | null;
-}
-
-interface Branch {
-  id: number;
-  company_id: number;
-  name: string;
-  code?: string | null;
-}
+interface Customer { id: number; name: string; email?: string | null; phone?: string | null; gst_number?: string | null; }
+interface Company { id: number; name: string; code?: string | null; }
+interface Branch { id: number; company_id: number; name: string; code?: string | null; }
 
 interface InvoiceItem {
   id?: number;
@@ -224,13 +186,10 @@ interface Invoice {
   total_amount: number | string;
   tax_amount: number | string;
   discount_amount?: number | string | null;
-
   received_amount?: number | string | null;
   outstanding_amount?: number | string | null;
-
   payment_received?: number | string | null;
   paid_amount?: number | string | null;
-
   status?: string | null;
   due_date?: string | null;
   invoice_date?: string | null;
@@ -298,7 +257,7 @@ interface AppLogEntry {
 }
 
 /* ------------------------------------------------------------------ */
-/* Constants                                                           */
+/* Constants                                                          */
 /* ------------------------------------------------------------------ */
 
 const PER_PAGE_OPTIONS = [15, 25, 50, 100] as const;
@@ -326,14 +285,10 @@ const EMPTY_SUMMARY: InvoiceSummary = {
 };
 
 /* ------------------------------------------------------------------ */
-/* Safe helpers                                                        */
+/* Safe helpers                                                       */
 /* ------------------------------------------------------------------ */
 
-interface ApiErrorLike {
-  message?: string;
-  status?: number;
-  response?: { status?: number };
-}
+interface ApiErrorLike { message?: string; status?: number; response?: { status?: number }; }
 
 function getErrorMessage(error: unknown, fallback: string): string {
   if (typeof error === 'object' && error !== null) {
@@ -345,11 +300,7 @@ function getErrorMessage(error: unknown, fallback: string): string {
 }
 
 function safeLog(entry: AppLogEntry): void {
-  try {
-    addAppLog(entry);
-  } catch {
-    /* no-op */
-  }
+  try { addAppLog(entry); } catch { /* no-op */ }
 }
 
 function unwrap<T>(value: unknown, fallback: T): T {
@@ -418,18 +369,12 @@ function formatDate(value?: string | null): string {
   const [year, month, day] = dateValue.split('-').map(Number);
   const date = new Date(year, month - 1, day);
   if (Number.isNaN(date.getTime())) return '—';
-  return new Intl.DateTimeFormat('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  }).format(date);
+  return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
 }
 
 function formatMoney(value: unknown): string {
   return new Intl.NumberFormat('en-IN', {
-    style: 'currency',
-    currency: 'INR',
-    maximumFractionDigits: 2,
+    style: 'currency', currency: 'INR', maximumFractionDigits: 2,
   }).format(toNumber(value));
 }
 
@@ -447,8 +392,8 @@ function getReceived(invoice: Invoice): number {
   }
   if (invoice.payments?.length) {
     const received = invoice.payments
-      .filter((payment) => String(payment.payment_direction ?? 'inward').toLowerCase() === 'inward')
-      .reduce((sum, payment) => sum + toNumber(payment.amount), 0);
+      .filter((p) => String(p.payment_direction ?? 'inward').toLowerCase() === 'inward')
+      .reduce((sum, p) => sum + toNumber(p.amount), 0);
     if (received > 0) return received;
   }
   return toNumber(invoice.payment_received ?? invoice.paid_amount);
@@ -475,19 +420,10 @@ function getPaymentStatus(invoice: Invoice): PaymentState | 'draft' {
   return 'unpaid';
 }
 
-function normalizePaginated(
-  response: unknown,
-  fallbackPage: number,
-  fallbackPerPage: number,
-): Paginated<Invoice> {
+function normalizePaginated(response: unknown, fallbackPage: number, fallbackPerPage: number): Paginated<Invoice> {
   const normalized = response as {
-    data?: unknown;
-    current_page?: unknown;
-    last_page?: unknown;
-    per_page?: unknown;
-    total?: unknown;
-    from?: unknown;
-    to?: unknown;
+    data?: unknown; current_page?: unknown; last_page?: unknown;
+    per_page?: unknown; total?: unknown; from?: unknown; to?: unknown;
   } | null;
 
   const data = Array.isArray(response)
@@ -535,43 +471,20 @@ function mapBackendSummary(data: Partial<BackendInvoiceSummary> | null | undefin
 }
 
 /* ------------------------------------------------------------------ */
-/* Presentational bits                                                 */
+/* Presentational bits                                                */
 /* ------------------------------------------------------------------ */
 
 function paymentBadge(status: ReturnType<typeof getPaymentStatus>) {
   const config: Record<string, { label: string; className: string; dot: string }> = {
-    paid: {
-      label: 'Paid',
-      className: 'border-emerald-200/70 bg-emerald-50 text-emerald-700',
-      dot: 'bg-emerald-500',
-    },
-    partial: {
-      label: 'Partial',
-      className: 'border-sky-200/70 bg-sky-50 text-sky-700',
-      dot: 'bg-sky-500',
-    },
-    overdue: {
-      label: 'Overdue',
-      className: 'border-rose-200/70 bg-rose-50 text-rose-700',
-      dot: 'bg-rose-500',
-    },
-    unpaid: {
-      label: 'Unpaid',
-      className: 'border-amber-200/70 bg-amber-50 text-amber-700',
-      dot: 'bg-amber-500',
-    },
-    draft: {
-      label: 'Draft',
-      className: 'border-slate-200 bg-slate-50 text-slate-600',
-      dot: 'bg-slate-400',
-    },
+    paid:    { label: 'Paid',    className: 'border-emerald-200/70 bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500' },
+    partial: { label: 'Partial', className: 'border-sky-200/70 bg-sky-50 text-sky-700',             dot: 'bg-sky-500' },
+    overdue: { label: 'Overdue', className: 'border-rose-200/70 bg-rose-50 text-rose-700',          dot: 'bg-rose-500' },
+    unpaid:  { label: 'Unpaid',  className: 'border-amber-200/70 bg-amber-50 text-amber-700',       dot: 'bg-amber-500' },
+    draft:   { label: 'Draft',   className: 'border-slate-200 bg-slate-50 text-slate-600',          dot: 'bg-slate-400' },
   };
   const selected = config[status] ?? config.unpaid;
   return (
-    <Badge
-      variant="outline"
-      className={`gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${selected.className}`}
-    >
+    <Badge variant="outline" className={`gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${selected.className}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${selected.dot}`} />
       {selected.label}
     </Badge>
@@ -581,19 +494,16 @@ function paymentBadge(status: ReturnType<typeof getPaymentStatus>) {
 function invoiceStatusBadge(status?: string | null) {
   const value = String(status ?? 'issued').toLowerCase();
   const config: Record<string, { label: string; className: string; dot: string }> = {
-    issued: { label: 'Issued', className: 'border-indigo-200/70 bg-indigo-50 text-indigo-700', dot: 'bg-indigo-500' },
-    pending: { label: 'Pending', className: 'border-amber-200/70 bg-amber-50 text-amber-700', dot: 'bg-amber-500' },
-    unpaid: { label: 'Unpaid', className: 'border-amber-200/70 bg-amber-50 text-amber-700', dot: 'bg-amber-500' },
-    paid: { label: 'Paid', className: 'border-emerald-200/70 bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500' },
-    draft: { label: 'Draft', className: 'border-slate-200 bg-slate-50 text-slate-600', dot: 'bg-slate-400' },
-    overdue: { label: 'Overdue', className: 'border-rose-200/70 bg-rose-50 text-rose-700', dot: 'bg-rose-500' },
+    issued:  { label: 'Issued',  className: 'border-indigo-200/70 bg-indigo-50 text-indigo-700', dot: 'bg-indigo-500' },
+    pending: { label: 'Pending', className: 'border-amber-200/70 bg-amber-50 text-amber-700',    dot: 'bg-amber-500' },
+    unpaid:  { label: 'Unpaid',  className: 'border-amber-200/70 bg-amber-50 text-amber-700',    dot: 'bg-amber-500' },
+    paid:    { label: 'Paid',    className: 'border-emerald-200/70 bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500' },
+    draft:   { label: 'Draft',   className: 'border-slate-200 bg-slate-50 text-slate-600',       dot: 'bg-slate-400' },
+    overdue: { label: 'Overdue', className: 'border-rose-200/70 bg-rose-50 text-rose-700',       dot: 'bg-rose-500' },
   };
   const selected = config[value] ?? config.issued;
   return (
-    <Badge
-      variant="outline"
-      className={`gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${selected.className}`}
-    >
+    <Badge variant="outline" className={`gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${selected.className}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${selected.dot}`} />
       {selected.label}
     </Badge>
@@ -601,24 +511,14 @@ function invoiceStatusBadge(status?: string | null) {
 }
 
 function TableHeadLabel({
-  children,
-  sortable = false,
-  onClick,
-  align = 'left',
+  children, sortable = false, onClick, align = 'left',
 }: {
-  children: React.ReactNode;
-  sortable?: boolean;
-  onClick?: () => void;
-  align?: 'left' | 'right';
+  children: React.ReactNode; sortable?: boolean; onClick?: () => void; align?: 'left' | 'right';
 }) {
   const alignClass = align === 'right' ? 'justify-end' : '';
   if (sortable && onClick) {
     return (
-      <button
-        type="button"
-        onClick={onClick}
-        className={`inline-flex items-center gap-1 ${alignClass} ${TABLE_HEAD_CLASS} transition hover:text-slate-800`}
-      >
+      <button type="button" onClick={onClick} className={`inline-flex items-center gap-1 ${alignClass} ${TABLE_HEAD_CLASS} transition hover:text-slate-800`}>
         {children}
       </button>
     );
@@ -627,31 +527,22 @@ function TableHeadLabel({
 }
 
 function KpiCard({
-  title,
-  value,
-  icon: Icon,
-  accent = 'indigo',
-  hint,
-  updating,
+  title, value, icon: Icon, accent = 'indigo', hint, updating,
 }: {
-  title: string;
-  value: string;
-  icon: React.ElementType;
+  title: string; value: string; icon: React.ElementType;
   accent?: 'indigo' | 'emerald' | 'rose' | 'amber' | 'violet';
-  hint?: string;
-  updating?: boolean;
+  hint?: string; updating?: boolean;
 }) {
   const accents: Record<string, { ring: string; icon: string; bg: string }> = {
     indigo: { ring: 'ring-indigo-500/10', icon: 'text-indigo-600', bg: 'bg-indigo-50' },
-    emerald: { ring: 'ring-emerald-500/10', icon: 'text-emerald-600', bg: 'bg-emerald-50' },
-    rose: { ring: 'ring-rose-500/10', icon: 'text-rose-600', bg: 'bg-rose-50' },
-    amber: { ring: 'ring-amber-500/10', icon: 'text-amber-600', bg: 'bg-amber-50' },
+    emerald:{ ring: 'ring-emerald-500/10', icon: 'text-emerald-600', bg: 'bg-emerald-50' },
+    rose:   { ring: 'ring-rose-500/10', icon: 'text-rose-600', bg: 'bg-rose-50' },
+    amber:  { ring: 'ring-amber-500/10', icon: 'text-amber-600', bg: 'bg-amber-50' },
     violet: { ring: 'ring-violet-500/10', icon: 'text-violet-600', bg: 'bg-violet-50' },
   };
   const style = accents[accent];
-
   return (
-    <div className="group relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] ring-1 ring-transparent transition-all duration-200 hover:-translate-y-0.5 hover:border-slate-300/80 hover:shadow-[0_8px_24px_-12px_rgba(15,23,42,0.15)]">
+    <div className="group relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:-translate-y-0.5 hover:border-slate-300/80 hover:shadow-[0_8px_24px_-12px_rgba(15,23,42,0.15)]">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
@@ -663,9 +554,7 @@ function KpiCard({
           <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">{value}</p>
           {hint && <p className="mt-1.5 text-xs text-slate-500">{hint}</p>}
         </div>
-        <div
-          className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${style.bg} ring-1 ${style.ring}`}
-        >
+        <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${style.bg} ring-1 ${style.ring}`}>
           <Icon className={`h-5 w-5 ${style.icon}`} />
         </div>
       </div>
@@ -675,19 +564,10 @@ function KpiCard({
 }
 
 function NativeSelect({
-  value,
-  onChange,
-  options,
-  disabled,
-  ariaLabel,
-  className = '',
+  value, onChange, options, disabled, ariaLabel, className = '',
 }: {
-  value: string;
-  onChange: (value: string) => void;
-  options: SelectOption[];
-  disabled?: boolean;
-  ariaLabel: string;
-  className?: string;
+  value: string; onChange: (value: string) => void; options: SelectOption[];
+  disabled?: boolean; ariaLabel: string; className?: string;
 }) {
   return (
     <div className={`relative ${className}`}>
@@ -696,13 +576,9 @@ function NativeSelect({
         value={value}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
-        className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
+        className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10 disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-400"
       >
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {option.label}
-          </option>
-        ))}
+        {options.map((option) => (<option key={option.value} value={option.value}>{option.label}</option>))}
       </select>
       <ChevronDown className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
     </div>
@@ -711,23 +587,11 @@ function NativeSelect({
 
 /* ------------------------------------------------------------------ */
 /* RowActions                                                          */
-/*                                                                     */
-/* The dropdown is portal-rendered. Actions are hidden when the user   */
-/* lacks the matching permission.                                      */
 /* ------------------------------------------------------------------ */
 
 function RowActions({
-  invoice,
-  onView,
-  onPrint,
-  onDelete,
-  onClose,
-  openId,
-  setOpenId,
-  canView,
-  canEdit,
-  canPrint,
-  canDelete,
+  invoice, onView, onPrint, onDelete, onClose, openId, setOpenId,
+  canView, canEdit, canPrint, canDelete,
 }: {
   invoice: Invoice;
   onView: (invoice: Invoice) => void;
@@ -736,10 +600,7 @@ function RowActions({
   onClose: () => void;
   openId: number | null;
   setOpenId: (id: number | null) => void;
-  canView: boolean;
-  canEdit: boolean;
-  canPrint: boolean;
-  canDelete: boolean;
+  canView: boolean; canEdit: boolean; canPrint: boolean; canDelete: boolean;
 }) {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -747,20 +608,16 @@ function RowActions({
   const isOpen = openId === invoice.id;
 
   const toggle = useCallback(() => {
-    if (isOpen) {
-      setOpenId(null);
-      return;
-    }
+    if (isOpen) { setOpenId(null); return; }
     const rect = buttonRef.current?.getBoundingClientRect();
     if (rect) {
       const left = Math.min(
         Math.max(MENU_MARGIN, rect.right - MENU_WIDTH),
         window.innerWidth - MENU_WIDTH - MENU_MARGIN,
       );
-      const top =
-        rect.bottom + MENU_HEIGHT <= window.innerHeight - MENU_MARGIN
-          ? rect.bottom + 4
-          : Math.max(MENU_MARGIN, rect.top - MENU_HEIGHT - 4);
+      const top = rect.bottom + MENU_HEIGHT <= window.innerHeight - MENU_MARGIN
+        ? rect.bottom + 4
+        : Math.max(MENU_MARGIN, rect.top - MENU_HEIGHT - 4);
       setMenuStyle({ position: 'fixed', left, top, width: MENU_WIDTH, zIndex: 9999 });
     }
     setOpenId(invoice.id);
@@ -775,7 +632,6 @@ function RowActions({
       if (!inButton && !inMenu) onClose();
     };
     const onScrollOrResize = () => onClose();
-
     document.addEventListener('mousedown', onPointerDown);
     window.addEventListener('resize', onScrollOrResize);
     window.addEventListener('scroll', onScrollOrResize, true);
@@ -787,9 +643,7 @@ function RowActions({
   }, [isOpen, onClose]);
 
   const hasAnyAction = canView || canEdit || canPrint || canDelete;
-  if (!hasAnyAction) {
-    return <span className="text-[11px] text-slate-400">—</span>;
-  }
+  if (!hasAnyAction) return <span className="text-[11px] text-slate-400">—</span>;
 
   return (
     <>
@@ -800,9 +654,7 @@ function RowActions({
         aria-expanded={isOpen}
         aria-haspopup="menu"
         onClick={toggle}
-        className={`grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 ${
-          isOpen ? 'bg-slate-100 text-slate-700' : ''
-        }`}
+        className={`grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 ${isOpen ? 'bg-slate-100 text-slate-700' : ''}`}
       >
         <MoreHorizontal className="h-4 w-4" />
       </button>
@@ -817,61 +669,32 @@ function RowActions({
             className="overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10"
           >
             {canView && (
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setOpenId(null);
-                  onView(invoice);
-                }}
-                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
-              >
-                <Eye className="h-4 w-4 text-slate-400" />
-                View invoice
+              <button type="button" role="menuitem"
+                onClick={() => { setOpenId(null); onView(invoice); }}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
+                <Eye className="h-4 w-4 text-slate-400" /> View invoice
               </button>
             )}
-
             {canEdit && (
-              <Link
-                to={`/invoices/${invoice.id}/edit`}
-                role="menuitem"
-                onClick={() => setOpenId(null)}
-                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 transition hover:bg-slate-50"
-              >
-                <FileText className="h-4 w-4 text-slate-400" />
-                Edit invoice
+              <Link to={`/invoices/${invoice.id}/edit`} role="menuitem" onClick={() => setOpenId(null)}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 transition hover:bg-slate-50">
+                <FileText className="h-4 w-4 text-slate-400" /> Edit invoice
               </Link>
             )}
-
             {canPrint && (
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setOpenId(null);
-                  onPrint(invoice);
-                }}
-                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50"
-              >
-                <Download className="h-4 w-4 text-slate-400" />
-                Print invoice
+              <button type="button" role="menuitem"
+                onClick={() => { setOpenId(null); onPrint(invoice); }}
+                className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
+                <Download className="h-4 w-4 text-slate-400" /> Print invoice
               </button>
             )}
-
             {canDelete && (
               <>
                 <Separator className="my-1" />
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setOpenId(null);
-                    onDelete(invoice);
-                  }}
-                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-rose-600 transition hover:bg-rose-50"
-                >
-                  <Trash2 className="h-4 w-4" />
-                  Delete invoice
+                <button type="button" role="menuitem"
+                  onClick={() => { setOpenId(null); onDelete(invoice); }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-rose-600 transition hover:bg-rose-50">
+                  <Trash2 className="h-4 w-4" /> Delete invoice
                 </button>
               </>
             )}
@@ -912,7 +735,7 @@ export function InvoicesPage() {
   const [printInvoice, setPrintInvoice] = useState<Invoice | null>(null);
   const [printing, setPrinting] = useState(false);
   const [actionMenuId, setActionMenuId] = useState<number | null>(null);
-  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   const [totals, setTotals] = useState<InvoiceSummary | null>(null);
   const [totalsLoading, setTotalsLoading] = useState(false);
@@ -925,9 +748,7 @@ export function InvoicesPage() {
 
   const page = Math.max(1, Number(params.get('page') || 1) || 1);
   const perPageRaw = Number(params.get('per_page') || DEFAULT_PER_PAGE);
-  const perPage = (PER_PAGE_OPTIONS as readonly number[]).includes(perPageRaw)
-    ? perPageRaw
-    : DEFAULT_PER_PAGE;
+  const perPage = (PER_PAGE_OPTIONS as readonly number[]).includes(perPageRaw) ? perPageRaw : DEFAULT_PER_PAGE;
   const search = params.get('search') || '';
   const companyId = Number(params.get('company_id') || 0) || undefined;
   const branchId = Number(params.get('branch_id') || 0) || undefined;
@@ -963,16 +784,12 @@ export function InvoicesPage() {
     }
   }, [params, updateParams]);
 
-  useEffect(() => {
-    setSearchInput(search);
-  }, [search]);
+  useEffect(() => { setSearchInput(search); }, [search]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const normalized = searchInput.trim();
-      if (normalized !== search) {
-        updateParams({ search: normalized || undefined, page: 1 });
-      }
+      if (normalized !== search) updateParams({ search: normalized || undefined, page: 1 });
     }, SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
   }, [searchInput, search, updateParams]);
@@ -983,22 +800,13 @@ export function InvoicesPage() {
     if (!canViewInvoices) return;
     let active = true;
     setCompanyLoading(true);
-    apiClient
-      .get('/companies?per_page=1000')
-      .then((response: unknown) => {
-        if (!active) return;
-        setCompanies(unwrap<Company[]>(response, []));
-      })
+    apiClient.get('/companies?per_page=1000')
+      .then((response: unknown) => { if (active) setCompanies(unwrap<Company[]>(response, [])); })
       .catch((err: unknown) => {
-        if (!active) return;
-        showError('Company filter unavailable', getErrorMessage(err, 'Unable to load companies.'));
+        if (active) showError('Company filter unavailable', getErrorMessage(err, 'Unable to load companies.'));
       })
-      .finally(() => {
-        if (active) setCompanyLoading(false);
-      });
-    return () => {
-      active = false;
-    };
+      .finally(() => { if (active) setCompanyLoading(false); });
+    return () => { active = false; };
   }, [showError, canViewInvoices]);
 
   /* -------------------- Branches -------------------- */
@@ -1009,35 +817,23 @@ export function InvoicesPage() {
     if (!companyId) {
       setBranches([]);
       if (branchId) updateParams({ branch_id: undefined, page: 1 });
-      return () => {
-        active = false;
-      };
+      return () => { active = false; };
     }
     setBranchLoading(true);
-    apiClient
-      .getBranchesByCompany(companyId)
-      .then((response: unknown) => {
-        if (!active) return;
-        setBranches(unwrap<Branch[]>(response, []));
-      })
+    apiClient.getBranchesByCompany(companyId)
+      .then((response: unknown) => { if (active) setBranches(unwrap<Branch[]>(response, [])); })
       .catch((err: unknown) => {
-        if (!active) return;
-        showError('Branch filter unavailable', getErrorMessage(err, 'Unable to load branches.'));
+        if (active) showError('Branch filter unavailable', getErrorMessage(err, 'Unable to load branches.'));
       })
-      .finally(() => {
-        if (active) setBranchLoading(false);
-      });
-    return () => {
-      active = false;
-    };
+      .finally(() => { if (active) setBranchLoading(false); });
+    return () => { active = false; };
   }, [companyId, branchId, updateParams, showError, canViewInvoices]);
 
   /* -------------------- Query + page loader -------------------- */
 
   const query: InvoiceQuery = useMemo(
     () => ({
-      page,
-      per_page: perPage,
+      page, per_page: perPage,
       search: search || undefined,
       company_id: companyId,
       branch_id: branchId,
@@ -1045,17 +841,13 @@ export function InvoicesPage() {
       payment_state: paymentState !== 'all' ? paymentState : undefined,
       date_from: dateFrom || undefined,
       date_to: dateTo || undefined,
-      sort_by: sortBy,
-      sort_dir: sortDir,
+      sort_by: sortBy, sort_dir: sortDir,
     }),
     [page, perPage, search, companyId, branchId, invoiceStatus, paymentState, dateFrom, dateTo, sortBy, sortDir],
   );
 
   const loadInvoices = useCallback(async () => {
-    if (!canViewInvoices) {
-      setLoading(false);
-      return;
-    }
+    if (!canViewInvoices) { setLoading(false); return; }
     const requestId = ++invoicesRequestIdRef.current;
     setLoading(true);
     setError(null);
@@ -1071,17 +863,9 @@ export function InvoicesPage() {
     }
   }, [query, page, perPage, canViewInvoices]);
 
-  useEffect(() => {
-    if (!canViewInvoices) return;
-    void loadInvoices();
-  }, [loadInvoices, canViewInvoices]);
+  useEffect(() => { if (canViewInvoices) void loadInvoices(); }, [loadInvoices, canViewInvoices]);
 
-  useEffect(
-    () => () => {
-      invoicesRequestIdRef.current += 1;
-    },
-    [],
-  );
+  useEffect(() => () => { invoicesRequestIdRef.current += 1; }, []);
 
   /* -------------------- Aggregate totals -------------------- */
 
@@ -1089,7 +873,6 @@ export function InvoicesPage() {
     if (!canViewInvoices) return;
     const requestId = ++totalsRequestIdRef.current;
     let cancelled = false;
-
     setTotalsLoading(true);
 
     const timer = window.setTimeout(async () => {
@@ -1102,46 +885,29 @@ export function InvoicesPage() {
         date_from: dateFrom || undefined,
         date_to: dateTo || undefined,
       };
-
       const searchParams = new URLSearchParams();
       Object.entries(filters).forEach(([key, value]) => {
-        if (value !== undefined && value !== null && value !== '') {
-          searchParams.set(key, String(value));
-        }
+        if (value !== undefined && value !== null && value !== '') searchParams.set(key, String(value));
       });
-
       const qs = searchParams.toString();
       const url = `/invoices/summary${qs ? `?${qs}` : ''}`;
 
       try {
         const response = await apiClient.get(url);
         if (cancelled || requestId !== totalsRequestIdRef.current) return;
-
-        const body = response as
-          | { data?: BackendInvoiceSummary }
-          | BackendInvoiceSummary
-          | null
-          | undefined;
-
-        const payload =
-          body && typeof body === 'object' && 'data' in body && (body as { data?: unknown }).data
-            ? ((body as { data?: BackendInvoiceSummary }).data ?? null)
-            : (body as BackendInvoiceSummary | null | undefined);
-
+        const body = response as { data?: BackendInvoiceSummary } | BackendInvoiceSummary | null | undefined;
+        const payload = body && typeof body === 'object' && 'data' in body && (body as { data?: unknown }).data
+          ? ((body as { data?: BackendInvoiceSummary }).data ?? null)
+          : (body as BackendInvoiceSummary | null | undefined);
         setTotals(mapBackendSummary(payload ?? null));
       } catch {
         if (cancelled || requestId !== totalsRequestIdRef.current) return;
       } finally {
-        if (!cancelled && requestId === totalsRequestIdRef.current) {
-          setTotalsLoading(false);
-        }
+        if (!cancelled && requestId === totalsRequestIdRef.current) setTotalsLoading(false);
       }
     }, TOTALS_DEBOUNCE_MS);
 
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [search, companyId, branchId, invoiceStatus, paymentState, dateFrom, dateTo, canViewInvoices]);
 
   /* -------------------- Visible summary -------------------- */
@@ -1175,29 +941,37 @@ export function InvoicesPage() {
       }
       if (event.key === 'Escape') {
         setActionMenuId(null);
-        setMobileFiltersOpen(false);
+        setFiltersOpen(false);
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
+  /* -------------------- Active filter count / reset visibility -------------------- */
+
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (companyId) count++;
+    if (branchId) count++;
+    if (invoiceStatus !== 'all') count++;
+    if (paymentState !== 'all') count++;
+    if (dateFrom !== getLocalToday() || dateTo !== getLocalToday()) count++;
+    return count;
+  }, [companyId, branchId, invoiceStatus, paymentState, dateFrom, dateTo]);
+
+  const showReset = activeFilterCount > 0 || searchInput.trim() !== '';
+
   /* -------------------- Actions -------------------- */
 
-  const handleSort = useCallback(
-    (column: string) => {
-      const nextDirection = sortBy === column && sortDir === 'asc' ? 'desc' : 'asc';
-      updateParams({ sort_by: column, sort_dir: nextDirection, page: 1 });
-    },
-    [sortBy, sortDir, updateParams],
-  );
+  const handleSort = useCallback((column: string) => {
+    const nextDirection = sortBy === column && sortDir === 'asc' ? 'desc' : 'asc';
+    updateParams({ sort_by: column, sort_dir: nextDirection, page: 1 });
+  }, [sortBy, sortDir, updateParams]);
 
-  const setDateRange = useCallback(
-    (from: string, to: string) => {
-      updateParams({ date_from: from || undefined, date_to: to || undefined, page: 1 });
-    },
-    [updateParams],
-  );
+  const setDateRange = useCallback((from: string, to: string) => {
+    updateParams({ date_from: from || undefined, date_to: to || undefined, page: 1 });
+  }, [updateParams]);
 
   const clearFilters = useCallback(() => {
     setSearchInput('');
@@ -1217,53 +991,42 @@ export function InvoicesPage() {
   const toggleSelectAll = useCallback(() => {
     const pageIds = (invoices?.data ?? []).map((invoice) => invoice.id);
     if (!pageIds.length) return;
-    if (allSelected) {
-      setSelectedIds((current) => current.filter((id) => !pageIds.includes(id)));
-    } else {
-      setSelectedIds((current) => Array.from(new Set([...current, ...pageIds])));
-    }
+    if (allSelected) setSelectedIds((current) => current.filter((id) => !pageIds.includes(id)));
+    else setSelectedIds((current) => Array.from(new Set([...current, ...pageIds])));
   }, [allSelected, invoices]);
 
   const toggleSelected = useCallback((id: number) => {
-    setSelectedIds((current) =>
-      current.includes(id) ? current.filter((value) => value !== id) : [...current, id],
-    );
+    setSelectedIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
   }, []);
 
   const closeActionMenu = useCallback(() => setActionMenuId(null), []);
 
-  const handleView = useCallback(
-    async (invoice: Invoice) => {
-      if (!canViewInvoices) return;
-      try {
-        const result = await apiClient.getInvoice(invoice.id);
-        setViewingInvoice(unwrap<Invoice>(result, invoice));
-      } catch (err: unknown) {
-        showError('Unable to open invoice', getErrorMessage(err, 'Failed to load invoice details.'));
-      }
-    },
-    [showError, canViewInvoices],
-  );
+  const handleView = useCallback(async (invoice: Invoice) => {
+    if (!canViewInvoices) return;
+    try {
+      const result = await apiClient.getInvoice(invoice.id);
+      setViewingInvoice(unwrap<Invoice>(result, invoice));
+    } catch (err: unknown) {
+      showError('Unable to open invoice', getErrorMessage(err, 'Failed to load invoice details.'));
+    }
+  }, [showError, canViewInvoices]);
 
-  const handlePrint = useCallback(
-    async (invoice: Invoice) => {
-      if (!canPrintInvoice) {
-        showError('Permission denied', 'You do not have permission to print invoices.');
-        return;
-      }
-      setPrinting(true);
-      try {
-        const result = await apiClient.getInvoice(invoice.id);
-        const details = unwrap<Invoice | null>(result, null);
-        setPrintInvoice(details ?? invoice);
-      } catch (err: unknown) {
-        showError('Print failed', getErrorMessage(err, 'Failed to load invoice.'));
-      } finally {
-        setPrinting(false);
-      }
-    },
-    [showError, canPrintInvoice],
-  );
+  const handlePrint = useCallback(async (invoice: Invoice) => {
+    if (!canPrintInvoice) {
+      showError('Permission denied', 'You do not have permission to print invoices.');
+      return;
+    }
+    setPrinting(true);
+    try {
+      const result = await apiClient.getInvoice(invoice.id);
+      const details = unwrap<Invoice | null>(result, null);
+      setPrintInvoice(details ?? invoice);
+    } catch (err: unknown) {
+      showError('Print failed', getErrorMessage(err, 'Failed to load invoice.'));
+    } finally {
+      setPrinting(false);
+    }
+  }, [showError, canPrintInvoice]);
 
   useEffect(() => {
     if (!printInvoice) return;
@@ -1271,56 +1034,40 @@ export function InvoicesPage() {
     return () => window.clearTimeout(timer);
   }, [printInvoice]);
 
-  const deleteInvoice = useCallback(
-    async (invoice: Invoice) => {
-      if (!canDeleteInvoice) {
-        showError('Permission denied', 'You do not have permission to delete invoices.');
-        return;
-      }
-      if (!window.confirm(`Delete invoice ${invoice.invoice_no}?`)) return;
-      try {
-        await apiClient.deleteInvoice(invoice.id);
-        showSuccess('Invoice deleted', `${invoice.invoice_no} deleted successfully.`);
-        safeLog({
-          module: 'Invoices',
-          action: 'Delete invoice',
-          status: 'success',
-          message: invoice.invoice_no,
-        });
-        await loadInvoices();
-      } catch (err: unknown) {
-        showError('Delete failed', getErrorMessage(err, 'Unable to delete invoice.'));
-      }
-    },
-    [loadInvoices, showError, showSuccess, canDeleteInvoice],
-  );
+  const deleteInvoice = useCallback(async (invoice: Invoice) => {
+    if (!canDeleteInvoice) {
+      showError('Permission denied', 'You do not have permission to delete invoices.');
+      return;
+    }
+    if (!window.confirm(`Delete invoice ${invoice.invoice_no}?`)) return;
+    try {
+      await apiClient.deleteInvoice(invoice.id);
+      showSuccess('Invoice deleted', `${invoice.invoice_no} deleted successfully.`);
+      safeLog({ module: 'Invoices', action: 'Delete invoice', status: 'success', message: invoice.invoice_no });
+      await loadInvoices();
+    } catch (err: unknown) {
+      showError('Delete failed', getErrorMessage(err, 'Unable to delete invoice.'));
+    }
+  }, [loadInvoices, showError, showSuccess, canDeleteInvoice]);
 
-  const bulkStatus = useCallback(
-    async (status: 'paid' | 'pending' | 'overdue') => {
-      if (!canUpdateInvoice) {
-        showError('Permission denied', 'You do not have permission to update invoices.');
-        return;
-      }
-      if (!selectedIds.length) return;
-      const count = selectedIds.length;
-      if (!window.confirm(`Update ${count} invoice(s) to ${status}?`)) return;
-      try {
-        await apiClient.bulkUpdateInvoiceStatus(selectedIds, status);
-        showSuccess('Bulk update complete', `${count} invoice(s) updated.`);
-        safeLog({
-          module: 'Invoices',
-          action: 'Bulk status change',
-          status: 'success',
-          message: `${count} invoices → ${status}`,
-        });
-        setSelectedIds([]);
-        await loadInvoices();
-      } catch (err: unknown) {
-        showError('Bulk update failed', getErrorMessage(err, 'One or more updates failed.'));
-      }
-    },
-    [loadInvoices, selectedIds, showError, showSuccess, canUpdateInvoice],
-  );
+  const bulkStatus = useCallback(async (status: 'paid' | 'pending' | 'overdue') => {
+    if (!canUpdateInvoice) {
+      showError('Permission denied', 'You do not have permission to update invoices.');
+      return;
+    }
+    if (!selectedIds.length) return;
+    const count = selectedIds.length;
+    if (!window.confirm(`Update ${count} invoice(s) to ${status}?`)) return;
+    try {
+      await apiClient.bulkUpdateInvoiceStatus(selectedIds, status);
+      showSuccess('Bulk update complete', `${count} invoice(s) updated.`);
+      safeLog({ module: 'Invoices', action: 'Bulk status change', status: 'success', message: `${count} invoices → ${status}` });
+      setSelectedIds([]);
+      await loadInvoices();
+    } catch (err: unknown) {
+      showError('Bulk update failed', getErrorMessage(err, 'One or more updates failed.'));
+    }
+  }, [loadInvoices, selectedIds, showError, showSuccess, canUpdateInvoice]);
 
   const bulkDelete = useCallback(async () => {
     if (!canDeleteInvoice) {
@@ -1333,12 +1080,7 @@ export function InvoicesPage() {
     try {
       await apiClient.bulkDeleteInvoices(selectedIds);
       showSuccess('Bulk delete complete', `${count} invoice(s) deleted.`);
-      safeLog({
-        module: 'Invoices',
-        action: 'Bulk delete',
-        status: 'success',
-        message: `${count} invoices`,
-      });
+      safeLog({ module: 'Invoices', action: 'Bulk delete', status: 'success', message: `${count} invoices` });
       setSelectedIds([]);
       await loadInvoices();
     } catch (err: unknown) {
@@ -1356,19 +1098,7 @@ export function InvoicesPage() {
       showError('Nothing to export', 'The current page contains no invoices.');
       return;
     }
-    const headers = [
-      'Invoice #',
-      'Customer',
-      'Company',
-      'Branch',
-      'Total',
-      'Received',
-      'Outstanding',
-      'Payment Status',
-      'Invoice Status',
-      'Invoice Date',
-      'Due Date',
-    ];
+    const headers = ['Invoice #', 'Customer', 'Company', 'Branch', 'Total', 'Received', 'Outstanding', 'Payment Status', 'Invoice Status', 'Invoice Date', 'Due Date'];
     const body = rows.map((invoice) =>
       [
         invoice.invoice_no,
@@ -1382,9 +1112,7 @@ export function InvoicesPage() {
         invoice.status || '',
         toDateInput(invoice.invoice_date || invoice.created_at),
         toDateInput(invoice.due_date),
-      ]
-        .map(escapeCsvField)
-        .join(','),
+      ].map(escapeCsvField).join(','),
     );
     const csv = [headers.map(escapeCsvField).join(','), ...body].join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -1400,19 +1128,9 @@ export function InvoicesPage() {
     showSuccess('Export complete', `Exported ${rows.length} visible invoice(s).`);
   }, [invoices, page, showError, showSuccess, canExportInvoices]);
 
-  /* -------------------- Derived display data -------------------- */
+  /* -------------------- Derived -------------------- */
 
-  const activeFilterCount = [
-    search,
-    companyId,
-    branchId,
-    invoiceStatus !== 'all' ? invoiceStatus : undefined,
-    paymentState !== 'all' ? paymentState : undefined,
-  ].filter(Boolean).length;
-
-  const companyName = companyId
-    ? companies.find((company) => company.id === companyId)?.name
-    : undefined;
+  const companyName = companyId ? companies.find((company) => company.id === companyId)?.name : undefined;
   const branchName = branchId ? branches.find((branch) => branch.id === branchId)?.name : undefined;
 
   const sortIcon = (column: string) => {
@@ -1424,7 +1142,6 @@ export function InvoicesPage() {
     const nextCompany = value === 'all' ? undefined : Number(value);
     updateParams({ company_id: nextCompany, branch_id: undefined, page: 1 });
   };
-
   const setBranchFilter = (value: string) => {
     updateParams({ branch_id: value === 'all' ? undefined : Number(value), page: 1 });
   };
@@ -1444,23 +1161,20 @@ export function InvoicesPage() {
   if (loadingUser && !isAuthenticated) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50">
-        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
-          Loading permissions…
-        </div>
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">Loading permissions…</div>
       </div>
     );
   }
 
-  if (!isAuthenticated || !canViewInvoices) {
-    return <AccessRestricted />;
-  }
+  if (!isAuthenticated || !canViewInvoices) return <AccessRestricted />;
 
   /* -------------------- Render -------------------- */
 
   return (
     <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
       <div className="mx-auto w-full max-w-[1900px] space-y-5 p-3 sm:p-4 lg:space-y-6 lg:p-6">
-        {/* Hero */}
+
+        {/* ── Hero ── */}
         <section className="relative overflow-hidden rounded-2xl border border-slate-800/10 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 px-5 py-6 shadow-[0_20px_40px_-20px_rgba(15,23,42,0.45)] sm:px-7 lg:px-8">
           <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-indigo-500/20 blur-3xl" />
           <div className="pointer-events-none absolute -bottom-24 right-24 h-56 w-56 rounded-full bg-cyan-500/10 blur-3xl" />
@@ -1481,21 +1195,15 @@ export function InvoicesPage() {
 
             <div className="flex flex-wrap items-center gap-2">
               {canExportInvoices && (
-                <Button
-                  variant="outline"
-                  onClick={exportCurrentPage}
-                  disabled={loading || !tableRows.length}
-                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white"
-                >
+                <Button variant="outline" onClick={exportCurrentPage} disabled={loading || !tableRows.length}
+                  className="h-10 rounded-xl border-white/10 bg-white/5 text-white shadow-none backdrop-blur transition hover:border-white/20 hover:bg-white/10 hover:text-white disabled:opacity-50">
                   <Download className="mr-2 h-4 w-4" />
                   Export
                 </Button>
               )}
               {canCreateInvoice && (
-                <Button
-                  onClick={() => navigate('/invoices/create')}
-                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300"
-                >
+                <Button onClick={() => navigate('/invoices/create')}
+                  className="h-10 rounded-xl bg-gradient-to-b from-cyan-300 to-cyan-400 font-semibold text-slate-950 shadow-lg shadow-cyan-500/20 transition hover:from-cyan-200 hover:to-cyan-300">
                   <Plus className="mr-2 h-4 w-4" />
                   New invoice
                 </Button>
@@ -1504,258 +1212,299 @@ export function InvoicesPage() {
           </div>
         </section>
 
-        {/* KPI */}
+        {/* ── KPI row ── */}
         <section className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3 xl:grid-cols-5">
-          <KpiCard
-            title="Invoices"
+          <KpiCard title="Invoices"
             value={kpiDisplay(visibleSummary.total, (v) => v.toLocaleString('en-IN'))}
-            icon={FileText}
-            accent="indigo"
+            icon={FileText} accent="indigo"
             hint={visibleSummary.overdue > 0 ? `${visibleSummary.overdue} overdue` : summaryScopeHint}
-            updating={totalsLoading && !!totals}
-          />
-          <KpiCard
-            title="Sales value"
+            updating={totalsLoading && !!totals} />
+          <KpiCard title="Sales value"
             value={kpiDisplay(visibleSummary.total_amount, formatMoney)}
-            icon={CircleDollarSign}
-            accent="violet"
+            icon={CircleDollarSign} accent="violet"
             hint={summaryScopeHint}
-            updating={totalsLoading && !!totals}
-          />
-          <KpiCard
-            title="Received"
+            updating={totalsLoading && !!totals} />
+          <KpiCard title="Received"
             value={kpiDisplay(visibleSummary.received_amount, formatMoney)}
-            icon={CheckCircle2}
-            accent="emerald"
+            icon={CheckCircle2} accent="emerald"
             hint={summaryScopeHint}
-            updating={totalsLoading && !!totals}
-          />
-          <KpiCard
-            title="Outstanding"
+            updating={totalsLoading && !!totals} />
+          <KpiCard title="Outstanding"
             value={kpiDisplay(visibleSummary.outstanding_amount, formatMoney)}
-            icon={Clock3}
-            accent="rose"
-            hint={
-              visibleSummary.partial > 0
-                ? `${visibleSummary.partial} partial payments`
-                : summaryScopeHint
-            }
-            updating={totalsLoading && !!totals}
-          />
-          <KpiCard
-            title="Tax"
+            icon={Clock3} accent="rose"
+            hint={visibleSummary.partial > 0 ? `${visibleSummary.partial} partial payments` : summaryScopeHint}
+            updating={totalsLoading && !!totals} />
+          <KpiCard title="Tax"
             value={kpiDisplay(visibleSummary.tax_amount, formatMoney)}
-            icon={IndianRupee}
-            accent="amber"
+            icon={IndianRupee} accent="amber"
             hint={summaryScopeHint}
-            updating={totalsLoading && !!totals}
-          />
+            updating={totalsLoading && !!totals} />
         </section>
 
-        {/* Filters */}
-        <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-          <CardHeader className="flex flex-row items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3.5 sm:px-5">
-            <div className="flex items-center gap-2.5">
-              <div className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-50 text-indigo-600 ring-1 ring-indigo-500/10">
-                <Filter className="h-4 w-4" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-slate-800">Filters</p>
-                <p className="text-[11px] text-slate-500">
-                  {activeFilterCount > 0
-                    ? `${activeFilterCount} active filter${activeFilterCount > 1 ? 's' : ''}`
-                    : 'Refine invoices by scope, status and date'}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-9 rounded-lg lg:hidden"
-                onClick={() => setMobileFiltersOpen((open) => !open)}
-                aria-expanded={mobileFiltersOpen}
-              >
-                <Filter className="mr-2 h-3.5 w-3.5" />
-                {mobileFiltersOpen ? 'Hide' : 'Show'}
-              </Button>
-              {(activeFilterCount > 0 || dateFrom !== getLocalToday() || dateTo !== getLocalToday()) && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-9 rounded-lg text-slate-500 hover:text-slate-800"
-                  onClick={clearFilters}
-                >
-                  <X className="mr-1.5 h-3.5 w-3.5" />
-                  Reset
-                </Button>
-              )}
-            </div>
-          </CardHeader>
+        {/* ── Toolbar: Search + Filters popover + Reset ── */}
+        <section className="rounded-2xl border border-slate-200/80 bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
 
-          <CardContent className={`${mobileFiltersOpen ? 'block' : 'hidden'} bg-white p-4 sm:p-5 lg:block`}>
-            <div className="grid gap-3 lg:grid-cols-12">
-              <div className="relative lg:col-span-4">
-                <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                <Input
-                  data-invoice-search
-                  value={searchInput}
-                  onChange={(event) => setSearchInput(event.target.value)}
-                  className="h-10 rounded-xl border-slate-200 pl-10 pr-16 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
-                  placeholder="Search invoice, customer, GSTIN, PO…"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
+            {/* Search */}
+            <div className="relative flex-1">
+              <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <Input
+                data-invoice-search
+                value={searchInput}
+                onChange={(event) => setSearchInput(event.target.value)}
+                className="h-10 rounded-xl border-slate-200 pl-10 pr-24 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
+                placeholder="Search invoice, customer, GSTIN, PO…"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              {searchInput ? (
+                <button
+                  type="button"
+                  onClick={() => setSearchInput('')}
+                  aria-label="Clear search"
+                  className="absolute right-2.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              ) : (
                 <span className="pointer-events-none absolute right-3 top-1/2 hidden -translate-y-1/2 items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-400 md:flex">
                   ⌘K
                 </span>
-              </div>
-
-              <div className="lg:col-span-2">
-                <NativeSelect
-                  value={companyId ? String(companyId) : 'all'}
-                  onChange={setCompanyFilter}
-                  ariaLabel="Company"
-                  disabled={companyLoading}
-                  options={[
-                    { value: 'all', label: companyLoading ? 'Loading…' : 'All companies' },
-                    ...companies.map((company) => ({ value: String(company.id), label: company.name })),
-                  ]}
-                />
-              </div>
-
-              <div className="lg:col-span-2">
-                <NativeSelect
-                  value={branchId ? String(branchId) : 'all'}
-                  onChange={setBranchFilter}
-                  ariaLabel="Branch"
-                  disabled={!companyId || branchLoading}
-                  options={[
-                    {
-                      value: 'all',
-                      label: !companyId
-                        ? 'Select company first'
-                        : branchLoading
-                          ? 'Loading…'
-                          : 'All branches',
-                    },
-                    ...branches.map((branch) => ({ value: String(branch.id), label: branch.name })),
-                  ]}
-                />
-              </div>
-
-              <div className="lg:col-span-2">
-                <NativeSelect
-                  value={invoiceStatus}
-                  onChange={(value) => updateParams({ status: value === 'all' ? undefined : value, page: 1 })}
-                  ariaLabel="Invoice status"
-                  options={[
-                    { value: 'all', label: 'All statuses' },
-                    { value: 'issued', label: 'Issued' },
-                    { value: 'pending', label: 'Pending' },
-                    { value: 'unpaid', label: 'Unpaid' },
-                    { value: 'paid', label: 'Paid' },
-                    { value: 'draft', label: 'Draft' },
-                    { value: 'overdue', label: 'Overdue' },
-                  ]}
-                />
-              </div>
-
-              <div className="lg:col-span-2">
-                <NativeSelect
-                  value={paymentState}
-                  onChange={(value) => updateParams({ payment_state: value === 'all' ? undefined : value, page: 1 })}
-                  ariaLabel="Payment state"
-                  options={[
-                    { value: 'all', label: 'All payment states' },
-                    { value: 'paid', label: 'Fully paid' },
-                    { value: 'partial', label: 'Partially paid' },
-                    { value: 'unpaid', label: 'Unpaid' },
-                    { value: 'overdue', label: 'Overdue' },
-                  ]}
-                />
-              </div>
+              )}
             </div>
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-12">
-              <div className="flex min-w-0 flex-col gap-2 sm:flex-row lg:col-span-5">
-                <div className="min-w-0 flex-1">
-                  <Input
-                    type="date"
-                    aria-label="Invoice date from"
-                    value={dateFrom}
-                    onChange={(event) => setDateRange(event.target.value, dateTo)}
-                    className="h-10 rounded-xl border-slate-200 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
-                  />
-                </div>
-                <div className="hidden items-center justify-center px-1 text-slate-300 sm:flex">→</div>
-                <div className="min-w-0 flex-1">
-                  <Input
-                    type="date"
-                    aria-label="Invoice date to"
-                    value={dateTo}
-                    min={dateFrom || undefined}
-                    onChange={(event) => setDateRange(dateFrom, event.target.value)}
-                    className="h-10 rounded-xl border-slate-200 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
-                  />
-                </div>
-              </div>
+            {/* Filters button + popover */}
+            <div className="relative z-30">
+              <Button
+                variant="outline"
+                onClick={() => setFiltersOpen((v) => !v)}
+                aria-expanded={filtersOpen}
+                className={`h-10 w-full gap-2 rounded-xl text-sm font-semibold transition sm:w-auto ${
+                  filtersOpen || activeFilterCount > 0
+                    ? 'border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <Filter className="h-4 w-4" />
+                <span>Filters</span>
+                {activeFilterCount > 0 && (
+                  <span className="grid h-5 min-w-[1.25rem] place-items-center rounded-full bg-indigo-600 px-1.5 text-[10px] font-bold text-white">
+                    {activeFilterCount}
+                  </span>
+                )}
+                <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${filtersOpen ? 'rotate-180' : ''}`} />
+              </Button>
 
-              <div className="flex flex-wrap items-center gap-2 lg:col-span-7 lg:justify-end">
-                <div className="flex items-center rounded-xl border border-slate-200 bg-white p-0.5 shadow-sm">
-                  {[
-                    { label: 'Today', from: getLocalToday(), to: getLocalToday() },
-                    { label: '7 days', from: addDaysToDateString(getLocalToday(), -6), to: getLocalToday() },
-                    { label: '30 days', from: addDaysToDateString(getLocalToday(), -29), to: getLocalToday() },
-                    { label: 'All', from: '', to: '' },
-                  ].map((preset) => {
-                    const active = dateFrom === preset.from && dateTo === preset.to;
-                    return (
-                      <button
-                        key={preset.label}
-                        type="button"
-                        onClick={() => setDateRange(preset.from, preset.to)}
-                        className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
-                          active
-                            ? 'bg-slate-900 text-white shadow-sm'
-                            : 'text-slate-600 hover:bg-slate-100'
-                        }`}
-                      >
-                        {preset.label === 'Today' && <CalendarDays className="mr-1 inline h-3.5 w-3.5" />}
-                        {preset.label}
+              {filtersOpen && (
+                <div className="absolute right-0 top-full z-40 mt-2 w-[min(560px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/10">
+
+                  {/* Popover header */}
+                  <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/70 px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <div className="grid h-7 w-7 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
+                        <Filter className="h-3.5 w-3.5" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold text-slate-800">Reporting Filters</p>
+                        <p className="text-[10px] text-slate-500">
+                          {activeFilterCount > 0 ? `${activeFilterCount} active` : 'No filters applied'}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {activeFilterCount > 0 && (
+                        <button onClick={clearFilters}
+                          className="rounded-lg px-2 py-1 text-[11px] font-semibold text-rose-600 transition hover:bg-rose-50">
+                          Reset all
+                        </button>
+                      )}
+                      <button onClick={() => setFiltersOpen(false)} aria-label="Close filters"
+                        className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700">
+                        <X className="h-3.5 w-3.5" />
                       </button>
-                    );
-                  })}
+                    </div>
+                  </div>
+
+                  {/* Popover body */}
+                  <div className="max-h-[70vh] space-y-4 overflow-y-auto p-4">
+
+                    {/* Company / Branch */}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Company</label>
+                        <NativeSelect
+                          value={companyId ? String(companyId) : 'all'}
+                          onChange={setCompanyFilter}
+                          ariaLabel="Company"
+                          disabled={companyLoading}
+                          options={[
+                            { value: 'all', label: companyLoading ? 'Loading…' : 'All companies' },
+                            ...companies.map((c) => ({ value: String(c.id), label: c.name })),
+                          ]}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Branch</label>
+                        <NativeSelect
+                          value={branchId ? String(branchId) : 'all'}
+                          onChange={setBranchFilter}
+                          ariaLabel="Branch"
+                          disabled={!companyId || branchLoading}
+                          options={[
+                            {
+                              value: 'all',
+                              label: !companyId
+                                ? 'Select company first'
+                                : branchLoading
+                                  ? 'Loading…'
+                                  : 'All branches',
+                            },
+                            ...branches.map((b) => ({ value: String(b.id), label: b.name })),
+                          ]}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Status / Payment state */}
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Invoice status</label>
+                        <NativeSelect
+                          value={invoiceStatus}
+                          onChange={(value) => updateParams({ status: value === 'all' ? undefined : value, page: 1 })}
+                          ariaLabel="Invoice status"
+                          options={[
+                            { value: 'all', label: 'All statuses' },
+                            { value: 'issued', label: 'Issued' },
+                            { value: 'pending', label: 'Pending' },
+                            { value: 'unpaid', label: 'Unpaid' },
+                            { value: 'paid', label: 'Paid' },
+                            { value: 'draft', label: 'Draft' },
+                            { value: 'overdue', label: 'Overdue' },
+                          ]}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Payment state</label>
+                        <NativeSelect
+                          value={paymentState}
+                          onChange={(value) => updateParams({ payment_state: value === 'all' ? undefined : value, page: 1 })}
+                          ariaLabel="Payment state"
+                          options={[
+                            { value: 'all', label: 'All payment states' },
+                            { value: 'paid', label: 'Fully paid' },
+                            { value: 'partial', label: 'Partially paid' },
+                            { value: 'unpaid', label: 'Unpaid' },
+                            { value: 'overdue', label: 'Overdue' },
+                          ]}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Date range */}
+                    <div>
+                      <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Invoice date range</label>
+                      <div className="flex items-center gap-2">
+                        <Input type="date" aria-label="Invoice date from" value={dateFrom}
+                          onChange={(event) => setDateRange(event.target.value, dateTo)}
+                          className="h-10 rounded-xl border-slate-200 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10" />
+                        <span className="text-xs text-slate-400">to</span>
+                        <Input type="date" aria-label="Invoice date to" value={dateTo} min={dateFrom || undefined}
+                          onChange={(event) => setDateRange(dateFrom, event.target.value)}
+                          className="h-10 rounded-xl border-slate-200 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10" />
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        {[
+                          { label: 'Today', from: getLocalToday(), to: getLocalToday() },
+                          { label: '7 days', from: addDaysToDateString(getLocalToday(), -6), to: getLocalToday() },
+                          { label: '30 days', from: addDaysToDateString(getLocalToday(), -29), to: getLocalToday() },
+                          { label: 'This month', from: `${getLocalToday().slice(0, 7)}-01`, to: getLocalToday() },
+                          { label: 'All time', from: '', to: '' },
+                        ].map((preset) => {
+                          const active = dateFrom === preset.from && dateTo === preset.to;
+                          return (
+                            <button key={preset.label} type="button" onClick={() => setDateRange(preset.from, preset.to)}
+                              className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11px] font-semibold transition ${
+                                active ? 'bg-slate-900 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                              }`}>
+                              {preset.label === 'Today' && <CalendarDays className="h-3 w-3" />}
+                              {preset.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Active chips */}
+                    {activeFilterCount > 0 && (
+                      <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-3">
+                        <span className="text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Active:</span>
+                        {companyName && (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
+                            <Building2 className="h-3 w-3" /> {companyName}
+                          </span>
+                        )}
+                        {branchName && (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700">
+                            <GitBranch className="h-3 w-3" /> {branchName}
+                          </span>
+                        )}
+                        {invoiceStatus !== 'all' && (
+                          <span className="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">
+                            Status: {invoiceStatus}
+                          </span>
+                        )}
+                        {paymentState !== 'all' && (
+                          <span className="inline-flex items-center rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                            Payment: {paymentState}
+                          </span>
+                        )}
+                        {(dateFrom !== getLocalToday() || dateTo !== getLocalToday()) && (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                            <CalendarDays className="h-3 w-3" />
+                            {dateFrom || '…'} → {dateTo || '…'}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Popover footer */}
+                  <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50/70 px-4 py-2.5">
+                    <p className="text-[11px] text-slate-500">
+                      {loading ? 'Loading…' : `${(invoices?.total ?? 0).toLocaleString('en-IN')} matching record${(invoices?.total ?? 0) === 1 ? '' : 's'}`}
+                    </p>
+                    <button onClick={() => setFiltersOpen(false)}
+                      className="rounded-lg bg-slate-900 px-3.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-slate-800">
+                      Done
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
-            {(companyName || branchName) && (
-              <div className="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-3 py-2">
-                <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                  Active scope
-                </span>
-                {companyName && (
-                  <Badge
-                    variant="secondary"
-                    className="gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-[11px] font-medium text-slate-700"
-                  >
-                    <Building2 className="h-3 w-3 text-indigo-500" /> {companyName}
-                  </Badge>
-                )}
-                {branchName && (
-                  <Badge
-                    variant="secondary"
-                    className="gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-[11px] font-medium text-slate-700"
-                  >
-                    <GitBranch className="h-3 w-3 text-violet-500" /> {branchName}
-                  </Badge>
-                )}
-              </div>
+            {/* Reset */}
+            {showReset && (
+              <Button variant="ghost" onClick={clearFilters}
+                className="h-10 rounded-xl text-sm font-medium text-slate-500 hover:text-slate-800">
+                <X className="mr-1.5 h-4 w-4" />
+                Reset
+              </Button>
             )}
-          </CardContent>
-        </Card>
+          </div>
+        </section>
 
+        {/* Backdrop */}
+        {filtersOpen && (
+          <div
+            className="fixed inset-0 z-20 bg-slate-900/10 backdrop-blur-[1px]"
+            onClick={() => setFiltersOpen(false)}
+            aria-hidden="true"
+          />
+        )}
+
+        {/* Error banner */}
         {error && (
           <div className="flex items-start gap-3 rounded-2xl border border-rose-200 bg-rose-50/80 p-4 text-sm text-rose-800 shadow-sm">
             <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-rose-100 text-rose-600">
@@ -1765,18 +1514,15 @@ export function InvoicesPage() {
               <p className="font-semibold">Unable to load invoices</p>
               <p className="mt-0.5 break-words text-rose-700/90">{error}</p>
             </div>
-            <Button
-              size="sm"
-              variant="outline"
+            <Button size="sm" variant="outline"
               className="rounded-lg border-rose-200 bg-white text-rose-700 hover:bg-rose-50"
-              onClick={loadInvoices}
-            >
+              onClick={loadInvoices}>
               Retry
             </Button>
           </div>
         )}
 
-        {/* Bulk toolbar — only when the user can update or delete */}
+        {/* Bulk toolbar */}
         {selectedIds.length > 0 && (canUpdateInvoice || canDeleteInvoice) && (
           <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
             <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
@@ -1798,28 +1544,22 @@ export function InvoicesPage() {
                 </>
               )}
               {canDeleteInvoice && (
-                <Button
-                  size="sm"
-                  variant="destructive"
+                <Button size="sm" variant="destructive"
                   className="h-9 rounded-lg bg-rose-600 hover:bg-rose-700"
-                  onClick={bulkDelete}
-                >
+                  onClick={bulkDelete}>
                   <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Delete
                 </Button>
               )}
-              <Button
-                size="sm"
-                variant="ghost"
+              <Button size="sm" variant="ghost"
                 className="ml-auto h-9 rounded-lg text-slate-500 hover:text-slate-800"
-                onClick={() => setSelectedIds([])}
-              >
+                onClick={() => setSelectedIds([])}>
                 Clear
               </Button>
             </div>
           </div>
         )}
 
-        {/* Table card */}
+        {/* ── Table card ── */}
         <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
           <CardHeader className="flex flex-col gap-3 border-b border-slate-100 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
             <div className="flex items-center gap-2.5">
@@ -1831,9 +1571,7 @@ export function InvoicesPage() {
                 <p className="text-[11px] text-slate-500">
                   {loading
                     ? 'Loading invoice records…'
-                    : `${(invoices?.total ?? 0).toLocaleString('en-IN')} record${
-                        (invoices?.total ?? 0) === 1 ? '' : 's'
-                      }`}
+                    : `${(invoices?.total ?? 0).toLocaleString('en-IN')} record${(invoices?.total ?? 0) === 1 ? '' : 's'}`}
                   {dateFrom && dateTo && (
                     <>
                       {' · '}
@@ -1865,10 +1603,7 @@ export function InvoicesPage() {
                         aria-label="Select all invoices on page"
                         type="checkbox"
                         checked={allSelected}
-                        onChange={(event) => {
-                          event.stopPropagation();
-                          toggleSelectAll();
-                        }}
+                        onChange={(event) => { event.stopPropagation(); toggleSelectAll(); }}
                         onClick={(event) => event.stopPropagation()}
                         className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
                       />
@@ -1879,12 +1614,8 @@ export function InvoicesPage() {
                       Invoice {sortIcon('invoice_no')}
                     </TableHeadLabel>
                   </TableHead>
-                  <TableHead>
-                    <TableHeadLabel>Customer</TableHeadLabel>
-                  </TableHead>
-                  <TableHead>
-                    <TableHeadLabel>Company / Branch</TableHeadLabel>
-                  </TableHead>
+                  <TableHead><TableHeadLabel>Customer</TableHeadLabel></TableHead>
+                  <TableHead><TableHeadLabel>Company / Branch</TableHeadLabel></TableHead>
                   <TableHead className="text-right">
                     <TableHeadLabel sortable align="right" onClick={() => handleSort('total_amount')}>
                       Amount {sortIcon('total_amount')}
@@ -1893,9 +1624,7 @@ export function InvoicesPage() {
                   <TableHead className="text-right">
                     <TableHeadLabel align="right">Outstanding</TableHeadLabel>
                   </TableHead>
-                  <TableHead>
-                    <TableHeadLabel>Status</TableHeadLabel>
-                  </TableHead>
+                  <TableHead><TableHeadLabel>Status</TableHeadLabel></TableHead>
                   <TableHead>
                     <TableHeadLabel sortable onClick={() => handleSort('invoice_date')}>
                       Date {sortIcon('invoice_date')}
@@ -1925,9 +1654,7 @@ export function InvoicesPage() {
                       <TableRow
                         key={invoice.id}
                         data-state={selected ? 'selected' : undefined}
-                        className={`cursor-pointer border-slate-100 transition-colors hover:bg-slate-50/70 ${
-                          selected ? 'bg-indigo-50/40 hover:bg-indigo-50/60' : ''
-                        }`}
+                        className={`cursor-pointer border-slate-100 transition-colors hover:bg-slate-50/70 ${selected ? 'bg-indigo-50/40 hover:bg-indigo-50/60' : ''}`}
                         onClick={() => handleView(invoice)}
                       >
                         {canDeleteInvoice && (
@@ -1936,10 +1663,7 @@ export function InvoicesPage() {
                               aria-label={`Select ${invoice.invoice_no}`}
                               type="checkbox"
                               checked={selected}
-                              onChange={(event) => {
-                                event.stopPropagation();
-                                toggleSelected(invoice.id);
-                              }}
+                              onChange={(event) => { event.stopPropagation(); toggleSelected(invoice.id); }}
                               onClick={(event) => event.stopPropagation()}
                               className="h-4 w-4 cursor-pointer rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
                             />
@@ -1948,11 +1672,9 @@ export function InvoicesPage() {
 
                         <TableCell>
                           <div className="min-w-[140px]">
-                            <Link
-                              to={`/invoices/${invoice.id}`}
+                            <Link to={`/invoices/${invoice.id}`}
                               onClick={(event) => event.stopPropagation()}
-                              className="text-sm font-semibold text-slate-900 transition hover:text-indigo-600"
-                            >
+                              className="text-sm font-semibold text-slate-900 transition hover:text-indigo-600">
                               {invoice.invoice_no}
                             </Link>
                             <p className="mt-0.5 text-[11px] font-medium text-slate-400">#{invoice.id}</p>
@@ -1981,17 +1703,13 @@ export function InvoicesPage() {
                               <span className="grid h-5 w-5 place-items-center rounded-md bg-indigo-50 text-indigo-600">
                                 <Building2 className="h-3 w-3" />
                               </span>
-                              <span className="text-xs font-medium text-slate-700">
-                                {invoice.company?.name || '—'}
-                              </span>
+                              <span className="text-xs font-medium text-slate-700">{invoice.company?.name || '—'}</span>
                             </div>
                             <div className="flex items-center gap-1.5 pl-0.5">
                               <span className="grid h-5 w-5 place-items-center rounded-md bg-violet-50 text-violet-600">
                                 <GitBranch className="h-3 w-3" />
                               </span>
-                              <span className="text-[11px] text-slate-500">
-                                {invoice.branch?.name || 'Main / unassigned'}
-                              </span>
+                              <span className="text-[11px] text-slate-500">{invoice.branch?.name || 'Main / unassigned'}</span>
                             </div>
                           </div>
                         </TableCell>
@@ -2001,13 +1719,9 @@ export function InvoicesPage() {
                         </TableCell>
 
                         <TableCell className="whitespace-nowrap text-right">
-                          <span
-                            className={`inline-flex items-center rounded-lg px-2 py-1 text-sm font-semibold tabular-nums ${
-                              outstanding > 0
-                                ? 'bg-rose-50 text-rose-600'
-                                : 'bg-emerald-50 text-emerald-600'
-                            }`}
-                          >
+                          <span className={`inline-flex items-center rounded-lg px-2 py-1 text-sm font-semibold tabular-nums ${
+                            outstanding > 0 ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600'
+                          }`}>
                             {formatMoney(outstanding)}
                           </span>
                         </TableCell>
@@ -2062,55 +1776,28 @@ export function InvoicesPage() {
 
           <div className="flex flex-col gap-3 border-t border-slate-100 bg-white px-4 py-3.5 sm:px-5 md:flex-row md:items-center md:justify-between">
             <p className="text-xs text-slate-500 sm:text-[13px]">
-              Showing{' '}
-              <span className="font-semibold text-slate-700">{invoices?.from ?? 0}</span>–
+              Showing <span className="font-semibold text-slate-700">{invoices?.from ?? 0}</span>–
               <span className="font-semibold text-slate-700">{invoices?.to ?? 0}</span> of{' '}
-              <span className="font-semibold text-slate-700">
-                {(invoices?.total ?? 0).toLocaleString('en-IN')}
-              </span>
+              <span className="font-semibold text-slate-700">{(invoices?.total ?? 0).toLocaleString('en-IN')}</span>
             </p>
             <div className="flex items-center justify-between gap-1.5 sm:justify-end">
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9 rounded-lg"
-                disabled={page <= 1 || loading}
-                onClick={() => updateParams({ page: 1 })}
-                aria-label="First page"
-              >
+              <Button variant="outline" size="icon" className="h-9 w-9 rounded-lg"
+                disabled={page <= 1 || loading} onClick={() => updateParams({ page: 1 })} aria-label="First page">
                 <ChevronsLeft className="h-4 w-4" />
               </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9 rounded-lg"
-                disabled={page <= 1 || loading}
-                onClick={() => updateParams({ page: page - 1 })}
-                aria-label="Previous page"
-              >
+              <Button variant="outline" size="icon" className="h-9 w-9 rounded-lg"
+                disabled={page <= 1 || loading} onClick={() => updateParams({ page: page - 1 })} aria-label="Previous page">
                 <ChevronLeft className="h-4 w-4" />
               </Button>
               <div className="mx-1 min-w-[76px] rounded-lg bg-slate-100 px-3 py-1.5 text-center text-xs font-semibold text-slate-700">
                 {page} / {lastPage}
               </div>
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9 rounded-lg"
-                disabled={page >= lastPage || loading}
-                onClick={() => updateParams({ page: page + 1 })}
-                aria-label="Next page"
-              >
+              <Button variant="outline" size="icon" className="h-9 w-9 rounded-lg"
+                disabled={page >= lastPage || loading} onClick={() => updateParams({ page: page + 1 })} aria-label="Next page">
                 <ChevronRight className="h-4 w-4" />
               </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9 rounded-lg"
-                disabled={page >= lastPage || loading}
-                onClick={() => updateParams({ page: lastPage })}
-                aria-label="Last page"
-              >
+              <Button variant="outline" size="icon" className="h-9 w-9 rounded-lg"
+                disabled={page >= lastPage || loading} onClick={() => updateParams({ page: lastPage })} aria-label="Last page">
                 <ChevronsRight className="h-4 w-4" />
               </Button>
             </div>
@@ -2119,12 +1806,7 @@ export function InvoicesPage() {
       </div>
 
       {/* Invoice detail sheet */}
-      <Sheet
-        open={!!viewingInvoice}
-        onOpenChange={(open) => {
-          if (!open) setViewingInvoice(null);
-        }}
-      >
+      <Sheet open={!!viewingInvoice} onOpenChange={(open) => { if (!open) setViewingInvoice(null); }}>
         <SheetContent side="right" className="w-full overflow-y-auto p-0 sm:max-w-md">
           {viewingInvoice && (
             <>
@@ -2135,17 +1817,13 @@ export function InvoicesPage() {
                       <span className="grid h-7 w-7 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
                         <ReceiptText className="h-3.5 w-3.5" />
                       </span>
-                      <span className="text-base font-bold text-slate-900">
-                        {viewingInvoice.invoice_no}
-                      </span>
+                      <span className="text-base font-bold text-slate-900">{viewingInvoice.invoice_no}</span>
                     </span>
                   </SheetTitle>
                   <div className="mt-2 flex flex-wrap items-center gap-1.5">
                     {invoiceStatusBadge(viewingInvoice.status)}
                     {paymentBadge(getPaymentStatus(viewingInvoice))}
-                    <span className="ml-auto text-[11px] font-medium text-slate-400">
-                      #{viewingInvoice.id}
-                    </span>
+                    <span className="ml-auto text-[11px] font-medium text-slate-400">#{viewingInvoice.id}</span>
                   </div>
                 </SheetHeader>
               </div>
@@ -2153,25 +1831,19 @@ export function InvoicesPage() {
               <div className="space-y-4 px-5 py-4">
                 <div className="grid grid-cols-3 gap-2">
                   <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-slate-500">
-                      Total
-                    </p>
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-slate-500">Total</p>
                     <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">
                       {formatMoney(viewingInvoice.total_amount)}
                     </p>
                   </div>
                   <div className="rounded-xl border border-emerald-200/70 bg-emerald-50/60 p-2.5">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-emerald-700/80">
-                      Received
-                    </p>
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-emerald-700/80">Received</p>
                     <p className="mt-0.5 text-sm font-bold tabular-nums text-emerald-700">
                       {formatMoney(getReceived(viewingInvoice))}
                     </p>
                   </div>
                   <div className="rounded-xl border border-rose-200/70 bg-rose-50/60 p-2.5">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-rose-700/80">
-                      Due
-                    </p>
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-rose-700/80">Due</p>
                     <p className="mt-0.5 text-sm font-bold tabular-nums text-rose-600">
                       {formatMoney(getOutstanding(viewingInvoice))}
                     </p>
@@ -2180,17 +1852,13 @@ export function InvoicesPage() {
 
                 <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
                   <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                      Customer
-                    </span>
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Customer</span>
                     <div className="min-w-0 text-right">
                       <p className="truncate text-xs font-semibold text-slate-800">
                         {viewingInvoice.customer?.name || viewingInvoice.customer_name || '—'}
                       </p>
                       {viewingInvoice.customer?.email && (
-                        <p className="truncate text-[11px] text-slate-500">
-                          {viewingInvoice.customer.email}
-                        </p>
+                        <p className="truncate text-[11px] text-slate-500">{viewingInvoice.customer.email}</p>
                       )}
                       {viewingInvoice.gstin && (
                         <p className="truncate text-[10px] text-slate-400">GSTIN {viewingInvoice.gstin}</p>
@@ -2198,46 +1866,29 @@ export function InvoicesPage() {
                     </div>
                   </div>
                   <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                      Company
-                    </span>
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Company</span>
                     <div className="min-w-0 text-right">
-                      <p className="truncate text-xs font-semibold text-slate-800">
-                        {viewingInvoice.company?.name || '—'}
-                      </p>
-                      <p className="truncate text-[11px] text-slate-500">
-                        {viewingInvoice.branch?.name || 'Main / unassigned'}
-                      </p>
+                      <p className="truncate text-xs font-semibold text-slate-800">{viewingInvoice.company?.name || '—'}</p>
+                      <p className="truncate text-[11px] text-slate-500">{viewingInvoice.branch?.name || 'Main / unassigned'}</p>
                     </div>
                   </div>
                   <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                      Invoice date
-                    </span>
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Invoice date</span>
                     <span className="text-xs font-semibold text-slate-800">
                       {formatDate(viewingInvoice.invoice_date || viewingInvoice.created_at)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between gap-3 px-3.5 py-2.5">
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                      Due date
-                    </span>
-                    <span className="text-xs font-semibold text-slate-800">
-                      {formatDate(viewingInvoice.due_date)}
-                    </span>
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">Due date</span>
+                    <span className="text-xs font-semibold text-slate-800">{formatDate(viewingInvoice.due_date)}</span>
                   </div>
                 </div>
 
                 {Array.isArray(viewingInvoice.items) && viewingInvoice.items.length > 0 && (
                   <div>
                     <div className="mb-2 flex items-center justify-between">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                        Items
-                      </p>
-                      <Badge
-                        variant="secondary"
-                        className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600"
-                      >
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Items</p>
+                      <Badge variant="secondary" className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
                         {viewingInvoice.items.length}
                       </Badge>
                     </div>
@@ -2245,15 +1896,9 @@ export function InvoicesPage() {
                       <table className="w-full text-xs">
                         <thead className="bg-slate-50/70">
                           <tr>
-                            <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                              Product
-                            </th>
-                            <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                              Qty
-                            </th>
-                            <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                              Total
-                            </th>
+                            <th className="px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">Product</th>
+                            <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-wide text-slate-500">Qty</th>
+                            <th className="px-3 py-2 text-right text-[10px] font-semibold uppercase tracking-wide text-slate-500">Total</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
@@ -2277,21 +1922,13 @@ export function InvoicesPage() {
                 )}
 
                 <div className="grid grid-cols-2 gap-2 pt-1">
-                  <Button
-                    size="sm"
-                    className="h-9 rounded-xl bg-slate-900 text-xs hover:bg-slate-800"
-                    onClick={() => navigate(`/invoices/${viewingInvoice.id}`)}
-                  >
+                  <Button size="sm" className="h-9 rounded-xl bg-slate-900 text-xs hover:bg-slate-800"
+                    onClick={() => navigate(`/invoices/${viewingInvoice.id}`)}>
                     Open full invoice
                   </Button>
                   {canPrintInvoice && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-9 rounded-xl text-xs"
-                      onClick={() => handlePrint(viewingInvoice)}
-                      disabled={printing}
-                    >
+                    <Button size="sm" variant="outline" className="h-9 rounded-xl text-xs"
+                      onClick={() => handlePrint(viewingInvoice)} disabled={printing}>
                       <Download className="mr-1.5 h-3.5 w-3.5" />
                       {printing ? 'Preparing…' : 'Print'}
                     </Button>
@@ -2314,11 +1951,7 @@ export function InvoicesPage() {
               customer: printInvoice.customer ?? undefined,
               items: (printInvoice.items ?? []).map((item) => {
                 const name = item.product?.name ?? item.product_name ?? 'Item';
-                return {
-                  ...item,
-                  product: { name },
-                  product_name: name,
-                };
+                return { ...item, product: { name }, product_name: name };
               }),
             } as unknown as React.ComponentProps<typeof InvoicePrint>['invoice']
           }
