@@ -125,13 +125,23 @@ class Invoice extends Model
 
     public function getPaymentReceivedAttribute()
     {
-        return $this->attributes['payment_received'] ?? $this->attributes['paid_amount'] ?? 0;
+        return $this->attributes['paid_amount']
+            ?? $this->attributes['payment_amount']
+            ?? $this->attributes['payment_received']
+            ?? 0;
     }
 
     public function setPaymentReceivedAttribute($value)
     {
-        $this->attributes['payment_received'] = $value;
-        $this->attributes['paid_amount'] = $value;
+        if (\Illuminate\Support\Facades\Schema::hasColumn('invoices', 'paid_amount')) {
+            $this->attributes['paid_amount'] = $value;
+        } elseif (\Illuminate\Support\Facades\Schema::hasColumn('invoices', 'payment_amount')) {
+            $this->attributes['payment_amount'] = $value;
+        } elseif (\Illuminate\Support\Facades\Schema::hasColumn('invoices', 'payment_received')) {
+            $this->attributes['payment_received'] = $value;
+        } else {
+            $this->attributes['paid_amount'] = $value;
+        }
     }
 
     public static function generateInvoiceNo(): string

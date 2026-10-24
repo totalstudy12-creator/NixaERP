@@ -173,12 +173,12 @@ const SUB_REPORTS: Record<CategoryKey, { key: string; label: string; icon: React
 
 const ENDPOINT_MAP: Record<string, string> = {
   'profit-loss': '/reports/profit-loss',
-  'pl-overview': '/reports/profit-loss-summary',
+  'pl-overview': '/reports/profit-loss/summary',
   'balance-sheet': '/reports/balance-sheet',
   'cash-flow': '/reports/cash-flow',
-  'branch-profitability': '/reports/profit-loss-branches',
-  'invoice-profitability': '/reports/invoice-profitability',
-  'customer-profitability': '/reports/profit-loss-customers',
+  'branch-profitability': '/reports/profit-loss/branches',
+  'invoice-profitability': '/reports/profit-loss/invoices',
+  'customer-profitability': '/reports/profit-loss/customers',
   'product-profitability': '/reports/product-profitability',
   'receivables-aging': '/reports/receivables-aging',
   'payables-aging': '/reports/payables-aging',
@@ -743,6 +743,25 @@ function ReportTable({
             <tbody>
               {loading ? (
                 <tr><td colSpan={columns.length} className="px-4 py-16 text-center"><LoadingBlock /></td></tr>
+              ) : error ? (
+                <tr><td colSpan={columns.length} className="px-4 py-16 text-center">
+                  <div className="mx-auto flex max-w-sm flex-col items-center">
+                    <div className="grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-500">
+                      <FiAlertTriangle size={20} />
+                    </div>
+                    <p className="mt-3 text-sm font-semibold text-rose-700">Failed to load report</p>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">{error}</p>
+                    {onRefresh && (
+                      <button
+                        type="button"
+                        onClick={onRefresh}
+                        className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-slate-800"
+                      >
+                        Try Again
+                      </button>
+                    )}
+                  </div>
+                </td></tr>
               ) : !rows.length ? (
                 <tr><td colSpan={columns.length} className="px-4 py-16 text-center">
                   <div className="mx-auto flex max-w-sm flex-col items-center">
@@ -1551,7 +1570,7 @@ export function ReportsPage() {
     'customer-profitability': [
       { key: 'customer', label: 'Customer' },
       { key: 'invoice_count', label: 'Invoices', align: 'right' },
-      { key: 'revenue', label: 'Revenue', align: 'right', render: (r) => fmtCurrency(r.revenue) },
+      { key: 'revenue', label: 'Revenue', align: 'right', render: (r) => fmtCurrency(r.revenue ?? r.net_revenue ?? r.gross_sales) },
       { key: 'gross_profit', label: 'Gross Profit', align: 'right', render: (r) => <span className="font-bold text-emerald-700">{fmtCurrency(r.gross_profit)}</span> },
       { key: 'margin_percent', label: 'Margin', align: 'right', render: (r) => fmtPct(r.margin_percent) },
     ],

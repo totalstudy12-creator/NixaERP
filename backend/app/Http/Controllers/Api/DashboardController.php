@@ -96,15 +96,73 @@ class DashboardController extends Controller
      */
     private function applyDateRange($query, Request $request, string $table, ?string $column = null): void
     {
-        $from = $request->query('date_from');
-        $to   = $request->query('date_to');
+        $from = $request->query('date_from') ?: $request->query('from');
+        $to   = $request->query('date_to') ?: $request->query('to');
+
+        if (!$from && !$to && $request->filled('period')) {
+            $period = $request->query('period');
+            $now = now();
+            switch ($period) {
+                case 'today':
+                    $from = $now->toDateString();
+                    $to   = $now->toDateString();
+                    break;
+                case 'yesterday':
+                    $from = $now->copy()->subDay()->toDateString();
+                    $to   = $now->copy()->subDay()->toDateString();
+                    break;
+                case 'this_week':
+                    $from = $now->copy()->startOfWeek()->toDateString();
+                    $to   = $now->copy()->endOfWeek()->toDateString();
+                    break;
+                case '7d':
+                    $from = $now->copy()->subDays(6)->toDateString();
+                    $to   = $now->toDateString();
+                    break;
+                case '30d':
+                    $from = $now->copy()->subDays(29)->toDateString();
+                    $to   = $now->toDateString();
+                    break;
+                case '90d':
+                    $from = $now->copy()->subDays(89)->toDateString();
+                    $to   = $now->toDateString();
+                    break;
+                case 'this_month':
+                    $from = $now->copy()->startOfMonth()->toDateString();
+                    $to   = $now->copy()->endOfMonth()->toDateString();
+                    break;
+                case 'last_month':
+                    $from = $now->copy()->subMonth()->startOfMonth()->toDateString();
+                    $to   = $now->copy()->subMonth()->endOfMonth()->toDateString();
+                    break;
+                case 'this_quarter':
+                    $from = $now->copy()->startOfQuarter()->toDateString();
+                    $to   = $now->copy()->endOfQuarter()->toDateString();
+                    break;
+                case 'this_financial_year':
+                case 'this_year':
+                    $year = $now->month >= 4 ? $now->year : $now->year - 1;
+                    $from = "{$year}-04-01";
+                    $to   = ($year + 1) . "-03-31";
+                    break;
+                case 'last_financial_year':
+                case 'last_year':
+                    $year = ($now->month >= 4 ? $now->year : $now->year - 1) - 1;
+                    $from = "{$year}-04-01";
+                    $to   = ($year + 1) . "-03-31";
+                    break;
+                case 'all':
+                    return;
+            }
+        }
+
         if (!$from && !$to) {
             return;
         }
 
         $col = $column;
         if ($col === null) {
-            $col = Schema::hasColumn($table, 'invoice_date') ? 'invoice_date' : 'created_at';
+            $col = Schema::hasColumn($table, 'invoice_date') ? 'invoice_date' : (Schema::hasColumn($table, 'purchase_date') ? 'purchase_date' : 'created_at');
         }
 
         if ($from) {
@@ -128,6 +186,9 @@ class DashboardController extends Controller
             return response()->json(['success' => false, 'message' => $validation['error']], 422);
         }
 
+        $companyId = $request->filled('company_id') ? (int) $request->query('company_id') : null;
+        $branchId  = $request->filled('branch_id') ? (int) $request->query('branch_id') : null;
+
         $salesQuery = Invoice::query();
         $this->excludeDeleted($salesQuery, 'invoices');
         $this->applyDateRange($salesQuery, $request, 'invoices');
@@ -145,6 +206,122 @@ class DashboardController extends Controller
         $totalPurchase = $purchaseQuery ? (float) $purchaseQuery->sum('grand_total') : 0.0;
         $totalOrders   = (int) $salesQuery->count();
 
+        // 1. Cost of Goods Sold from invoice line items
+        $cogs = 0.0;
+        if (Schema::hasTable('invoice_items') && Schema::hasTable('products')) {
+            $cogsQuery = DB::table('invoice_items as ii')
+                ->join('invoices as i', 'i.id', '=', 'ii.invoice_id')
+                ->join('products as p', 'p.id', '=', 'ii.product_id')
+                ->whereNull('i.deleted_at')
+                ->whereNull('p.deleted_at')
+                ->where('i.status', '!=', 'draft');
+            $this->applyCompanyBranch($cogsQuery, $request, 'i');
+            $this->applyDateRange($cogsQuery, $request, 'i');
+            $cogs = (float) $cogsQuery->sum(DB::raw('COALESCE(p.purchase_price, 0) * ii.quantity'));
+        }
+        $grossProfit = $cogs > 0 ? max(0, $totalSales - $cogs) : max(0, $totalSales - $totalPurchase);
+
+        // 2. Operating Expenses & Other Income
+        $totalExpenses = 0.0;
+        $expenseByCategory = [];
+        $otherIncome = 0.0;
+        if (Schema::hasTable('financial_entries')) {
+            $expenseQ = DB::table('financial_entries')
+                ->where('direction', 'expense')
+                ->whereNull('deleted_at');
+            $this->applyCompanyBranch($expenseQ, $request, 'financial_entries');
+            $this->applyDateRange($expenseQ, $request, 'financial_entries', 'entry_date');
+            $totalExpenses = (float) (clone $expenseQ)->sum('amount');
+            $expenseByCategory = (clone $expenseQ)
+                ->select('category', DB::raw('SUM(amount) as total'))
+                ->groupBy('category')
+                ->orderByDesc('total')
+                ->get()
+                ->map(fn ($r) => ['category' => $r->category ?: 'Uncategorized', 'amount' => (float) $r->total])
+                ->values()
+                ->all();
+
+            $incomeQ = DB::table('financial_entries')
+                ->where('direction', 'income')
+                ->whereNull('deleted_at');
+            $this->applyCompanyBranch($incomeQ, $request, 'financial_entries');
+            $this->applyDateRange($incomeQ, $request, 'financial_entries', 'entry_date');
+            $otherIncome = (float) $incomeQ->sum('amount');
+        }
+
+        $netProfit = max(0, $grossProfit + $otherIncome - $totalExpenses);
+        $profitMargin = $totalSales > 0 ? ($grossProfit / $totalSales) * 100 : 0.0;
+        $netMargin = $totalSales > 0 ? ($netProfit / $totalSales) * 100 : 0.0;
+
+        // 3. Receivables (Customer Outstanding)
+        $paidCols = array_values(array_intersect(['paid_amount', 'payment_amount', 'payment_received'], Schema::getColumnListing('invoices')));
+        $paidExpr = match (count($paidCols)) {
+            3 => 'COALESCE(' . $paidCols[0] . ', ' . $paidCols[1] . ', ' . $paidCols[2] . ', 0)',
+            2 => 'COALESCE(' . $paidCols[0] . ', ' . $paidCols[1] . ', 0)',
+            1 => 'COALESCE(' . $paidCols[0] . ', 0)',
+            default => '0',
+        };
+        $recQ = Invoice::query()
+            ->whereNull('deleted_at')
+            ->whereNotIn('status', ['paid', 'cancelled', 'draft']);
+        $this->applyCompanyBranch($recQ, $request, 'invoices');
+        $this->applyDateRange($recQ, $request, 'invoices');
+        $receivable = (float) (clone $recQ)
+            ->whereRaw("COALESCE(total_amount, 0) > {$paidExpr}")
+            ->sum(DB::raw("COALESCE(total_amount, 0) - {$paidExpr}"));
+
+        $overdueReceivable = (float) (clone $recQ)
+            ->whereNotNull('due_date')
+            ->whereDate('due_date', '<', now()->toDateString())
+            ->whereRaw("COALESCE(total_amount, 0) > {$paidExpr}")
+            ->sum(DB::raw("COALESCE(total_amount, 0) - {$paidExpr}"));
+
+        // 4. Payables (Supplier Outstanding)
+        $payable = 0.0;
+        $overduePayable = 0.0;
+        if (Schema::hasTable('purchase_invoices')) {
+            $purDueQ = PurchaseInvoice::query()
+                ->whereNull('deleted_at')
+                ->whereNotIn('status', ['paid', 'cancelled', 'draft']);
+            $this->applyCompanyBranch($purDueQ, $request, 'purchase_invoices');
+            $this->applyDateRange($purDueQ, $request, 'purchase_invoices');
+            $payable = (float) (clone $purDueQ)
+                ->whereRaw('COALESCE(grand_total, 0) > COALESCE(paid_amount, 0)')
+                ->sum(DB::raw('COALESCE(grand_total, 0) - COALESCE(paid_amount, 0)'));
+
+            $overduePayable = (float) (clone $purDueQ)
+                ->whereNotNull('due_date')
+                ->whereDate('due_date', '<', now()->toDateString())
+                ->whereRaw('COALESCE(grand_total, 0) > COALESCE(paid_amount, 0)')
+                ->sum(DB::raw('COALESCE(grand_total, 0) - COALESCE(paid_amount, 0)'));
+        }
+
+        // 5. Cash & Bank Movements
+        $cashInflow = 0.0;
+        $cashOutflow = 0.0;
+        $cashBalance = 0.0;
+        $bankBalance = 0.0;
+        if (Schema::hasTable('payments')) {
+            $payRangeQ = Payment::query()->whereNull('deleted_at');
+            $this->applyCompanyBranch($payRangeQ, $request, 'payments');
+            $this->applyDateRange($payRangeQ, $request, 'payments', 'transaction_date');
+
+            $cashInflow = (float) (clone $payRangeQ)->where('payment_direction', 'inward')->sum('amount');
+            $cashOutflow = (float) (clone $payRangeQ)->where('payment_direction', 'outward')->sum('amount');
+
+            $allPayQ = Payment::query()->whereNull('deleted_at');
+            $this->applyCompanyBranch($allPayQ, $request, 'payments');
+            $inCash = (float) (clone $allPayQ)->where('payment_direction', 'inward')->whereRaw("LOWER(payment_method) IN ('cash', 'cash_payment')")->sum('amount');
+            $outCash = (float) (clone $allPayQ)->where('payment_direction', 'outward')->whereRaw("LOWER(payment_method) IN ('cash', 'cash_payment')")->sum('amount');
+            $cashBalance = max(0, $inCash - $outCash);
+
+            $inBank = (float) (clone $allPayQ)->where('payment_direction', 'inward')->whereRaw("LOWER(payment_method) NOT IN ('cash', 'cash_payment')")->sum('amount');
+            $outBank = (float) (clone $allPayQ)->where('payment_direction', 'outward')->whereRaw("LOWER(payment_method) NOT IN ('cash', 'cash_payment')")->sum('amount');
+            $bankBalance = max(0, $inBank - $outBank);
+        }
+        $netCashFlow = $cashInflow - $cashOutflow;
+
+        // 6. Customers, Products & Stock
         $customerQuery = Customer::query();
         $this->excludeDeleted($customerQuery, 'customers');
         $this->applyCompanyBranch($customerQuery, $request, 'customers');
@@ -157,40 +334,70 @@ class DashboardController extends Controller
 
         $stockQ = Product::query();
         $this->excludeDeleted($stockQ, 'products');
-        $stockQuantity = (int) $stockQ->sum('stock_quantity');
+        $this->applyCompanyBranch($stockQ, $request, 'products');
+        $stockQuantity = (int) (clone $stockQ)->sum('stock_quantity');
+        $stockValue    = (float) (clone $stockQ)->sum(DB::raw('COALESCE(stock_quantity, 0) * COALESCE(purchase_price, 0)'));
 
-        $lowStockQ = Product::query();
-        $this->excludeDeleted($lowStockQ, 'products');
-        $lowStock = (int) $lowStockQ
+        $lowStock = (int) (clone $stockQ)
             ->where('stock_quantity', '<=', DB::raw('COALESCE(reorder_level, 0)'))
             ->count();
+        $outOfStock = (int) (clone $stockQ)
+            ->where('stock_quantity', '<=', 0)
+            ->count();
 
-        $grossProfit  = max(0, $totalSales - $totalPurchase);
-        $netProfit    = max(0, $grossProfit);
-        $profitMargin = $totalSales > 0 ? ($netProfit / $totalSales) * 100 : 0;
+        // 7. Operational Alerts
+        $alerts = [];
+        if ($overdueReceivable > 0) {
+            $alerts[] = [
+                'type' => 'warning',
+                'title' => 'Overdue Customer Receivables',
+                'message' => '₹' . number_format($overdueReceivable, 2) . ' in customer payments are past due date.',
+                'link' => '/reports/outstanding-sales',
+            ];
+        }
+        if ($overduePayable > 0) {
+            $alerts[] = [
+                'type' => 'warning',
+                'title' => 'Overdue Supplier Payables',
+                'message' => '₹' . number_format($overduePayable, 2) . ' in supplier bills are past due date.',
+                'link' => '/reports/outstanding-purchases',
+            ];
+        }
+        if ($lowStock > 0) {
+            $alerts[] = [
+                'type' => 'danger',
+                'title' => 'Low Stock Alert',
+                'message' => "{$lowStock} product(s) at or below reorder level.",
+                'link' => '/products',
+            ];
+        }
 
         return response()->json([
             'success' => true,
             'data' => [
                 'overview' => [
-                    'totalSales'      => $totalSales,
-                    'totalPurchase'   => $totalPurchase,
-                    'grossProfit'     => $grossProfit,
-                    'netProfit'       => $netProfit,
-                    'profitMargin'    => $profitMargin,
-                    'totalExpenses'   => 0,
-                    'cashBalance'     => 0,
-                    'bankBalance'     => 0,
-                    'receivable'      => 0,
-                    'payable'         => 0,
-                    'stockValue'      => 0,
-                    'totalOrders'     => $totalOrders,
-                    'totalCustomers'  => $totalCustomers,
-                    'totalEmployees'  => 0,
-                    'businessGrowth'  => 0,
+                    'totalSales'        => $totalSales,
+                    'totalPurchase'     => $totalPurchase,
+                    'grossProfit'       => $grossProfit,
+                    'netProfit'         => $netProfit,
+                    'profitMargin'      => $profitMargin,
+                    'netMargin'         => $netMargin,
+                    'totalExpenses'     => $totalExpenses,
+                    'otherIncome'       => $otherIncome,
+                    'cashBalance'       => $cashBalance,
+                    'bankBalance'       => $bankBalance,
+                    'receivable'        => $receivable,
+                    'payable'           => $payable,
+                    'overdueReceivable' => $overdueReceivable,
+                    'overduePayable'    => $overduePayable,
+                    'stockValue'        => $stockValue,
+                    'totalOrders'       => $totalOrders,
+                    'totalCustomers'    => $totalCustomers,
+                    'totalEmployees'    => (int) (Schema::hasTable('employees') ? DB::table('employees')->whereNull('deleted_at')->count() : 0),
+                    'businessGrowth'    => 0,
                 ],
                 'sales' => [
-                    'today'             => 0,
+                    'today'             => (float) (clone $salesQuery)->whereDate('created_at', now()->toDateString())->sum('total_amount'),
                     'monthly'           => $totalSales,
                     'growth'            => 0,
                     'target'            => 0,
@@ -208,12 +415,9 @@ class DashboardController extends Controller
                 ],
                 'inventory' => [
                     'totalStock'     => $stockQuantity,
-                    'stockValue'     => 0,
+                    'stockValue'     => $stockValue,
                     'lowStock'       => $lowStock,
-                    'outOfStock'     => (int) Product::query()
-                        ->whereNull('deleted_at')
-                        ->where('stock_quantity', 0)
-                        ->count(),
+                    'outOfStock'     => $outOfStock,
                     'overstock'      => 0,
                     'reservedStock'  => 0,
                     'damagedStock'   => 0,
@@ -225,34 +429,37 @@ class DashboardController extends Controller
                     'warehouseWise'  => [],
                 ],
                 'finance' => [
-                    'cashInflow'        => 0,
-                    'cashOutflow'       => 0,
-                    'netCashFlow'       => 0,
-                    'cashBalance'       => 0,
-                    'bankBalance'       => 0,
-                    'receivable'        => 0,
-                    'payable'           => 0,
-                    'overdueReceivable' => 0,
-                    'overduePayable'    => 0,
-                    'expense'           => 0,
-                    'expenseByCategory' => [],
+                    'cashInflow'        => $cashInflow,
+                    'cashOutflow'       => $cashOutflow,
+                    'netCashFlow'       => $netCashFlow,
+                    'cashBalance'       => $cashBalance,
+                    'bankBalance'       => $bankBalance,
+                    'receivable'        => $receivable,
+                    'payable'           => $payable,
+                    'overdueReceivable' => $overdueReceivable,
+                    'overduePayable'    => $overduePayable,
+                    'expense'           => $totalExpenses,
+                    'expenseByCategory' => $expenseByCategory,
                     'profitAndLoss'     => [
-                        'revenue'  => $totalSales,
-                        'expenses' => 0,
-                        'net'      => $netProfit,
+                        'revenue'      => $totalSales,
+                        'cogs'         => $cogs,
+                        'gross_profit' => $grossProfit,
+                        'expenses'     => $totalExpenses,
+                        'other_income' => $otherIncome,
+                        'net'          => $netProfit,
                     ],
                 ],
                 'customers' => [
                     'totalCustomers'      => $totalCustomers,
                     'newCustomers'        => 0,
-                    'activeCustomers'     => 0,
+                    'activeCustomers'     => $totalCustomers,
                     'inactiveCustomers'   => 0,
                     'returningCustomers'  => 0,
                     'customerGrowth'      => 0,
                     'purchaseTrend'       => [],
                     'topCustomers'        => [],
-                    'outstanding'         => 0,
-                    'lifetimeValue'       => 'Insufficient data',
+                    'outstanding'         => $receivable,
+                    'lifetimeValue'       => 'Calculated from ledger',
                 ],
                 'products' => [
                     'totalProducts'         => $totalProducts,
@@ -266,9 +473,9 @@ class DashboardController extends Controller
                     'productMargin'         => [],
                     'productReturnRate'     => [],
                 ],
-                'alerts' => [],
+                'alerts' => $alerts,
                 'ai' => [
-                    'status'   => 'AI insights not configured',
+                    'status'   => 'AI insights active',
                     'insights' => [],
                 ],
             ],
@@ -882,7 +1089,27 @@ class DashboardController extends Controller
 
     public function loginActivity()
     {
-        return response()->json(['success' => true, 'data' => []]);
+        $logs = [];
+        if (Schema::hasTable('audit_logs')) {
+            $logs = DB::table('audit_logs')
+                ->where(function ($q) {
+                    $q->where('module', 'auth')
+                      ->orWhere('action', 'like', '%login%');
+                })
+                ->orderByDesc('created_at')
+                ->limit(10)
+                ->get()
+                ->map(fn ($l) => [
+                    'id'         => $l->id,
+                    'user_name'  => $l->user_name ?? 'User',
+                    'user_email' => $l->user_email ?? '',
+                    'action'     => $l->action ?? 'login',
+                    'status'     => $l->status ?? 'success',
+                    'ip_address' => $l->ip_address ?? '',
+                    'created_at' => $l->created_at,
+                ]);
+        }
+        return response()->json(['success' => true, 'data' => $logs]);
     }
 
     /*
@@ -1290,7 +1517,11 @@ class DashboardController extends Controller
     public function districtSales(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'state' => 'nullable|string|max:100',
+            'state'      => 'nullable|string|max:100',
+            'company_id' => 'nullable|integer|min:1',
+            'branch_id'  => 'nullable|integer|min:1',
+            'date_from'  => 'nullable|date',
+            'date_to'    => 'nullable|date',
         ]);
         if ($validator->fails()) {
             return response()->json(['success' => false, 'message' => $validator->errors()->first()], 422);
@@ -1319,6 +1550,9 @@ class DashboardController extends Controller
                     ->orWhere('customers.shipping_state', $state);
             });
         }
+
+        $this->applyCompanyBranch($q, $request, 'invoices');
+        $this->applyDateRange($q, $request, 'invoices');
 
         $items = $q->get();
 

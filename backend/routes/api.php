@@ -187,9 +187,12 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::get('profit-loss',                    [ReportController::class, 'profitLoss'])->middleware('permission:view dashboard profit');
         Route::get('profit-loss/summary',            [ReportController::class, 'profitLossSummary'])->middleware('permission:view dashboard profit');
+        Route::get('profit-loss-summary',            [ReportController::class, 'profitLossSummary'])->middleware('permission:view dashboard profit');
         Route::get('profit-loss/products',           [ReportController::class, 'profitLossProducts'])->middleware('permission:view dashboard profit');
         Route::get('profit-loss/customers',          [ReportController::class, 'profitLossCustomers'])->middleware('permission:view dashboard profit');
+        Route::get('profit-loss-customers',          [ReportController::class, 'profitLossCustomers'])->middleware('permission:view dashboard profit');
         Route::get('profit-loss/branches',           [ReportController::class, 'profitLossBranches'])->middleware('permission:view dashboard profit');
+        Route::get('profit-loss-branches',           [ReportController::class, 'profitLossBranches'])->middleware('permission:view dashboard profit');
         Route::get('profit-loss/monthly',            [ReportController::class, 'profitLossMonthly'])->middleware('permission:view dashboard profit');
         Route::get('profit-loss/yearly',             [ReportController::class, 'profitLossYearly'])->middleware('permission:view dashboard profit');
         Route::get('profit-loss/comparison',         [ReportController::class, 'profitLossComparison'])->middleware('permission:view dashboard profit');
@@ -198,6 +201,13 @@ Route::middleware('auth:sanctum')->group(function () {
 
         Route::get('product-profitability',  [ReportController::class, 'productProfitability'])->middleware('permission:view dashboard profit');
         Route::get('gst-summary',            [ReportController::class, 'gstSummary'])->middleware('permission:view accounting summary');
+        Route::get('sales-purchase-trend',   [ReportController::class, 'salesPurchaseTrend'])->middleware('permission:view sales reports');
+        Route::get('payment-mode-summary',   [ReportController::class, 'paymentModeSummary'])->middleware('permission:view accounting statements');
+        Route::get('expense-report',         [ReportController::class, 'expenseReport'])->middleware('permission:income_expenses.view_reports,view reports expenses,income_expenses.view');
+        Route::get('receivables-aging',      [ReportController::class, 'receivablesAging'])->middleware('permission:view sales reports');
+        Route::get('payables-aging',         [ReportController::class, 'payablesAging'])->middleware('permission:view purchase reports');
+        Route::get('cash-flow',              [ReportController::class, 'cashFlow'])->middleware('permission:view accounting statements');
+        Route::get('stock-summary',          [ReportController::class, 'stockSummary'])->middleware('permission:view inventory');
     });
 
     /* ------------------ Alternative dashboard endpoints ---------------- */

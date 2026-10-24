@@ -43,6 +43,10 @@ const DASHBOARD_ENDPOINT_FALLBACKS: Record<string, string[]> = {
   '/vendors/top': ['/dashboard/top-vendors'],
   '/purchases/due': ['/dashboard/purchase-due'],
   '/admin/login-activity': ['/dashboard/login-activity'],
+  '/reports/profit-loss-customers': ['/reports/profit-loss/customers'],
+  '/reports/profit-loss-branches': ['/reports/profit-loss/branches'],
+  '/reports/profit-loss-summary': ['/reports/profit-loss/summary'],
+  '/reports/invoice-profitability': ['/reports/profit-loss/invoices'],
 };
 
 // -----------------------------------------------------------------------------
@@ -257,15 +261,17 @@ const unwrapApiData = <T>(payload: unknown, fallback: T): T => {
   return current as T;
 };
 
-const buildQuery = (params: Record<string, unknown> = {}): string => {
+const buildQuery = (params?: Record<string, unknown> | null): string => {
   const search = new URLSearchParams();
 
-  Object.entries(params).forEach(([key, value]) => {
-    if (value === undefined || value === null || value === '') {
-      return;
-    }
-    search.set(key, String(value));
-  });
+  if (params && typeof params === 'object') {
+    Object.entries(params).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === '') {
+        return;
+      }
+      search.set(key, String(value));
+    });
+  }
 
   const query = search.toString();
   return query ? `?${query}` : '';
@@ -2217,6 +2223,46 @@ export const apiClient = {
   async getCustomerLedger(params: any = {}) {
     const query = buildQuery(params);
     return this.request('GET', `/reports/customer-ledger${query}`);
+  },
+
+  async getReceivablesAging(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/receivables-aging${query}`);
+  },
+
+  async getPayablesAging(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/payables-aging${query}`);
+  },
+
+  async getSalesPurchaseTrend(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/sales-purchase-trend${query}`);
+  },
+
+  async getPaymentModeSummary(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/payment-mode-summary${query}`);
+  },
+
+  async getExpenseReport(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/expense-report${query}`);
+  },
+
+  async getCashFlowSummary(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/cash-flow${query}`);
+  },
+
+  async getStockSummaryReport(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/reports/stock-summary${query}`);
+  },
+
+  async getAuditLogs(params: any = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/audit-logs${query}`);
   },
 
   // ---------------------------------------------------------------------------

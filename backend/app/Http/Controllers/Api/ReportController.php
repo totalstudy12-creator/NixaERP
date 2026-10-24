@@ -39,7 +39,10 @@ class ReportController extends Controller
             'company_id' => 'nullable|integer|min:1',
             'branch_id'  => 'nullable|integer|min:1',
             'from'       => 'nullable|date',
-            'to'         => 'nullable|date|after_or_equal:from',
+            'to'         => 'nullable|date',
+            'date_from'  => 'nullable|date',
+            'date_to'    => 'nullable|date',
+            'period'     => 'nullable|string|max:50',
             'page'       => 'nullable|integer|min:1',
             'per_page'   => 'nullable|integer|min:1|max:200',
             'search'     => 'nullable|string|max:100',
@@ -47,6 +50,68 @@ class ReportController extends Controller
         ], $extraRules);
 
         $v = $request->validate($rules);
+
+        // Normalize from / to with date_from / date_to and period
+        if (empty($v['from']) && !empty($v['date_from'])) {
+            $v['from'] = $v['date_from'];
+        }
+        if (empty($v['to']) && !empty($v['date_to'])) {
+            $v['to'] = $v['date_to'];
+        }
+
+        if (empty($v['from']) && empty($v['to']) && !empty($v['period'])) {
+            $now = now();
+            switch ($v['period']) {
+                case 'today':
+                    $v['from'] = $now->toDateString();
+                    $v['to']   = $now->toDateString();
+                    break;
+                case 'yesterday':
+                    $v['from'] = $now->copy()->subDay()->toDateString();
+                    $v['to']   = $now->copy()->subDay()->toDateString();
+                    break;
+                case 'this_week':
+                    $v['from'] = $now->copy()->startOfWeek()->toDateString();
+                    $v['to']   = $now->copy()->endOfWeek()->toDateString();
+                    break;
+                case '7d':
+                    $v['from'] = $now->copy()->subDays(6)->toDateString();
+                    $v['to']   = $now->toDateString();
+                    break;
+                case '30d':
+                    $v['from'] = $now->copy()->subDays(29)->toDateString();
+                    $v['to']   = $now->toDateString();
+                    break;
+                case '90d':
+                    $v['from'] = $now->copy()->subDays(89)->toDateString();
+                    $v['to']   = $now->toDateString();
+                    break;
+                case 'this_month':
+                    $v['from'] = $now->copy()->startOfMonth()->toDateString();
+                    $v['to']   = $now->copy()->endOfMonth()->toDateString();
+                    break;
+                case 'last_month':
+                    $v['from'] = $now->copy()->subMonth()->startOfMonth()->toDateString();
+                    $v['to']   = $now->copy()->subMonth()->endOfMonth()->toDateString();
+                    break;
+                case 'this_quarter':
+                    $v['from'] = $now->copy()->startOfQuarter()->toDateString();
+                    $v['to']   = $now->copy()->endOfQuarter()->toDateString();
+                    break;
+                case 'this_financial_year':
+                case 'this_year':
+                    $year = $now->month >= 4 ? $now->year : $now->year - 1;
+                    $v['from'] = "{$year}-04-01";
+                    $v['to']   = ($year + 1) . "-03-31";
+                    break;
+                case 'last_financial_year':
+                case 'last_year':
+                    $year = ($now->month >= 4 ? $now->year : $now->year - 1) - 1;
+                    $v['from'] = "{$year}-04-01";
+                    $v['to']   = ($year + 1) . "-03-31";
+                    break;
+            }
+        }
 
         $user          = auth()->user();
         $userCompanyId = $user->company_id ?? null;

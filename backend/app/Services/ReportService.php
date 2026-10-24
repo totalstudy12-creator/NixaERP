@@ -30,6 +30,18 @@ class ReportService
     /**
      * Get financial year dates (1 Apr - 31 Mar)
      */
+        public function getInvoicePaidExpression(): string
+    {
+        $cols = Schema::getColumnListing('invoices');
+        $matches = array_values(array_intersect(['paid_amount', 'payment_amount', 'payment_received'], $cols));
+        return match (count($matches)) {
+            3 => 'COALESCE(' . $matches[0] . ', ' . $matches[1] . ', ' . $matches[2] . ', 0)',
+            2 => 'COALESCE(' . $matches[0] . ', ' . $matches[1] . ', 0)',
+            1 => 'COALESCE(' . $matches[0] . ', 0)',
+            default => '0',
+        };
+    }
+
     public function getFinancialYearDates($yearStart): array
     {
         $start = Carbon::parse($yearStart . '-04-01');
@@ -45,8 +57,12 @@ class ReportService
      */
     public function validateDateRange($from, $to): array
     {
-        $fromDate = Carbon::parse($from)->startOfDay();
-        $toDate = Carbon::parse($to)->endOfDay();
+        $now = now();
+        $year = $now->month >= 4 ? $now->year : $now->year - 1;
+        $defaultFrom = "{$year}-04-01";
+
+        $fromDate = $from ? Carbon::parse($from)->startOfDay() : Carbon::parse($defaultFrom)->startOfDay();
+        $toDate   = $to   ? Carbon::parse($to)->endOfDay()     : $now->copy()->endOfDay();
 
         if ($fromDate->isAfter($toDate)) {
             throw new \InvalidArgumentException('From date cannot be after to date.');
@@ -1666,11 +1682,22 @@ class ReportService
             $revenue = $this->calculateInvoiceRevenue($invoice);
             $cost = $this->calculateInvoiceCogs($invoice);
             if (!isset($grouped[$key])) {
-                $grouped[$key] = ['customer' => $invoice->customer?->name ?? $invoice->customer_name ?? 'Walk-in Customer', 'invoice_count' => 0, 'gross_sales' => 0.0, 'net_revenue' => 0.0, 'cogs' => 0.0, 'gross_profit' => 0.0, 'missing_cost_lines' => 0];
+                $grouped[$key] = [
+                    'customer' => $invoice->customer?->name ?? $invoice->customer_name ?? 'Walk-in Customer',
+                    'customer_id' => $invoice->customer_id ?? null,
+                    'invoice_count' => 0,
+                    'gross_sales' => 0.0,
+                    'net_revenue' => 0.0,
+                    'revenue' => 0.0,
+                    'cogs' => 0.0,
+                    'gross_profit' => 0.0,
+                    'missing_cost_lines' => 0,
+                ];
             }
             $grouped[$key]['invoice_count']++;
             $grouped[$key]['gross_sales'] += $revenue['gross_sales'];
             $grouped[$key]['net_revenue'] += $revenue['net_sales'];
+            $grouped[$key]['revenue'] += $revenue['net_sales'];
             $grouped[$key]['cogs'] += $cost['cogs'];
             $grouped[$key]['gross_profit'] += $revenue['net_sales'] - $cost['cogs'];
             $grouped[$key]['missing_cost_lines'] += $cost['missing_cost_lines'];
@@ -1681,8 +1708,12 @@ class ReportService
             $rows = array_values(array_filter($rows, fn ($r) => str_contains(mb_strtolower((string) ($r['customer'] ?? '')), $needle)));
         }
         foreach ($rows as &$row) {
+            $row['gross_sales'] = round($row['gross_sales'], 2);
+            $row['net_revenue'] = round($row['net_revenue'], 2);
+            $row['revenue'] = round($row['revenue'], 2);
+            $row['cogs'] = round($row['cogs'], 2);
             $row['gross_profit'] = round($row['gross_profit'], 2);
-            $row['margin_percent'] = $row['net_revenue'] > 0 ? (($row['gross_profit'] / $row['net_revenue']) * 100) : 0.0;
+            $row['margin_percent'] = $row['net_revenue'] > 0 ? round((($row['gross_profit'] / $row['net_revenue']) * 100), 2) : 0.0;
         }
         unset($row);
         usort($rows, fn ($a, $b) => $b['gross_profit'] <=> $a['gross_profit']);
@@ -1701,9 +1732,23 @@ class ReportService
             $key = ($invoice->branch_id ?? 0) . '|' . ($invoice->branch?->name ?? 'Main Branch');
             $revenue = $this->calculateInvoiceRevenue($invoice);
             $cost = $this->calculateInvoiceCogs($invoice);
-            if (!isset($grouped[$key])) $grouped[$key] = ['branch' => $invoice->branch?->name ?? 'Main Branch', 'gross_sales' => 0.0, 'net_revenue' => 0.0, 'cogs' => 0.0, 'gross_profit' => 0.0, 'missing_cost_lines' => 0];
+            if (!isset($grouped[$key])) {
+                $grouped[$key] = [
+                    'branch' => $invoice->branch?->name ?? 'Main Branch',
+                    'branch_id' => $invoice->branch_id ?? null,
+                    'invoice_count' => 0,
+                    'gross_sales' => 0.0,
+                    'net_revenue' => 0.0,
+                    'revenue' => 0.0,
+                    'cogs' => 0.0,
+                    'gross_profit' => 0.0,
+                    'missing_cost_lines' => 0,
+                ];
+            }
+            $grouped[$key]['invoice_count']++;
             $grouped[$key]['gross_sales'] += $revenue['gross_sales'];
             $grouped[$key]['net_revenue'] += $revenue['net_sales'];
+            $grouped[$key]['revenue'] += $revenue['net_sales'];
             $grouped[$key]['cogs'] += $cost['cogs'];
             $grouped[$key]['gross_profit'] += $revenue['net_sales'] - $cost['cogs'];
             $grouped[$key]['missing_cost_lines'] += $cost['missing_cost_lines'];
@@ -1713,7 +1758,14 @@ class ReportService
             $needle = mb_strtolower($search);
             $rows = array_values(array_filter($rows, fn ($r) => str_contains(mb_strtolower((string) ($r['branch'] ?? '')), $needle)));
         }
-        foreach ($rows as &$row) $row['margin_percent'] = $row['net_revenue'] > 0 ? (($row['gross_profit'] / $row['net_revenue']) * 100) : 0.0;
+        foreach ($rows as &$row) {
+            $row['gross_sales'] = round($row['gross_sales'], 2);
+            $row['net_revenue'] = round($row['net_revenue'], 2);
+            $row['revenue'] = round($row['revenue'], 2);
+            $row['cogs'] = round($row['cogs'], 2);
+            $row['gross_profit'] = round($row['gross_profit'], 2);
+            $row['margin_percent'] = $row['net_revenue'] > 0 ? round((($row['gross_profit'] / $row['net_revenue']) * 100), 2) : 0.0;
+        }
         unset($row);
         usort($rows, fn ($a, $b) => $b['gross_profit'] <=> $a['gross_profit']);
         $total = count($rows);
@@ -2005,7 +2057,8 @@ class ReportService
     {
         $asOf = Carbon::parse($to ?: now()->toDateString())->endOfDay();
         $rows = [];
-        foreach ($this->baseInvoiceQuery($companyId, $branchId)->whereNotIn('status', ['paid', 'cancelled', 'draft'])->whereRaw('COALESCE(total_amount,0) > COALESCE(payment_received,paid_amount,0)')->get() as $i) {
+        $paidExpr = $this->getInvoicePaidExpression();
+        foreach ($this->baseInvoiceQuery($companyId, $branchId)->whereNotIn('status', ['paid', 'cancelled', 'draft'])->whereRaw("COALESCE(total_amount,0) > {$paidExpr}")->get() as $i) {
             $due = $i->due_date ? Carbon::parse($i->due_date) : Carbon::parse($i->invoice_date);
             $days = max(0, $due->diffInDays($asOf, false) < 0 ? $asOf->diffInDays($due) : 0);
             $amount = max(0, (float) $i->total_amount - (float) ($i->payment_received ?? $i->paid_amount ?? 0));
@@ -2106,7 +2159,8 @@ class ReportService
     public function getBalanceSheet(?int $companyId = null, ?int $branchId = null, $from = null, $to = null): array
     {
         [$fromDate, $toDate] = $this->validateDateRange($from, $to);
-        $receivables = (float) $this->baseInvoiceQuery($companyId, $branchId)->whereNotIn('status', ['paid', 'cancelled', 'draft'])->sum(DB::raw('GREATEST(COALESCE(total_amount,0)-COALESCE(payment_received,paid_amount,0),0)'));
+        $paidExpr = $this->getInvoicePaidExpression();
+        $receivables = (float) $this->baseInvoiceQuery($companyId, $branchId)->whereNotIn('status', ['paid', 'cancelled', 'draft'])->sum(DB::raw("CASE WHEN COALESCE(total_amount,0) > {$paidExpr} THEN COALESCE(total_amount,0) - {$paidExpr} ELSE 0 END"));
         $payables = (float) $this->basePurchaseQuery($companyId, $branchId)->whereNotIn('status', ['paid', 'cancelled', 'draft'])->sum(DB::raw('GREATEST(COALESCE(grand_total,0)-COALESCE(paid_amount,0),0)'));
         $inventory = (float) Product::query()->when($companyId, fn ($q) => $q->where('company_id', $companyId))->sum(DB::raw('COALESCE(stock_quantity,0)*COALESCE(purchase_price,0)'));
         return ['data' => ['assets' => ['accounts_receivable' => $receivables, 'inventory' => $inventory], 'liabilities' => ['accounts_payable' => $payables], 'equity' => []], 'meta' => ['from' => $fromDate->format('Y-m-d'), 'to' => $toDate->format('Y-m-d'), 'partial' => true, 'message' => 'Only directly available balances are shown; opening equity, fixed assets and other ledger balances require accounting masters.']];
