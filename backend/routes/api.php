@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\BiometricDeviceController;
 use App\Http\Controllers\Api\BiometricScanController;
 use App\Http\Controllers\Api\BranchController;
 use App\Http\Controllers\Api\CompanyController;
+use App\Http\Controllers\Api\ConnectedAppController;
 use App\Http\Controllers\Api\CustomerController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DealerController;
@@ -110,6 +111,10 @@ Route::get('/auth/{provider}/callback',                 [SocialAuthController::c
 Route::post('/webhooks/whatsapp', [WhatsAppWebhookController::class, 'handle'])->middleware('throttle:60,1');
 Route::post('/webhooks/twilio/notification-status', [NotificationController::class, 'twilioStatus'])->middleware('throttle:120,1');
 Route::get('marketing/gbp-locations',                   [MarketingController::class, 'gbpLocations']);
+
+/* ========================== FLUTTER APPS — public handshake =============== */
+Route::get('v1/apps/{identifier}/handshake', [ConnectedAppController::class, 'handshake']);
+Route::post('v1/apps/{identifier}/ping',     [ConnectedAppController::class, 'ping']);
 
 /* =========================================================================
  |  PROTECTED — auth:sanctum + RBAC
@@ -599,6 +604,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/',       [SettingsController::class, 'revokeAllTokens']);
     });
 
+    /* ---------------------- Connected Apps (Flutter) ------------------- */
+    Route::apiResource('connected-apps', ConnectedAppController::class)->middleware('permission:view settings');
+    Route::post('connected-apps/{app}/regenerate-token', [ConnectedAppController::class, 'regenerateToken'])->middleware('permission:edit settings');
+
     /* ------------------------- Health / Backups ------------------------ */
     Route::get('health/cron',               [HealthController::class, 'cron'])->middleware('permission:view health cron,view settings');
     Route::get('health/backups',            [BackupController::class, 'index'])->middleware('permission:view backups');
@@ -657,6 +666,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('chat',     [GeminiVoiceController::class, 'chat'])->middleware('permission:chat with ai assistant');
         Route::get('insights',  [GeminiVoiceController::class, 'dashboardInsights'])->middleware('permission:view ai assistant insights');
         Route::get('test',      [GeminiVoiceController::class, 'testConnection'])->middleware('permission:view ai providers');
+        Route::post('live-token', [GeminiVoiceController::class, 'liveToken'])->middleware('permission:chat with ai assistant');
     });
 
     /* -------------------- Inventory Import / Export -------------------- */

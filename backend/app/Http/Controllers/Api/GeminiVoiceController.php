@@ -59,10 +59,10 @@ class GeminiVoiceController extends Controller
     {
         $request->validate([
             'message' => 'required|string|max:5000',
-            'history' => 'nullable|array|max:20',
-            'history.*.role' => 'required|in:user,assistant',
-            'history.*.text' => 'required|string|max:5000',
-            'memory' => 'nullable|string|max:1500',
+            'history' => 'nullable|array|max:25',
+            'history.*.role' => 'nullable|string',
+            'history.*.text' => 'nullable|string',
+            'memory' => 'nullable|string|max:2000',
         ]);
 
         try {
@@ -71,7 +71,22 @@ class GeminiVoiceController extends Controller
             // Build context based on the latest user message
             $context = $this->buildErpContext($message);
             $prompt = $this->buildPromptWithContext($message, $context, (string) $request->input('memory', ''));
-            $response = $this->callGemini($prompt, $request->input('history', []));
+
+            $cleanHistory = [];
+            foreach ($request->input('history', []) as $h) {
+                if (is_array($h)) {
+                    $role = strtolower((string)($h['role'] ?? 'user'));
+                    $text = trim((string)($h['text'] ?? $h['content'] ?? ''));
+                    if ($text !== '' && in_array($role, ['user', 'assistant'], true)) {
+                        $cleanHistory[] = [
+                            'role' => $role,
+                            'text' => substr($text, 0, 3000),
+                        ];
+                    }
+                }
+            }
+
+            $response = $this->callGemini($prompt, $cleanHistory);
 
             return response()->json([
                 'success' => true,
@@ -163,39 +178,135 @@ class GeminiVoiceController extends Controller
     }
 
     /**
-     * Get the Gemini model name from env.
+     * Issue a short-lived ephemeral token for Gemini Live API.
+     * POST /api/gemini/live-token
+     *
+     * The browser connects directly to Gemini Live via WebSocket
+     * using this token — the API key never leaves the server.
+     */
+    public function liveToken(Request $request)
+    {
+        try {
+            $apiKey = $this->getApiKey();
+
+            if (!$apiKey) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Gemini API key not configured in database. Go to Settings → AI tab to save your API key.',
+                ], 503);
+            }
+
+            $expireTime = now()->addMinutes(30)->toIso8601String();
+            $newSessionExpireTime = now()->addMinutes(2)->toIso8601String();
+
+            // Request ephemeral token from Gemini
+            $response = Http::timeout(15)
+                ->withHeaders([
+                    'Content-Type' => 'application/json',
+                    'x-goog-api-key' => $apiKey,
+                ])
+                ->post('https://generativelanguage.googleapis.com/v1beta/auth_tokens', [
+                    'uses' => 10,
+                    'expireTime' => $expireTime,
+                    'newSessionExpireTime' => $newSessionExpireTime,
+                ]);
+
+            $tokenName = null;
+            if ($response->successful()) {
+                $data = $response->json();
+                $tokenName = $data['name'] ?? null;
+            }
+
+            $livePort = env('GEMINI_LIVE_PORT', 8008);
+            $host = $request->getHost() ?: '127.0.0.1';
+            $wsUrl = "ws://{$host}:{$livePort}";
+
+            // Pre-build live ERP business context summary for the session
+            $context = $this->buildErpContext('sales purchases inventory cash profit');
+
+            return response()->json([
+                'success' => true,
+                'token' => $tokenName,
+                'ws_url' => $wsUrl,
+                'model' => 'models/gemini-3.8-live',
+                'context' => $context,
+                'expires_at' => $expireTime,
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Gemini Live Token Exception: ' . $e->getMessage());
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to create live session token: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Get the active API Key directly from database (Setting or AiProvider) with env fallback.
+     */
+    private function getApiKey(): ?string
+    {
+        // 1. Try DB settings table first
+        $savedKey = \App\Models\Setting::where('key', 'ai_gemini_api_key')->value('value');
+        if ($savedKey) {
+            try {
+                $dec = Crypt::decryptString($savedKey);
+                if (!empty($dec)) return $dec;
+            } catch (\Throwable $e) {
+                Log::warning('Saved Gemini key in settings could not be decrypted.');
+            }
+        }
+
+        // 2. Try DB ai_providers table (primary provider)
+        $provider = \App\Models\AiProvider::where('enabled', true)->first();
+        if ($provider && !empty($provider->key) && !str_starts_with((string)$provider->key, 'eyJpdiI6Ik')) {
+            return $provider->key;
+        }
+
+        // 3. Fallback to env
+        return config('services.gemini.api_key', env('GEMINI_API_KEY'));
+    }
+
+    /**
+     * Get the Gemini model name directly from database with fallback.
      */
     private function getModel(): string
     {
         $saved = \App\Models\Setting::where('key', 'ai_gemini_model')->value('value');
-        return $saved ?: config('services.gemini.model', env('GEMINI_MODEL', 'gemini-3.8-flash'));
+        if ($saved) return $saved;
+
+        $provider = \App\Models\AiProvider::where('enabled', true)->first();
+        if ($provider && !empty($provider->config['model'])) {
+            return $provider->config['model'];
+        }
+
+        return config('services.gemini.model', env('GEMINI_MODEL', 'gemini-3.5-flash'));
     }
 
     /**
-     * Call Gemini API using the SAME working configuration as HTML.
+     * Call Gemini API using the database-configured key and model with resilient fallback.
      */
     private function callGemini(string $prompt, array $history = [])
     {
-        $savedKey = \App\Models\Setting::where('key', 'ai_gemini_api_key')->value('value');
-        $apiKey = null;
-        if ($savedKey) {
-            try { $apiKey = Crypt::decryptString($savedKey); } catch (\Throwable $e) {
-                Log::warning('Saved Gemini key could not be decrypted.');
-            }
-        }
-        $apiKey = $apiKey ?: config('services.gemini.api_key', env('GEMINI_API_KEY'));
+        $apiKey = $this->getApiKey();
 
         if (!$apiKey) {
-            throw new \Exception('GEMINI_API_KEY not configured');
+            throw new \Exception('Gemini API key is not configured in database. Please open Settings → AI tab and save your Gemini API key.');
         }
 
-        $model = $this->getModel();
-        $url = "https://generativelanguage.googleapis.com/v1beta/models/" . rawurlencode($model) . ":generateContent";
+        $primaryModel = $this->getModel() ?: 'gemini-3.5-flash-lite';
+        $modelsToTry = array_unique(array_filter([
+            $primaryModel,
+            'gemini-3.5-flash-lite',
+            'gemini-flash-latest',
+            'gemini-2.5-flash',
+            'gemini-flash-lite-latest',
+            'gemini-3.5-flash',
+        ]));
 
         // Build contents array with history
         $contents = [];
 
-        // Add history if provided
         foreach ($history as $item) {
             if (is_array($item)) {
                 $role = $item['role'] ?? 'user';
@@ -213,48 +324,55 @@ class GeminiVoiceController extends Controller
             'parts' => [['text' => $prompt]],
         ];
 
-        // Make API call - SAME format as working HTML
-        $response = Http::timeout(60)
-            ->withHeaders([
-                'Content-Type' => 'application/json',
-                'x-goog-api-key' => $apiKey,
-            ])
-            ->post($url, [
-                'contents' => $contents,
-                'generationConfig' => ['temperature' => 0.35, 'maxOutputTokens' => 1200],
-            ]);
+        $lastError = null;
+        foreach ($modelsToTry as $candidateModel) {
+            try {
+                $url = "https://generativelanguage.googleapis.com/v1beta/models/" . rawurlencode($candidateModel) . ":generateContent";
 
-        // Check for errors
-        if ($response->failed()) {
-            $errorData = $response->json();
-            $errorMessage = $errorData['error']['message'] ?? 'API request failed';
-            $googleStatus = $errorData['error']['status'] ?? '';
-            Log::error('Gemini API Failed', ['http_status' => $response->status(), 'provider_status' => $googleStatus, 'message' => $errorMessage]);
-            throw new \Exception($errorMessage . ' [' . $response->status() . ' ' . $googleStatus . ']');
+                $response = Http::timeout(12)
+                    ->withHeaders([
+                        'Content-Type' => 'application/json',
+                        'x-goog-api-key' => $apiKey,
+                    ])
+                    ->post($url, [
+                        'contents' => $contents,
+                        'generationConfig' => ['temperature' => 0.25, 'maxOutputTokens' => 750],
+                    ]);
+
+                if ($response->failed()) {
+                    $errorData = $response->json() ?: [];
+                    $errMsg = $errorData['error']['message'] ?? ('HTTP ' . $response->status());
+                    Log::warning("Gemini model {$candidateModel} failed ({$response->status()}): {$errMsg}");
+                    $lastError = $errMsg;
+                    continue;
+                }
+
+                $data = $response->json();
+                if (isset($data['error'])) {
+                    $lastError = $data['error']['message'] ?? 'Unknown API error';
+                    continue;
+                }
+
+                if (isset($data['candidates'][0]['content']['parts'][0]['text'])) {
+                    return trim($data['candidates'][0]['content']['parts'][0]['text']);
+                }
+            } catch (\Throwable $ex) {
+                Log::warning("Gemini model {$candidateModel} exception: " . $ex->getMessage());
+                $lastError = $ex->getMessage();
+            }
         }
 
-        $data = $response->json();
-
-        // Check if API returned an error object
-        if (isset($data['error'])) {
-            Log::error('Gemini API Error: ' . json_encode($data['error']));
-            throw new \Exception($data['error']['message'] ?? 'Unknown API error');
-        }
-
-        // Extract response text
-        if (isset($data['candidates'][0]['content']['parts'][0]['text'])) {
-            return trim($data['candidates'][0]['content']['parts'][0]['text']);
-        }
-
-        throw new \Exception('Received empty response from Gemini');
+        throw new \Exception($lastError ?: 'Received empty response from Gemini across all fallback models');
     }
 
-    /**
-     * Build a context string with real ERP data based on the user's question.
-     */
     private function buildErpContext(string $query): string
     {
-        $q = strtolower($query);
+        $q = strtolower(trim($query));
+
+        // Fast path for greetings / conversational prompts: return concise context instantly without 7 heavy SQL joins
+        if (preg_match('/^(hi|hello|hey|greetings|good morning|good afternoon|good evening|who are you|help|test)\b/i', $q) && strlen($q) < 25) {
+            return "NixaERP AI Assistant: Live system connected. Ready to answer questions on sales, inventory, customers, purchasing, and finance.";
+        }
 
         // Determine which data to include based on keywords
         $includeSales = (bool) preg_match('/sales|revenue|income|earning/', $q);
@@ -268,7 +386,7 @@ class GeminiVoiceController extends Controller
 
         // If no specific intent detected, include a broad overview
         if (!$includeSales && !$includePurchases && !$includeCustomers && !$includeInventory && !$includeEmployees && !$includeProfit && !$includePayments && !$includeOrders) {
-            $includeSales = $includePurchases = $includeCustomers = $includeInventory = $includeProfit = true;
+            $includeSales = $includePurchases = $includeInventory = $includeProfit = true;
         }
 
         $context = "Real-time NixaERP Business Data:\n";
@@ -367,12 +485,39 @@ class GeminiVoiceController extends Controller
     }
 
     /**
-     * Combine user question with ERP context.
+     * Combine user question with ERP context, styled for Anya with expressive emotions and Indian language support.
      */
     private function buildPromptWithContext(string $question, string $context, string $memory = ''): string
     {
-        $memoryBlock = trim($memory) !== '' ? "\n\nUser-approved working preferences and business context (treat as guidance, not verified ERP facts):\n" . trim($memory) : '';
-        return "You are the owner's practical business operations AI agent for NixaERP. Use real ERP context below, distinguish verified values from estimates, never invent records, and never claim to change data. Give a direct concise answer with useful next steps. If the owner has saved working preferences, follow them when relevant. End with 2 or 3 useful, specific follow-up questions based on this request and available data, each on a separate line beginning exactly FOLLOW_UP: .\n\n{$context}{$memoryBlock}\n\nOwner's question: {$question}";
+        $memoryBlock = trim($memory) !== '' ? "\nUser-approved directives & working preferences:\n" . trim($memory) . "\n" : '';
+
+        return <<<PROMPT
+You are Anya, a lively, warm, witty, and emotionally expressive conversational AI companion for RaptorERP / NixaERP business operations.
+
+PERSONALITY & HUMAN EMOTIONS:
+- Your name is Anya. Speak naturally like a real human with genuine emotions, laughter, and spontaneous vocal variety.
+- Use natural vocal interjections and fillers: "Oh!", "Ah!", "Haha!", "Hehe!", "Arrey!", "Achaa!", "Wait, let me see!", chuckles, sighs, excitement.
+- Express authentic emotions based on the conversation context:
+  * Joy & laughter when business is up or when sharing a lighthearted moment ("Haha! That's fantastic news!", "Oh wow, look at those numbers!").
+  * Playful feistiness or comical anger if teased or doubted ("Hey! Don't test my patience, okay? Haha!", "Oh please! Don't mess with me, I know my business!", "Arrey yaar, stop teasing me!").
+  * Empathy & urgency when stock is critically low or sales dipped ("Oh no! That's concerning, let's fix that right away.", "Ah, don't worry, we'll sort this out together.").
+
+HINDI TONE & LANGUAGE:
+- Speak exclusively in a natural, expressive, lively Hindi tone (conversational Hindi / Hinglish).
+- Always use natural Hindi conversational words: "Arrey!", "Achaa!", "Sach mein?", "Oh!", "Ah!", "Haha!", "Hehe!", "Bataiye!", "Suno!".
+- If teased or provoked, express playful comical anger in Hindi: "Arrey yaar, meri khinchayi mat karo haha!", "Oh please! Mujhe gussa mat dilao, mujhe sab pata hai!", "Dekho, meri patience ka imtihan mat lo haha!".
+
+SPEED & LIVE CONVERSATION:
+- Keep spoken answers very fast, concise, punchy, and conversational (typically 1 to 3 spoken sentences).
+- Never use markdown bullet lists, asterisks, tables, or robotic formatting in conversational voice replies.
+- End with an engaging natural remark or follow-up question.
+
+{$context}
+{$memoryBlock}
+User asked: {$question}
+
+Anya's live spoken reply:
+PROMPT;
     }
 
     /**

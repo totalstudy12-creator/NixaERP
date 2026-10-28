@@ -35,7 +35,7 @@ class AiController extends Controller
         }
 
         try {
-            $lowStock = \App\Models\Product::whereRaw('stock_quantity <= minimum_stock')
+            $lowStock = \App\Models\Product::whereRaw('stock_quantity <= COALESCE(reorder_level, 10)')
                 ->limit(10)
                 ->get(['id', 'name', 'stock_quantity']);
         } catch (\Throwable $e) {
@@ -62,11 +62,37 @@ class AiController extends Controller
         $settings = \App\Models\Setting::whereIn('key', ['ai_gemini_api_key', 'ai_gemini_model'])
             ->pluck('value', 'key');
 
+        $apiKey = null;
+        if (!empty($settings['ai_gemini_api_key'])) {
+            try { $apiKey = Crypt::decryptString($settings['ai_gemini_api_key']); } catch (\Throwable $e) {}
+        }
+
+        if (!$apiKey) {
+            $provider = \App\Models\AiProvider::where('enabled', true)->first();
+            if ($provider && !empty($provider->key) && !str_starts_with((string)$provider->key, 'eyJpdiI6Ik')) {
+                $apiKey = $provider->key;
+            }
+        }
+
+        $configured = !empty($apiKey) || !empty(env('GEMINI_API_KEY'));
+        $model = $settings['ai_gemini_model'] ?? null;
+        if (!$model) {
+            $provider = \App\Models\AiProvider::where('enabled', true)->first();
+            $model = $provider?->config['model'] ?? env('GEMINI_MODEL', 'gemini-3.5-flash');
+        }
+
+        $maskedKey = null;
+        if ($apiKey) {
+            $maskedKey = substr($apiKey, 0, 6) . '...' . substr($apiKey, -4);
+        }
+
         return response()->json([
             'success' => true,
             'data' => [
-                'configured' => !empty($settings['ai_gemini_api_key']),
-                'model' => $settings['ai_gemini_model'] ?: 'gemini-2.5-flash',
+                'configured' => $configured,
+                'model' => $model ?: 'gemini-3.5-flash',
+                'masked_key' => $maskedKey,
+                'has_db_key' => !empty($apiKey),
             ],
         ]);
     }
@@ -78,65 +104,94 @@ class AiController extends Controller
             'model'   => 'required|string|max:100',
         ]);
 
-        foreach ([
-            'ai_gemini_api_key' => Crypt::encryptString(trim($validated['api_key'])),
-            'ai_gemini_model'   => $validated['model'],
-        ] as $key => $value) {
-            \App\Models\Setting::updateOrCreate(
-                ['key' => $key],
-                [
-                    'value'       => $value,
-                    'group'       => 'ai',
-                    'description' => 'Encrypted server-side Gemini configuration for AI assistant.',
-                    'is_public'   => false,
-                ]
-            );
-        }
+        $rawKey = trim($validated['api_key']);
+        $model  = trim($validated['model']);
+
+        // 1. Save in settings table
+        \App\Models\Setting::updateOrCreate(
+            ['key' => 'ai_gemini_api_key'],
+            [
+                'value'       => Crypt::encryptString($rawKey),
+                'group'       => 'ai',
+                'description' => 'Encrypted server-side Gemini configuration for AI assistant.',
+                'is_public'   => false,
+            ]
+        );
+        \App\Models\Setting::updateOrCreate(
+            ['key' => 'ai_gemini_model'],
+            [
+                'value'       => $model,
+                'group'       => 'ai',
+                'description' => 'Gemini model selection in Database.',
+                'is_public'   => false,
+            ]
+        );
+
+        // 2. Synchronize to ai_providers table (primary provider)
+        $aiProvider = \App\Models\AiProvider::firstOrNew(['id' => 1]);
+        $aiProvider->name = 'Google Gemini';
+        $aiProvider->key = $rawKey;
+        $aiProvider->config = [
+            'type'  => 'gemini',
+            'model' => $model,
+        ];
+        $aiProvider->enabled = true;
+        $aiProvider->save();
 
         return response()->json([
             'success' => true,
-            'data' => ['configured' => true, 'model' => $validated['model']],
+            'message' => 'AI settings saved directly to database successfully.',
+            'data' => [
+                'configured' => true,
+                'model'      => $model,
+                'masked_key' => substr($rawKey, 0, 6) . '...' . substr($rawKey, -4),
+            ],
         ]);
     }
 
-    /**
-     * Test a Gemini key + model combination.
-     *
-     * Handles all the ways Gemini can return HTTP 200 while producing no visible
-     * text (thinking budget exhaustion, safety blocks, recitation, empty parts).
-     */
     public function testAssistantConfig(Request $request)
     {
-        $validated = $request->validate([
-            'api_key' => 'required|string|min:20|max:500',
-            'model'   => 'required|string|max:100|regex:/^[a-zA-Z0-9._-]+$/',
-        ]);
+        $rawKey = trim((string) $request->input('api_key', ''));
+        $model  = trim((string) $request->input('model', 'gemini-3.5-flash'));
 
-        $apiKey = trim($validated['api_key']);
-        $model  = trim($validated['model']);
+        // If key was not typed, load active key from database!
+        if (empty($rawKey)) {
+            $savedKey = \App\Models\Setting::where('key', 'ai_gemini_api_key')->value('value');
+            if ($savedKey) {
+                try { $rawKey = Crypt::decryptString($savedKey); } catch (\Throwable $e) {}
+            }
+            if (empty($rawKey)) {
+                $p = \App\Models\AiProvider::where('enabled', true)->first();
+                if ($p && !empty($p->key) && !str_starts_with((string)$p->key, 'eyJpdiI6Ik')) {
+                    $rawKey = $p->key;
+                }
+            }
+            if (empty($rawKey)) {
+                $rawKey = env('GEMINI_API_KEY');
+            }
+        }
+
+        if (empty($rawKey)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No Gemini API key provided or saved in database. Please enter a key.',
+            ], 422);
+        }
 
         $url = 'https://generativelanguage.googleapis.com/v1beta/models/'
             . rawurlencode($model)
             . ':generateContent';
 
-        // Baseline config — plenty of headroom so thinking passes cannot starve
-        // the visible answer.
         $generationConfig = [
             'temperature'     => 0,
             'maxOutputTokens' => 512,
         ];
 
-        // Gemini 2.5+ supports an explicit thinking budget. Turn it off for this
-        // connectivity probe so every token goes to visible output.
-        if (preg_match('/2\.5|2\.0|3\./', $model)) {
-            $generationConfig['thinkingConfig'] = ['thinkingBudget' => 0];
-        }
-
         try {
             $response = Http::timeout(30)
                 ->withHeaders([
                     'Content-Type'   => 'application/json',
-                    'x-goog-api-key' => $apiKey,
+                    'x-goog-api-key' => $rawKey,
                 ])
                 ->post($url, [
                     'contents' => [[
@@ -149,84 +204,36 @@ class AiController extends Controller
             $status = $response->status();
             $body   = $response->json() ?: [];
 
-            // ---- Non-2xx: translate provider status codes -------------------
+            if ($status === 429) {
+                $googleMsg = (string) data_get($body, 'error.message', '');
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Gemini Quota Exceeded (429): Free tier limit reached. Please enter a new key in Settings → AI or upgrade billing. ' . $googleMsg,
+                    'error_code' => 'QUOTA_EXCEEDED',
+                ], 422);
+            }
+
             if (!$response->successful()) {
                 $googleMessage = (string) data_get($body, 'error.message', '');
-
                 $message = match ($status) {
-                    400 => 'Gemini rejected the request. Check the selected model name and model access. ' . $googleMessage,
-                    401, 403 => 'Gemini rejected this API key or the key lacks permission for this model. Check the key and Google AI Studio project access. ' . $googleMessage,
-                    404 => 'The selected Gemini model was not found or is unavailable to this project. Select a model listed for your API key. ' . $googleMessage,
-                    429 => 'Gemini provider quota or rate limit reached. Check quota and billing for the Google AI Studio project, then retry.',
-                    default => 'Gemini connection failed (HTTP ' . $status . '). ' . $googleMessage,
+                    400 => 'Gemini rejected the request: ' . $googleMessage,
+                    401, 403 => 'Gemini rejected this API key: ' . $googleMessage,
+                    404 => 'Model ' . $model . ' not found on Google API: ' . $googleMessage,
+                    default => 'Gemini connection failed (HTTP ' . $status . '): ' . $googleMessage,
                 };
 
                 return response()->json(['success' => false, 'message' => $message], 422);
             }
 
-            // ---- 2xx but provider returned an error object ------------------
-            if (isset($body['error'])) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Gemini error: '
-                        . (string) data_get($body, 'error.message', 'Unknown error'),
-                ], 422);
-            }
-
-            // ---- Prompt-level blocking (safety, recitation, etc.) -----------
-            $blockReason = (string) data_get($body, 'promptFeedback.blockReason', '');
-            if ($blockReason !== '') {
-                return response()->json([
-                    'success' => false,
-                    'message' => "Gemini blocked this request ({$blockReason}). Adjust the prompt or safety settings.",
-                ], 422);
-            }
-
-            // ---- Walk every part and skip thought-only parts ----------------
-            $candidate    = data_get($body, 'candidates.0');
-            $finishReason = (string) data_get($candidate, 'finishReason', '');
-            $parts        = (array) data_get($candidate, 'content.parts', []);
-
-            $text = '';
-            foreach ($parts as $part) {
-                if (!is_array($part)) {
-                    continue;
-                }
-                // Thinking models can emit a `thought: true` part with the hidden
-                // reasoning trace. Ignore it — we only want user-visible text.
-                if (!empty($part['thought'])) {
-                    continue;
-                }
-                if (isset($part['text']) && is_string($part['text'])) {
-                    $text .= $part['text'];
-                }
-            }
-            $text = trim($text);
-
-            if ($text !== '') {
-                return response()->json([
-                    'success' => true,
-                    'message' => 'Gemini key and selected model can generate a response.',
-                    'sample'  => $text,
-                ]);
-            }
-
-            // ---- HTTP 200 but no visible text — explain precisely -----------
-            $message = match ($finishReason) {
-                'SAFETY'      => 'Gemini blocked the reply due to its safety filters. Try a different prompt or model.',
-                'RECITATION'  => 'Gemini declined to answer (recitation). Try a different prompt.',
-                'MAX_TOKENS'  => 'Gemini used all output tokens before producing visible text. This usually happens with thinking models — increase maxOutputTokens or pick a non-thinking model such as gemini-1.5-flash.',
-                'OTHER'       => 'Gemini stopped for an unspecified reason before producing text.',
-                ''            => 'Gemini returned an empty response. The model may be a thinking variant that consumed its budget on reasoning. Try gemini-2.5-flash with thinking disabled, or gemini-1.5-flash.',
-                default       => "Gemini returned an empty response (finishReason: {$finishReason}).",
-            };
-
-            return response()->json(['success' => false, 'message' => $message], 422);
+            return response()->json([
+                'success' => true,
+                'message' => 'Gemini API key and model (' . $model . ') connected successfully.',
+            ]);
         } catch (\Throwable $e) {
             Log::warning('Gemini settings connection check failed: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
-                'message' => 'Could not reach Google Gemini. Check the server network connection and retry.',
+                'message' => 'Could not reach Google Gemini: ' . $e->getMessage(),
             ], 503);
         }
     }
@@ -234,15 +241,128 @@ class AiController extends Controller
     public function clearAssistantConfig()
     {
         \App\Models\Setting::whereIn('key', ['ai_gemini_api_key', 'ai_gemini_model'])->delete();
-        return response()->json(['success' => true]);
+        $provider = \App\Models\AiProvider::find(1);
+        if ($provider) {
+            $provider->enabled = false;
+            $provider->save();
+        }
+        return response()->json(['success' => true, 'message' => 'AI database configuration cleared.']);
+    }
+
+    /**
+     * Convert PCM 16-bit 24kHz audio to standard WAV format.
+     */
+    public static function pcmToWav(string $pcmData, int $sampleRate = 24000, int $channels = 1, int $bitsPerSample = 16): string
+    {
+        $byteRate = $sampleRate * $channels * ($bitsPerSample / 8);
+        $blockAlign = $channels * ($bitsPerSample / 8);
+        $dataLength = strlen($pcmData);
+        $chunkSize = 36 + $dataLength;
+
+        $header = pack('a4Va4a4VvvVVvva4V',
+            'RIFF',
+            $chunkSize,
+            'WAVE',
+            'fmt ',
+            16,
+            1,
+            $channels,
+            $sampleRate,
+            $byteRate,
+            $blockAlign,
+            $bitsPerSample,
+            'data',
+            $dataLength
+        );
+
+        return $header . $pcmData;
+    }
+
+    /**
+     * Generate natural speech using Google Gemini TTS (gemini-2.5-flash-preview-tts).
+     * Returns standard base64 WAV audio.
+     */
+    public static function generateGeminiSpeech(string $text, string $voice = 'Aoede'): ?string
+    {
+        $rawKey = \App\Models\Setting::where('key', 'ai_gemini_api_key')->value('value') ?? env('GEMINI_API_KEY');
+        if (!$rawKey) {
+            $provider = \App\Models\AiProvider::find(1);
+            $rawKey = $provider?->key;
+        }
+
+        if (!$rawKey) {
+            return null;
+        }
+
+        try {
+            $apiKey = \Illuminate\Support\Facades\Crypt::decryptString($rawKey);
+        } catch (\Throwable $e) {
+            $apiKey = $rawKey;
+        }
+
+        $validVoices = ['Aoede', 'Kore', 'Puck', 'Fenrir', 'Charon'];
+        $selectedVoice = 'Aoede';
+        foreach ($validVoices as $v) {
+            if (stripos($voice, $v) !== false) {
+                $selectedVoice = $v;
+                break;
+            }
+        }
+
+        $cleanText = substr(trim(preg_replace('/[*#_`>]/', '', $text)), 0, 1500);
+        if ($cleanText === '') {
+            return null;
+        }
+
+        $url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=' . rawurlencode($apiKey);
+        $payload = [
+            'contents' => [
+                [
+                    'role' => 'user',
+                    'parts' => [
+                        ['text' => $cleanText],
+                    ],
+                ],
+            ],
+            'generationConfig' => [
+                'responseModalities' => ['AUDIO'],
+                'speechConfig' => [
+                    'voiceConfig' => [
+                        'prebuiltVoiceConfig' => [
+                            'voiceName' => $selectedVoice,
+                        ],
+                    ],
+                ],
+            ],
+        ];
+
+        try {
+            $response = Http::withoutVerifying()->timeout(15)->post($url, $payload);
+            if ($response->successful()) {
+                $data = $response->json();
+                $rawBase64 = data_get($data, 'candidates.0.content.parts.0.inlineData.data');
+                if ($rawBase64) {
+                    $rawPcm = base64_decode($rawBase64);
+                    $wav = self::pcmToWav($rawPcm, 24000);
+                    return base64_encode($wav);
+                }
+            } else {
+                Log::warning('Gemini TTS API error: ' . $response->body());
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Gemini TTS call exception: ' . $e->getMessage());
+        }
+
+        return null;
     }
 
     public function voice(Request $request)
     {
         $request->validate([
-            'text'     => 'required|string|max:3000',
-            'provider' => 'nullable|string|in:browser,cloud,auto',
-            'language' => 'nullable|string|max:20',
+            'text'       => 'required|string|max:3000',
+            'provider'   => 'nullable|string|in:browser,cloud,auto',
+            'language'   => 'nullable|string|max:20',
+            'voice_name' => 'nullable|string|max:50',
         ]);
 
         $text = trim($request->input('text'));
@@ -273,7 +393,10 @@ class AiController extends Controller
             $language = $configuredLanguage;
         }
 
-        if (in_array($provider, ['cloud', 'elevenlabs', 'auto'], true) && $paidEnabled) {
+        $voiceName = (string) $request->input('voice_name', 'Aoede');
+
+        // 1. ElevenLabs TTS if configured
+        if (in_array($provider, ['cloud', 'elevenlabs'], true) && $paidEnabled) {
             $apiKey  = trim((string) ($settings['elevenlabs_api_key']  ?? env('ELEVENLABS_API_KEY', '')));
             $voiceId = trim((string) ($settings['elevenlabs_voice_id'] ?? env('ELEVENLABS_VOICE_ID', 'EXAVITQu4vr4xnSDxMaL')));
             $modelId = trim((string) ($settings['elevenlabs_model_id'] ?? env('ELEVENLABS_MODEL_ID', 'eleven_multilingual_v2')));
@@ -313,6 +436,24 @@ class AiController extends Controller
                 } catch (\Throwable $e) {
                     Log::warning('ElevenLabs TTS exception: ' . $e->getMessage());
                 }
+            }
+        }
+
+        // 2. Google Gemini Native TTS (Crystal clear, ultra-low latency, built into Google Gemini Key)
+        if (in_array($provider, ['cloud', 'gemini', 'auto'], true)) {
+            $wavBase64 = self::generateGeminiSpeech($text, $voiceName);
+            if ($wavBase64) {
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'source'       => 'cloud',
+                        'provider'     => 'gemini-tts',
+                        'voice'        => $voiceName,
+                        'language'     => $language,
+                        'mime_type'    => 'audio/wav',
+                        'audio_base64' => $wavBase64,
+                    ],
+                ]);
             }
         }
 
@@ -367,7 +508,7 @@ class AiController extends Controller
         $context['profit_loss_report'] = $this->contextService->getFinancialContextForQuery($message, $user?->company_id, $user?->branch_id);
 
         try {
-            $context['inventory_sample'] = \App\Models\Product::limit(15)->get(['id', 'name', 'sku', 'barcode', 'stock_quantity', 'minimum_stock', 'sale_price', 'cost_price'])->toArray();
+            $context['inventory_sample'] = \App\Models\Product::limit(15)->get(['id', 'name', 'sku', 'barcode', 'stock_quantity', 'reorder_level', 'sale_price', 'purchase_price'])->toArray();
         } catch (\Throwable $e) {
             $context['inventory_sample'] = [];
         }
@@ -377,7 +518,7 @@ class AiController extends Controller
             'inventory_auditor' => 'You are the Nexa WMS Inventory & Cycle Audit Agent. You specialize in verifying physical stocks, detecting bin discrepancies, tracking shelf variances, and auditing warehouse bays.',
             'reorder_specialist' => 'You are the Nexa WMS Purchasing & Restock Agent. You analyze low-stock items against minimum thresholds, suggest restock quantities, calculate reorder costs, and prepare Purchase Order drafts.',
             'dispatch_coordinator' => 'You are the Nexa WMS Logistics & Dispatch Coordinator. You optimize pick-pack routes, bay staging, shipping thermal labels, and warehouse transfer orders.',
-            default => 'You are the Nexa WMS Senior Operations AI Copilot. You assist warehouse operators and managers with live stock status, cycle counts, stock in/out, bin locations, and barcode printing.',
+            default => 'You are Anya, an emotionally expressive, warm, and witty conversational AI companion for RaptorERP/NixaERP business operations. Speak exclusively in a natural, lively Hindi tone (conversational Hindi / Hinglish). Speak naturally like a real human with genuine emotions, laughter (Haha!, Hehe!), expressive interjections (Oh!, Ah!, Arrey!, Achaa!), empathy, and playful feistiness or comical anger in Hindi if teased (Arrey yaar, mujhe gussa mat dilao haha!). Keep responses fast, concise, punchy, and conversational.',
         };
 
         $providerId = $request->input('provider_id');
@@ -406,7 +547,7 @@ class AiController extends Controller
                     'key'     => $configuredKey,
                     'config'  => [
                         'type'  => 'gemini',
-                        'model' => $settings['ai_gemini_model'] ?: 'gemini-2.5-flash',
+                        'model' => $settings['ai_gemini_model'] ?: 'gemini-3.5-flash',
                     ],
                     'enabled' => true,
                 ]);

@@ -579,6 +579,9 @@ class InvoiceController extends Controller
 
             'status' => 'nullable|string|max:50',
 
+            'auto_deduct_stock' => 'nullable|boolean',
+            'warehouse_id' => 'nullable|integer|exists:warehouses,id',
+
             'items' => 'required|array|min:1',
 
             'items.*.product_id' => 'required|exists:products,id',
@@ -624,6 +627,12 @@ class InvoiceController extends Controller
             $data['status'] = 'issued';
         }
 
+        $autoDeductStock = isset($data['auto_deduct_stock'])
+            ? (bool) $data['auto_deduct_stock']
+            : true;
+        $explicitWarehouseId = ! empty($data['warehouse_id']) ? (int) $data['warehouse_id'] : null;
+        unset($data['auto_deduct_stock'], $data['warehouse_id']);
+
         $actorId    = Auth::id();
         $actorUser  = Auth::user();
         $actorName  = $actorUser?->name;
@@ -631,6 +640,8 @@ class InvoiceController extends Controller
 
         return DB::transaction(function () use (
             $data,
+            $autoDeductStock,
+            $explicitWarehouseId,
             $actorId,
             $actorName,
             $actorEmail
@@ -755,9 +766,9 @@ class InvoiceController extends Controller
                 'total_amount' => round($grandTotal, 2),
             ]);
 
-            if (! in_array($invoice->status, ['draft', 'cancelled'], true)) {
+            if ($autoDeductStock && ! in_array($invoice->status, ['draft', 'cancelled'], true)) {
                 $invoice->load('items');
-                $this->deductInvoiceStock($invoice);
+                $this->deductInvoiceStock($invoice, $explicitWarehouseId);
             }
 
             Log::info(

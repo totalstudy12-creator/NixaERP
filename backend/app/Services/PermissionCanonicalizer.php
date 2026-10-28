@@ -887,6 +887,8 @@ class PermissionCanonicalizer
         // --- AI & Marketing ---
         'view ai assistant insights'    => 'ai.assistant.view',
         'chat with ai'                  => 'ai.assistant.view',
+        'chat with ai assistant'        => 'ai.assistant.view',
+        'chat with ai agent'            => 'ai.assistant.view',
     ];
 
     /**

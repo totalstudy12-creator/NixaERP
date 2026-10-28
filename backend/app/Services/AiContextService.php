@@ -27,7 +27,7 @@ class AiContextService
     public function getLowStockProducts($limit = 10)
     {
         try {
-            return \App\Models\Product::whereRaw('stock_quantity <= minimum_stock')->limit($limit)->get(['id','name','stock_quantity'])->toArray();
+            return \App\Models\Product::whereRaw('stock_quantity <= COALESCE(reorder_level, 10)')->limit($limit)->get(['id','name','stock_quantity'])->toArray();
         } catch (\Throwable $e) {
             Log::warning('AiContextService.getLowStockProducts failed: ' . $e->getMessage());
             return [];

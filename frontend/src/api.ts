@@ -1915,12 +1915,14 @@ export const apiClient = {
   async generateAiSpeech(
     text: string,
     provider: 'browser' | 'cloud' | 'auto' = 'auto',
-    language = 'en-US'
+    language = 'en-US',
+    voice_name?: string
   ) {
     return this.request('POST', '/ai/assistant/voice', {
       text,
       provider,
       language,
+      voice_name,
     });
   },
 
@@ -2297,6 +2299,32 @@ export const apiClient = {
     return this.request('GET', '/gemini/test');
   },
 
+  async getGeminiLiveToken() {
+    return this.request('POST', '/gemini/live-token');
+  },
+
+  // Add inside the apiClient object in api.ts
+
+  // ---------------------------------------------------------------------------
+  // VOICE AI CONVERSATION (New Endpoints)
+  // ---------------------------------------------------------------------------
+
+  async voiceConverse(payload: {
+    message?: string;
+    audioBase64?: string;
+    audioMime?: string;
+    voice?: string;
+    persona?: string;
+    chatHistory?: Array<{ role: string; content: string }>;
+  }) {
+    return this.request('POST', '/voice-converse', payload);
+  },
+
+  async transcribeAudio(audioBase64: string, mimeType: string = 'audio/webm') {
+    return this.request('POST', '/transcribe', { audioBase64, mimeType });
+  },
+
+
   // ---------------------------------------------------------------------------
   // AUTOMATION
   // ---------------------------------------------------------------------------
@@ -2358,6 +2386,39 @@ export const apiClient = {
 
   async cancelWmsTransfer(id: number, reason?: string) {
     return this.request('POST', `/wms/transfers/${id}/cancel`, { reason });
+  },
+
+  // ---------------------------------------------------------------------------
+  // CONNECTED APPS (Flutter & Mobile App Management)
+  // ---------------------------------------------------------------------------
+
+  async getConnectedApps(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/connected-apps${query}`);
+  },
+
+  async getConnectedApp(id: number) {
+    return this.request('GET', `/connected-apps/${id}`);
+  },
+
+  async createConnectedApp(data: any) {
+    return this.request('POST', '/connected-apps', data);
+  },
+
+  async updateConnectedApp(id: number, data: any) {
+    return this.request('PUT', `/connected-apps/${id}`, data);
+  },
+
+  async deleteConnectedApp(id: number) {
+    return this.request('DELETE', `/connected-apps/${id}`);
+  },
+
+  async regenerateAppToken(id: number) {
+    return this.request('POST', `/connected-apps/${id}/regenerate-token`);
+  },
+
+  async getAppHandshake(identifier: string, version = '1.0.0') {
+    return this.request('GET', `/v1/apps/${encodeURIComponent(identifier)}/handshake?version=${encodeURIComponent(version)}`);
   },
 };
 

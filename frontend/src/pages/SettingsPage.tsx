@@ -45,8 +45,11 @@ import {
 import { apiClient, API_BASE } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { TwoFactorSettings } from '../features/security/TwoFactorSettings';
+import { ConnectedAppsSettings } from '../features/apps/ConnectedAppsSettings';
+import { FiSmartphone } from 'react-icons/fi';
 import { useAuthStore } from '../store/auth';
 import { getCronHealth, type CronTask } from '../services/healthService';
+import { playSpeech, playAudioBase64, primeSpeechEngine } from '../utils/audioSpeech';
 
 // -----------------------------------------------------------------------------
 // Types
@@ -111,7 +114,7 @@ interface WhatsAppConnectionStatus {
   last_error?: string | null;
 }
 
-type ActiveTab = 'settings' | 'providers' | 'printer' | 'api' | 'ai' | 'security' | 'operations';
+type ActiveTab = 'settings' | 'providers' | 'printer' | 'applications' | 'api' | 'ai' | 'security' | 'operations';
 
 interface AiConfig {
   provider: 'gemini';
@@ -354,7 +357,10 @@ const DEFAULT_PRINTER_SETTINGS = {
   printer_bluetooth_device_id: '',
   printer_last_connected: '',
   printer_is_connected: 'false',
+  printer_one_click_print: 'false',
 };
+
+const PRINTER_STORAGE_KEY = 'nixa_connected_printer_config';
 
 // -----------------------------------------------------------------------------
 // Skeletons
@@ -481,6 +487,7 @@ export function SettingsPage() {
   const [aiTesting, setAiTesting] = useState(false);
   const [aiTestResult, setAiTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [aiServerConfigured, setAiServerConfigured] = useState(false);
+  const [aiMaskedKey, setAiMaskedKey] = useState<string | null>(null);
   const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
   const [cronLoading, setCronLoading] = useState(false);
   const [cronError, setCronError] = useState('');
@@ -594,6 +601,9 @@ export function SettingsPage() {
       setAiServerConfigured(Boolean(data?.configured));
       if (typeof data?.model === 'string') {
         setAiConfig((previous) => ({ ...previous, selectedModel: data.model }));
+      }
+      if (typeof data?.masked_key === 'string') {
+        setAiMaskedKey(data.masked_key);
       }
     }).catch(() => setAiServerConfigured(false));
   }, [canAiView]);
@@ -1073,7 +1083,7 @@ export function SettingsPage() {
     }
 
     try {
-      await apiClient.request('PUT', '/ai/assistant/config', {
+      const res: any = await apiClient.request('PUT', '/ai/assistant/config', {
         api_key: trimmedKey,
         model: trimmedModel,
       });
@@ -1083,9 +1093,14 @@ export function SettingsPage() {
         }));
       } catch { /* server-side assistant config has already been saved */ }
       setAiServerConfigured(true);
+      if (res?.data?.masked_key) {
+        setAiMaskedKey(res.data.masked_key);
+      } else {
+        setAiMaskedKey(trimmedKey.slice(0, 6) + '...' + trimmedKey.slice(-4));
+      }
       showSuccess(
-        'AI settings saved',
-        'The AI business assistant is ready. The purchase scanner keeps its browser-side key copy.'
+        'AI settings saved to Database',
+        'Gemini key and model saved in database. All AI chat, voice, and agents are updated.'
       );
     } catch (error: any) {
       showError('Save failed', error?.backendMessage || error?.message || 'Unable to save server-side AI settings.');
@@ -1117,6 +1132,7 @@ export function SettingsPage() {
     }
     setAiConfig(DEFAULT_AI_CONFIG);
     setAiServerConfigured(false);
+    setAiMaskedKey(null);
     setAiTestResult(null);
     setShowAiKey(false);
     showSuccess('AI settings cleared', 'The stored API key has been removed.');
@@ -1129,7 +1145,7 @@ export function SettingsPage() {
     }
 
     const trimmedKey = aiConfig.apiKey.trim();
-    if (!trimmedKey) {
+    if (!trimmedKey && !aiServerConfigured) {
       showError('Missing API key', 'Enter a Gemini API key first.');
       return;
     }
@@ -1191,6 +1207,7 @@ export function SettingsPage() {
     const tabs: ActiveTab[] = [];
     if (canViewSettings) tabs.push('settings');
     if (canPrinterView) tabs.push('printer');
+    if (canViewSettings) tabs.push('applications');
     if (canAiView) tabs.push('ai');
     if (canApiView) tabs.push('api');
     if (canSecurityView) tabs.push('security');
@@ -1426,6 +1443,7 @@ export function SettingsPage() {
 
   const testVoiceConnection = useCallback(async () => {
     if (!canVoiceView) return;
+    primeSpeechEngine();
     setVoiceTestMessage('Testing configured speech provider…');
     try {
       // Normalise the stored provider setting into a value the API accepts.
@@ -1442,21 +1460,38 @@ export function SettingsPage() {
       const source = payload?.source || payload?.provider || 'unknown';
       setVoiceTestMessage(
         source === 'cloud'
-          ? 'ElevenLabs voice API responded successfully.'
-          : `Speech API responded using ${source} voice.`
+          ? 'ElevenLabs voice API responded successfully. Playing test audio…'
+          : `Speech API responded using ${source} voice. Playing test audio…`
       );
       showSuccess(
         'Voice connection ready',
         source === 'cloud'
-          ? 'ElevenLabs returned audio successfully.'
-          : `Using ${source} speech output.`
+          ? 'ElevenLabs returned audio successfully. Playing sound…'
+          : `Using ${source} speech output. Playing sound…`
       );
+
+      // Audibly play the test speech through physical speakers
+      if (payload?.audio_base64) {
+        try {
+          await playAudioBase64(payload.audio_base64, payload.mime_type || 'audio/mpeg');
+        } catch {
+          playSpeech('Your business assistant is ready.', {
+            lang: voiceConfig.voice_default_language || 'en-US',
+            rate: Number(voiceConfig.voice_speed) || 1.0,
+          });
+        }
+      } else {
+        playSpeech('Your business assistant is ready.', {
+          lang: voiceConfig.voice_default_language || 'en-US',
+          rate: Number(voiceConfig.voice_speed) || 1.0,
+        });
+      }
     } catch (error: any) {
       const message = error?.backendMessage || error?.message || 'Voice provider test failed.';
       setVoiceTestMessage(message);
       showError('Voice test failed', message);
     }
-  }, [canVoiceView, voiceConfig.voice_tts_provider, voiceConfig.voice_default_language, showSuccess, showError]);
+  }, [canVoiceView, voiceConfig.voice_tts_provider, voiceConfig.voice_default_language, voiceConfig.voice_speed, showSuccess, showError]);
 
   // ---------------------------------------------------------------------------
   // Printer
@@ -1561,6 +1596,7 @@ export function SettingsPage() {
           printer_bluetooth_device_name: device.name || 'Unknown Printer',
           printer_last_connected: new Date().toISOString(),
         }));
+        try { localStorage.setItem(PRINTER_STORAGE_KEY, JSON.stringify({ ...printerSettings, printer_is_connected: 'true', printer_bluetooth_device_id: device.id, printer_bluetooth_device_name: device.name || 'Unknown Printer', printer_last_connected: new Date().toISOString() })); } catch {}
         showSuccess('Connected', `Connected to ${device.name || 'printer'}.`);
       } catch (err: unknown) {
         const errorObject = err as { message?: string };
@@ -2380,6 +2416,78 @@ export function SettingsPage() {
               )}
             </div>
 
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-cyan-200 bg-cyan-50/60 p-4">
+              <label className="flex items-center gap-2.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={printerSettings.printer_one_click_print === 'true'}
+                  onChange={(e) => {
+                    const updated = {
+                      ...printerSettings,
+                      printer_one_click_print: e.target.checked ? 'true' : 'false',
+                    };
+                    setPrinterSettings(updated);
+                    try { localStorage.setItem(PRINTER_STORAGE_KEY, JSON.stringify(updated)); } catch {}
+                  }}
+                  className="h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+                />
+                <div>
+                  <span className="text-xs font-bold text-slate-800 sm:text-sm">One-Click Direct Printout</span>
+                  <p className="text-[11px] text-slate-500">Bypass print format previews and print directly with 1 click on checkout.</p>
+                </div>
+              </label>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const format = printerSettings.printer_default_format || 'A4';
+                  const pw = window.open('', '_blank', 'width=420,height=600');
+                  if (pw) {
+                    pw.document.write(`
+                      <html>
+                        <head>
+                          <title>Printer Test Receipt</title>
+                          <style>
+                            body { font-family: monospace; font-size: ${format === '58mm' ? '11px' : format === '80mm' ? '12px' : '14px'}; padding: 12px; max-width: ${format === '58mm' ? '58mm' : format === '80mm' ? '80mm' : '100%'}; margin: 0 auto; }
+                            .center { text-align: center; }
+                            .border { border-top: 1px dashed #333; border-bottom: 1px dashed #333; padding: 6px 0; margin: 8px 0; }
+                            .row { display: flex; justify-content: space-between; margin: 2px 0; }
+                          </style>
+                        </head>
+                        <body>
+                          <div class="center">
+                            <h3>NIXA ERP</h3>
+                            <p>PRINTER HARDWARE TEST</p>
+                          </div>
+                          <div class="border">
+                            <div class="row"><span>Format:</span><span>${format}</span></div>
+                            <div class="row"><span>Mode:</span><span>${printerSettings.printer_connection_mode}</span></div>
+                            <div class="row"><span>Device:</span><span>${printerSettings.printer_bluetooth_device_name || 'System Default'}</span></div>
+                            <div class="row"><span>Status:</span><span>READY &amp; CONNECTED</span></div>
+                            <div class="row"><span>Timestamp:</span><span>${new Date().toLocaleTimeString()}</span></div>
+                          </div>
+                          <div class="center">
+                            <p>*** TEST SUCCESSFUL ***</p>
+                            <p>v1.2.3 Production Ready</p>
+                          </div>
+                          <script>
+                            window.onload = function() {
+                              window.print();
+                              window.onafterprint = function() { window.close(); };
+                            };
+                          </script>
+                        </body>
+                      </html>
+                    `);
+                    pw.document.close();
+                  }
+                }}
+                className="flex items-center gap-1.5 rounded-xl border border-cyan-300 bg-white px-3.5 py-2 text-xs font-semibold text-cyan-800 shadow-sm hover:bg-cyan-50"
+              >
+                <FiPrinter size={14} /> Print Test Receipt
+              </button>
+            </div>
+
             <div className="mt-6 grid gap-4 md:grid-cols-2">
               <label className="text-sm text-slate-700">
                 <span className="mb-1 block font-medium">Default Print Format</span>
@@ -2621,7 +2729,7 @@ export function SettingsPage() {
                       }))
                     }
                     disabled={!canAiUpdate}
-                    placeholder="AIza…"
+                    placeholder={aiMaskedKey ? `Key saved in DB: ${aiMaskedKey} (paste new key to update)` : 'Paste Gemini API key (AIzaSy...)'}
                     autoComplete="new-password"
                     spellCheck={false}
                     className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 pr-10 font-mono text-xs outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-100 disabled:cursor-not-allowed disabled:bg-slate-100"
@@ -2654,9 +2762,16 @@ export function SettingsPage() {
               </label>
             </div>
 
-            <p className={`mt-4 rounded-lg border px-3 py-2 text-xs ${aiServerConfigured ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
-              {aiServerConfigured ? 'Business assistant AI is configured. The API key is never returned to this page.' : 'Business assistant is not configured yet. Enter a Gemini key, test it, then save.'}
-            </p>
+            <div className={`mt-4 rounded-lg border p-3 text-xs ${aiServerConfigured ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+              <div className="font-semibold mb-0.5">
+                {aiServerConfigured ? '✓ AI Configured in Database (No .env dependency)' : '⚠ AI Not Configured in Database'}
+              </div>
+              <div>
+                {aiServerConfigured
+                  ? `Active Model: ${aiConfig.selectedModel || 'gemini-3.5-flash'}${aiMaskedKey ? ` · Stored Key: ${aiMaskedKey}` : ''}. All assistant chat, voice agent, and insights load directly from database settings.`
+                  : 'Enter a Gemini key, pick a model, test the connection, and save directly to the database.'}
+              </div>
+            </div>
 
             {aiTestResult && (
               <div

@@ -17,6 +17,15 @@
     "dependencies": {
         "react-dropzone": "^16.0.0",
         "react-simple-maps": "^3.0.0",
-        "react-tooltip": "^6.0.8"
-    }
+        "react-tooltip": "^6.0.8",
+        "ws": "^8.22.0"
+    },
+    "name": "backend",
+    "version": "1.0.0",
+    "description": "This is the Laravel backend for the RaptorERP application. It exposes the ERP API, queue-based notification services, and the WhatsApp/Web Push integrations used by the frontend.",
+    "main": "vite.config.js",
+    "directories": {
+        "test": "tests"
+    },
+    "keywords": []
 }

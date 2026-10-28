@@ -23,6 +23,8 @@ class ApiRouteSecurityInventoryTest extends TestCase
             'api/status',
             'api/webhooks/whatsapp',
             'api/webhooks/twilio/notification-status',
+            'api/v1/apps/{identifier}/handshake',
+            'api/v1/apps/{identifier}/ping',
         ];
         $apiRoutes = 0;
 

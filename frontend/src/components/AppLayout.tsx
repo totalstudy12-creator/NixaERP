@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet, useLocation } from 'react-router-dom';
 import clsx from 'clsx';
 import { Navbar } from './Navbar';
 import { Sidebar } from './Sidebar';
 import { FloatingVoiceAgent } from './FloatingVoiceAgent';
 
 export function AppLayout() {
+  const location = useLocation();
+  const isAiAssistantPage = location.pathname.startsWith('/ai-assistant');
   const [sidebarOpen, setSidebarOpen] = useState(
     typeof window !== 'undefined' ? window.innerWidth >= 768 : false
   );
@@ -43,7 +45,7 @@ export function AppLayout() {
         </div>
       </footer>
 
-      <FloatingVoiceAgent />
+      {!isAiAssistantPage && <FloatingVoiceAgent />}
     </div>
   );
 }
