@@ -1585,8 +1585,12 @@ export const apiClient = {
   // PURCHASE INVOICES
   // ---------------------------------------------------------------------------
 
-  async getPurchaseInvoices(page = 1) {
-    return this.request('GET', `/purchase-invoices?page=${page}`);
+  async getPurchaseInvoices(params: number | Record<string, unknown> = {}) {
+    if (typeof params === 'number') {
+      return this.request('GET', `/purchase-invoices?page=${params}`);
+    }
+    const query = buildQuery(params);
+    return this.request('GET', `/purchase-invoices${query}`);
   },
 
   async getPurchaseInvoice(id: number) {
@@ -2031,10 +2035,6 @@ export const apiClient = {
     );
   },
 
-  async getBankAccounts() {
-    return this.request('GET', '/bank-accounts');
-  },
-
   // ---------------------------------------------------------------------------
   // API TOKENS
   // ---------------------------------------------------------------------------
@@ -2420,6 +2420,389 @@ export const apiClient = {
   async getAppHandshake(identifier: string, version = '1.0.0') {
     return this.request('GET', `/v1/apps/${encodeURIComponent(identifier)}/handshake?version=${encodeURIComponent(version)}`);
   },
+
+  // ---------------------------------------------------------------------------
+  // BANK & CASH MANAGEMENT + AUTOMATED RECONCILIATION
+  // ---------------------------------------------------------------------------
+
+  async getBankAccounts(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/banking/accounts${query}`);
+  },
+
+  async getBankAccount(id: number) {
+    return this.request('GET', `/banking/accounts/${id}`);
+  },
+
+  async createBankAccount(data: any) {
+    return this.request('POST', '/banking/accounts', data);
+  },
+
+  async updateBankAccount(id: number, data: any) {
+    return this.request('PUT', `/banking/accounts/${id}`, data);
+  },
+
+  async deleteBankAccount(id: number) {
+    return this.request('DELETE', `/banking/accounts/${id}`);
+  },
+
+  async getBankAccountTransactions(accountId: number | string, params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/banking/accounts/${accountId}/transactions${query}`);
+  },
+
+  async createBankTransfer(data: {
+    source_account_id: number;
+    destination_account_id: number;
+    amount: number;
+    transaction_date: string;
+    reference_no?: string;
+    description?: string;
+  }) {
+    return this.request('POST', '/banking/transfers', data);
+  },
+
+  async createBankAdjustment(data: {
+    bank_account_id: number;
+    transaction_type: string;
+    amount: number;
+    transaction_date: string;
+    reference_no?: string;
+    description?: string;
+  }) {
+    return this.request('POST', '/banking/adjustments', data);
+  },
+
+  async getCashClosings(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/banking/cash-closings${query}`);
+  },
+
+  async createCashClosing(data: {
+    cash_account_id: number;
+    closing_date: string;
+    physical_cash_counted: number;
+    denomination_breakdown?: Record<string, number>;
+    remarks?: string;
+  }) {
+    return this.request('POST', '/banking/cash-closings', data);
+  },
+
+  async approveCashClosing(id: number, note?: string) {
+    return this.request('POST', `/banking/cash-closings/${id}/approve`, { note });
+  },
+
+  async rejectCashClosing(id: number, reason: string) {
+    return this.request('POST', `/banking/cash-closings/${id}/reject`, { reason });
+  },
+
+  async uploadBankStatement(formData: FormData) {
+    return this.request('POST', '/banking/statements/upload', formData);
+  },
+
+  async getBankStatements(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/banking/statements${query}`);
+  },
+
+  async deleteBankStatement(id: number) {
+    return this.request('DELETE', `/banking/statements/${id}`);
+  },
+
+  async getReconciliationDashboard(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/banking/reconciliation/dashboard${query}`);
+  },
+
+  async getReconciliationWorkspace(accountId: number, statementId?: number) {
+    const query = statementId ? `?statement_id=${statementId}` : '';
+    return this.request('GET', `/banking/reconciliation/${accountId}${query}`);
+  },
+
+  async confirmReconciliationMatch(data: {
+    statement_transaction_id: number;
+    payment_id: number;
+    allocated_amount?: number;
+    match_type?: string;
+  }) {
+    return this.request('POST', '/banking/reconciliation/match', data);
+  },
+
+  async unmatchReconciliation(statementTransactionId: number) {
+    return this.request('POST', '/banking/reconciliation/unmatch', {
+      statement_transaction_id: statementTransactionId,
+    });
+  },
+
+  async autoMatchReconciliation(bankAccountId: number, confidenceThreshold = 95) {
+    return this.request('POST', '/banking/reconciliation/auto-match', {
+      bank_account_id: bankAccountId,
+      confidence_threshold: confidenceThreshold,
+    });
+  },
+
+  async getAiReconciliationSuggestion(statementTransactionId: number) {
+    return this.request('POST', '/banking/reconciliation/ai-suggest', {
+      statement_transaction_id: statementTransactionId,
+    });
+  },
+
+  async createReconciliationAdjustment(data: {
+    statement_transaction_id: number;
+    transaction_type: string;
+    amount: number;
+    description?: string;
+  }) {
+    return this.request('POST', '/banking/reconciliation/adjustments', data);
+  },
+
+  async getCashSummary(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/banking/cash-summary${query}`);
+  },
+
+  async quickRecordPaymentAndMatch(data: {
+    statement_transaction_id: number;
+    payment_direction: 'inward' | 'outward';
+    payment_method: string;
+    transaction_date?: string;
+    reference_no?: string;
+    customer_name?: string;
+    remarks?: string;
+    invoice_id?: number;
+  }) {
+    return this.request('POST', '/banking/reconciliation/quick-record', data);
+  },
+
+  async processFullStatementReconciliation(statementId: number, autoApprove = false) {
+    return this.request('POST', `/banking/statements/${statementId}/process-full-reconciliation`, {
+      auto_approve: autoApprove,
+    });
+  },
+
+  async getStatementSummary(statementId: number) {
+    return this.request('GET', `/banking/statements/${statementId}/summary`);
+  },
+
+  async approveExpenseDraft(statementTxnId: number, saveLearnedRule = true) {
+    return this.request('POST', `/banking/reconciliation/expense-drafts/${statementTxnId}/approve`, {
+      save_learned_rule: saveLearnedRule,
+    });
+  },
+
+  async editExpenseDraft(statementTxnId: number, data: {
+    category?: string;
+    counterparty?: string;
+    amount?: number;
+    description?: string;
+    notes?: string;
+  }) {
+    return this.request('PUT', `/banking/reconciliation/expense-drafts/${statementTxnId}`, data);
+  },
+
+  async rejectExpenseDraft(statementTxnId: number) {
+    return this.request('POST', `/banking/reconciliation/expense-drafts/${statementTxnId}/reject`);
+  },
+
+  async ignoreStatementTransaction(statementTxnId: number, reason: string) {
+    return this.request('POST', `/banking/reconciliation/transactions/${statementTxnId}/ignore`, {
+      reason,
+    });
+  },
+
+  async unignoreStatementTransaction(statementTxnId: number) {
+    return this.request('POST', `/banking/reconciliation/transactions/${statementTxnId}/unignore`);
+  },
+
+  async getReconciliationRules(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/banking/rules${query}`);
+  },
+
+  async createReconciliationRule(data: {
+    rule_name: string;
+    pattern_type: string;
+    pattern_value: string;
+    action: string;
+    category?: string;
+    vendor_name?: string;
+    confidence_score?: number;
+    notes?: string;
+  }) {
+    return this.request('POST', '/banking/rules', data);
+  },
+
+  async updateReconciliationRule(id: number, data: Record<string, unknown>) {
+    return this.request('PUT', `/banking/rules/${id}`, data);
+  },
+
+  async deleteReconciliationRule(id: number) {
+    return this.request('DELETE', `/banking/rules/${id}`);
+  },
+
+  async toggleReconciliationRule(id: number) {
+    return this.request('POST', `/banking/rules/${id}/toggle`);
+  },
+  // --- Quotations ---
+  async getQuotations(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/quotations${query}`);
+  },
+
+  async getQuotation(id: number) {
+    return this.request('GET', `/quotations/${id}`);
+  },
+
+  async getQuotationSummary(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/quotations/summary${query}`);
+  },
+
+  async getNextQuotationNumber() {
+    return this.request('GET', '/quotations/next-number');
+  },
+
+  async createQuotation(data: any) {
+    return this.request('POST', '/quotations', data);
+  },
+
+  async updateQuotation(id: number, data: any) {
+    return this.request('PUT', `/quotations/${id}`, data);
+  },
+
+  async updateQuotationStatus(id: number, data: { status: string; rejection_reason?: string; follow_up_date?: string }) {
+    return this.request('PATCH', `/quotations/${id}/status`, data);
+  },
+
+  async convertQuotation(id: number, data: { invoice_date?: string; due_date?: string; auto_deduct_stock?: boolean; warehouse_id?: number; payment_term?: string } = {}) {
+    return this.request('POST', `/quotations/${id}/convert`, data);
+  },
+
+  async duplicateQuotation(id: number) {
+    return this.request('POST', `/quotations/${id}/duplicate`);
+  },
+
+  async deleteQuotation(id: number) {
+    return this.request('DELETE', `/quotations/${id}`);
+  },
+
+  // --- Leads ---
+  async getLeads(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/leads${query}`);
+  },
+
+  async getLead(id: number) {
+    return this.request('GET', `/leads/${id}`);
+  },
+
+  async getLeadSummary(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/leads/summary${query}`);
+  },
+
+  async createLead(data: any) {
+    return this.request('POST', '/leads', data);
+  },
+
+  async updateLead(id: number, data: any) {
+    return this.request('PUT', `/leads/${id}`, data);
+  },
+
+  async updateLeadStage(id: number, stage: string, note?: string, lost_reason?: string) {
+    return this.request('PATCH', `/leads/${id}/stage`, { stage, note, lost_reason });
+  },
+
+  async addLeadActivity(id: number, data: { activity_type: string; title: string; description?: string; activity_date?: string; follow_up_date?: string }) {
+    return this.request('POST', `/leads/${id}/activities`, data);
+  },
+
+  async convertLead(id: number, data: { create_customer?: boolean; create_contact?: boolean; customer_name?: string; gstin?: string; pan?: string } = {}) {
+    return this.request('POST', `/leads/${id}/convert`, data);
+  },
+
+  async deleteLead(id: number) {
+    return this.request('DELETE', `/leads/${id}`);
+  },
+
+  // --- Contacts ---
+  async getContacts(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/contacts${query}`);
+  },
+
+  async getContact(id: number) {
+    return this.request('GET', `/contacts/${id}`);
+  },
+
+  async getContactSummary(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/contacts/summary${query}`);
+  },
+
+  async checkContactDuplicate(params: { phone?: string; email?: string; gstin?: string; exclude_id?: number }) {
+    const query = buildQuery(params);
+    return this.request('GET', `/contacts/check-duplicate${query}`);
+  },
+
+  async createContact(data: any) {
+    return this.request('POST', '/contacts', data);
+  },
+
+  async updateContact(id: number, data: any) {
+    return this.request('PUT', `/contacts/${id}`, data);
+  },
+
+  async deleteContact(id: number) {
+    return this.request('DELETE', `/contacts/${id}`);
+  },
+
+  // --- Opportunities ---
+  async getOpportunities(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/opportunities${query}`);
+  },
+
+  async getOpportunitySummary(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/opportunities/summary${query}`);
+  },
+
+  async createOpportunity(data: any) {
+    return this.request('POST', '/opportunities', data);
+  },
+
+  async updateOpportunity(id: number, data: any) {
+    return this.request('PUT', `/opportunities/${id}`, data);
+  },
+
+  async deleteOpportunity(id: number) {
+    return this.request('DELETE', `/opportunities/${id}`);
+  },
+
+  // --- Campaigns ---
+  async getCampaigns(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/campaigns${query}`);
+  },
+
+  async getCampaignSummary(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/campaigns/summary${query}`);
+  },
+
+  async createCampaign(data: any) {
+    return this.request('POST', '/campaigns', data);
+  },
+
+  async updateCampaign(id: number, data: any) {
+    return this.request('PUT', `/campaigns/${id}`, data);
+  },
+
+  async deleteCampaign(id: number) {
+    return this.request('DELETE', `/campaigns/${id}`);
+  },
+
 };
 
 export default apiClient;

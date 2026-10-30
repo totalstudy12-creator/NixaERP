@@ -98,7 +98,26 @@ class CanonicalPermissionsSeeder extends Seeder
             'dashboard.view',
         ];
 
-        $salesCommon = [
+        $crmCommon = [
+            'quotations.view',
+            'quotations.create',
+            'quotations.update',
+            'quotations.delete',
+            'quotations.convert',
+            'leads.view',
+            'leads.create',
+            'leads.update',
+            'leads.delete',
+            'leads.convert',
+            'contacts.view',
+            'contacts.create',
+            'contacts.update',
+            'contacts.delete',
+            'opportunities.view',
+            'campaigns.view',
+        ];
+
+        $salesCommon = array_merge([
             'invoices.view',
             'invoices.create',
             'invoices.print',
@@ -111,7 +130,7 @@ class CanonicalPermissionsSeeder extends Seeder
             'products.view',
             'view orders',
             'create orders',
-        ];
+        ], $crmCommon);
 
         $salesManager = array_merge($salesCommon, [
             'invoices.update',
@@ -209,6 +228,16 @@ class CanonicalPermissionsSeeder extends Seeder
             'income_expenses.export',
             'accounting.view',
             'accounting.manage',
+            'banking.accounts.view',
+            'banking.accounts.manage',
+            'banking.transactions.view',
+            'banking.transactions.manage',
+            'banking.cash_closing.view',
+            'banking.cash_closing.manage',
+            'banking.cash_closing.approve',
+            'banking.statements.upload',
+            'banking.reconciliation.view',
+            'banking.reconciliation.manage',
             'invoices.view',
             'invoices.export',
             'invoices.print',
@@ -381,6 +410,7 @@ class CanonicalPermissionsSeeder extends Seeder
             'Sales Manager'        => array_merge($baseStaff, $salesManager),
             'Sales'                => array_merge($baseStaff, $salesCommon),
             'Sales Executive'      => array_merge($baseStaff, $salesCommon),
+            'Cashier'              => array_merge($baseStaff, $salesCommon),
             'Marketing Manager'    => array_merge($baseStaff, $marketingCommon),
             'Marketing'            => array_merge($baseStaff, $marketingCommon),
             'Marketing Executive'  => array_merge($baseStaff, $marketingCommon),

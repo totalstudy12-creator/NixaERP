@@ -3,6 +3,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\BankAccount;
+use App\Models\BankAccountTransaction;
 use App\Models\Payment;
 use App\Models\Invoice;
 use Illuminate\Http\Request;
@@ -25,20 +27,12 @@ class PaymentController extends Controller
      * The React app filters, computes KPI totals, and exports client-side,
      * so we return the full list by default. Pass ?per_page=N to opt into
      * pagination.
-     *
-     * Supported query params:
-     *   - customer_id       (int)  — filters to a single customer
-     *   - company_id        (int|"all")
-     *   - branch_id         (int|"all")
-     *   - invoice_id        (int)
-     *   - payment_direction ("inward" | "outward" | "all")
-     *   - per_page          (int) — opt-in pagination; 0 / omitted = full list
      */
     public function index(Request $request)
     {
-        $query = Payment::with(['company', 'invoice', 'branch']);
+        $query = Payment::with(['company', 'invoice', 'branch', 'bankAccount']);
 
-        /* ---------- Customer scoping (the important fix) ---------- */
+        /* ---------- Customer scoping ---------- */
         if ($request->filled('customer_id')) {
             $customerId = (int) $request->input('customer_id');
             $this->applyCustomerFilter($query, $customerId);
@@ -55,6 +49,10 @@ class PaymentController extends Controller
             $query->where('branch_id', (int) $branchId);
         }
 
+        if ($request->filled('bank_account_id') && $request->input('bank_account_id') !== 'all') {
+            $query->where('bank_account_id', (int) $request->input('bank_account_id'));
+        }
+
         if ($request->filled('invoice_id')) {
             $query->where('invoice_id', (int) $request->input('invoice_id'));
         }
@@ -65,8 +63,6 @@ class PaymentController extends Controller
         }
 
         /* ---------- Deterministic ordering ---------- */
-        // created_at desc, then transaction_date desc, then id desc
-        // as the ultimate tie-breaker.
         $query
             ->orderByDesc('created_at')
             ->orderByDesc('transaction_date')
@@ -85,14 +81,15 @@ class PaymentController extends Controller
      | ================================================================== */
 
     /**
-     * Store a newly created payment and update invoice status.
+     * Store a newly created payment and update invoice status & bank ledger.
      */
     public function store(Request $request)
     {
         $data = $request->validate([
-            'company_id' => ['nullable', $this->activeExists('companies')],
-            'branch_id'  => ['nullable', $this->activeExistsForCompany($request)],
-            'invoice_id' => ['nullable', $this->activeExists('invoices')],
+            'company_id'        => ['nullable', $this->activeExists('companies')],
+            'branch_id'         => ['nullable', $this->activeExistsForCompany($request)],
+            'bank_account_id'   => 'nullable|exists:bank_accounts,id',
+            'invoice_id'        => ['nullable', $this->activeExists('invoices')],
             'reference_no'      => 'nullable|string|max:255',
             'amount'            => 'required|numeric|min:0.01',
             'payment_method'    => 'required|string|max:100',
@@ -120,13 +117,56 @@ class PaymentController extends Controller
         }
 
         return DB::transaction(function () use ($data) {
+            // Auto-resolve default bank or cash account if not explicitly specified
+            if (empty($data['bank_account_id']) && Schema::hasTable('bank_accounts')) {
+                $targetType = ($data['payment_method'] ?? '') === 'cash' ? 'cash_drawer' : 'bank';
+                $defaultAcc = BankAccount::where('company_id', $data['company_id'] ?? 1)
+                    ->where('account_type', $targetType)
+                    ->where('is_active', true)
+                    ->orderByDesc('is_default')
+                    ->first();
+                if ($defaultAcc) {
+                    $data['bank_account_id'] = $defaultAcc->id;
+                }
+            }
+
             $payment = Payment::create($data);
 
             if ($payment->invoice_id) {
                 $this->updateInvoiceStatus((int) $payment->invoice_id);
             }
 
-            return $payment->load(['company', 'invoice', 'branch']);
+            // Sync with Bank Account & Ledger
+            if (!empty($payment->bank_account_id) && Schema::hasTable('bank_accounts')) {
+                $account = BankAccount::lockForUpdate()->find($payment->bank_account_id);
+                if ($account) {
+                    $amount = (float) $payment->amount;
+                    if ($payment->payment_direction === 'inward') {
+                        $account->current_balance += $amount;
+                    } else {
+                        $account->current_balance -= $amount;
+                    }
+                    $account->save();
+
+                    BankAccountTransaction::create([
+                        'company_id' => $account->company_id,
+                        'branch_id' => $payment->branch_id ?: $account->branch_id,
+                        'bank_account_id' => $account->id,
+                        'transaction_type' => $payment->payment_direction === 'inward' ? 'payment_in' : 'payment_out',
+                        'amount' => $amount,
+                        'running_balance' => $account->current_balance,
+                        'transaction_date' => $payment->transaction_date ?: now()->toDateString(),
+                        'reference_no' => $payment->reference_no,
+                        'description' => "Payment #{$payment->id} ({$payment->payment_method}): " . ($payment->remarks ?: 'Invoice payment'),
+                        'payment_id' => $payment->id,
+                        'counterparty' => $payment->bank_name ?: 'Customer/Supplier',
+                        'status' => $payment->status === 'reconciled' ? 'reconciled' : 'cleared',
+                        'created_by' => auth()->id(),
+                    ]);
+                }
+            }
+
+            return $payment->load(['company', 'invoice', 'branch', 'bankAccount']);
         });
     }
 
@@ -134,27 +174,22 @@ class PaymentController extends Controller
      |  SHOW
      | ================================================================== */
 
-    /**
-     * Display the specified payment.
-     */
     public function show(Payment $payment)
     {
-        return $payment->load(['company', 'invoice', 'branch']);
+        return $payment->load(['company', 'invoice', 'branch', 'bankAccount']);
     }
 
     /* ==================================================================
      |  UPDATE
      | ================================================================== */
 
-    /**
-     * Update the specified payment and adjust invoice status if needed.
-     */
     public function update(Request $request, Payment $payment)
     {
         $data = $request->validate([
-            'company_id' => ['nullable', $this->activeExists('companies')],
-            'branch_id'  => ['nullable', $this->activeExistsForCompany($request)],
-            'invoice_id' => ['nullable', $this->activeExists('invoices')],
+            'company_id'        => ['nullable', $this->activeExists('companies')],
+            'branch_id'         => ['nullable', $this->activeExistsForCompany($request)],
+            'bank_account_id'   => 'nullable|exists:bank_accounts,id',
+            'invoice_id'        => ['nullable', $this->activeExists('invoices')],
             'reference_no'      => 'nullable|string|max:255',
             'amount'            => 'required|numeric|min:0.01',
             'payment_method'    => 'required|string|max:100',
@@ -167,7 +202,6 @@ class PaymentController extends Controller
             'remarks'           => 'nullable|string',
         ]);
 
-        // Inherit branch_id from the (new) invoice when not provided.
         if (empty($data['branch_id']) && ! empty($data['invoice_id'])) {
             $data['branch_id'] = Invoice::whereKey($data['invoice_id'])->value('branch_id');
         }
@@ -182,20 +216,66 @@ class PaymentController extends Controller
 
         return DB::transaction(function () use ($data, $payment) {
             $previousInvoiceId = $payment->invoice_id;
+            $oldAccountId = $payment->bank_account_id;
+            $oldAmount = (float) $payment->amount;
+            $oldDirection = $payment->payment_direction;
+
+            // Revert old account balance if present
+            if ($oldAccountId && Schema::hasTable('bank_accounts')) {
+                $oldAcc = BankAccount::lockForUpdate()->find($oldAccountId);
+                if ($oldAcc) {
+                    if ($oldDirection === 'inward') {
+                        $oldAcc->current_balance -= $oldAmount;
+                    } else {
+                        $oldAcc->current_balance += $oldAmount;
+                    }
+                    $oldAcc->save();
+                }
+            }
 
             $payment->update($data);
 
-            // Recalculate the old invoice (if it changed).
+            // Apply new account balance
+            if (!empty($payment->bank_account_id) && Schema::hasTable('bank_accounts')) {
+                $newAcc = BankAccount::lockForUpdate()->find($payment->bank_account_id);
+                if ($newAcc) {
+                    $newAmount = (float) $payment->amount;
+                    if ($payment->payment_direction === 'inward') {
+                        $newAcc->current_balance += $newAmount;
+                    } else {
+                        $newAcc->current_balance -= $newAmount;
+                    }
+                    $newAcc->save();
+
+                    // Update or create ledger entry
+                    BankAccountTransaction::updateOrCreate(
+                        ['payment_id' => $payment->id],
+                        [
+                            'company_id' => $newAcc->company_id,
+                            'branch_id' => $payment->branch_id ?: $newAcc->branch_id,
+                            'bank_account_id' => $newAcc->id,
+                            'transaction_type' => $payment->payment_direction === 'inward' ? 'payment_in' : 'payment_out',
+                            'amount' => $newAmount,
+                            'running_balance' => $newAcc->current_balance,
+                            'transaction_date' => $payment->transaction_date ?: now()->toDateString(),
+                            'reference_no' => $payment->reference_no,
+                            'description' => "Payment #{$payment->id} ({$payment->payment_method}): " . ($payment->remarks ?: 'Invoice payment'),
+                            'counterparty' => $payment->bank_name ?: 'Customer/Supplier',
+                            'status' => $payment->status === 'reconciled' ? 'reconciled' : 'cleared',
+                        ]
+                    );
+                }
+            }
+
+            // Recalculate invoices
             if ($previousInvoiceId) {
                 $this->updateInvoiceStatus((int) $previousInvoiceId);
             }
-
-            // Recalculate the new invoice.
             if ($payment->invoice_id) {
                 $this->updateInvoiceStatus((int) $payment->invoice_id);
             }
 
-            return $payment->fresh(['company', 'invoice', 'branch']);
+            return $payment->fresh(['company', 'invoice', 'branch', 'bankAccount']);
         });
     }
 
@@ -203,13 +283,25 @@ class PaymentController extends Controller
      |  DESTROY
      | ================================================================== */
 
-    /**
-     * Remove the specified payment (soft delete) and update invoice status.
-     */
     public function destroy(Payment $payment)
     {
         return DB::transaction(function () use ($payment) {
             $invoiceId = $payment->invoice_id;
+
+            // Revert account balance
+            if ($payment->bank_account_id && Schema::hasTable('bank_accounts')) {
+                $acc = BankAccount::lockForUpdate()->find($payment->bank_account_id);
+                if ($acc) {
+                    $amount = (float) $payment->amount;
+                    if ($payment->payment_direction === 'inward') {
+                        $acc->current_balance -= $amount;
+                    } else {
+                        $acc->current_balance += $amount;
+                    }
+                    $acc->save();
+                }
+                BankAccountTransaction::where('payment_id', $payment->id)->delete();
+            }
 
             $payment->delete();
 
@@ -225,13 +317,6 @@ class PaymentController extends Controller
      |  INVOICE STATUS
      | ================================================================== */
 
-    /**
-     * Recalculate invoice status based on total paid amount.
-     *
-     * - Uses Invoice::find() so a soft-deleted invoice is never re-touched.
-     * - Excludes soft-deleted payments from the sum, even if the Payment
-     *   model does not use the SoftDeletes trait.
-     */
     private function updateInvoiceStatus(int $invoiceId): void
     {
         $invoice = Invoice::find($invoiceId);
@@ -239,7 +324,6 @@ class PaymentController extends Controller
             return;
         }
 
-        // Skip status update for purchase invoices / bills.
         $purchaseTypes = ['purchase_invoice', 'purchase_bill'];
         if (in_array($invoice->type, $purchaseTypes, true)) {
             return;
@@ -248,8 +332,6 @@ class PaymentController extends Controller
         $paymentsQuery = $invoice->payments()
             ->where('payment_direction', 'inward');
 
-        // Defensive: exclude soft-deleted payments whether or not the
-        // Payment model uses the SoftDeletes trait.
         try {
             if (Schema::hasColumn('payments', 'deleted_at')) {
                 $paymentsQuery->whereNull('payments.deleted_at');
@@ -276,20 +358,6 @@ class PaymentController extends Controller
      |  CUSTOMER SCOPING HELPERS
      | ================================================================== */
 
-    /**
-     * Scope a Payment query to a single customer.
-     *
-     * Three schemas are supported, in this order:
-     *   1. `payments.customer_id`                (direct FK)
-     *   2. `payments.party_id` / `dealer_id` /   (aliased FK)
-     *      `client_id` / `contact_id`
-     *   3. `payments.invoice_id` → `invoices.customer_id` (indirect)
-     *
-     * Anything else is a schema we don't know how to scope safely. In
-     * that case we log a warning and leave the query unfiltered; the
-     * client-side ownership guard in CustomersPage will drop the
-     * stray rows and log its own warning.
-     */
     private function applyCustomerFilter($query, int $customerId): void
     {
         try {
@@ -301,7 +369,6 @@ class PaymentController extends Controller
             return;
         }
 
-        // 1) Direct FK aliases on payments.
         $directFkCandidates = [
             'customer_id',
             'party_id',
@@ -318,7 +385,6 @@ class PaymentController extends Controller
             }
         }
 
-        // 2) Indirect via invoices.
         if (in_array('invoice_id', $columns, true)) {
             try {
                 if (Schema::hasTable('invoices')
@@ -327,7 +393,6 @@ class PaymentController extends Controller
                     $invoiceIds = DB::table('invoices')
                         ->where('customer_id', $customerId);
 
-                    // Respect soft-deletes on invoices if present.
                     if (Schema::hasColumn('invoices', 'deleted_at')) {
                         $invoiceIds->whereNull('invoices.deleted_at');
                     }
@@ -343,7 +408,6 @@ class PaymentController extends Controller
             }
         }
 
-        // 3) Unknown schema — do not scope, but log loudly.
         Log::warning('Payment index: no customer column found on payments', [
             'customer_id' => $customerId,
             'columns'     => $columns,
@@ -351,13 +415,9 @@ class PaymentController extends Controller
     }
 
     /* ==================================================================
-     |  VALIDATION HELPERS — soft-delete aware
+     |  VALIDATION HELPERS
      | ================================================================== */
 
-    /**
-     * Build a Rule::exists that excludes soft-deleted rows when the
-     * target table has a `deleted_at` column.
-     */
     private function activeExists(string $table, string $column = 'id'): Exists
     {
         return Rule::exists($table, $column)
@@ -372,11 +432,6 @@ class PaymentController extends Controller
             });
     }
 
-    /**
-     * Branch rule that:
-     *   - excludes soft-deleted branches
-     *   - constrains the branch to the supplied company_id
-     */
     private function activeExistsForCompany(Request $request): Exists
     {
         return Rule::exists('branches', 'id')

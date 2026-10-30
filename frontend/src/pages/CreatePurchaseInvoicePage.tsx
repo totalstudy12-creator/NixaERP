@@ -784,6 +784,7 @@ export function CreatePurchaseInvoicePage() {
       if (action === 'save_print') {
         try { printSavedPurchase(purchaseId); } catch (printError) { showError('Print failed', getUserFriendlyError(printError, 'Invoice saved, but the print window could not be opened.')); }
       }
+      window.dispatchEvent(new CustomEvent('purchases_updated'));
       navigate('/purchases');
     } catch (e) {
       submittedIdRef.current = null;

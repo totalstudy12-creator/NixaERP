@@ -69,6 +69,7 @@ class Invoice extends Model
         'internal_note',
         'additional_charges',
         'subtotal',
+        'quotation_id',
     ];
 
     protected $casts = [
@@ -106,6 +107,11 @@ class Invoice extends Model
     public function customer()
     {
         return $this->belongsTo(Customer::class);
+    }
+
+    public function quotation()
+    {
+        return $this->belongsTo(Quotation::class);
     }
 
     public function order()

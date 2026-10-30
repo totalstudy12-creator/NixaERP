@@ -9,20 +9,24 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 class Payment extends Model
 {
     use HasFactory, SoftDeletes;
- 
+
     protected $fillable = [
         'company_id',
         'branch_id',
+        'bank_account_id',
         'invoice_id',
+        'purchase_invoice_id',
         'payment_method',
         'reference_no',
         'amount',
         'status',
         'transaction_date',
-         'payment_direction',
+        'payment_direction',
         'bank_name',
         'account_number',
         'ledger_reference',
+        'payable_type',
+        'payable_id',
         'remarks',
     ];
 
@@ -40,8 +44,24 @@ class Payment extends Model
     {
         return $this->belongsTo(Invoice::class);
     }
+
+    public function purchaseInvoice()
+    {
+        return $this->belongsTo(PurchaseInvoice::class);
+    }
+
     public function branch()
-{
-    return $this->belongsTo(Branch::class);
-}
+    {
+        return $this->belongsTo(Branch::class);
+    }
+
+    public function bankAccount()
+    {
+        return $this->belongsTo(BankAccount::class, 'bank_account_id');
+    }
+
+    public function accountTransactions()
+    {
+        return $this->hasMany(BankAccountTransaction::class, 'payment_id');
+    }
 }

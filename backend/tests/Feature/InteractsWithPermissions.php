@@ -17,6 +17,7 @@ trait InteractsWithPermissions
 
         $role->permissions()->sync($permissionIds);
         $user->roles()->syncWithoutDetaching([$role->id]);
+        $user->flushPermissionCache();
 
         return $this->actingAs($user, 'sanctum');
     }

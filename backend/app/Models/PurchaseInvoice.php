@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
@@ -66,11 +67,11 @@ class PurchaseInvoice extends Model
         'warehouse_id' => 'integer',
         'supplier_id'  => 'integer',
 
-        'purchase_date'          => 'date',
-        'due_date'               => 'date',
-        'expected_delivery_date' => 'date',
-        'invoice_date'           => 'date',
-        'payment_date'           => 'date',
+        'purchase_date'          => 'date:Y-m-d',
+        'due_date'               => 'date:Y-m-d',
+        'expected_delivery_date' => 'date:Y-m-d',
+        'invoice_date'           => 'date:Y-m-d',
+        'payment_date'           => 'date:Y-m-d',
 
         'subtotal'                 => 'decimal:2',
         'order_discount'           => 'decimal:2',
@@ -123,5 +124,25 @@ class PurchaseInvoice extends Model
             Payment::class,
             'payable'
         );
+    }
+    public function setPurchaseDateAttribute($value)
+    {
+        $this->attributes['purchase_date'] = !empty($value)
+            ? Carbon::parse($value)->toDateString()
+            : null;
+    }
+
+    public function setDueDateAttribute($value)
+    {
+        $this->attributes['due_date'] = !empty($value)
+            ? Carbon::parse($value)->toDateString()
+            : null;
+    }
+
+    public function setInvoiceDateAttribute($value)
+    {
+        $this->attributes['invoice_date'] = !empty($value)
+            ? Carbon::parse($value)->toDateString()
+            : null;
     }
 }

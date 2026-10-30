@@ -135,9 +135,10 @@ class PurchaseInvoiceController extends Controller
 
     public function index(Request $request)
     {
-        // FIX: eager-load `company` so the table can render the company column.
+        // FIX: eager-load company, supplier, items, payments & order by purchase_date desc
         $query = PurchaseInvoice::with(['company', 'supplier', 'items', 'payments'])
-            ->orderByDesc('created_at');
+            ->orderByDesc('purchase_date')
+            ->orderByDesc('id');
 
         if ($request->filled('company_id')) {
             $query->where('company_id', $request->integer('company_id'));
@@ -151,13 +152,53 @@ class PurchaseInvoiceController extends Controller
             $query->where('supplier_id', $request->integer('supplier_id'));
         }
 
-        if ($request->filled('status')) {
-            $query->where('status', $request->string('status'));
+        if ($request->filled('status') && $request->input('status') !== 'all') {
+            $query->where('status', $request->input('status'));
         }
 
-        $purchases = $query->paginate(
-            min(max((int) $request->input('per_page', 15), 1), 100)
-        );
+        if ($request->filled('payment_status') && $request->input('payment_status') !== 'all') {
+            $query->where('payment_status', $request->input('payment_status'));
+        }
+
+        if ($request->filled('search')) {
+            $search = trim($request->string('search'));
+            $query->where(function ($q) use ($search) {
+                $q->where('purchase_number', 'like', "%{$search}%")
+                  ->orWhere('bill_number', 'like', "%{$search}%")
+                  ->orWhere('reference_number', 'like', "%{$search}%")
+                  ->orWhereHas('supplier', function ($sq) use ($search) {
+                      $sq->where('name', 'like', "%{$search}%");
+                  });
+            });
+        }
+
+        $dateFrom = $request->input('date_from') ?? $request->input('from_date') ?? $request->input('start_date');
+        if ($dateFrom) {
+            $query->whereDate('purchase_date', '>=', $dateFrom);
+        }
+
+        $dateTo = $request->input('date_to') ?? $request->input('to_date') ?? $request->input('end_date');
+        if ($dateTo) {
+            $query->whereDate('purchase_date', '<=', $dateTo);
+        }
+
+        $perPage = $request->input('per_page');
+        if ($perPage === 'all' || $request->boolean('all')) {
+            $purchases = $query->limit(1000)->get();
+            return response()->json([
+                'success' => true,
+                'data'    => $purchases,
+                'meta'    => [
+                    'current_page' => 1,
+                    'last_page'    => 1,
+                    'total'        => $purchases->count(),
+                    'per_page'     => $purchases->count(),
+                ],
+            ]);
+        }
+
+        $limit = min(max((int) ($perPage ?: 250), 1), 500);
+        $purchases = $query->paginate($limit);
 
         return response()->json([
             'success' => true,
@@ -480,6 +521,7 @@ class PurchaseInvoiceController extends Controller
             foreach ([
                 'warehouse_id'                => $warehouse->id,
                 'branch_id'                   => $branch->id,
+                'invoice_date'                => $validated['invoice_date'] ?? $validated['purchase_date'],
                 'packing_apply_type'          => $packingApplyType,
                 'general_discount_type'       => $generalDiscountType,
                 'general_discount_percent'    => $generalDiscountType === 'percent' ? $generalDiscountPercent : 0,

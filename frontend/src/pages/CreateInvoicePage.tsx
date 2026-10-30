@@ -1588,7 +1588,7 @@ export function CreateInvoicePage() {
 
   /* ── GST lookup ── */
   const handleGstAutoFill = async () => {
-    const gstin = newCustomer.gst_number.trim().toUpperCase();
+    const gstin = String(newCustomer.gst_number || '').trim().toUpperCase();
     if (!REGEX.GSTIN.test(gstin)) {
       showError('Invalid GSTIN', 'Enter a valid 15‑character GSTIN.');
       return;

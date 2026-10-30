@@ -31,6 +31,18 @@ const REGEX = {
   PHONE: /^[0-9+\-\s()]{6,20}$/,
 } as const;
 
+function parseDateForInput(val: unknown): string {
+  if (!val) return '';
+  const s = String(val).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s.slice(0, 10);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function safeNumber(v: unknown, fallback = 0): number {
   if (v === null || v === undefined || v === '') return fallback;
   const n = typeof v === 'number' ? v : Number(v);
@@ -632,16 +644,16 @@ export function EditPurchaseInvoicePage() {
           place_of_supply: inv.place_of_supply || '',
           invoice_type: inv.invoice_type || 'purchase_invoice',
           invoice_no: inv.purchase_number || inv.invoice_no || '',
-          invoice_date: inv.purchase_date?.split('T')[0] || new Date().toISOString().slice(0, 10),
+          invoice_date: parseDateForInput(inv.purchase_date || inv.invoice_date) || new Date().toISOString().slice(0, 10),
           challan_no: inv.challan_no || '',
-          challan_date: inv.challan_date?.split('T')[0] || '',
+          challan_date: parseDateForInput(inv.challan_date),
           po_no: inv.po_no || '',
-          po_date: inv.po_date?.split('T')[0] || '',
+          po_date: parseDateForInput(inv.po_date),
           lr_no: inv.lr_no || '',
           eway_no: inv.eway_no || '',
           delivery_mode: inv.delivery_mode || '',
           payment_term: inv.payment_term || '',
-          due_date: inv.due_date?.split('T')[0] || '',
+          due_date: parseDateForInput(inv.due_date),
           bank_id: inv.bank_id || '',
           packing_charges: nonNegative(inv.packing_charges),
           general_discount_percent: nonNegative(inv.general_discount_percent),

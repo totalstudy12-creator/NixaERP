@@ -46,6 +46,7 @@ class RoleSeeder extends Seeder
             'Sales',
             'Sales Manager',
             'Sales Executive',
+            'Cashier',
             'Marketing',
             'Marketing Manager',
             'Marketing Executive',

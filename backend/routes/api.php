@@ -48,6 +48,11 @@ use App\Http\Controllers\Api\PrinterController;
 use App\Http\Controllers\Api\ThermalPaperProfileController;
 use App\Http\Controllers\Api\LabelTemplateController;
 use App\Http\Controllers\Api\PrintJobController;
+use App\Http\Controllers\Api\QuotationController;
+use App\Http\Controllers\Api\LeadController;
+use App\Http\Controllers\Api\ContactController;
+use App\Http\Controllers\Api\OpportunityController;
+use App\Http\Controllers\Api\CampaignController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -377,6 +382,63 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/{dealer}',     [DealerController::class, 'destroy'])->middleware('permission:delete dealers');
     });
 
+
+    /* ---------------------------- Quotations --------------------------- */
+    Route::get('quotations/next-number', [QuotationController::class, 'nextNumber'])->middleware('permission:quotations.create');
+    Route::get('quotations/summary',     [QuotationController::class, 'summary'])->middleware('permission:quotations.view');
+    Route::prefix('quotations')->group(function () {
+        Route::get('/',                        [QuotationController::class, 'index'])->middleware('permission:quotations.view');
+        Route::get('/{quotation}',             [QuotationController::class, 'show'])->middleware('permission:quotations.view');
+        Route::post('/',                       [QuotationController::class, 'store'])->middleware('permission:quotations.create');
+        Route::match(['put', 'patch'], '/{quotation}', [QuotationController::class, 'update'])->middleware('permission:quotations.update');
+        Route::patch('/{quotation}/status',    [QuotationController::class, 'updateStatus'])->middleware('permission:quotations.update');
+        Route::post('/{quotation}/convert',    [QuotationController::class, 'convert'])->middleware('permission:quotations.convert,create invoices,invoices.create,quotations.update,edit sales quotations,quotations.create,create sales quotations,quotations.view,view sales quotations');
+        Route::post('/{quotation}/duplicate',  [QuotationController::class, 'duplicate'])->middleware('permission:quotations.create');
+        Route::delete('/{quotation}',          [QuotationController::class, 'destroy'])->middleware('permission:quotations.delete');
+    });
+
+    /* ------------------------------ CRM Leads ---------------------------- */
+    Route::get('leads/summary', [LeadController::class, 'summary'])->middleware('permission:leads.view');
+    Route::prefix('leads')->group(function () {
+        Route::get('/',                     [LeadController::class, 'index'])->middleware('permission:leads.view');
+        Route::get('/{lead}',               [LeadController::class, 'show'])->middleware('permission:leads.view');
+        Route::post('/',                    [LeadController::class, 'store'])->middleware('permission:leads.create');
+        Route::match(['put', 'patch'], '/{lead}', [LeadController::class, 'update'])->middleware('permission:leads.update');
+        Route::patch('/{lead}/stage',       [LeadController::class, 'updateStage'])->middleware('permission:leads.update');
+        Route::post('/{lead}/activities',   [LeadController::class, 'addActivity'])->middleware('permission:leads.update');
+        Route::post('/{lead}/convert',      [LeadController::class, 'convert'])->middleware('permission:leads.convert,create customers,customers.create,leads.update,edit leads,leads.create,create leads,leads.view,view leads,customers.view,view customers');
+        Route::delete('/{lead}',            [LeadController::class, 'destroy'])->middleware('permission:leads.delete');
+    });
+
+    /* ------------------------------ Contacts ---------------------------- */
+    Route::get('contacts/summary',          [ContactController::class, 'summary'])->middleware('permission:contacts.view');
+    Route::get('contacts/check-duplicate',  [ContactController::class, 'checkDuplicate'])->middleware('permission:contacts.view');
+    Route::prefix('contacts')->group(function () {
+        Route::get('/',                     [ContactController::class, 'index'])->middleware('permission:contacts.view');
+        Route::get('/{contact}',            [ContactController::class, 'show'])->middleware('permission:contacts.view');
+        Route::post('/',                    [ContactController::class, 'store'])->middleware('permission:contacts.create');
+        Route::match(['put', 'patch'], '/{contact}', [ContactController::class, 'update'])->middleware('permission:contacts.update');
+        Route::delete('/{contact}',         [ContactController::class, 'destroy'])->middleware('permission:contacts.delete');
+    });
+
+    /* ---------------------------- Opportunities ------------------------- */
+    Route::get('opportunities/summary', [OpportunityController::class, 'summary'])->middleware('permission:opportunities.view');
+    Route::prefix('opportunities')->group(function () {
+        Route::get('/',                     [OpportunityController::class, 'index'])->middleware('permission:opportunities.view');
+        Route::post('/',                    [OpportunityController::class, 'store'])->middleware('permission:opportunities.create');
+        Route::match(['put', 'patch'], '/{opportunity}', [OpportunityController::class, 'update'])->middleware('permission:opportunities.update');
+        Route::delete('/{opportunity}',     [OpportunityController::class, 'destroy'])->middleware('permission:opportunities.delete');
+    });
+
+    /* ----------------------------- Campaigns ---------------------------- */
+    Route::get('campaigns/summary', [CampaignController::class, 'summary'])->middleware('permission:campaigns.view');
+    Route::prefix('campaigns')->group(function () {
+        Route::get('/',                     [CampaignController::class, 'index'])->middleware('permission:campaigns.view');
+        Route::post('/',                    [CampaignController::class, 'store'])->middleware('permission:campaigns.create');
+        Route::match(['put', 'patch'], '/{campaign}', [CampaignController::class, 'update'])->middleware('permission:campaigns.update');
+        Route::delete('/{campaign}',        [CampaignController::class, 'destroy'])->middleware('permission:campaigns.delete');
+    });
+
     /* ---------------------------- Invoices ----------------------------- */
     Route::get('invoices/next-number',  [InvoiceController::class, 'nextNumber'])->middleware('permission:create invoices');
     Route::post('invoices/from-order',  [InvoiceController::class, 'fromOrder'])->middleware('permission:create invoice from order');
@@ -422,6 +484,60 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('accounting/accounts/{id}',    [AccountingController::class, 'update'])->middleware('permission:edit accounting accounts');
     Route::delete('accounting/accounts/{id}', [AccountingController::class, 'destroy'])->middleware('permission:delete accounting accounts');
     Route::post('accounting/journals',        [AccountingController::class, 'storeJournal'])->middleware('permission:create accounting journals');
+
+    /* ---------------------- Banking & Reconciliation --------------------- */
+    Route::prefix('banking')->group(function () {
+        // Accounts & Balances
+        Route::get('accounts',                      [\App\Http\Controllers\Api\BankCashController::class, 'indexAccounts'])->middleware('permission:banking.accounts.view');
+        Route::post('accounts',                     [\App\Http\Controllers\Api\BankCashController::class, 'storeAccount'])->middleware('permission:banking.accounts.manage');
+        Route::get('accounts/{id}',                 [\App\Http\Controllers\Api\BankCashController::class, 'showAccount'])->middleware('permission:banking.accounts.view');
+        Route::put('accounts/{id}',                 [\App\Http\Controllers\Api\BankCashController::class, 'updateAccount'])->middleware('permission:banking.accounts.manage');
+        Route::delete('accounts/{id}',              [\App\Http\Controllers\Api\BankCashController::class, 'destroyAccount'])->middleware('permission:banking.accounts.manage');
+
+        // Ledger & Internal Transfers
+        Route::get('transactions',                  [\App\Http\Controllers\Api\BankCashController::class, 'indexAllTransactions'])->middleware('permission:banking.transactions.view,reports.accounts.view');
+        Route::get('accounts/{id}/transactions',    [\App\Http\Controllers\Api\BankCashController::class, 'indexTransactions'])->middleware('permission:banking.transactions.view');
+        Route::post('transfers',                    [\App\Http\Controllers\Api\BankCashController::class, 'storeTransfer'])->middleware('permission:banking.transactions.manage');
+        Route::post('adjustments',                  [\App\Http\Controllers\Api\BankCashController::class, 'storeAdjustment'])->middleware('permission:banking.transactions.manage');
+
+        // Daily Cash Register Closing
+        Route::get('cash-closings',                 [\App\Http\Controllers\Api\BankCashController::class, 'indexCashClosings'])->middleware('permission:banking.cash_closing.view,reports.accounts.view');
+        Route::post('cash-closings',                [\App\Http\Controllers\Api\BankCashController::class, 'storeCashClosing'])->middleware('permission:banking.cash_closing.manage');
+        Route::post('cash-closings/{id}/approve',   [\App\Http\Controllers\Api\BankCashController::class, 'approveCashClosing'])->middleware('permission:banking.cash_closing.approve');
+        Route::post('cash-closings/{id}/reject',    [\App\Http\Controllers\Api\BankCashController::class, 'rejectCashClosing'])->middleware('permission:banking.cash_closing.approve');
+        Route::get('cash-summary',                 [\App\Http\Controllers\Api\BankCashController::class, 'dailyCashSummary'])->middleware('permission:banking.cash_closing.view,reports.accounts.view');
+
+        // Statements Upload & History
+        Route::post('statements/upload',            [\App\Http\Controllers\Api\BankCashController::class, 'uploadStatement'])->middleware('permission:banking.statements.upload');
+        Route::get('statements',                    [\App\Http\Controllers\Api\BankCashController::class, 'indexStatements'])->middleware('permission:banking.reconciliation.view');
+        Route::get('statements/{id}/summary',       [\App\Http\Controllers\Api\BankCashController::class, 'statementSummary'])->middleware('permission:banking.reconciliation.view');
+        Route::delete('statements/{id}',            [\App\Http\Controllers\Api\BankCashController::class, 'destroyStatement'])->middleware('permission:banking.statements.upload');
+        Route::post('statements/{id}/process-full-reconciliation', [\App\Http\Controllers\Api\BankCashController::class, 'processFullReconciliation'])->middleware('permission:banking.reconciliation.manage');
+
+        // Reconciliation Workspace & AI Assistant
+        Route::get('reconciliation/dashboard',      [\App\Http\Controllers\Api\BankCashController::class, 'reconciliationDashboard'])->middleware('permission:banking.reconciliation.view');
+        Route::get('reconciliation/{accountId}',    [\App\Http\Controllers\Api\BankCashController::class, 'reconciliationWorkspace'])->middleware('permission:banking.reconciliation.view');
+        Route::post('reconciliation/match',         [\App\Http\Controllers\Api\BankCashController::class, 'confirmMatch'])->middleware('permission:banking.reconciliation.manage');
+        Route::post('reconciliation/unmatch',       [\App\Http\Controllers\Api\BankCashController::class, 'unmatch'])->middleware('permission:banking.reconciliation.manage');
+        Route::post('reconciliation/auto-match',    [\App\Http\Controllers\Api\BankCashController::class, 'autoMatch'])->middleware('permission:banking.reconciliation.manage');
+        Route::post('reconciliation/ai-suggest',    [\App\Http\Controllers\Api\BankCashController::class, 'aiSuggest'])->middleware('permission:banking.reconciliation.view');
+        Route::post('reconciliation/adjustments',   [\App\Http\Controllers\Api\BankCashController::class, 'createReconciliationAdjustment'])->middleware('permission:banking.reconciliation.manage');
+        Route::post('reconciliation/quick-record',  [\App\Http\Controllers\Api\BankCashController::class, 'quickCreatePaymentAndMatch'])->middleware('permission:banking.reconciliation.manage');
+
+        // Expense Drafts & Ignore Actions
+        Route::post('reconciliation/expense-drafts/{statementTxnId}/approve',   [\App\Http\Controllers\Api\BankCashController::class, 'approveExpenseDraft'])->middleware('permission:banking.reconciliation.manage');
+        Route::put('reconciliation/expense-drafts/{statementTxnId}',            [\App\Http\Controllers\Api\BankCashController::class, 'editExpenseDraft'])->middleware('permission:banking.reconciliation.manage');
+        Route::post('reconciliation/expense-drafts/{statementTxnId}/reject',    [\App\Http\Controllers\Api\BankCashController::class, 'rejectExpenseDraft'])->middleware('permission:banking.reconciliation.manage');
+        Route::post('reconciliation/transactions/{statementTxnId}/ignore',      [\App\Http\Controllers\Api\BankCashController::class, 'ignoreStatementTransaction'])->middleware('permission:banking.reconciliation.manage');
+        Route::post('reconciliation/transactions/{statementTxnId}/unignore',    [\App\Http\Controllers\Api\BankCashController::class, 'unignoreStatementTransaction'])->middleware('permission:banking.reconciliation.manage');
+
+        // Learned Reconciliation Rules
+        Route::get('rules',              [\App\Http\Controllers\Api\BankCashController::class, 'indexRules'])->middleware('permission:banking.reconciliation.view');
+        Route::post('rules',             [\App\Http\Controllers\Api\BankCashController::class, 'storeRule'])->middleware('permission:banking.reconciliation.manage');
+        Route::put('rules/{id}',         [\App\Http\Controllers\Api\BankCashController::class, 'updateRule'])->middleware('permission:banking.reconciliation.manage');
+        Route::delete('rules/{id}',      [\App\Http\Controllers\Api\BankCashController::class, 'deleteRule'])->middleware('permission:banking.reconciliation.manage');
+        Route::post('rules/{id}/toggle', [\App\Http\Controllers\Api\BankCashController::class, 'toggleRule'])->middleware('permission:banking.reconciliation.manage');
+    });
 
     /* ------------------------------ Sales ------------------------------ */
     Route::get('sales/summary',           [SalesController::class, 'summary'])->middleware('permission:view sales summary');

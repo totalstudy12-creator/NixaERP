@@ -94,6 +94,13 @@ interface Payment {
   payment_direction: PaymentDirection;
   bank_name?: string | null;
   account_number?: string | null;
+  bank_account_id?: number | null;
+  bank_account?: {
+    id: number;
+    account_name: string;
+    account_type: string;
+    masked_account_number?: string | null;
+  } | null;
   ledger_reference?: string | null;
   remarks?: string | null;
   payment_date?: string | null;
@@ -128,6 +135,7 @@ interface PaymentForm {
   payment_direction: PaymentDirection;
   bank_name: string;
   account_number: string;
+  bank_account_id?: number | null;
   ledger_reference: string;
   remarks: string;
 }
@@ -448,6 +456,7 @@ export function PaymentsPage() {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
+  const [bankAccounts, setBankAccounts] = useState<any[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -457,10 +466,13 @@ export function PaymentsPage() {
 
   const [companyFilter, setCompanyFilter] = useState('all');
   const [branchFilter, setBranchFilter] = useState('all');
+  const [bankAccountFilter, setBankAccountFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
   const [methodFilter, setMethodFilter] = useState('all');
   const [directionFilter, setDirectionFilter] = useState('all');
   const [billFilter, setBillFilter] = useState('all');
+  const [minAmountFilter, setMinAmountFilter] = useState('');
+  const [maxAmountFilter, setMaxAmountFilter] = useState('');
 
   const [dateFrom, setDateFrom] = useState(today());
   const [dateTo, setDateTo] = useState(today());
@@ -518,14 +530,16 @@ export function PaymentsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [paymentRes, companyRes, branchRes] = await Promise.all([
+      const [paymentRes, companyRes, branchRes, bankRes] = await Promise.all([
         apiClient.getPayments(),
         apiClient.getCompanies(),
         apiClient.getBranches(),
+        apiClient.getBankAccounts().catch(() => ({ data: [] })),
       ]);
       setPayments(normalize<Payment>(paymentRes));
       setCompanies(normalize<Company>(companyRes));
       setBranches(normalize<Branch>(branchRes));
+      setBankAccounts((bankRes as any)?.data || []);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to load payment records.';
       setError(message);
@@ -581,6 +595,9 @@ export function PaymentsPage() {
 
     if (directionFilter !== 'all') rows = rows.filter((p) => p.payment_direction === directionFilter);
     if (billFilter !== 'all') rows = rows.filter((p) => billType(p) === billFilter);
+    if (bankAccountFilter !== 'all') rows = rows.filter((p) => String(p.bank_account_id) === String(bankAccountFilter));
+    if (minAmountFilter !== '' && !isNaN(Number(minAmountFilter))) rows = rows.filter((p) => n(p.amount) >= Number(minAmountFilter));
+    if (maxAmountFilter !== '' && !isNaN(Number(maxAmountFilter))) rows = rows.filter((p) => n(p.amount) <= Number(maxAmountFilter));
 
     if (search) {
       rows = rows.filter((p) =>
@@ -615,7 +632,7 @@ export function PaymentsPage() {
     });
 
     return rows;
-  }, [payments, companyFilter, branchFilter, statusFilter, methodFilter, directionFilter, billFilter, search, dateFrom, dateTo, sortBy, sortDir]);
+  }, [payments, companyFilter, branchFilter, bankAccountFilter, statusFilter, methodFilter, directionFilter, billFilter, minAmountFilter, maxAmountFilter, search, dateFrom, dateTo, sortBy, sortDir]);
 
   const summary = useMemo(() => {
     const inward = filtered.filter((p) => p.payment_direction === 'inward').reduce((s, p) => s + n(p.amount), 0);
@@ -658,21 +675,25 @@ export function PaymentsPage() {
     let count = 0;
     if (companyFilter !== 'all') count++;
     if (branchFilter !== 'all') count++;
+    if (bankAccountFilter !== 'all') count++;
     if (statusFilter !== 'all') count++;
     if (methodFilter !== 'all') count++;
     if (directionFilter !== 'all') count++;
     if (billFilter !== 'all') count++;
+    if (minAmountFilter !== '' || maxAmountFilter !== '') count++;
     if (dateFrom !== today() || dateTo !== today()) count++;
     return count;
-  }, [companyFilter, branchFilter, statusFilter, methodFilter, directionFilter, billFilter, dateFrom, dateTo]);
+  }, [companyFilter, branchFilter, bankAccountFilter, statusFilter, methodFilter, directionFilter, billFilter, minAmountFilter, maxAmountFilter, dateFrom, dateTo]);
 
   const showReset = activeFilterCount > 0 || searchInput.trim() !== '';
 
   const clearFilters = () => {
     setSearchInput(''); setSearch('');
     setCompanyFilter('all'); setBranchFilter('all');
+    setBankAccountFilter('all');
     setStatusFilter('all'); setMethodFilter('all');
     setDirectionFilter('all'); setBillFilter('all');
+    setMinAmountFilter(''); setMaxAmountFilter('');
     setDateFrom(today()); setDateTo(today());
     setSelected([]);
   };
@@ -698,7 +719,7 @@ export function PaymentsPage() {
     setForm({
       company_id: 0, branch_id: undefined, invoice_id: null,
       reference_no: '', amount: '', payment_method: 'qr', status: 'pending',
-      payment_direction: 'inward', bank_name: '', account_number: '',
+      payment_direction: 'inward', bank_name: '', account_number: '', bank_account_id: null,
       ledger_reference: '', remarks: '',
     });
     setDueInvoiceSearch('');
@@ -722,6 +743,7 @@ export function PaymentsPage() {
       payment_method: methodKey(p.payment_method) || 'qr',
       status: p.status || 'pending',
       payment_direction: p.payment_direction || 'inward',
+      bank_account_id: p.bank_account_id || null,
       bank_name: p.bank_name || '',
       account_number: p.account_number || '',
       ledger_reference: p.ledger_reference || '',
@@ -815,6 +837,7 @@ export function PaymentsPage() {
       ...form,
       company_id: Number(form.company_id),
       branch_id: form.branch_id ? Number(form.branch_id) : null,
+      bank_account_id: form.bank_account_id ? Number(form.bank_account_id) : null,
       invoice_id: form.invoice_id || null,
       amount: n(form.amount),
       payment_method: methodKey(form.payment_method) || 'other',
@@ -1133,6 +1156,23 @@ export function PaymentsPage() {
                       </div>
                     </div>
 
+                    {/* Bank / Cash Account Filter */}
+                    <div>
+                      <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Bank / Cash Account</label>
+                      <Select
+                        value={bankAccountFilter}
+                        onChange={setBankAccountFilter}
+                        label="Bank Account"
+                        options={[
+                          { value: 'all', label: 'All bank & cash accounts' },
+                          ...bankAccounts.map((a: any) => ({
+                            value: String(a.id),
+                            label: `${a.account_name} (${a.account_type === 'cash' ? 'Cash Till' : a.bank_name || 'Bank'})`,
+                          })),
+                        ]}
+                      />
+                    </div>
+
                     {/* Status / Method */}
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                       <div>
@@ -1158,6 +1198,28 @@ export function PaymentsPage() {
                       </div>
                     </div>
 
+                    {/* Amount range */}
+                    <div>
+                      <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Amount range (₹)</label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="number"
+                          placeholder="Min ₹"
+                          value={minAmountFilter}
+                          onChange={(e) => setMinAmountFilter(e.target.value)}
+                          className="h-9 rounded-xl text-xs"
+                        />
+                        <span className="text-xs text-slate-400">to</span>
+                        <Input
+                          type="number"
+                          placeholder="Max ₹"
+                          value={maxAmountFilter}
+                          onChange={(e) => setMaxAmountFilter(e.target.value)}
+                          className="h-9 rounded-xl text-xs"
+                        />
+                      </div>
+                    </div>
+
                     {/* Date range */}
                     <div>
                       <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Date range</label>
@@ -1176,6 +1238,7 @@ export function PaymentsPage() {
                           { label: '7 days', from: addDays(today(), -6), to: today() },
                           { label: '30 days', from: addDays(today(), -29), to: today() },
                           { label: 'This month', from: `${today().slice(0, 7)}-01`, to: today() },
+                          { label: 'This FY', from: (today().slice(5, 7) >= '04' ? `${today().slice(0, 4)}-04-01` : `${Number(today().slice(0, 4)) - 1}-04-01`), to: (today().slice(5, 7) >= '04' ? `${Number(today().slice(0, 4)) + 1}-03-31` : `${today().slice(0, 4)}-03-31`) },
                           { label: 'All time', from: '', to: '' },
                         ].map((preset) => {
                           const active = dateFrom === preset.from && dateTo === preset.to;
@@ -1210,6 +1273,16 @@ export function PaymentsPage() {
                         {branchFilter !== 'all' && (
                           <span className="inline-flex items-center rounded-md bg-violet-50 px-2 py-0.5 text-[10px] font-semibold text-violet-700">
                             {branches.find((b) => String(b.id) === branchFilter)?.name || 'Branch'}
+                          </span>
+                        )}
+                        {bankAccountFilter !== 'all' && (
+                          <span className="inline-flex items-center rounded-md bg-cyan-50 px-2 py-0.5 text-[10px] font-semibold text-cyan-700">
+                            {bankAccounts.find((a: any) => String(a.id) === bankAccountFilter)?.account_name || 'Account'}
+                          </span>
+                        )}
+                        {(minAmountFilter !== '' || maxAmountFilter !== '') && (
+                          <span className="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                            ₹{minAmountFilter || '0'} - ₹{maxAmountFilter || '∞'}
                           </span>
                         )}
                         {statusFilter !== 'all' && (
@@ -1441,6 +1514,11 @@ export function PaymentsPage() {
                         <Badge variant="outline" className="rounded-full border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px]">
                           {methodLabel(p.payment_method)}
                         </Badge>
+                        {p.bank_account && (
+                          <p className="mt-1 text-[10px] text-slate-500 font-medium truncate max-w-[120px]">
+                            {p.bank_account.account_name}
+                          </p>
+                        )}
                       </TableCell>
 
                       <TableCell><StatusBadge status={p.status} /></TableCell>
@@ -1957,6 +2035,30 @@ export function PaymentsPage() {
 
                 {sections.bank && (
                   <div className="grid gap-4 border-t border-slate-100 p-4 sm:grid-cols-2">
+                    <div className="sm:col-span-2">
+                      <label className="mb-1.5 block text-xs font-semibold">Bank / Cash Account</label>
+                      <select
+                        value={form.bank_account_id || ''}
+                        onChange={(e) => {
+                          const accId = e.target.value ? Number(e.target.value) : null;
+                          const selectedAcc = bankAccounts.find((a: any) => a.id === accId);
+                          setForm((x) => ({
+                            ...x,
+                            bank_account_id: accId,
+                            bank_name: selectedAcc?.bank_name || x.bank_name,
+                            account_number: selectedAcc?.account_number || x.account_number,
+                          }));
+                        }}
+                        className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-800 shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-4 focus:ring-indigo-500/10"
+                      >
+                        <option value="">Auto-Assign / Default Account</option>
+                        {bankAccounts.map((a: any) => (
+                          <option key={a.id} value={a.id}>
+                            {a.account_name} ({a.account_type === 'bank' ? (a.masked_account_number || a.bank_name || 'Bank') : 'Cash Till'})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                     <div>
                       <label className="mb-1.5 block text-xs font-semibold">Bank name</label>
                       <Input value={form.bank_name} onChange={(e) => setForm((x) => ({ ...x, bank_name: e.target.value }))} />

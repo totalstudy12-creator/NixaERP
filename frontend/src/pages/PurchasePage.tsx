@@ -279,7 +279,7 @@ function rememberSupplierAlias(name: string, gstin: string | undefined, id: numb
   const key = normalizeName(name || '');
   if (key) a.suppliers[key] = id;
   if (gstin) {
-    const g = gstin.trim().toUpperCase();
+    const g = String(gstin || '').trim().toUpperCase();
     if (g) a.supplierGstin[g] = id;
   }
   saveAliases(a);
@@ -292,18 +292,18 @@ function rememberProductAlias(
   const a = loadAliases();
   const key = normalizeName(description || '');
   if (key) a.products[key] = id;
-  if (key && hsn) a.productHsn[`${key}|${hsn.trim().toUpperCase()}`] = id;
-  if (key && hsn && !a.hsn[key]) a.hsn[key] = hsn.trim().toUpperCase();
+  if (key && hsn) a.productHsn[`${key}|${String(hsn || '').trim().toUpperCase()}`] = id;
+  if (key && hsn && !a.hsn[key]) a.hsn[key] = String(hsn || '').trim().toUpperCase();
   if (unit) {
-    const u = unit.trim().toUpperCase();
+    const u = String(unit || '').trim().toUpperCase();
     if (u && !a.units[u]) a.units[u] = u;
   }
   saveAliases(a);
 }
 
 function rememberUnitAlias(rawUnit: string, canonical: string): void {
-  const raw = rawUnit.trim().toUpperCase();
-  const canon = canonical.trim().toUpperCase();
+  const raw = String(rawUnit || '').trim().toUpperCase();
+  const canon = String(canonical || '').trim().toUpperCase();
   if (!raw || !canon) return;
   const a = loadAliases();
   a.units[raw] = canon;
@@ -313,7 +313,7 @@ function rememberUnitAlias(rawUnit: string, canonical: string): void {
 function recallSupplierId(name: string, gstin?: string): number | null {
   const a = loadAliases();
   if (gstin) {
-    const g = gstin.trim().toUpperCase();
+    const g = String(gstin || '').trim().toUpperCase();
     if (g && a.supplierGstin[g]) return a.supplierGstin[g];
   }
   const key = normalizeName(name || '');
@@ -325,7 +325,7 @@ function recallProductId(description: string, hsn?: string): number | null {
   const key = normalizeName(description || '');
   if (!key) return null;
   if (hsn) {
-    const composite = `${key}|${hsn.trim().toUpperCase()}`;
+    const composite = `${key}|${String(hsn || '').trim().toUpperCase()}`;
     if (a.productHsn[composite]) return a.productHsn[composite];
   }
   return a.products[key] ?? null;
@@ -486,16 +486,35 @@ function formatCurrency(value: unknown): string {
     style: 'currency', currency: 'INR', maximumFractionDigits: 2,
   }).format(safeNum(value));
 }
+function normalizeDateInput(value: unknown): string {
+  if (!value) return '';
+  const str = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  const d = new Date(str);
+  if (Number.isNaN(d.getTime())) {
+    const s = str.slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : '';
+  }
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
 function formatDate(value: unknown): string {
   if (!value) return '—';
-  const str = typeof value === 'string' ? value : String(value);
-  const dateValue = str.slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateValue)) return '—';
-  const [year, month, day] = dateValue.split('-').map(Number);
-  const date = new Date(year, month - 1, day);
+  const str = typeof value === 'string' ? value.trim() : String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    const [year, month, day] = str.split('-').map(Number);
+    const date = new Date(year, month - 1, day);
+    if (Number.isNaN(date.getTime())) return '—';
+    return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
+  }
+  const date = new Date(str);
   if (Number.isNaN(date.getTime())) return '—';
   return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
 }
+
 function formatDateTime(value: unknown): string {
   if (!value) return '—';
   const d = new Date(String(value));
@@ -504,6 +523,7 @@ function formatDateTime(value: unknown): string {
     day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
   }).format(d);
 }
+
 function getLocalToday(): string {
   const now = new Date();
   const y = now.getFullYear();
@@ -511,10 +531,18 @@ function getLocalToday(): string {
   const d = String(now.getDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
 }
+
 function getMonthStart(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
 }
+
+function getMonthEnd(): string {
+  const now = new Date();
+  const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+}
+
 function getDaysAgo(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() - days);
@@ -522,11 +550,6 @@ function getDaysAgo(days: number): string {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
-}
-function normalizeDateInput(value: unknown): string {
-  if (!value) return '';
-  const str = String(value).slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(str) ? str : '';
 }
 
 function toBackendPaymentMethod(input: string): string {
@@ -596,8 +619,14 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
 
   useEffect(() => {
     mountedRef.current = true;
-    void fetchData();
-    return () => { mountedRef.current = false; requestIdRef.current += 1; };
+    void fetchData(true);
+    const handleUpdate = () => void fetchData(true);
+    window.addEventListener('purchases_updated', handleUpdate);
+    return () => {
+      mountedRef.current = false;
+      requestIdRef.current += 1;
+      window.removeEventListener('purchases_updated', handleUpdate);
+    };
   }, [fetchData]);
 
   const refresh = useCallback(() => { cache.delete(key); return fetchData(true); }, [fetchData, key]);
@@ -1524,7 +1553,7 @@ function scoreSupplierMatch(name: string, gstin: string | undefined, s: Supplier
     }
   }
   const sGst = (s.gstin || s.gst_number || '').toUpperCase();
-  if (gstin && sGst && gstin.toUpperCase() === sGst) score += 100;
+  if (gstin && sGst && String(gstin || '').toUpperCase() === sGst) score += 100;
   return score;
 }
 
@@ -3802,7 +3831,7 @@ export function PurchasePage() {
   const [filterPaymentStatus, setFilterPaymentStatus] = useState('all');
   const [filterCompanyId, setFilterCompanyId] = useState<number | undefined>(undefined);
   const [filterDateFrom, setFilterDateFrom] = useState(getMonthStart());
-  const [filterDateTo, setFilterDateTo] = useState(getLocalToday());
+  const [filterDateTo, setFilterDateTo] = useState(getMonthEnd());
   const [datePreset, setDatePreset] = useState<DatePreset>('month');
 
   const [filtersExpanded, setFiltersExpanded] = useState<boolean>(() => {
@@ -3849,7 +3878,7 @@ export function PurchasePage() {
   }, []);
 
   const { data: purchases, loading, error, refresh } =
-    useApiCache<PurchaseInvoice[]>('purchase-invoices', () => apiClient.getPurchaseInvoices());
+    useApiCache<PurchaseInvoice[]>('purchase-invoices', () => apiClient.getPurchaseInvoices({ per_page: 500 }));
 
   const filteredPurchases = useMemo(() => {
     if (!purchases) return [];
@@ -4058,7 +4087,7 @@ export function PurchasePage() {
     if (preset === 'today') { setFilterDateFrom(today); setFilterDateTo(today); }
     else if (preset === '7d') { setFilterDateFrom(getDaysAgo(6)); setFilterDateTo(today); }
     else if (preset === '30d') { setFilterDateFrom(getDaysAgo(29)); setFilterDateTo(today); }
-    else if (preset === 'month') { setFilterDateFrom(getMonthStart()); setFilterDateTo(today); }
+    else if (preset === 'month') { setFilterDateFrom(getMonthStart()); setFilterDateTo(getMonthEnd()); }
     else { setFilterDateFrom(''); setFilterDateTo(''); }
 
     if (typeof window !== 'undefined' && window.innerWidth < 1024) {
@@ -4089,7 +4118,7 @@ export function PurchasePage() {
   const clearFilters = useCallback(() => {
     setSearchInput(''); setSearch(''); setFilterStatus('all'); setFilterPaymentStatus('all');
     setFilterCompanyId(undefined);
-    setFilterDateFrom(getMonthStart()); setFilterDateTo(getLocalToday());
+    setFilterDateFrom(getMonthStart()); setFilterDateTo(getMonthEnd());
     setDatePreset('month');
   }, []);
 
@@ -4099,7 +4128,7 @@ export function PurchasePage() {
     if (filterStatus !== 'all') count++;
     if (filterPaymentStatus !== 'all') count++;
     if (filterCompanyId !== undefined) count++;
-    if (datePreset === 'custom' || filterDateFrom !== getMonthStart() || filterDateTo !== getLocalToday()) count++;
+    if (datePreset === 'custom' || filterDateFrom !== getMonthStart() || filterDateTo !== getMonthEnd()) count++;
     return count;
   }, [search, filterStatus, filterPaymentStatus, filterCompanyId, datePreset, filterDateFrom, filterDateTo]);
 

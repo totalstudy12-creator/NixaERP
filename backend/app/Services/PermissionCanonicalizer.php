@@ -528,6 +528,90 @@ class PermissionCanonicalizer
         ],
 
         // ==========================================
+        // CRM & QUOTATIONS
+        // ==========================================
+        'quotations.view' => [
+            'group'       => 'CRM & Quotations',
+            'label'       => 'View Quotations',
+            'description' => 'Browse and inspect sales quotations and price proposals',
+        ],
+        'quotations.create' => [
+            'group'       => 'CRM & Quotations',
+            'label'       => 'Create Quotations',
+            'description' => 'Create new sales quotations and proposals',
+        ],
+        'quotations.update' => [
+            'group'       => 'CRM & Quotations',
+            'label'       => 'Update Quotations',
+            'description' => 'Edit quotation details, line items, discounts, and terms',
+        ],
+        'quotations.delete' => [
+            'group'       => 'CRM & Quotations',
+            'label'       => 'Delete Quotations',
+            'description' => 'Cancel or delete sales quotations',
+        ],
+        'quotations.convert' => [
+            'group'       => 'CRM & Quotations',
+            'label'       => 'Convert Quotations',
+            'description' => 'Convert approved quotations to sales invoices or sales orders',
+        ],
+        'leads.view' => [
+            'group'       => 'CRM & Leads',
+            'label'       => 'View Leads',
+            'description' => 'Browse sales leads and customer acquisition pipeline',
+        ],
+        'leads.create' => [
+            'group'       => 'CRM & Leads',
+            'label'       => 'Create Leads',
+            'description' => 'Capture and log prospective customer leads',
+        ],
+        'leads.update' => [
+            'group'       => 'CRM & Leads',
+            'label'       => 'Update Leads',
+            'description' => 'Update lead status, qualification, notes, and follow-ups',
+        ],
+        'leads.delete' => [
+            'group'       => 'CRM & Leads',
+            'label'       => 'Delete Leads',
+            'description' => 'Remove leads from CRM pipeline',
+        ],
+        'leads.convert' => [
+            'group'       => 'CRM & Leads',
+            'label'       => 'Convert Leads',
+            'description' => 'Convert qualified leads into active customer accounts',
+        ],
+        'contacts.view' => [
+            'group'       => 'CRM & Contacts',
+            'label'       => 'View Contacts',
+            'description' => 'Browse business contacts and directory',
+        ],
+        'contacts.create' => [
+            'group'       => 'CRM & Contacts',
+            'label'       => 'Create Contacts',
+            'description' => 'Add new business contacts and stakeholders',
+        ],
+        'contacts.update' => [
+            'group'       => 'CRM & Contacts',
+            'label'       => 'Update Contacts',
+            'description' => 'Update contact profiles and communication channels',
+        ],
+        'contacts.delete' => [
+            'group'       => 'CRM & Contacts',
+            'label'       => 'Delete Contacts',
+            'description' => 'Remove contacts from address directory',
+        ],
+        'opportunities.view' => [
+            'group'       => 'CRM',
+            'label'       => 'View Opportunities',
+            'description' => 'Browse sales pipeline opportunities',
+        ],
+        'campaigns.view' => [
+            'group'       => 'CRM',
+            'label'       => 'View Campaigns',
+            'description' => 'Browse marketing campaigns',
+        ],
+
+        // ==========================================
         // 8. FINANCE & ACCOUNTING
         // ==========================================
         'income_expenses.view' => [
@@ -599,6 +683,70 @@ class PermissionCanonicalizer
             'group'       => 'Accounting',
             'label'       => 'Manage Accounting Accounts',
             'description' => 'Create and modify bank/cash accounts and ledgers',
+        ],
+
+        // ==========================================
+        // 8B. BANK & CASH RECONCILIATION
+        // ==========================================
+        'banking.accounts.view' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'View Bank & Cash Accounts',
+            'description' => 'Browse bank accounts, cash drawers, and running book balances',
+        ],
+        'banking.accounts.manage' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'Manage Bank & Cash Accounts',
+            'description' => 'Create, modify, and configure bank accounts and cash drawers',
+        ],
+        'banking.transactions.view' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'View Account Transactions',
+            'description' => 'Inspect account ledgers, deposits, withdrawals, and internal transfers',
+        ],
+        'banking.transactions.manage' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'Manage Transactions & Transfers',
+            'description' => 'Record deposits, withdrawals, adjustments, and inter-account transfers',
+        ],
+        'banking.cash_closing.view' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'View Cash Closings',
+            'description' => 'Inspect daily cash register closings and count sheets',
+        ],
+        'banking.cash_closing.manage' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'Submit Cash Closing',
+            'description' => 'Count physical cash and submit daily register closings',
+        ],
+        'banking.cash_closing.approve' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'Approve Cash Variances',
+            'description' => 'Authorize and approve cash shortage or excess adjustments',
+        ],
+        'banking.statements.upload' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'Upload Bank Statements',
+            'description' => 'Upload, parse, and import CSV, Excel, and PDF bank statements',
+        ],
+        'banking.reconciliation.view' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'View Bank Reconciliation',
+            'description' => 'Inspect bank statement matches, outstanding items, and reconciliation dashboard',
+        ],
+        'banking.reconciliation.manage' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'Perform Bank Reconciliation',
+            'description' => 'Confirm matches, split settlements, create adjustments, and approve reconciliations',
+        ],
+        'banking.rules.view' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'View Learned Reconciliation Rules',
+            'description' => 'Inspect automated pattern recognition rules and merchant mappings',
+        ],
+        'banking.rules.manage' => [
+            'group'       => 'Banking & Cash',
+            'label'       => 'Manage Reconciliation Rules',
+            'description' => 'Create, edit, toggle, and delete learned matching rules',
         ],
 
         // ==========================================
@@ -837,6 +985,29 @@ class PermissionCanonicalizer
         'edit purchase invoices'        => 'purchases.update',
         'delete purchase invoices'      => 'purchases.delete',
 
+        // --- Quotations & CRM ---
+        'view sales quotations'         => 'quotations.view',
+        'convert sales quotations'      => 'quotations.convert',
+        'convert quotations'            => 'quotations.convert',
+        'convert leads'                 => 'leads.convert',
+        'create sales quotations'       => 'quotations.create',
+        'edit sales quotations'         => 'quotations.update',
+        'delete sales quotations'       => 'quotations.delete',
+        'view quotations'               => 'quotations.view',
+        'create quotations'             => 'quotations.create',
+        'edit quotations'               => 'quotations.update',
+        'delete quotations'             => 'quotations.delete',
+        'view leads'                    => 'leads.view',
+        'create leads'                  => 'leads.create',
+        'edit leads'                    => 'leads.update',
+        'delete leads'                  => 'leads.delete',
+        'view contacts'                 => 'contacts.view',
+        'create contacts'               => 'contacts.create',
+        'edit contacts'                 => 'contacts.update',
+        'delete contacts'               => 'contacts.delete',
+        'view opportunities'            => 'opportunities.view',
+        'view campaigns'                => 'campaigns.view',
+
         // --- Invoices & POS ---
         'view invoices'                 => 'invoices.view',
         'invoices.view'                 => 'invoices.view',
@@ -889,6 +1060,17 @@ class PermissionCanonicalizer
         'chat with ai'                  => 'ai.assistant.view',
         'chat with ai assistant'        => 'ai.assistant.view',
         'chat with ai agent'            => 'ai.assistant.view',
+
+        // --- Banking & Reconciliation Aliases ---
+        'view bank accounts'            => 'banking.accounts.view',
+        'manage bank accounts'          => 'banking.accounts.manage',
+        'view bank statements'          => 'banking.reconciliation.view',
+        'upload bank statements'        => 'banking.statements.upload',
+        'reconcile bank accounts'       => 'banking.reconciliation.manage',
+        'manage cash closings'          => 'banking.cash_closing.manage',
+        'approve cash closings'         => 'banking.cash_closing.approve',
+        'view reconciliation rules'     => 'banking.rules.view',
+        'manage reconciliation rules'   => 'banking.rules.manage',
     ];
 
     /**

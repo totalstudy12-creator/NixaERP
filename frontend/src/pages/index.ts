@@ -56,3 +56,5 @@ export { EditInvoicePage } from './EditInvoicePage';
 export { CreatePurchaseInvoicePage } from './CreatePurchaseInvoicePage';
 export { EditPurchaseInvoicePage } from './EditPurchaseInvoicePage';
 export { IncomeExpensePage } from './IncomeExpensePage';
+export * from './CreateQuotationPage';
+export * from './QuotationDetailPage';

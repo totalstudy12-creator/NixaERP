@@ -150,6 +150,8 @@ const SUB_REPORTS: Record<CategoryKey, { key: string; label: string; icon: React
     { key: 'branch-profitability', label: 'Branch Profitability', icon: <FiGrid size={14} /> },
     { key: 'balance-sheet', label: 'Balance Sheet', icon: <FiFileText size={14} /> },
     { key: 'cash-flow', label: 'Cash Flow', icon: <FiDollarSign size={14} /> },
+    { key: 'bank-cash-summary', label: 'Bank & Cash Ledger', icon: <FiCreditCard size={14} /> },
+    { key: 'cash-closings-report', label: 'Daily Cash Closing', icon: <FiDollarSign size={14} /> },
     { key: 'receivables-aging', label: 'Receivables Aging', icon: <FiAlertTriangle size={14} /> },
     { key: 'payables-aging', label: 'Payables Aging', icon: <FiAlertTriangle size={14} /> },
   ],
@@ -176,6 +178,8 @@ const ENDPOINT_MAP: Record<string, string> = {
   'pl-overview': '/reports/profit-loss/summary',
   'balance-sheet': '/reports/balance-sheet',
   'cash-flow': '/reports/cash-flow',
+  'bank-cash-summary': '/banking/transactions',
+  'cash-closings-report': '/banking/cash-closings',
   'branch-profitability': '/reports/profit-loss/branches',
   'invoice-profitability': '/reports/profit-loss/invoices',
   'customer-profitability': '/reports/profit-loss/customers',
@@ -249,8 +253,8 @@ const buildQS = (params: Record<string, unknown>) => {
   return s ? `?${s}` : '';
 };
 
-const humanize = (k: string) =>
-  k.replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).trim();
+const humanize = (k: any) =>
+  String(k ?? '').replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()).trim();
 
 const getByPath = (row: Row, path: string): unknown =>
   path.split('.').reduce<unknown>(
@@ -391,6 +395,30 @@ interface UseReportResult {
   refresh: () => void;
 }
 
+const extractRows = (obj: any): Row[] => {
+  if (!obj) return [];
+  if (Array.isArray(obj.data)) return obj.data as Row[];
+  if (obj.data && typeof obj.data === 'object' && Array.isArray(obj.data.data)) return obj.data.data as Row[];
+  if (Array.isArray(obj.rows)) return obj.rows as Row[];
+  if (Array.isArray(obj.transactions)) return obj.transactions as Row[];
+  if (Array.isArray(obj.closings)) return obj.closings as Row[];
+  return [];
+};
+
+const extractMeta = (obj: any): PageMeta | null => {
+  if (!obj) return null;
+  if (obj.meta && typeof obj.meta === 'object') return obj.meta as PageMeta;
+  if (obj.data && typeof obj.data === 'object' && 'current_page' in obj.data) {
+    return {
+      current_page: obj.data.current_page,
+      last_page: obj.data.last_page,
+      per_page: obj.data.per_page,
+      total: obj.data.total,
+    };
+  }
+  return null;
+};
+
 const reportCache = new Map<string, { at: number; payload: Record<string, unknown> }>();
 
 function useReport({ path, filters, enabled = true, ttlMs = 120_000 }: UseReportOptions): UseReportResult {
@@ -422,7 +450,8 @@ function useReport({ path, filters, enabled = true, ttlMs = 120_000 }: UseReport
     if (cached && Date.now() - cached.at < ttlMs) {
       const p = cached.payload;
       setRaw(p);
-      setRows(Array.isArray(p.data) ? (p.data as Row[]) : []);
+      setRows(extractRows(p));
+      setMeta(extractMeta(p));
       setSummary((p.summary as Record<string, number>) ?? null);
       setMeta((p.meta as PageMeta) ?? null);
       setError(null);
@@ -440,7 +469,7 @@ function useReport({ path, filters, enabled = true, ttlMs = 120_000 }: UseReport
         const payload = (res ?? {}) as Record<string, unknown>;
         reportCache.set(key, { at: Date.now(), payload });
         setRaw(payload);
-        setRows(Array.isArray(payload.data) ? (payload.data as Row[]) : []);
+        setRows(extractRows(payload)); setMeta(extractMeta(payload));
         setSummary((payload.summary as Record<string, number>) ?? null);
         setMeta((payload.meta as PageMeta) ?? null);
       })
@@ -1434,6 +1463,36 @@ export function ReportsPage() {
       { key: 'total', label: 'Total', align: 'right', render: (r) => fmtCurrency(r.total) },
       { key: 'due_amount', label: 'Due', align: 'right', render: (r) => fmtCurrency(r.due_amount) },
       { key: 'status', label: 'Status', align: 'right', render: (r) => <StatusBadge status={String(r.status ?? '')} /> },
+    ],
+    'bank-cash-summary': [
+      { key: 'transaction_date', label: 'Date', render: (r) => fmtDate(r.transaction_date) },
+      { key: 'bank_account', label: 'Account', render: (r: any) => r.bank_account?.account_name || '—' },
+      { key: 'transaction_type', label: 'Type', render: (r: any) => <StatusBadge status={String(r.transaction_type ?? 'transaction').replace(/_/g, ' ')} /> },
+      { key: 'reference_no', label: 'Reference / UTR', render: (r: any) => r.reference_no || '—' },
+      { key: 'description', label: 'Description' },
+      { key: 'amount', label: 'Debit', align: 'right', render: (r: any) => {
+        const isCredit = ['deposit', 'transfer_in', 'interest'].includes(String(r.transaction_type));
+        return !isCredit && r.amount ? fmtCurrency(r.amount) : '—';
+      }},
+      { key: 'credit_amount', label: 'Credit', align: 'right', render: (r: any) => {
+        const isCredit = ['deposit', 'transfer_in', 'interest'].includes(String(r.transaction_type));
+        return isCredit && r.amount ? fmtCurrency(r.amount) : '—';
+      }},
+      { key: 'running_balance', label: 'Balance', align: 'right', render: (r: any) => fmtCurrency(r.running_balance) },
+    ],
+    'cash-closings-report': [
+      { key: 'closing_date', label: 'Date', render: (r) => fmtDate(r.closing_date) },
+      { key: 'cash_account', label: 'Cash Account', render: (r: any) => r.cash_account?.account_name || 'Cash' },
+      { key: 'opening_cash', label: 'Opening', align: 'right', render: (r: any) => fmtCurrency(r.opening_cash) },
+      { key: 'cash_in', label: 'Cash In', align: 'right', render: (r: any) => fmtCurrency(r.cash_in) },
+      { key: 'cash_out', label: 'Cash Out', align: 'right', render: (r: any) => fmtCurrency(r.cash_out) },
+      { key: 'expected_closing_cash', label: 'Expected', align: 'right', render: (r: any) => fmtCurrency(r.expected_closing_cash) },
+      { key: 'actual_closing_cash', label: 'Actual Count', align: 'right', render: (r: any) => fmtCurrency(r.actual_closing_cash) },
+      { key: 'difference', label: 'Diff', align: 'right', render: (r: any) => {
+        const diff = Number(r.difference || 0);
+        return <span className={diff < 0 ? 'text-rose-600 font-bold' : diff > 0 ? 'text-emerald-600 font-bold' : 'text-slate-600'}>{fmtCurrency(diff)}</span>;
+      }},
+      { key: 'status', label: 'Status', align: 'right', render: (r: any) => <StatusBadge status={String(r.status ?? 'pending')} /> },
     ],
     'sales-register': [
       { key: 'date', label: 'Date', render: (r) => fmtDate(r.date) },
