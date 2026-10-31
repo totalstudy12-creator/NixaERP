@@ -1916,6 +1916,16 @@ export const apiClient = {
     return this.request('POST', '/ai/assistant/chat', payload);
   },
 
+  async liveConverse(payload: {
+    transcript: string;
+    voice?: string;
+    language?: string;
+    history?: Array<{ role: string; text: string }>;
+    turn_id?: string;
+  }) {
+    return this.request('POST', '/ai/assistant/live-converse', payload);
+  },
+
   async generateAiSpeech(
     text: string,
     provider: 'browser' | 'cloud' | 'auto' = 'auto',
@@ -2802,7 +2812,97 @@ export const apiClient = {
   async deleteCampaign(id: number) {
     return this.request('DELETE', `/campaigns/${id}`);
   },
+
 
+// --- Enterprise Auth & Sessions Management ---
+  async getUserSessions() {
+    return this.request('GET', '/auth/sessions');
+  },
+
+  async terminateUserSession(sessionId: number) {
+    return this.request('DELETE', `/auth/sessions/${sessionId}`);
+  },
+
+  async terminateOtherSessions() {
+    return this.request('POST', '/auth/sessions/terminate-others');
+  },
+
+  async changePassword(data: { current_password: string; password: string; password_confirmation: string }) {
+    return this.request('POST', '/auth/change-password', data);
+  },
+
+  // --- User Account Control & Banning ---
+  async banUser(userId: number, data: { action: 'ban' | 'suspend' | 'deactivate'; reason: string; duration_minutes?: number; duration_days?: number }) {
+    return this.request('POST', `/users/${userId}/ban`, data);
+  },
+
+  async unbanUser(userId: number, reason?: string) {
+    return this.request('POST', `/users/${userId}/unban`, { reason });
+  },
+
+  async resetUserLockout(userId: number) {
+    return this.request('POST', `/users/${userId}/reset-lockout`);
+  },
+
+  async forceLogoutUser(userId: number) {
+    return this.request('POST', `/users/${userId}/force-logout`);
+  },
+
+  async getUserSecurityOverview(userId: number) {
+    return this.request('GET', `/users/${userId}/security-overview`);
+  },
+
+  // --- Security & IP Firewall ---
+  async getSecurityDashboard() {
+    return this.request('GET', '/security/dashboard');
+  },
+
+  async getIpRules(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/security/ip-rules${query ? '?' + query : ''}`);
+  },
+
+  async createIpRule(data: { ip_address: string; rule_type?: 'deny' | 'allow'; type?: 'block' | 'allow'; reason?: string; notes?: string; duration_minutes?: number; duration_hours?: number }) {
+    return this.request('POST', '/security/ip-rules', data);
+  },
+
+  async deleteIpRule(id: number) {
+    return this.request('DELETE', `/security/ip-rules/${id}`);
+  },
+
+  async getLoginAttempts(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/security/login-attempts${query ? '?' + query : ''}`);
+  },
+
+  async getActiveSessionsAdmin(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/security/active-sessions${query ? '?' + query : ''}`);
+  },
+
+  async terminateSessionAdmin(id: number) {
+    return this.request('DELETE', `/security/sessions/${id}`);
+  },
+
+  // --- Customer 360 Workspace ---
+  async getCustomer360(customerId: number) {
+    return this.request('GET', `/customers/${customerId}/customer-360`);
+  },
+
+  async toggleCustomerArchive(customerId: number) {
+    return this.request('POST', `/customers/${customerId}/archive`);
+  },
+
+  // --- Nixa Multi-App Ecosystem & Launcher ---
+  async getAppLauncher() {
+    return this.request('GET', '/apps/launcher');
+  },
+
+  // --- Super Admin Control Center ---
+  async getAdminSystemOverview() {
+    return this.request('GET', '/admin/system-overview');
+  },
 };
 
 export default apiClient;
+

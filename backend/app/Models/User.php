@@ -17,6 +17,8 @@ class User extends Authenticatable
     protected $fillable = [
         'name', 'email', 'password', 'phone',
         'location', 'timezone', 'bio', 'avatar_url', 'company_id', 'branch_id',
+        'status', 'banned_at', 'banned_until', 'banned_reason', 'banned_by_user_id',
+        'failed_login_count', 'last_failed_login_at', 'lockout_until', 'last_login_at', 'last_login_ip',
     ];
 
     protected $hidden = ['password', 'remember_token', 'two_factor_secret'];
@@ -33,6 +35,11 @@ class User extends Authenticatable
             'two_factor_confirmed_at' => 'datetime',
             'company_id'              => 'integer',
             'branch_id'               => 'integer',
+            'banned_at'               => 'datetime',
+            'banned_until'            => 'datetime',
+            'last_failed_login_at'    => 'datetime',
+            'lockout_until'           => 'datetime',
+            'last_login_at'           => 'datetime',
         ];
     }
 
@@ -173,5 +180,48 @@ class User extends Authenticatable
     public function hasPendingTwoFactorSetup(): bool
     {
         return $this->two_factor_secret !== null && $this->two_factor_confirmed_at === null;
+    }
+
+    /* ---------------------- Sessions & Account Control ---------------------- */
+
+    public function sessions()
+    {
+        return $this->hasMany(UserSession::class);
+    }
+
+    public function activeSessions()
+    {
+        return $this->hasMany(UserSession::class)->where('is_active', true);
+    }
+
+    public function banHistories()
+    {
+        return $this->hasMany(UserBanHistory::class)->orderByDesc('created_at');
+    }
+
+    public function loginAttempts()
+    {
+        return $this->hasMany(LoginAttempt::class)->orderByDesc('created_at');
+    }
+
+    public function isBanned(): bool
+    {
+        if ($this->status === 'banned') {
+            return true;
+        }
+
+        if ($this->status === 'suspended') {
+            if ($this->banned_until === null) {
+                return true;
+            }
+            return now()->lt($this->banned_until);
+        }
+
+        return false;
+    }
+
+    public function isLockedOut(): bool
+    {
+        return $this->lockout_until !== null && now()->lt($this->lockout_until);
     }
 }

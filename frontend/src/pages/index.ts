@@ -43,6 +43,7 @@ export * from './BackupRestorePage';
 export * from './PageTemplate';
 
 // Re-export specific named exports if needed
+export { AIAssistantPage } from './AIAssistantPage';
 export { MarketingPage } from './MarketingPage';
 export { EmployeesPage } from './EmployeesPage';
 export { CreateInvoicePage } from './CreateInvoicePage';

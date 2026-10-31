@@ -5,37 +5,236 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\AiConversation;
 use App\Models\AiMessage;
+use App\Models\AiProvider;
+use App\Models\Product;
+use App\Models\Setting;
+use App\Services\AiContextService;
 use App\Services\AiManager;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Crypt;
 
 class AiController extends Controller
 {
-    protected $aiManager;
-    protected $contextService;
+    protected AiManager $aiManager;
+    protected AiContextService $contextService;
 
-    public function __construct(AiManager $aiManager)
+    public function __construct(AiManager $aiManager, AiContextService $contextService)
     {
         $this->aiManager = $aiManager;
-        $this->contextService = new \App\Services\AiContextService();
+        $this->contextService = $contextService;
+    }
+
+    /**
+     * Resolve the active Gemini API key from database settings, active AiProvider, or environment.
+     */
+    public static function resolveGeminiKey(): ?string
+    {
+        // 1. Settings table (encrypted)
+        try {
+            $savedKey = Setting::where('key', 'ai_gemini_api_key')->value('value');
+            if (!empty($savedKey)) {
+                try {
+                    $decrypted = Crypt::decryptString($savedKey);
+                    if (!empty($decrypted)) {
+                        return trim($decrypted);
+                    }
+                } catch (\Throwable $e) {
+                    if (!str_starts_with($savedKey, 'eyJpdiI6')) {
+                        return trim($savedKey);
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Error resolving Gemini key from settings: ' . $e->getMessage());
+        }
+
+        // 2. AiProvider (accessor auto-decrypts)
+        try {
+            $provider = AiProvider::where('enabled', true)->first();
+            if ($provider && !empty($provider->key)) {
+                return trim((string) $provider->key);
+            }
+        } catch (\Throwable $e) {
+            Log::warning('Error resolving Gemini key from provider: ' . $e->getMessage());
+        }
+
+        // 3. Environment variable fallback
+        $envKey = env('GEMINI_API_KEY');
+        return !empty($envKey) ? trim((string) $envKey) : null;
+    }
+
+    /**
+     * Clean markdown, asterisks, bullet points, headers, and code for smooth TTS synthesis.
+     */
+    public static function cleanTextForSpeech(string $text): string
+    {
+        $text = preg_replace('/```[\s\S]*?```/', '', $text);
+        $text = preg_replace('/`([^`]+)`/', '$1', $text);
+        $text = preg_replace('/[#*_~>]+/', ' ', $text);
+        $text = preg_replace('/[•·▪▫●○►–—]/u', ' ', $text);
+        $text = preg_replace('/https?:\/\/\S+/', '', $text);
+        $text = preg_replace('/^\s*[-•]\s*/m', '', $text);
+        $text = preg_replace('/^\s*\d+\.\s*/m', '', $text);
+        $text = preg_replace('/\s+/', ' ', $text);
+        return trim($text);
+    }
+
+    /**
+     * Convert PCM 16-bit 24kHz audio to standard WAV format.
+     */
+    public static function pcmToWav(string $pcmData, int $sampleRate = 24000, int $channels = 1, int $bitsPerSample = 16): string
+    {
+        $byteRate   = $sampleRate * $channels * ($bitsPerSample / 8);
+        $blockAlign = $channels * ($bitsPerSample / 8);
+        $dataLength = strlen($pcmData);
+        $chunkSize  = 36 + $dataLength;
+
+        $header = pack(
+            'a4Va4a4VvvVVvva4V',
+            'RIFF',
+            $chunkSize,
+            'WAVE',
+            'fmt ',
+            16,
+            1,
+            $channels,
+            $sampleRate,
+            $byteRate,
+            $blockAlign,
+            $bitsPerSample,
+            'data',
+            $dataLength
+        );
+
+        return $header . $pcmData;
+    }
+
+    /**
+     * Generate natural speech using Google Gemini TTS.
+     * Returns standard base64 WAV audio.
+     */
+    public static function generateGeminiSpeech(string $text, string $voice = 'Zephyr'): ?string
+    {
+        $apiKey = self::resolveGeminiKey();
+        if (!$apiKey) {
+            return null;
+        }
+
+        // Real Gemini TTS prebuilt voices
+        $validVoices = ['Zephyr', 'Aoede', 'Kore', 'Puck', 'Fenrir', 'Charon', 'Leda', 'Orus'];
+        $selectedVoice = 'Zephyr';
+        foreach ($validVoices as $v) {
+            if (strcasecmp($voice, $v) === 0 || stripos($voice, $v) !== false) {
+                $selectedVoice = $v;
+                break;
+            }
+        }
+
+        $cleanText = substr(self::cleanTextForSpeech($text), 0, 1500);
+        if ($cleanText === '') {
+            return null;
+        }
+
+        // Active Gemini TTS models prioritized
+        $modelsToTry = [
+            'gemini-3.8-flash-tts',
+            'gemini-3.8-flash-lite-tts',
+            'gemini-3.1-flash-tts-preview',
+            'gemini-2.5-flash-preview-tts',
+            'gemini-2.5-pro-preview-tts',
+        ];
+
+        $payload = [
+            'contents' => [
+                [
+                    'role'  => 'user',
+                    'parts' => [['text' => $cleanText]],
+                ],
+            ],
+            'generationConfig' => [
+                'responseModalities' => ['AUDIO'],
+                'speechConfig' => [
+                    'voiceConfig' => [
+                        'prebuiltVoiceConfig' => [
+                            'voiceName' => $selectedVoice,
+                        ],
+                    ],
+                ],
+            ],
+        ];
+
+        $verifySsl = filter_var(env('GEMINI_VERIFY_SSL', true), FILTER_VALIDATE_BOOLEAN);
+
+        foreach ($modelsToTry as $model) {
+            $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
+            try {
+                $httpReq = Http::timeout(4)->withHeaders([
+                    'Content-Type'   => 'application/json',
+                    'x-goog-api-key' => $apiKey,
+                ]);
+                if (!$verifySsl) {
+                    $httpReq = $httpReq->withoutVerifying();
+                }
+
+                $response = $httpReq->post($url, $payload);
+
+                if ($response->successful()) {
+                    $data = $response->json();
+                    $parts = data_get($data, 'candidates.0.content.parts', []);
+                    $rawBase64 = null;
+                    foreach ($parts as $p) {
+                        if (!empty($p['inlineData']['data'])) {
+                            $rawBase64 = $p['inlineData']['data'];
+                            break;
+                        }
+                    }
+
+                    if ($rawBase64) {
+                        $rawBytes = base64_decode($rawBase64);
+                        // If already a valid WAV (starts with RIFF), return as-is to prevent double-wrapping
+                        if (str_starts_with($rawBytes, 'RIFF')) {
+                            return base64_encode($rawBytes);
+                        }
+                        // If MP3, return as-is
+                        if (str_starts_with($rawBytes, 'ID3') || (strlen($rawBytes) > 2 && ord($rawBytes[0]) === 0xFF && (ord($rawBytes[1]) & 0xE0) === 0xE0)) {
+                            return base64_encode($rawBytes);
+                        }
+                        // Raw PCM 24kHz
+                        $wav = self::pcmToWav($rawBytes, 24000);
+                        return base64_encode($wav);
+                    }
+                } else {
+                    Log::warning("Gemini TTS API error with {$model}: HTTP " . $response->status());
+                }
+            } catch (\Throwable $e) {
+                Log::warning("Gemini TTS call exception with {$model}: " . $e->getMessage());
+            }
+        }
+
+        return null;
     }
 
     public function insights(Request $request)
     {
-        $user = Auth::user();
-
         try {
             $salesSummary = app()->call('\App\Http\Controllers\Api\SalesController@summary');
+            if ($salesSummary instanceof \Illuminate\Http\JsonResponse) {
+                $salesSummary = $salesSummary->getData(true);
+            }
+            if (isset($salesSummary['data']) && is_array($salesSummary['data'])) {
+                $salesSummary = $salesSummary['data'];
+            }
         } catch (\Throwable $e) {
             Log::warning('AI insights: failed to fetch sales summary: ' . $e->getMessage());
-            $salesSummary = null;
+            $salesSummary = [];
         }
 
         try {
-            $lowStock = \App\Models\Product::whereRaw('stock_quantity <= COALESCE(reorder_level, 10)')
+            $lowStock = Product::whereRaw('stock_quantity <= COALESCE(reorder_level, 10)')
                 ->limit(10)
                 ->get(['id', 'name', 'stock_quantity']);
         } catch (\Throwable $e) {
@@ -43,14 +242,23 @@ class AiController extends Controller
             $lowStock = collect();
         }
 
+        $totalSales     = (float) ($salesSummary['total_sales']     ?? 0);
+        $outstanding    = (float) ($salesSummary['outstanding']     ?? 0);
+        $deliveredToday = (int)   ($salesSummary['delivered_today'] ?? 0);
+        $pendingOrders  = (int)   ($salesSummary['pending_orders']  ?? 0);
+
         $insights = [
             'summary' => [
-                'sales_growth' => $salesSummary['growth'] ?? null,
-                'inventory_health' => $lowStock->count() ? 'attention' : 'good',
-                'cash_position' => $salesSummary['cash_position'] ?? null,
+                'total_sales'      => $totalSales,
+                'outstanding'      => $outstanding,
+                'delivered_today'  => $deliveredToday,
+                'pending_orders'   => $pendingOrders,
+                'sales_growth'     => $salesSummary['growth'] ?? $salesSummary['sales_growth'] ?? null,
+                'inventory_health' => $lowStock->count() > 0 ? 'attention' : 'good',
+                'cash_position'    => $salesSummary['cash_position'] ?? null,
                 'payroll_accuracy' => null,
             ],
-            'low_stock' => $lowStock->take(5),
+            'low_stock'       => $lowStock->take(5),
             'recommendations' => [],
         ];
 
@@ -59,26 +267,13 @@ class AiController extends Controller
 
     public function assistantConfig()
     {
-        $settings = \App\Models\Setting::whereIn('key', ['ai_gemini_api_key', 'ai_gemini_model'])
-            ->pluck('value', 'key');
+        $apiKey     = self::resolveGeminiKey();
+        $configured = !empty($apiKey);
 
-        $apiKey = null;
-        if (!empty($settings['ai_gemini_api_key'])) {
-            try { $apiKey = Crypt::decryptString($settings['ai_gemini_api_key']); } catch (\Throwable $e) {}
-        }
-
-        if (!$apiKey) {
-            $provider = \App\Models\AiProvider::where('enabled', true)->first();
-            if ($provider && !empty($provider->key) && !str_starts_with((string)$provider->key, 'eyJpdiI6Ik')) {
-                $apiKey = $provider->key;
-            }
-        }
-
-        $configured = !empty($apiKey) || !empty(env('GEMINI_API_KEY'));
-        $model = $settings['ai_gemini_model'] ?? null;
+        $model = Setting::where('key', 'ai_gemini_model')->value('value');
         if (!$model) {
-            $provider = \App\Models\AiProvider::where('enabled', true)->first();
-            $model = $provider?->config['model'] ?? env('GEMINI_MODEL', 'gemini-3.5-flash');
+            $provider = AiProvider::where('enabled', true)->first();
+            $model    = $provider?->config['model'] ?? env('GEMINI_MODEL', 'gemini-2.5-flash');
         }
 
         $maskedKey = null;
@@ -90,7 +285,7 @@ class AiController extends Controller
             'success' => true,
             'data' => [
                 'configured' => $configured,
-                'model' => $model ?: 'gemini-3.5-flash',
+                'model'      => $model ?: 'gemini-2.5-flash',
                 'masked_key' => $maskedKey,
                 'has_db_key' => !empty($apiKey),
             ],
@@ -107,8 +302,8 @@ class AiController extends Controller
         $rawKey = trim($validated['api_key']);
         $model  = trim($validated['model']);
 
-        // 1. Save in settings table
-        \App\Models\Setting::updateOrCreate(
+        // 1. Save in settings table (encrypted)
+        Setting::updateOrCreate(
             ['key' => 'ai_gemini_api_key'],
             [
                 'value'       => Crypt::encryptString($rawKey),
@@ -117,7 +312,7 @@ class AiController extends Controller
                 'is_public'   => false,
             ]
         );
-        \App\Models\Setting::updateOrCreate(
+        Setting::updateOrCreate(
             ['key' => 'ai_gemini_model'],
             [
                 'value'       => $model,
@@ -127,14 +322,11 @@ class AiController extends Controller
             ]
         );
 
-        // 2. Synchronize to ai_providers table (primary provider)
-        $aiProvider = \App\Models\AiProvider::firstOrNew(['id' => 1]);
-        $aiProvider->name = 'Google Gemini';
-        $aiProvider->key = $rawKey;
-        $aiProvider->config = [
-            'type'  => 'gemini',
-            'model' => $model,
-        ];
+        // 2. Synchronize to ai_providers table
+        $aiProvider = AiProvider::firstOrNew(['id' => 1]);
+        $aiProvider->name    = 'Google Gemini';
+        $aiProvider->key     = $rawKey;
+        $aiProvider->config  = ['type' => 'gemini', 'model' => $model];
         $aiProvider->enabled = true;
         $aiProvider->save();
 
@@ -152,23 +344,10 @@ class AiController extends Controller
     public function testAssistantConfig(Request $request)
     {
         $rawKey = trim((string) $request->input('api_key', ''));
-        $model  = trim((string) $request->input('model', 'gemini-3.5-flash'));
+        $model  = trim((string) $request->input('model', 'gemini-2.5-flash'));
 
-        // If key was not typed, load active key from database!
         if (empty($rawKey)) {
-            $savedKey = \App\Models\Setting::where('key', 'ai_gemini_api_key')->value('value');
-            if ($savedKey) {
-                try { $rawKey = Crypt::decryptString($savedKey); } catch (\Throwable $e) {}
-            }
-            if (empty($rawKey)) {
-                $p = \App\Models\AiProvider::where('enabled', true)->first();
-                if ($p && !empty($p->key) && !str_starts_with((string)$p->key, 'eyJpdiI6Ik')) {
-                    $rawKey = $p->key;
-                }
-            }
-            if (empty($rawKey)) {
-                $rawKey = env('GEMINI_API_KEY');
-            }
+            $rawKey = self::resolveGeminiKey() ?? '';
         }
 
         if (empty($rawKey)) {
@@ -182,24 +361,28 @@ class AiController extends Controller
             . rawurlencode($model)
             . ':generateContent';
 
-        $generationConfig = [
-            'temperature'     => 0,
-            'maxOutputTokens' => 512,
-        ];
+        $verifySsl = filter_var(env('GEMINI_VERIFY_SSL', true), FILTER_VALIDATE_BOOLEAN);
 
         try {
-            $response = Http::timeout(30)
-                ->withHeaders([
-                    'Content-Type'   => 'application/json',
-                    'x-goog-api-key' => $rawKey,
-                ])
-                ->post($url, [
-                    'contents' => [[
-                        'role'  => 'user',
-                        'parts' => [['text' => 'Reply with exactly: CONNECTION_OK']],
-                    ]],
-                    'generationConfig' => $generationConfig,
-                ]);
+            $httpReq = Http::timeout(15)->withHeaders([
+                'Content-Type'   => 'application/json',
+                'x-goog-api-key' => $rawKey,
+            ]);
+
+            if (!$verifySsl) {
+                $httpReq = $httpReq->withoutVerifying();
+            }
+
+            $response = $httpReq->post($url, [
+                'contents' => [[
+                    'role'  => 'user',
+                    'parts' => [['text' => 'Reply with exactly: CONNECTION_OK']],
+                ]],
+                'generationConfig' => [
+                    'temperature'     => 0,
+                    'maxOutputTokens' => 64,
+                ],
+            ]);
 
             $status = $response->status();
             $body   = $response->json() ?: [];
@@ -207,8 +390,8 @@ class AiController extends Controller
             if ($status === 429) {
                 $googleMsg = (string) data_get($body, 'error.message', '');
                 return response()->json([
-                    'success' => false,
-                    'message' => 'Gemini Quota Exceeded (429): Free tier limit reached. Please enter a new key in Settings → AI or upgrade billing. ' . $googleMsg,
+                    'success'    => false,
+                    'message'    => 'Gemini Quota Exceeded (429): Free tier limit reached. Please enter a new key in Settings → AI or upgrade billing. ' . $googleMsg,
                     'error_code' => 'QUOTA_EXCEEDED',
                 ], 422);
             }
@@ -240,120 +423,13 @@ class AiController extends Controller
 
     public function clearAssistantConfig()
     {
-        \App\Models\Setting::whereIn('key', ['ai_gemini_api_key', 'ai_gemini_model'])->delete();
-        $provider = \App\Models\AiProvider::find(1);
+        Setting::whereIn('key', ['ai_gemini_api_key', 'ai_gemini_model'])->delete();
+        $provider = AiProvider::find(1);
         if ($provider) {
             $provider->enabled = false;
             $provider->save();
         }
         return response()->json(['success' => true, 'message' => 'AI database configuration cleared.']);
-    }
-
-    /**
-     * Convert PCM 16-bit 24kHz audio to standard WAV format.
-     */
-    public static function pcmToWav(string $pcmData, int $sampleRate = 24000, int $channels = 1, int $bitsPerSample = 16): string
-    {
-        $byteRate = $sampleRate * $channels * ($bitsPerSample / 8);
-        $blockAlign = $channels * ($bitsPerSample / 8);
-        $dataLength = strlen($pcmData);
-        $chunkSize = 36 + $dataLength;
-
-        $header = pack('a4Va4a4VvvVVvva4V',
-            'RIFF',
-            $chunkSize,
-            'WAVE',
-            'fmt ',
-            16,
-            1,
-            $channels,
-            $sampleRate,
-            $byteRate,
-            $blockAlign,
-            $bitsPerSample,
-            'data',
-            $dataLength
-        );
-
-        return $header . $pcmData;
-    }
-
-    /**
-     * Generate natural speech using Google Gemini TTS (gemini-2.5-flash-preview-tts).
-     * Returns standard base64 WAV audio.
-     */
-    public static function generateGeminiSpeech(string $text, string $voice = 'Aoede'): ?string
-    {
-        $rawKey = \App\Models\Setting::where('key', 'ai_gemini_api_key')->value('value') ?? env('GEMINI_API_KEY');
-        if (!$rawKey) {
-            $provider = \App\Models\AiProvider::find(1);
-            $rawKey = $provider?->key;
-        }
-
-        if (!$rawKey) {
-            return null;
-        }
-
-        try {
-            $apiKey = \Illuminate\Support\Facades\Crypt::decryptString($rawKey);
-        } catch (\Throwable $e) {
-            $apiKey = $rawKey;
-        }
-
-        $validVoices = ['Aoede', 'Kore', 'Puck', 'Fenrir', 'Charon'];
-        $selectedVoice = 'Aoede';
-        foreach ($validVoices as $v) {
-            if (stripos($voice, $v) !== false) {
-                $selectedVoice = $v;
-                break;
-            }
-        }
-
-        $cleanText = substr(trim(preg_replace('/[*#_`>]/', '', $text)), 0, 1500);
-        if ($cleanText === '') {
-            return null;
-        }
-
-        $url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=' . rawurlencode($apiKey);
-        $payload = [
-            'contents' => [
-                [
-                    'role' => 'user',
-                    'parts' => [
-                        ['text' => $cleanText],
-                    ],
-                ],
-            ],
-            'generationConfig' => [
-                'responseModalities' => ['AUDIO'],
-                'speechConfig' => [
-                    'voiceConfig' => [
-                        'prebuiltVoiceConfig' => [
-                            'voiceName' => $selectedVoice,
-                        ],
-                    ],
-                ],
-            ],
-        ];
-
-        try {
-            $response = Http::withoutVerifying()->timeout(15)->post($url, $payload);
-            if ($response->successful()) {
-                $data = $response->json();
-                $rawBase64 = data_get($data, 'candidates.0.content.parts.0.inlineData.data');
-                if ($rawBase64) {
-                    $rawPcm = base64_decode($rawBase64);
-                    $wav = self::pcmToWav($rawPcm, 24000);
-                    return base64_encode($wav);
-                }
-            } else {
-                Log::warning('Gemini TTS API error: ' . $response->body());
-            }
-        } catch (\Throwable $e) {
-            Log::warning('Gemini TTS call exception: ' . $e->getMessage());
-        }
-
-        return null;
     }
 
     public function voice(Request $request)
@@ -365,11 +441,11 @@ class AiController extends Controller
             'voice_name' => 'nullable|string|max:50',
         ]);
 
-        $text = trim($request->input('text'));
+        $text              = trim($request->input('text'));
         $preferredProvider = strtolower((string) $request->input('provider', 'auto'));
-        $language = $request->input('language', 'en-US');
+        $language          = $request->input('language', 'en-US');
 
-        $settings = \App\Models\Setting::whereIn('key', [
+        $settings = Setting::whereIn('key', [
             'voice_tts_provider',
             'voice_default_language',
             'voice_browser_enabled',
@@ -393,7 +469,7 @@ class AiController extends Controller
             $language = $configuredLanguage;
         }
 
-        $voiceName = (string) $request->input('voice_name', 'Aoede');
+        $voiceName = (string) $request->input('voice_name', 'Zephyr');
 
         // 1. ElevenLabs TTS if configured
         if (in_array($provider, ['cloud', 'elevenlabs'], true) && $paidEnabled) {
@@ -439,7 +515,7 @@ class AiController extends Controller
             }
         }
 
-        // 2. Google Gemini Native TTS (Crystal clear, ultra-low latency, built into Google Gemini Key)
+        // 2. Google Gemini Native TTS
         if (in_array($provider, ['cloud', 'gemini', 'auto'], true)) {
             $wavBase64 = self::generateGeminiSpeech($text, $voiceName);
             if ($wavBase64) {
@@ -479,13 +555,17 @@ class AiController extends Controller
     public function chat(Request $request)
     {
         $this->validate($request, [
-            'message'          => 'required|string|max:5000',
-            'history'          => 'nullable|array|max:20',
-            'history.*.role'   => 'required|in:user,assistant',
-            'history.*.text'   => 'required|string|max:5000',
+            'message'        => 'required|string|max:5000',
+            'history'        => 'nullable|array|max:20',
+            'history.*.role' => 'required|in:user,assistant,model',
+            'history.*.text' => 'required|string|max:5000',
         ]);
 
         $user = Auth::user();
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Unauthenticated.'], 401);
+        }
+
         $message = $request->input('message');
 
         $conversation = AiConversation::firstOrCreate(
@@ -505,10 +585,13 @@ class AiController extends Controller
         $context['low_stock']     = $this->contextService->getLowStockProducts(10);
         $context['top_products']  = $this->contextService->getTopProducts(5);
         $context['top_customers'] = $this->contextService->getTopCustomers(5);
-        $context['profit_loss_report'] = $this->contextService->getFinancialContextForQuery($message, $user?->company_id, $user?->branch_id);
+        $context['profit_loss_report'] = $this->contextService->getFinancialContextForQuery($message, $user->company_id, $user->branch_id);
 
         try {
-            $context['inventory_sample'] = \App\Models\Product::limit(15)->get(['id', 'name', 'sku', 'barcode', 'stock_quantity', 'reorder_level', 'sale_price', 'purchase_price'])->toArray();
+            $context['inventory_sample'] = Product::limit(15)->get([
+                'id', 'name', 'sku', 'barcode', 'stock_quantity',
+                'reorder_level', 'sale_price', 'purchase_price',
+            ])->toArray();
         } catch (\Throwable $e) {
             $context['inventory_sample'] = [];
         }
@@ -518,37 +601,23 @@ class AiController extends Controller
             'inventory_auditor' => 'You are the Nexa WMS Inventory & Cycle Audit Agent. You specialize in verifying physical stocks, detecting bin discrepancies, tracking shelf variances, and auditing warehouse bays.',
             'reorder_specialist' => 'You are the Nexa WMS Purchasing & Restock Agent. You analyze low-stock items against minimum thresholds, suggest restock quantities, calculate reorder costs, and prepare Purchase Order drafts.',
             'dispatch_coordinator' => 'You are the Nexa WMS Logistics & Dispatch Coordinator. You optimize pick-pack routes, bay staging, shipping thermal labels, and warehouse transfer orders.',
-            default => 'You are Anya, an emotionally expressive, warm, and witty conversational AI companion for RaptorERP/NixaERP business operations. Speak exclusively in a natural, lively Hindi tone (conversational Hindi / Hinglish). Speak naturally like a real human with genuine emotions, laughter (Haha!, Hehe!), expressive interjections (Oh!, Ah!, Arrey!, Achaa!), empathy, and playful feistiness or comical anger in Hindi if teased (Arrey yaar, mujhe gussa mat dilao haha!). Keep responses fast, concise, punchy, and conversational.',
+            default => 'You are Anya, an emotionally expressive, warm, and witty conversational AI companion for RaptorERP/NixaERP business operations. Speak in natural conversational Hindi / Hinglish. Speak naturally like a real human with genuine emotions, laughter (Haha!, Hehe!), expressive interjections (Oh!, Ah!, Arrey!, Achaa!), empathy, and playful feistiness. Keep responses fast, concise, punchy, and conversational.',
         };
 
         $providerId = $request->input('provider_id');
-        if ($providerId) {
-            $providerModel = \App\Models\AiProvider::find($providerId);
-        } else {
-            $providerModel = $this->aiManager->getPrimaryProvider();
-        }
+        $providerModel = $providerId
+            ? AiProvider::find($providerId)
+            : $this->aiManager->getPrimaryProvider();
 
         if (!$providerModel) {
-            $settings = \App\Models\Setting::whereIn('key', ['ai_gemini_api_key', 'ai_gemini_model'])
-                ->pluck('value', 'key');
-
-            $configuredKey = null;
-            try {
-                $configuredKey = $settings['ai_gemini_api_key']
-                    ? Crypt::decryptString($settings['ai_gemini_api_key'])
-                    : null;
-            } catch (\Throwable $e) {
-                Log::warning('AI assistant key could not be decrypted.');
-            }
+            $configuredKey = self::resolveGeminiKey();
+            $model = Setting::where('key', 'ai_gemini_model')->value('value') ?: env('GEMINI_MODEL', 'gemini-2.5-flash');
 
             if ($configuredKey) {
-                $providerModel = new \App\Models\AiProvider([
+                $providerModel = new AiProvider([
                     'name'    => 'Gemini (Settings)',
                     'key'     => $configuredKey,
-                    'config'  => [
-                        'type'  => 'gemini',
-                        'model' => $settings['ai_gemini_model'] ?: 'gemini-3.5-flash',
-                    ],
+                    'config'  => ['type' => 'gemini', 'model' => $model],
                     'enabled' => true,
                 ]);
             }
@@ -581,17 +650,17 @@ class AiController extends Controller
             ]];
 
             foreach ($request->input('history', []) as $item) {
+                $role = in_array($item['role'] ?? '', ['assistant', 'model']) ? 'assistant' : 'user';
                 $messages[] = [
-                    'role'    => $item['role'],
-                    'content' => $item['text'],
+                    'role'    => $role,
+                    'content' => (string) ($item['text'] ?? ''),
                 ];
             }
 
             $messages[] = ['role' => 'user', 'content' => $message];
 
             $result = $provider->chat($messages, ['context' => $context]);
-
-            $reply = $result['reply'] ?? '';
+            $reply  = $result['reply'] ?? '';
 
             $assistantMsg = AiMessage::create([
                 'conversation_id' => $conversation->id,
@@ -608,11 +677,167 @@ class AiController extends Controller
                 ],
             ]);
         } catch (\Throwable $e) {
-            Log::error('AI chat failed: ' . $e->getMessage());
+            Log::error('AI chat failed', [
+                'user_id' => $user->id,
+                'error'   => $e->getMessage(),
+                'trace'   => $e->getTraceAsString(),
+            ]);
             return response()->json([
                 'success' => false,
-                'message' => 'AI provider error: ' . $e->getMessage(),
+                'message' => 'AI service is temporarily unavailable. Please try again.',
             ], 500);
         }
+    }
+
+    public function liveConverse(Request $request)
+    {
+        $request->validate([
+            'transcript'     => 'nullable|string|max:4000',
+            'voice'          => 'nullable|string|max:50',
+            'language'       => 'nullable|string|max:20',
+            'history'        => 'nullable|array|max:20',
+            'history.*.role' => 'nullable|string|in:user,model,assistant',
+            'history.*.text' => 'nullable|string|max:2000',
+            'turn_id'        => 'nullable|string|max:100',
+        ]);
+
+        $voice    = $request->input('voice', 'Zephyr');
+        $language = strtolower((string) $request->input('language', 'hinglish'));
+        $userText = trim((string) $request->input('transcript', ''));
+        $turnId   = $request->input('turn_id');
+
+        if (empty($userText)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No spoken transcript provided.',
+            ], 422);
+        }
+
+        $user     = Auth::user();
+        $tenantId = $user?->company_id ? 'comp_' . $user->company_id : ($user ? 'user_' . $user->id : 'guest');
+        $cacheKey = 'ai_erp_live_ctx_' . $tenantId;
+
+        $context = Cache::remember($cacheKey, 60, function () {
+            try {
+                return [
+                    'sales_summary' => $this->contextService->getSalesSummary(),
+                    'low_stock'     => $this->contextService->getLowStockProducts(5),
+                    'top_products'  => $this->contextService->getTopProducts(5),
+                ];
+            } catch (\Throwable $e) {
+                return [];
+            }
+        });
+
+        $systemInstruction = match ($language) {
+            'hindi'   => 'You are Gemini Live in a real-time live phone call. Speak in natural, warm conversational Hindi using Roman English letters (e.g., "Namaste ji, main aapki poori madad karunga", never use Devanagari script). Keep every answer ultra-concise (1-2 spoken sentences only). Never use bullet points, asterisks, or markdown.',
+            'english' => 'You are Gemini Live in a real-time live voice call. Speak in crisp, natural conversational English with warmth. Keep answers punchy and under 2 spoken sentences. Never use bullet points, asterisks, or markdown.',
+            default   => 'You are Gemini Live in a real-time phone call for RaptorERP. Speak in natural everyday conversational Hinglish (Hindi + English blend) using Roman English letters (e.g. "Haan ji! Main aapki madad ke liye taiyar hoon", never use Devanagari script). Use friendly spoken fillers (Haan ji!, Achha!, Bilkul!). Keep every answer ultra-concise (1 to 2 spoken sentences only). Never output bullet points, asterisks, or markdown.',
+        };
+
+        if (!empty($context)) {
+            $systemInstruction .= "\nERP Context: " . json_encode($context, JSON_UNESCAPED_UNICODE);
+        }
+
+        $rawKey = self::resolveGeminiKey();
+
+        $fallbackReplies = [
+            'hindi'    => 'Namaste! Main aapka Gemini Live sahayak hoon. Bataiye business data mein main aapki kya madad kar sakta hoon?',
+            'english'  => 'Hello! I am your Gemini Live assistant. How can I help you with your business data today?',
+            'hinglish' => 'Haan ji! Main aapka Gemini Live companion hoon. Batayein business data mein aaj kya madad chahiye?',
+        ];
+        $fallbackReply = $fallbackReplies[$language] ?? $fallbackReplies['hinglish'];
+
+        $replyText  = $fallbackReply;
+        $llmSuccess = false;
+
+        if ($rawKey) {
+            $messages = [];
+            foreach ($request->input('history', []) as $h) {
+                if (!empty($h['text'])) {
+                    $role = in_array($h['role'] ?? '', ['model', 'assistant']) ? 'model' : 'user';
+                    $messages[] = [
+                        'role'  => $role,
+                        'parts' => [['text' => (string) $h['text']]],
+                    ];
+                }
+            }
+            $messages[] = [
+                'role'  => 'user',
+                'parts' => [['text' => $userText]],
+            ];
+
+            // Verified working Gemini models prioritized with fast failover
+            $modelsToTry = [
+                'gemini-3.5-flash',
+                'gemini-3.8-flash',
+                'gemini-3.6-flash',
+                'gemini-3.7-flash',
+                'gemini-3.5-flash-lite',
+                'gemini-flash-latest',
+                'gemini-2.5-flash',
+            ];
+
+            $verifySsl = filter_var(env('GEMINI_VERIFY_SSL', true), FILTER_VALIDATE_BOOLEAN);
+
+            foreach ($modelsToTry as $m) {
+                try {
+                    $url = "https://generativelanguage.googleapis.com/v1beta/models/{$m}:generateContent";
+                    $httpReq = Http::timeout(3)->withHeaders([
+                        'Content-Type'   => 'application/json',
+                        'x-goog-api-key' => $rawKey,
+                    ]);
+
+                    if (!$verifySsl) {
+                        $httpReq = $httpReq->withoutVerifying();
+                    }
+
+                    $resp = $httpReq->post($url, [
+                        'systemInstruction' => [
+                            'parts' => [['text' => $systemInstruction]],
+                        ],
+                        'contents'         => $messages,
+                        'generationConfig' => [
+                            'temperature'     => 0.6,
+                            'maxOutputTokens' => 120,
+                        ],
+                    ]);
+
+                    if ($resp->successful()) {
+                        $json = $resp->json();
+                        $text = data_get($json, 'candidates.0.content.parts.0.text');
+                        if (!empty($text)) {
+                            $replyText  = trim($text);
+                            $llmSuccess = true;
+                            break;
+                        }
+                    } else {
+                        Log::warning("Gemini liveConverse {$m} HTTP " . $resp->status());
+                    }
+                } catch (\Throwable $e) {
+                    Log::warning("Gemini live converse with {$m} failed: " . $e->getMessage());
+                }
+            }
+        }
+
+        // Generate Gemini TTS with short timeout
+        $wavBase64 = null;
+        try {
+            $wavBase64 = self::generateGeminiSpeech($replyText, $voice);
+        } catch (\Throwable $e) {
+            Log::warning('Live converse TTS exception: ' . $e->getMessage());
+        }
+
+        return response()->json([
+            'success'          => true,
+            'turn_id'          => $turnId,
+            'transcript'       => $userText,
+            'reply_text'       => $replyText,
+            'audio_wav_base64' => $wavBase64,
+            'voice'            => $voice,
+            'language'         => $language,
+            'llm_success'      => $llmSuccess,
+            'tts_failed'       => ($wavBase64 === null),
+        ]);
     }
 }

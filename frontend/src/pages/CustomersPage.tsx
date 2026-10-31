@@ -19,6 +19,7 @@ import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
 import { usePermission } from '../hooks/usePermission';
 import { useAuthStore } from '../store/auth';
+import { Customer360Modal } from '../components/Customer360Modal';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -727,8 +728,9 @@ interface ActionDropdownPermissions {
 }
 
 const ActionDropdown = memo(function ActionDropdown({
-  customer, onEdit, onLedger, onLedgerA4, onDelete, ledgerLoading, permissions,
+  customer, onEdit, onLedger, onLedgerA4, onDelete, onCustomer360, ledgerLoading, permissions,
 }: {
+  onCustomer360?: (c: Customer) => void;
   customer: Customer;
   onEdit: (c: Customer) => void;
   onLedger: (c: Customer) => void;
@@ -794,6 +796,13 @@ const ActionDropdown = memo(function ActionDropdown({
       {isOpen && createPortal(
         <div ref={menuRef} role="menu" style={menuStyle} onClick={(e) => e.stopPropagation()}
           className="animate-fadeIn overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10">
+          {onCustomer360 && (
+            <button type="button" role="menuitem"
+              onClick={() => { setIsOpen(false); onCustomer360(customer); }}
+              className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-indigo-600 transition hover:bg-indigo-50">
+              <FiActivity size={14} className="text-indigo-600" /> Customer 360°
+            </button>
+          )}
           {permissions.canEdit && (
             <button type="button" role="menuitem"
               onClick={() => { setIsOpen(false); onEdit(customer); }}
@@ -964,6 +973,7 @@ export function CustomersPage() {
 
   /* ── Quick view & detail ── */
   const [quickViewCustomer, setQuickViewCustomer] = useState<Customer | null>(null);
+  const [customer360Id, setCustomer360Id] = useState<number | null>(null);
   const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>('overview');
   const [detailLoading, setDetailLoading] = useState(false);
@@ -2120,6 +2130,7 @@ export function CustomersPage() {
                         <TableCell><span className="text-sm text-slate-700">{customer.billing_city || '—'}</span></TableCell>
                         <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                           <ActionDropdown customer={customer} onEdit={handleEdit}
+                            onCustomer360={(c) => setCustomer360Id(c.id)}
                             onLedger={handleLedger} onLedgerA4={handleLedgerA4}
                             onDelete={handleDelete} ledgerLoading={isLedgerLoading}
                             permissions={{
@@ -2325,6 +2336,11 @@ export function CustomersPage() {
                   <FiEdit className="mr-1.5" size={14} /> Edit
                 </Button>
               )}
+              <Button type="button"
+                onClick={() => { const c = quickViewCustomer; setQuickViewCustomer(null); if (c) setCustomer360Id(c.id); }}
+                className="h-9 rounded-xl bg-indigo-600 text-sm font-semibold text-white hover:bg-indigo-700">
+                <FiActivity className="mr-1.5" size={14} /> Customer 360°
+              </Button>
               <Button type="button"
                 onClick={() => { const c = quickViewCustomer; setQuickViewCustomer(null); void handleViewCustomer(c); }}
                 className="h-9 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800">
@@ -3178,6 +3194,12 @@ export function CustomersPage() {
           </Offcanvas>
         </Suspense>
       )}
+      <Customer360Modal
+        customerId={customer360Id}
+        isOpen={customer360Id !== null}
+        onClose={() => setCustomer360Id(null)}
+        onCustomerUpdated={() => void refreshCustomers()}
+      />
     </>
   );
 }

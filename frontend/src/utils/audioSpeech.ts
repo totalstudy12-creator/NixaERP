@@ -191,6 +191,7 @@ export function playAudioBase64(base64: string, mimeType = 'audio/mpeg'): Promis
       const blob = new Blob([bytes], { type: mimeType });
       const objectUrl = URL.createObjectURL(blob);
       const audio = new Audio(objectUrl);
+      audio.preload = 'auto';
       window.__activeAudioElement = audio;
 
       let isCleanedUp = false;
@@ -266,25 +267,58 @@ export function playSpeech(text: string, options?: PlaySpeechOptions): void {
         utterance.lang = bestVoice.lang || utterance.lang;
       }
 
-      window.__activeSpeechUtterance = utterance;
+      let resumeInterval: any = null;
+      let watchdogTimer: any = null;
+
+      const cleanup = () => {
+        if (resumeInterval) {
+          clearInterval(resumeInterval);
+          resumeInterval = null;
+        }
+        if (watchdogTimer) {
+          clearTimeout(watchdogTimer);
+          watchdogTimer = null;
+        }
+        window.__activeSpeechUtterance = null;
+      };
 
       utterance.onstart = () => {
         options?.onStart?.();
+        // Keepalive for Chromium bug where speech pauses after ~15s
+        resumeInterval = setInterval(() => {
+          if (!window.__activeSpeechUtterance) {
+            clearInterval(resumeInterval);
+            return;
+          }
+          if (window.speechSynthesis.paused) {
+            window.speechSynthesis.resume();
+          }
+        }, 3000);
       };
 
       utterance.onend = () => {
-        window.__activeSpeechUtterance = null;
+        cleanup();
         options?.onEnd?.();
       };
 
       utterance.onerror = (e) => {
-        window.__activeSpeechUtterance = null;
+        cleanup();
         if ((e as any)?.error !== 'interrupted' && (e as any)?.error !== 'canceled') {
           console.warn('Speech synthesis error:', (e as any)?.error || e);
         }
         options?.onError?.(e);
         options?.onEnd?.();
       };
+
+      // Watchdog timeout to prevent voice lock if browser fails to fire onend
+      const maxDurationMs = Math.max(5000, clean.length * 160);
+      watchdogTimer = setTimeout(() => {
+        if (window.__activeSpeechUtterance === utterance) {
+          cleanup();
+          try { window.speechSynthesis.cancel(); } catch {}
+          options?.onEnd?.();
+        }
+      }, maxDurationMs);
 
       window.speechSynthesis.speak(utterance);
     } catch (err) {
@@ -349,3 +383,34 @@ export async function speakWithAiAudio(
   // Local browser speech synthesis fallback
   playSpeech(clean, options);
 }
+
+/**
+ * Promise-based browser speech synthesis with error handling and completion resolution.
+ */
+export function playBrowserSpeech(text: string, options?: PlaySpeechOptions): Promise<void> {
+  return new Promise((resolve) => {
+    if (!isSpeechSynthesisSupported()) {
+      options?.onEnd?.();
+      resolve();
+      return;
+    }
+    const clean = cleanTextForSpeech(text);
+    if (!clean) {
+      options?.onEnd?.();
+      resolve();
+      return;
+    }
+    playSpeech(clean, {
+      ...options,
+      onEnd: () => {
+        options?.onEnd?.();
+        resolve();
+      },
+      onError: (err) => {
+        options?.onError?.(err);
+        resolve();
+      },
+    });
+  });
+}
+

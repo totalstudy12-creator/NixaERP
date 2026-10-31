@@ -1114,6 +1114,7 @@ export function LeadsPage() {
   });
 
   const [saving, setSaving] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1141,7 +1142,7 @@ export function LeadsPage() {
       }
     })();
     return () => controller.abort();
-  }, [debouncedSearch, stageFilter, sourceFilter, branchFilter, push]);
+  }, [debouncedSearch, stageFilter, sourceFilter, branchFilter, refreshKey, push]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1203,19 +1204,29 @@ export function LeadsPage() {
         branch_id: leadForm.branch_id ? Number(leadForm.branch_id) : null,
         expected_value: leadForm.expected_value ? Number(leadForm.expected_value) : 0,
       };
+      let savedLead: any = null;
       if (editingLead) {
-        await apiClient.updateLead(editingLead.id, payload);
+        const res: any = await apiClient.updateLead(editingLead.id, payload);
+        savedLead = res?.data || res;
         push('success', 'Lead updated');
       } else {
-        await apiClient.createLead(payload);
+        const res: any = await apiClient.createLead(payload);
+        savedLead = res?.data || res;
         push('success', 'Lead created');
       }
       setCreateModalOpen(false);
-      setLeads((prev) =>
-        editingLead
-          ? prev.map((l) => (l.id === editingLead.id ? { ...l, ...leadForm } : l))
-          : [{ ...leadForm, id: Date.now() }, ...prev],
-      );
+      setLeads((prev) => {
+        if (editingLead) {
+          return prev.map((l) =>
+            l.id === editingLead.id ? { ...l, ...leadForm, ...(savedLead?.id ? savedLead : {}) } : l,
+          );
+        }
+        if (savedLead && savedLead.id) {
+          return [savedLead, ...prev.filter((l) => l.id !== savedLead.id)];
+        }
+        return prev;
+      });
+      setRefreshKey((k) => k + 1);
     } catch (err: any) {
       push('error', err?.message || 'Could not save lead');
     } finally {
@@ -1225,7 +1236,7 @@ export function LeadsPage() {
 
   const handleStageMove = async (e: FormEvent) => {
     e.preventDefault();
-    if (!stageModalLead) return;
+    if (!stageModalLead?.id) return;
     try {
       await apiClient.updateLeadStage(
         stageModalLead.id,
@@ -1238,6 +1249,7 @@ export function LeadsPage() {
       );
       push('success', `Moved to ${stageForm.stage.replace('_', ' ')}`);
       setStageModalLead(null);
+      setRefreshKey((k) => k + 1);
     } catch (err: any) {
       push('error', err?.message || 'Failed to update stage');
     }
@@ -1245,7 +1257,7 @@ export function LeadsPage() {
 
   const handleAddActivity = async (e: FormEvent) => {
     e.preventDefault();
-    if (!detailLead || !activityForm.title.trim()) return;
+    if (!detailLead?.id || !activityForm.title.trim()) return;
     setActivitySubmitting(true);
     try {
       await apiClient.addLeadActivity(detailLead.id, activityForm);
@@ -1253,6 +1265,7 @@ export function LeadsPage() {
       setDetailLead(fresh?.data || fresh);
       setActivityForm({ activity_type: 'call', title: '', description: '', follow_up_date: '' });
       push('success', 'Activity logged');
+      setRefreshKey((k) => k + 1);
     } catch (err: any) {
       push('error', err?.message || 'Failed to log activity');
     } finally {
@@ -1261,22 +1274,41 @@ export function LeadsPage() {
   };
 
   const handleConvertLead = async (lead: any) => {
+    if (!lead?.id) return;
     if (!window.confirm(`Convert "${lead.name}" into a Customer and Contact card?`)) return;
     try {
       await apiClient.convertLead(lead.id, { create_customer: true, create_contact: true });
       push('success', `Converted "${lead.name}" to Customer`);
       setLeads((prev) => prev.map((l) => (l.id === lead.id ? { ...l, stage: 'won' } : l)));
+      setRefreshKey((k) => k + 1);
     } catch (err: any) {
       push('error', err?.message || 'Failed to convert lead');
     }
   };
 
   const openDetail = async (id: number) => {
+    if (!id) return;
     try {
       const res: any = await apiClient.getLead(id);
       setDetailLead(res?.data || res);
     } catch (err: any) {
       push('error', err?.message || 'Could not load lead');
+      // If the lead doesn't exist on server, filter out invalid/stale lead from local state
+      setLeads((prev) => prev.filter((l) => l.id !== id));
+    }
+  };
+
+  const handleDeleteLead = async (id: number, name: string) => {
+    if (!id) return;
+    if (!window.confirm(`Are you sure you want to delete lead "${name}"? This action cannot be undone.`)) return;
+    try {
+      await apiClient.deleteLead(id);
+      setLeads((prev) => prev.filter((l) => l.id !== id));
+      if (detailLead?.id === id) setDetailLead(null);
+      push('success', 'Lead deleted successfully');
+      setRefreshKey((k) => k + 1);
+    } catch (err: any) {
+      push('error', err?.message || 'Failed to delete lead');
     }
   };
 
@@ -1447,6 +1479,12 @@ export function LeadsPage() {
                             setStageForm({ stage: lead.stage, note: '', lost_reason: '' });
                           }}
                           onConvert={() => void handleConvertLead(lead)}
+                          onEdit={() => {
+                            setEditingLead(lead);
+                            setLeadForm({ ...emptyLeadForm(), ...lead });
+                            setCreateModalOpen(true);
+                          }}
+                          onDelete={() => void handleDeleteLead(lead.id, lead.name)}
                         />
                       ))}
                 </div>
@@ -1560,6 +1598,11 @@ export function LeadsPage() {
                                   setCreateModalOpen(true);
                                 },
                               },
+                              {
+                                label: 'Delete',
+                                icon: <Trash2 size={13} className="text-rose-500" />,
+                                onClick: () => void handleDeleteLead(l.id, l.name),
+                              },
                             ]}
                           />
                         </div>
@@ -1583,6 +1626,56 @@ export function LeadsPage() {
             onClose={() => setDetailLead(null)}
           />
           <div className="space-y-5 overflow-y-auto p-6 text-xs">
+            {/* Quick Actions */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const l = detailLead;
+                    setDetailLead(null);
+                    setEditingLead(l);
+                    setLeadForm({ ...emptyLeadForm(), ...l });
+                    setCreateModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+                >
+                  <Edit2 size={12} className="text-slate-500" /> Edit Lead
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const l = detailLead;
+                    setStageModalLead(l);
+                    setStageForm({ stage: l.stage, note: '', lost_reason: '' });
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+                >
+                  <ArrowRight size={12} className="text-slate-500" /> Move Stage
+                </button>
+                {detailLead.stage !== 'won' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleConvertLead(detailLead);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                  >
+                    <UserCheck size={12} /> Convert to Customer
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleDeleteLead(detailLead.id, detailLead.name);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-100"
+              >
+                <Trash2 size={12} /> Delete
+              </button>
+            </div>
+
             <div className="grid grid-cols-2 gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3.5 sm:grid-cols-3">
               <DetailRow label="Phone" value={detailLead.phone} />
               <DetailRow label="Email" value={detailLead.email} />
@@ -1861,11 +1954,15 @@ function LeadCard({
   onOpen,
   onMove,
   onConvert,
+  onEdit,
+  onDelete,
 }: {
   lead: any;
   onOpen: () => void;
   onMove: () => void;
   onConvert: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
 }) {
   const isHigh = lead.priority === 'urgent' || lead.priority === 'high';
   return (
@@ -1903,6 +2000,15 @@ function LeadCard({
       <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-2 text-xs text-slate-500">
         <span className="truncate">{lead.phone || lead.email || '—'}</span>
         <div className="flex items-center gap-0.5">
+          {onEdit && (
+            <button
+              onClick={onEdit}
+              title="Edit lead"
+              className="rounded p-1 text-slate-400 transition hover:bg-slate-100 hover:text-indigo-600"
+            >
+              <Edit2 size={13} />
+            </button>
+          )}
           <button
             onClick={onMove}
             title="Move stage"
@@ -1917,6 +2023,15 @@ function LeadCard({
               className="rounded p-1 text-emerald-600 transition hover:bg-emerald-50"
             >
               <UserCheck size={13} />
+            </button>
+          )}
+          {onDelete && (
+            <button
+              onClick={onDelete}
+              title="Delete lead"
+              className="rounded p-1 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+            >
+              <Trash2 size={13} />
             </button>
           )}
         </div>
@@ -1965,6 +2080,7 @@ export function ContactsPage() {
   const [errors, setErrors] = useState<{ name?: string; email?: string; phone?: string; gstin?: string; pan?: string }>({});
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1991,7 +2107,7 @@ export function ContactsPage() {
       }
     })();
     return () => controller.abort();
-  }, [debouncedSearch, typeFilter, branchFilter, push]);
+  }, [debouncedSearch, typeFilter, branchFilter, refreshKey, push]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -2052,20 +2168,29 @@ export function ContactsPage() {
         company_id: 1,
         branch_id: form.branch_id ? Number(form.branch_id) : null,
       };
+      let savedContact: any = null;
       if (editingContact) {
-        await apiClient.updateContact(editingContact.id, payload);
+        const res: any = await apiClient.updateContact(editingContact.id, payload);
+        savedContact = res?.data || res;
         push('success', 'Contact updated');
       } else {
-        await apiClient.createContact(payload);
+        const res: any = await apiClient.createContact(payload);
+        savedContact = res?.data || res;
         push('success', 'Contact created');
       }
       setModalOpen(false);
-      // Optimistic refresh via toggle
-      setContacts((prev) =>
-        editingContact
-          ? prev.map((c) => (c.id === editingContact.id ? { ...c, ...form } : c))
-          : [{ ...form, id: Date.now() }, ...prev],
-      );
+      setContacts((prev) => {
+        if (editingContact) {
+          return prev.map((c) =>
+            c.id === editingContact.id ? { ...c, ...form, ...(savedContact?.id ? savedContact : {}) } : c,
+          );
+        }
+        if (savedContact && savedContact.id) {
+          return [savedContact, ...prev.filter((c) => c.id !== savedContact.id)];
+        }
+        return prev;
+      });
+      setRefreshKey((k) => k + 1);
     } catch (err: any) {
       push('error', err?.message || 'Could not save contact');
     } finally {

@@ -247,4 +247,139 @@ class ConnectedAppController extends Controller
             'synced_at' => now()->toIso8601String(),
         ]);
     }
+
+    /**
+     * Centralized Nixa App Launcher catalog with permission-aware access resolution.
+     * GET /api/apps/launcher
+     */
+    public function launcher(Request $request)
+    {
+        $user = $request->user();
+        $isSuperAdmin = $user && ($user->hasRole('Admin') || $user->hasRole('Super Admin'));
+
+        $catalog = [
+            [
+                'id'                  => 'nixa_erp',
+                'name'                => 'Nixa ERP',
+                'category'            => 'erp',
+                'platform'            => 'web',
+                'description'         => 'Core Enterprise Business OS — CRM, Customers, Sales Invoicing, Banking, and Accounting.',
+                'route'               => '/dashboard',
+                'icon'                => 'Layers',
+                'version'             => '1.2.3',
+                'required_permission' => 'erp.access',
+                'color'               => 'indigo',
+                'status'              => 'active',
+                'is_core'             => true,
+            ],
+            [
+                'id'                  => 'nixa_wms',
+                'name'                => 'Nixa WMS',
+                'category'            => 'wms',
+                'platform'            => 'web_flutter',
+                'description'         => 'Warehouse Management System — Multi-warehouse inventory, zones, bins, stock transfers, and physical counts.',
+                'route'               => '/warehouses',
+                'icon'                => 'Package',
+                'version'             => '1.2.3',
+                'required_permission' => 'wms.access',
+                'color'               => 'emerald',
+                'status'              => 'active',
+                'is_core'             => false,
+            ],
+            [
+                'id'                  => 'nixa_billing',
+                'name'                => 'Nixa Billing',
+                'category'            => 'billing',
+                'platform'            => 'web_pos',
+                'description'         => 'High-Speed POS & Billing — Fast barcode scanning, walk-in sales, cash closing, and 58mm/80mm thermal receipt printing.',
+                'route'               => '/sales/pos',
+                'icon'                => 'CreditCard',
+                'version'             => '1.1.0',
+                'required_permission' => 'billing.access',
+                'color'               => 'amber',
+                'status'              => 'active',
+                'is_core'             => false,
+            ],
+            [
+                'id'                  => 'nixa_hr',
+                'name'                => 'Nixa HR',
+                'category'            => 'hr',
+                'platform'            => 'web',
+                'description'         => 'Human Resources & Payroll — Employee profiles, shift scheduling, biometric attendance, leaves, and salary payslips.',
+                'route'               => '/hr-payroll',
+                'icon'                => 'Users',
+                'version'             => '1.2.0',
+                'required_permission' => 'hr.access',
+                'color'               => 'purple',
+                'status'              => 'active',
+                'is_core'             => false,
+            ],
+            [
+                'id'                  => 'nixa_crm',
+                'name'                => 'Nixa CRM',
+                'category'            => 'crm',
+                'platform'            => 'web',
+                'description'         => 'Customer Relationship Management — Lead pipeline, opportunity deals, quotations, and activity follow-ups.',
+                'route'               => '/crm/leads',
+                'icon'                => 'Activity',
+                'version'             => '1.0.5',
+                'required_permission' => 'crm.access',
+                'color'               => 'rose',
+                'status'              => 'active',
+                'is_core'             => false,
+            ],
+            [
+                'id'                  => 'nixa_finance',
+                'name'                => 'Nixa Finance',
+                'category'            => 'finance',
+                'platform'            => 'web',
+                'description'         => 'Banking & Treasury — Bank accounts, bank statement reconciliation, cash drawer closings, and GL audit trails.',
+                'route'               => '/banking',
+                'icon'                => 'DollarSign',
+                'version'             => '1.2.0',
+                'required_permission' => 'finance.view',
+                'color'               => 'cyan',
+                'status'              => 'active',
+                'is_core'             => false,
+            ],
+        ];
+
+        // Fetch DB-registered connected apps to merge active states
+        $dbApps = ConnectedApp::all()->keyBy('app_identifier');
+
+        $resolved = array_map(function ($app) use ($dbApps, $user, $isSuperAdmin) {
+            $dbApp = $dbApps->get($app['id']);
+            $isEnabled = $dbApp ? (bool) $dbApp->is_active : true;
+            $maintenance = $dbApp ? (bool) $dbApp->maintenance_mode : false;
+
+            // Check access permission
+            $hasPermission = $isSuperAdmin
+                || ($user && $user->hasPermission($app['required_permission']))
+                || ($user && !empty($dbApp?->allowed_roles) && $user->hasAnyRole($dbApp->allowed_roles));
+
+            // Legacy fallback: if user has general access to that module
+            if (!$hasPermission && $user) {
+                if ($app['category'] === 'wms' && $user->hasAnyPermission(['wms.warehouses.view', 'wms.inventory.view', 'view warehouses'])) $hasPermission = true;
+                if ($app['category'] === 'billing' && $user->hasAnyPermission(['invoices.create', 'sales.view', 'create sales invoice'])) $hasPermission = true;
+                if ($app['category'] === 'hr' && $user->hasAnyPermission(['employees.view', 'payroll.view', 'view employees'])) $hasPermission = true;
+                if ($app['category'] === 'crm' && $user->hasAnyPermission(['quotations.view', 'customers.view', 'view customers'])) $hasPermission = true;
+                if ($app['category'] === 'finance' && $user->hasAnyPermission(['finance.view', 'view payments'])) $hasPermission = true;
+                if ($app['category'] === 'erp') $hasPermission = true; // All authenticated users have basic ERP access
+            }
+
+            return [
+                ...$app,
+                'is_enabled'   => $isEnabled,
+                'has_access'   => $hasPermission,
+                'maintenance'  => $maintenance,
+                'status'       => $maintenance ? 'maintenance' : ($isEnabled ? ($hasPermission ? 'ready' : 'restricted') : 'disabled'),
+                'download_url' => $dbApp?->apk_download_url,
+            ];
+        }, $catalog);
+
+        return response()->json([
+            'success' => true,
+            'data'    => $resolved,
+        ]);
+    }
 }

@@ -6,6 +6,9 @@ use App\Http\Controllers\Controller;
 use App\Models\Permission;
 use App\Models\Role;
 use App\Models\User;
+use App\Models\UserSession;
+use App\Models\UserBanHistory;
+use App\Services\AuditLogger;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -447,6 +450,244 @@ class UserAccessController extends Controller
         ]);
     }
 
+    /* =================== USER BAN, UNBAN & SESSIONS ================== */
+
+    public function banUser(Request $request, int $userId): JsonResponse
+    {
+        $user = User::findOrFail($userId);
+        $admin = $request->user();
+
+        // Prevent self-ban
+        if ($admin->id === $user->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'You cannot ban or suspend your own account.',
+            ], 422);
+        }
+
+        // Emergency protection: cannot ban the last active system administrator
+        if ($this->hasSystemAdminRole($user)) {
+            $otherActiveAdmins = User::query()
+                ->whereKeyNot($user->id)
+                ->where('status', 'active')
+                ->whereHas('roles', fn ($q) => $q->whereIn('roles.name', self::SYSTEM_ADMIN_ROLES))
+                ->exists();
+
+            if (! $otherActiveAdmins) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Emergency Protection: You cannot ban the last active system administrator.',
+                ], 409);
+            }
+        }
+
+        $validator = Validator::make($request->all(), [
+            'reason'        => 'required|string|max:1000',
+            'action'        => 'required|in:ban,suspend,deactivate',
+            'duration_days' => 'nullable|integer|min:1|max:3650',
+        ]);
+
+        if ($validator->fails()) {
+            return $this->validationError($validator->errors());
+        }
+
+        $action = $request->input('action');
+        $reason = $request->input('reason');
+        $durationDays = $request->input('duration_days');
+        $bannedUntil = $durationDays ? now()->addDays($durationDays) : null;
+
+        DB::transaction(function () use ($user, $admin, $action, $reason, $durationDays, $bannedUntil) {
+            // Update user status
+            $status = $action === 'suspend' ? 'suspended' : ($action === 'deactivate' ? 'inactive' : 'banned');
+            $user->update([
+                'status'            => $status,
+                'banned_at'         => now(),
+                'banned_until'      => $bannedUntil,
+                'banned_reason'     => $reason,
+                'banned_by_user_id' => $admin->id,
+            ]);
+
+            // Invalidate all active Sanctum tokens immediately
+            $user->tokens()->delete();
+
+            // Revoke all active sessions
+            UserSession::where('user_id', $user->id)
+                ->where('is_active', true)
+                ->update([
+                    'is_active'         => false,
+                    'revoked_at'        => now(),
+                    'revocation_reason' => "Account {$status} by administrator {$admin->name}: {$reason}",
+                ]);
+
+            // Record ban history
+            UserBanHistory::create([
+                'user_id'       => $user->id,
+                'action'        => $action,
+                'reason'        => $reason,
+                'duration_days' => $durationDays,
+                'expires_at'    => $bannedUntil,
+                'performed_by'  => $admin->id,
+            ]);
+        });
+
+        AuditLogger::log(
+            'User Management',
+            "User {$action}",
+            'warning',
+            "Administrator {$admin->name} applied {$action} to user {$user->email}. Reason: {$reason}",
+            'User',
+            $user->id,
+            null,
+            ['status' => $user->status, 'banned_until' => $bannedUntil],
+            $reason,
+            $admin,
+            $request
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => "User account has been {$user->status} successfully.",
+            'data'    => $this->serializeUser($user->fresh()->load('roles')),
+        ]);
+    }
+
+    public function unbanUser(Request $request, int $userId): JsonResponse
+    {
+        $user = User::findOrFail($userId);
+        $admin = $request->user();
+
+        $reason = $request->input('reason', 'Administrative reactivation');
+
+        DB::transaction(function () use ($user, $admin, $reason) {
+            $user->update([
+                'status'             => 'active',
+                'banned_at'          => null,
+                'banned_until'       => null,
+                'banned_reason'      => null,
+                'banned_by_user_id'  => null,
+                'failed_login_count' => 0,
+                'lockout_until'      => null,
+            ]);
+
+            UserBanHistory::create([
+                'user_id'      => $user->id,
+                'action'       => 'unban',
+                'reason'       => $reason,
+                'performed_by' => $admin->id,
+            ]);
+        });
+
+        AuditLogger::log(
+            'User Management',
+            'User Unban',
+            'success',
+            "Administrator {$admin->name} unbanned user {$user->email}",
+            'User',
+            $user->id,
+            null,
+            ['status' => 'active'],
+            $reason,
+            $admin,
+            $request
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => 'User account has been unbanned and restored to active status.',
+            'data'    => $this->serializeUser($user->fresh()->load('roles')),
+        ]);
+    }
+
+    public function resetLockout(Request $request, int $userId): JsonResponse
+    {
+        $user = User::findOrFail($userId);
+        $admin = $request->user();
+
+        $user->update([
+            'failed_login_count' => 0,
+            'lockout_until'      => null,
+        ]);
+
+        AuditLogger::log(
+            'User Management',
+            'Reset Lockout',
+            'info',
+            "Failed login lockout reset for user {$user->email} by admin {$admin->name}",
+            'User',
+            $user->id,
+            null,
+            null,
+            'Reset lockout restrictions',
+            $admin,
+            $request
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => 'User lockout and failed attempt counters have been reset.',
+            'data'    => $this->serializeUser($user->fresh()->load('roles')),
+        ]);
+    }
+
+    public function forceLogoutUser(Request $request, int $userId): JsonResponse
+    {
+        $user = User::findOrFail($userId);
+        $admin = $request->user();
+
+        $user->tokens()->delete();
+        $count = UserSession::where('user_id', $user->id)
+            ->where('is_active', true)
+            ->update([
+                'is_active'         => false,
+                'revoked_at'        => now(),
+                'revocation_reason' => "Force logout by admin {$admin->name}",
+            ]);
+
+        AuditLogger::log(
+            'User Management',
+            'Force Logout',
+            'warning',
+            "Administrator {$admin->name} forced logout on all devices for user {$user->email}",
+            'User',
+            $user->id,
+            null,
+            null,
+            'Force logout from all devices',
+            $admin,
+            $request
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => "User has been logged out from all devices ({$count} sessions revoked).",
+        ]);
+    }
+
+    public function userSecurityOverview(int $userId): JsonResponse
+    {
+        $user = User::with(['roles', 'banHistories.performer:id,name'])->findOrFail($userId);
+
+        $activeSessions = UserSession::where('user_id', $user->id)
+            ->where('is_active', true)
+            ->orderByDesc('last_activity_at')
+            ->get();
+
+        $recentLogins = \App\Models\LoginAttempt::where('user_id', $user->id)
+            ->orderByDesc('created_at')
+            ->limit(15)
+            ->get();
+
+        return response()->json([
+            'success' => true,
+            'data'    => [
+                'user'            => $this->serializeUser($user),
+                'active_sessions' => $activeSessions,
+                'ban_history'     => $user->banHistories,
+                'recent_logins'   => $recentLogins,
+            ],
+        ]);
+    }
+
     /* ============================ HELPERS ========================== */
 
     private function serializeRole(Role $role): array
@@ -484,24 +725,33 @@ class UserAccessController extends Controller
         $permissions = $user->resolvePermissions();
 
         return [
-            'id'                 => $user->id,
-            'name'               => $user->name,
-            'email'              => $user->email,
-            'phone'              => $user->phone,
-            'company_id'         => $user->company_id,
-            'branch_id'          => $user->branch_id,
-            'two_factor_enabled' => $user->hasTwoFactorEnabled(),
-            'email_verified_at'  => $user->email_verified_at,
+            'id'                    => $user->id,
+            'name'                  => $user->name,
+            'email'                 => $user->email,
+            'phone'                 => $user->phone,
+            'status'                => $user->status ?? 'active',
+            'banned_at'             => $user->banned_at?->toISOString(),
+            'banned_until'          => $user->banned_until?->toISOString(),
+            'banned_reason'         => $user->banned_reason,
+            'failed_login_count'    => (int) ($user->failed_login_count ?? 0),
+            'lockout_until'         => $user->lockout_until?->toISOString(),
+            'last_login_at'         => $user->last_login_at?->toISOString(),
+            'last_login_ip'         => $user->last_login_ip,
+            'active_sessions_count' => $user->activeSessions()->count(),
+            'company_id'            => $user->company_id,
+            'branch_id'             => $user->branch_id,
+            'two_factor_enabled'    => $user->hasTwoFactorEnabled(),
+            'email_verified_at'     => $user->email_verified_at,
             'roles' => $user->roles->map(fn ($r) => [
                 'id'    => $r->id,
                 'name'  => $r->name,
                 'group' => $r->group,
             ])->values(),
-            'role_names'       => $user->roles->pluck('name')->values(),
-            'permission_names' => $permissions->pluck('name')->values(),
-            'permission_ids'   => $permissions->pluck('id')->values(),
-            'created_at'       => $user->created_at,
-            'updated_at'       => $user->updated_at,
+            'role_names'            => $user->roles->pluck('name')->values(),
+            'permission_names'      => $permissions->pluck('name')->values(),
+            'permission_ids'        => $permissions->pluck('id')->values(),
+            'created_at'            => $user->created_at,
+            'updated_at'            => $user->updated_at,
         ];
     }
 

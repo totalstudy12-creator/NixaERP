@@ -185,6 +185,18 @@ class CustomerController extends Controller
             return response()->json(['message' => 'Customer not found.'], 404);
         }
 
+        // Rule: Do not permanently delete customers with linked financial history
+        $hasInvoices = DB::table('invoices')->where('customer_id', $customerModel->id)->whereNull('deleted_at')->exists();
+        $hasPayments = DB::table('payments')->where('customer_id', $customerModel->id)->whereNull('deleted_at')->exists();
+        $hasOrders   = DB::table('orders')->where('customer_id', $customerModel->id)->whereNull('deleted_at')->exists();
+
+        if ($hasInvoices || $hasPayments || $hasOrders) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Cannot delete customer with linked financial transactions (invoices, payments, or orders). Please archive or deactivate the customer instead.',
+            ], 422);
+        }
+
         try {
             $customerModel->delete();
             return response()->noContent();
@@ -676,6 +688,319 @@ class CustomerController extends Controller
             'Content-Type'        => 'text/csv; charset=UTF-8',
             'Content-Disposition' => 'attachment; filename="customers_template.csv"',
             'Cache-Control'       => 'no-store, no-cache, must-revalidate',
+        ]);
+    }
+
+    /* ======================================================================
+     |  CUSTOMER 360 WORKSPACE
+     ====================================================================== */
+
+    public function customer360(Request $request, $customer)
+    {
+        $c = $this->findActiveCustomer((int) $customer);
+        if (!$c) {
+            return response()->json(['message' => 'Customer not found.'], 404);
+        }
+
+        $customerId = (int) $c->id;
+
+        // 1. Invoices
+        $invoices = DB::table('invoices')
+            ->where('customer_id', $customerId)
+            ->whereNull('deleted_at')
+            ->orderByDesc('invoice_date')
+            ->orderByDesc('id')
+            ->get();
+
+        // 2. Orders
+        $orders = DB::table('orders')
+            ->where('customer_id', $customerId)
+            ->whereNull('deleted_at')
+            ->orderByDesc('created_at')
+            ->get();
+
+        // 3. Quotations
+        $quotations = DB::table('quotations')
+            ->where('customer_id', $customerId)
+            ->whereNull('deleted_at')
+            ->orderByDesc('quotation_date')
+            ->get();
+
+        // 4. Sales Returns
+        $returns = DB::table('sales_returns')
+            ->where('customer_id', $customerId)
+            ->orderByDesc('created_at')
+            ->get();
+
+        // 5. Payments
+        $invoiceIds = $invoices->pluck('id')->all();
+        $hasCustomerCol = Schema::hasColumn('payments', 'customer_id');
+        $hasInvoiceIdCol = Schema::hasColumn('payments', 'invoice_id');
+        $hasPayableCol = Schema::hasColumn('payments', 'payable_id');
+        $hasPaymentDateCol = Schema::hasColumn('payments', 'payment_date');
+        $hasTransactionDateCol = Schema::hasColumn('payments', 'transaction_date');
+        $dateCol = $hasTransactionDateCol ? 'transaction_date' : ($hasPaymentDateCol ? 'payment_date' : 'created_at');
+
+        $paymentsQuery = DB::table('payments');
+        $paymentsQuery->where(function ($q) use ($customerId, $invoiceIds, $hasCustomerCol, $hasInvoiceIdCol, $hasPayableCol) {
+            $hasAny = false;
+            if ($hasCustomerCol) {
+                $q->where('customer_id', $customerId);
+                $hasAny = true;
+            }
+            if ($hasInvoiceIdCol && !empty($invoiceIds)) {
+                if ($hasAny) {
+                    $q->orWhereIn('invoice_id', $invoiceIds);
+                } else {
+                    $q->whereIn('invoice_id', $invoiceIds);
+                    $hasAny = true;
+                }
+            }
+            if ($hasPayableCol) {
+                if ($hasAny) {
+                    $q->orWhere(function ($q2) use ($customerId) {
+                        $q2->where('payable_id', $customerId);
+                        if (Schema::hasColumn('payments', 'payable_type')) {
+                            $q2->whereIn('payable_type', ['customer', 'App\\Models\\Customer']);
+                        }
+                    });
+                } else {
+                    $q->where('payable_id', $customerId);
+                    $hasAny = true;
+                }
+            }
+            if (!$hasAny) {
+                $q->whereRaw('1 = 0');
+            }
+        });
+
+        if (Schema::hasColumn('payments', 'deleted_at')) {
+            $paymentsQuery->whereNull('deleted_at');
+        }
+
+        $payments = $paymentsQuery
+            ->orderByDesc($dateCol)
+            ->orderByDesc('id')
+            ->get();
+
+        // 6. Contacts
+        $contacts = DB::table('contacts')
+            ->where('customer_id', $customerId)
+            ->whereNull('deleted_at')
+            ->get();
+
+        // 7. Purchased Products Summary (joined with products table to show real names)
+        $productsPurchased = [];
+        if (!empty($invoiceIds)) {
+            $isSqlite = DB::connection()->getDriverName() === 'sqlite';
+            $fallback = $isSqlite ? "('Product #' || invoice_items.product_id)" : 'CONCAT("Product #", invoice_items.product_id)';
+            $productsPurchased = DB::table('invoice_items')
+                ->whereIn('invoice_items.invoice_id', $invoiceIds)
+                ->leftJoin('products', 'invoice_items.product_id', '=', 'products.id')
+                ->select(
+                    'invoice_items.product_id',
+                    DB::raw("COALESCE(NULLIF(invoice_items.product_name, ''), products.name, {$fallback}) as product_name"),
+                    DB::raw("COALESCE(NULLIF(invoice_items.hsn_sac_code, ''), products.sku, '—') as hsn_sac_code"),
+                    DB::raw("COALESCE(NULLIF(invoice_items.uom, ''), products.unit, 'units') as uom"),
+                    DB::raw('SUM(invoice_items.quantity) as total_quantity'),
+                    DB::raw('SUM(COALESCE(invoice_items.total, invoice_items.subtotal, 0)) as total_spend'),
+                    DB::raw('MAX(invoice_items.created_at) as last_purchased_at')
+                )
+                ->groupBy('invoice_items.product_id', 'invoice_items.product_name', 'products.name', 'invoice_items.hsn_sac_code', 'products.sku', 'invoice_items.uom', 'products.unit')
+                ->orderByDesc('total_spend')
+                ->limit(50)
+                ->get()
+                ->map(function ($p) {
+                    if (empty($p->product_name)) {
+                        $p->product_name = 'Product #' . $p->product_id;
+                    }
+                    return $p;
+                });
+        }
+
+        // Map and fix invoice payment statuses so none are stuck on pending
+        $invoices = $invoices->map(function ($inv) {
+            $total = (float) ($inv->grand_total ?: $inv->total_amount);
+            $paid = (float) ($inv->paid_amount ?? 0);
+            $st = strtolower((string) ($inv->status ?? ''));
+            $ps = strtolower((string) ($inv->payment_status ?? ''));
+            if ($ps === '' || $ps === 'pending') {
+                if ($paid >= ($total - 0.01) && $total > 0) {
+                    $inv->payment_status = 'paid';
+                } elseif ($paid > 0) {
+                    $inv->payment_status = 'partial';
+                } elseif ($st === 'paid') {
+                    $inv->payment_status = 'paid';
+                } else {
+                    $inv->payment_status = 'unpaid';
+                }
+            }
+            return $inv;
+        });
+
+        // 8. Calculations for KPIs
+        $totalSales = (float) $invoices->whereNotIn('status', ['draft', 'cancelled'])->sum('total_amount');
+        if ($totalSales == 0 && $invoices->isNotEmpty()) {
+            $totalSales = (float) $invoices->sum('grand_total');
+        }
+        $totalInvoicesCount = $invoices->count();
+        $paidAmount = (float) $payments->where('payment_direction', 'inward')->sum('amount');
+        if ($paidAmount == 0 && $payments->isNotEmpty()) {
+            $paidAmount = (float) $payments->sum('amount');
+        }
+
+        $outstandingMap = $this->computeOutstandingMapForCustomers([$c]);
+        $outstandingReceivables = (float) ($outstandingMap[$customerId] ?? 0.0);
+
+        // Aging breakdown
+        $aging = ['current' => 0.0, 'days_30' => 0.0, 'days_60' => 0.0, 'days_90_plus' => 0.0];
+        $now = now();
+        $overdueAmount = 0.0;
+        foreach ($invoices as $inv) {
+            $status = strtolower((string) ($inv->status ?? ''));
+            $payStatus = strtolower((string) ($inv->payment_status ?? ''));
+            if (in_array($status, ['cancelled', 'draft']) || $payStatus === 'paid') {
+                continue;
+            }
+            $invTotal = (float) ($inv->grand_total ?: $inv->total_amount);
+            $invPaid = (float) ($inv->paid_amount ?? 0);
+            $balance = max(0.0, $invTotal - $invPaid);
+            if ($balance <= 0) continue;
+
+            $invDate = $inv->invoice_date ? \Carbon\Carbon::parse($inv->invoice_date) : \Carbon\Carbon::parse($inv->created_at);
+            $days = $invDate->diffInDays($now);
+
+            if ($inv->due_date && \Carbon\Carbon::parse($inv->due_date)->lt($now)) {
+                $overdueAmount += $balance;
+            }
+
+            if ($days <= 30) {
+                $aging['current'] += $balance;
+            } elseif ($days <= 60) {
+                $aging['days_30'] += $balance;
+            } elseif ($days <= 90) {
+                $aging['days_60'] += $balance;
+            } else {
+                $aging['days_90_plus'] += $balance;
+            }
+        }
+
+        // Last payment & purchase
+        $lastPaymentRow = $payments->first();
+        $lastInvoiceRow = $invoices->first();
+
+        // Sales trend (last 6 months) — fallback to created_at if invoice_date is null
+        $salesTrend = [];
+        for ($i = 5; $i >= 0; $i--) {
+            $month = now()->subMonths($i);
+            $monthKey = $month->format('M Y');
+            $monthPrefix = $month->format('Y-m');
+            $monthTotal = $invoices
+                ->filter(function ($inv) use ($monthPrefix) {
+                    $dateStr = $inv->invoice_date ?: substr((string) ($inv->created_at ?? ''), 0, 10);
+                    return $dateStr && str_starts_with($dateStr, $monthPrefix);
+                })
+                ->sum(fn ($inv) => (float) ($inv->grand_total ?: $inv->total_amount));
+            $salesTrend[] = [
+                'month' => $monthKey,
+                'total' => round((float) $monthTotal, 2),
+            ];
+        }
+
+        // 9. Customer Activities / Notes
+        $activities = [];
+        if (Schema::hasTable('lead_activities')) {
+            $actDateCol = Schema::hasColumn('lead_activities', 'activity_date')
+                ? 'activity_date'
+                : (Schema::hasColumn('lead_activities', 'activity_at') ? 'activity_at' : 'created_at');
+
+            $activities = DB::table('lead_activities')
+                ->where('title', 'like', "%Customer #{$customerId}%")
+                ->orderByDesc($actDateCol)
+                ->limit(20)
+                ->get();
+        }
+
+        // 10. Audit History for Customer
+        $auditHistory = DB::table('audit_logs')
+            ->where(function ($q) use ($customerId) {
+                $q->where('resource_type', 'Customer')
+                  ->where('resource_id', (string) $customerId);
+            })
+            ->orWhere('message', 'like', "%customer #{$customerId}%")
+            ->orderByDesc('created_at')
+            ->limit(30)
+            ->get();
+
+        $lastVisitDate = $activities->first()?->activity_date
+            ?? $activities->first()?->created_at
+            ?? $auditHistory->first()?->created_at
+            ?? $lastInvoiceRow?->invoice_date
+            ?? $c->updated_at
+            ?? $c->created_at;
+
+        return response()->json([
+            'success' => true,
+            'data'    => [
+                'customer' => $c->load(['company', 'branch', 'group']),
+                'kpis' => [
+                    'total_sales'             => round($totalSales, 2),
+                    'total_invoices'          => $totalInvoicesCount,
+                    'paid_amount'             => round($paidAmount, 2),
+                    'outstanding_receivables' => round($outstandingReceivables, 2),
+                    'overdue_amount'          => round($overdueAmount, 2),
+                    'advance_balance'         => (float) ($c->wallet_balance ?? 0),
+                    'average_order_value'     => $totalInvoicesCount > 0 ? round($totalSales / $totalInvoicesCount, 2) : 0,
+                    'lifetime_value'          => round($totalSales, 2),
+                    'last_payment_date'       => $lastPaymentRow?->payment_date ?? $lastPaymentRow?->transaction_date ?? $lastPaymentRow?->created_at,
+                    'last_payment_amount'     => (float) ($lastPaymentRow?->amount ?? 0),
+                    'last_purchase_date'      => $lastInvoiceRow?->invoice_date ?? $lastInvoiceRow?->created_at,
+                    'last_purchase_amount'    => (float) ($lastInvoiceRow?->grand_total ?: $lastInvoiceRow?->total_amount ?? 0),
+                    'last_visit_date'         => $lastVisitDate,
+                    'aging'                   => $aging,
+                    'sales_trend'             => $salesTrend,
+                ],
+                'quotations' => $quotations,
+                'invoices'   => $invoices,
+                'orders'     => $orders,
+                'returns'    => $returns,
+                'payments'   => $payments,
+                'products'   => $productsPurchased,
+                'contacts'   => $contacts,
+                'activities' => $activities,
+                'audit_logs' => $auditHistory,
+            ],
+        ]);
+    }
+
+    public function toggleArchive(Request $request, $customer)
+    {
+        $c = $this->findActiveCustomer((int) $customer);
+        if (!$c) {
+            return response()->json(['message' => 'Customer not found.'], 404);
+        }
+
+        $c->is_active = !$c->is_active;
+        $c->save();
+
+        \App\Services\AuditLogger::log(
+            'Customer Management',
+            $c->is_active ? 'Customer Restored' : 'Customer Archived',
+            'info',
+            "Customer {$c->name} ({$c->id}) active state set to " . ($c->is_active ? 'true' : 'false'),
+            'Customer',
+            $c->id,
+            null,
+            ['is_active' => $c->is_active],
+            null,
+            $request->user(),
+            $request
+        );
+
+        return response()->json([
+            'success'   => true,
+            'message'   => $c->is_active ? 'Customer activated successfully.' : 'Customer archived successfully.',
+            'is_active' => $c->is_active,
         ]);
     }
 

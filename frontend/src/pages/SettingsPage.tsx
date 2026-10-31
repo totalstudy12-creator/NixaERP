@@ -1874,6 +1874,21 @@ export function SettingsPage() {
           </button>
         )}
 
+        {availableTabs.includes('applications') && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('applications')}
+            className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'applications'
+                ? 'bg-slate-900 text-white shadow-lg'
+                : 'bg-white text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <FiSmartphone className="mr-1 inline" size={14} />
+            Connected Apps
+          </button>
+        )}
+
         {availableTabs.includes('ai') && (
           <button
             type="button"
@@ -2834,6 +2849,13 @@ export function SettingsPage() {
               </p>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* CONNECTED APPS TAB */}
+      {activeTab === 'applications' && (
+        <div className="space-y-6">
+          <ConnectedAppsSettings />
         </div>
       )}
 

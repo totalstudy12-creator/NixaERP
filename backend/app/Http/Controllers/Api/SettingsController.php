@@ -100,9 +100,18 @@ class SettingsController extends Controller
                 }
             );
 
+            $maskedSettings = $settings->map(function ($s) {
+                $arr = $s->toArray();
+                if ($s->isSecretKey() || $s->is_secret) {
+                    $arr['value'] = $s->value ? '********' : '';
+                    $arr['is_secret'] = true;
+                }
+                return $arr;
+            });
+
             return response()->json([
                 'success' => true,
-                'data' => $settings,
+                'data' => $maskedSettings,
             ]);
         } catch (Throwable $e) {
             report($e);
@@ -321,13 +330,33 @@ class SettingsController extends Controller
                 )->first();
 
                 if ($setting) {
-                    $setting->fill($data)->save();
+                    if (($setting->isSecretKey() || $setting->is_secret) && isset($data['value']) && $data['value'] === '********') {
+                        unset($data['value']);
+                    }
+                    $setting->fill($data);
+                    $setting->updated_by = $request->user()?->id;
+                    $setting->save();
                     $updated++;
                 } else {
+                    $data['updated_by'] = $request->user()?->id;
                     Setting::create($data);
                     $created++;
                 }
             }
+
+            \App\Services\AuditLogger::log(
+                'Settings',
+                'Bulk Update Settings',
+                'success',
+                "Updated {$updated} and created {$created} settings",
+                'Setting',
+                null,
+                null,
+                null,
+                'Central configuration update',
+                $request->user(),
+                $request
+            );
 
             $this->clearSettingsCache();
 

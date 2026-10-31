@@ -53,6 +53,8 @@ use App\Http\Controllers\Api\LeadController;
 use App\Http\Controllers\Api\ContactController;
 use App\Http\Controllers\Api\OpportunityController;
 use App\Http\Controllers\Api\CampaignController;
+use App\Http\Controllers\Api\SecurityFirewallController;
+use App\Http\Controllers\Api\AdminControlCenterController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -86,6 +88,11 @@ Route::prefix('auth')->group(function () {
         Route::get('profile',   [AuthController::class, 'profile']);
         Route::put('profile',   [AuthController::class, 'updateProfile'])
             ->middleware('permission:edit profile');
+
+        Route::get('sessions',                   [AuthController::class, 'sessions']);
+        Route::delete('sessions/{id}',           [AuthController::class, 'terminateSession']);
+        Route::post('sessions/terminate-others', [AuthController::class, 'terminateOtherSessions']);
+        Route::post('change-password',           [AuthController::class, 'changePassword']);
 
         Route::prefix('2fa')->group(function () {
             Route::get('status',                 [TwoFactorController::class, 'status']);
@@ -127,9 +134,11 @@ Route::post('v1/apps/{identifier}/ping',     [ConnectedAppController::class, 'pi
 Route::middleware('auth:sanctum')->group(function () {
 
     /* ----------------------------- Audit Logs -------------------------- */
-    Route::get('audit-logs', [AuditLogController::class, 'index']);
-    Route::post('audit-logs', [AuditLogController::class, 'store'])->middleware('throttle:120,1');
-    Route::delete('audit-logs', [AuditLogController::class, 'destroy']);
+    Route::get('audit-logs/export', [AuditLogController::class, 'exportCsv'])->middleware('permission:view settings,view users');
+    Route::get('audit-logs',        [AuditLogController::class, 'index']);
+    Route::get('audit-logs/{id}',   [AuditLogController::class, 'show'])->middleware('permission:view settings,view users');
+    Route::post('audit-logs',       [AuditLogController::class, 'store'])->middleware('throttle:120,1');
+    Route::delete('audit-logs',     [AuditLogController::class, 'destroy']);
 
     /* ------------------------------- MCP ------------------------------- */
     // MCP token management is gated by `settings.mcp.manage` — matches the
@@ -255,12 +264,17 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('permissions/{permissionId}', [UserAccessController::class, 'destroyPermission'])->middleware('permission:delete permissions');
 
     // Users
-    Route::get('users',                 [UserAccessController::class, 'users'])->middleware('permission:view users');
-    Route::get('users/{userId}',        [UserAccessController::class, 'showUser'])->middleware('permission:view users');
-    Route::post('users',                [UserAccessController::class, 'storeUser'])->middleware('permission:create users');
-    Route::put('users/{userId}',        [UserAccessController::class, 'updateUser'])->middleware('permission:edit users');
-    Route::delete('users/{userId}',     [UserAccessController::class, 'destroyUser'])->middleware('permission:delete users');
-    Route::post('users/{userId}/roles', [UserAccessController::class, 'assignRolesToUser'])->middleware('permission:assign roles to user');
+    Route::get('users',                           [UserAccessController::class, 'users'])->middleware('permission:view users');
+    Route::get('users/{userId}',                  [UserAccessController::class, 'showUser'])->middleware('permission:view users');
+    Route::post('users',                          [UserAccessController::class, 'storeUser'])->middleware('permission:create users');
+    Route::put('users/{userId}',                  [UserAccessController::class, 'updateUser'])->middleware('permission:edit users');
+    Route::delete('users/{userId}',               [UserAccessController::class, 'destroyUser'])->middleware('permission:delete users');
+    Route::post('users/{userId}/roles',           [UserAccessController::class, 'assignRolesToUser'])->middleware('permission:assign roles to user');
+    Route::post('users/{userId}/ban',             [UserAccessController::class, 'banUser'])->middleware('permission:view users');
+    Route::post('users/{userId}/unban',           [UserAccessController::class, 'unbanUser'])->middleware('permission:view users');
+    Route::post('users/{userId}/reset-lockout',   [UserAccessController::class, 'resetLockout'])->middleware('permission:view users');
+    Route::post('users/{userId}/force-logout',    [UserAccessController::class, 'forceLogoutUser'])->middleware('permission:view users');
+    Route::get('users/{userId}/security-overview',[UserAccessController::class, 'userSecurityOverview'])->middleware('permission:view users');
 
     /* ====================== Core Business Resources ==================== */
     /* Each resource is written as explicit per-method routes because
@@ -295,11 +309,13 @@ Route::middleware('auth:sanctum')->group(function () {
 
     /* ---------------------------- Customers ---------------------------- */
     Route::prefix('customers')->group(function () {
-        Route::get('/',                [CustomerController::class, 'index'])->middleware('permission:view customers');
-        Route::get('/{customer}',      [CustomerController::class, 'show'])->middleware('permission:view customers');
-        Route::post('/',               [CustomerController::class, 'store'])->middleware('permission:create customers');
+        Route::get('/',                          [CustomerController::class, 'index'])->middleware('permission:view customers');
+        Route::get('/{customer}/customer-360',   [CustomerController::class, 'customer360'])->middleware('permission:view customers');
+        Route::post('/{customer}/archive',       [CustomerController::class, 'toggleArchive'])->middleware('permission:edit customers');
+        Route::get('/{customer}',                [CustomerController::class, 'show'])->middleware('permission:view customers');
+        Route::post('/',                         [CustomerController::class, 'store'])->middleware('permission:create customers');
         Route::match(['put', 'patch'], '/{customer}', [CustomerController::class, 'update'])->middleware('permission:edit customers');
-        Route::delete('/{customer}',   [CustomerController::class, 'destroy'])->middleware('permission:delete customers');
+        Route::delete('/{customer}',             [CustomerController::class, 'destroy'])->middleware('permission:delete customers');
     });
 
     /* ---------------------------- Suppliers ---------------------------- */
@@ -720,9 +736,24 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/',       [SettingsController::class, 'revokeAllTokens']);
     });
 
-    /* ---------------------- Connected Apps (Flutter) ------------------- */
+    /* ---------------------- Connected Apps & Multi-App Launcher ------- */
+    Route::get('apps/launcher', [ConnectedAppController::class, 'launcher']);
     Route::apiResource('connected-apps', ConnectedAppController::class)->middleware('permission:view settings');
     Route::post('connected-apps/{app}/regenerate-token', [ConnectedAppController::class, 'regenerateToken'])->middleware('permission:edit settings');
+
+    /* ---------------------- Security Firewall & Sessions --------------- */
+    Route::prefix('security')->group(function () {
+        Route::get('dashboard',        [SecurityFirewallController::class, 'dashboard'])->middleware('permission:view settings');
+        Route::get('ip-rules',         [SecurityFirewallController::class, 'index'])->middleware('permission:view settings');
+        Route::post('ip-rules',        [SecurityFirewallController::class, 'store'])->middleware('permission:edit settings');
+        Route::delete('ip-rules/{id}', [SecurityFirewallController::class, 'destroy'])->middleware('permission:edit settings');
+        Route::get('login-attempts',   [SecurityFirewallController::class, 'loginAttempts'])->middleware('permission:view settings');
+        Route::get('active-sessions',  [SecurityFirewallController::class, 'activeSessions'])->middleware('permission:view settings');
+        Route::delete('sessions/{id}', [SecurityFirewallController::class, 'terminateAdminSession'])->middleware('permission:edit settings');
+    });
+
+    /* ---------------------- Admin Control Center ----------------------- */
+    Route::get('admin/system-overview', [AdminControlCenterController::class, 'overview'])->middleware('permission:view settings');
 
     /* ------------------------- Health / Backups ------------------------ */
     Route::get('health/cron',               [HealthController::class, 'cron'])->middleware('permission:view health cron,view settings');
@@ -767,6 +798,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('ai/assistant/config', [\App\Http\Controllers\Api\AiController::class, 'clearAssistantConfig'])->middleware('permission:settings.ai.update');
     Route::post('ai/assistant/chat',    [\App\Http\Controllers\Api\AiController::class, 'chat'])->middleware('permission:chat with ai assistant');
     Route::post('ai/assistant/voice',   [\App\Http\Controllers\Api\AiController::class, 'voice'])->middleware('permission:chat with ai assistant');
+    Route::post('ai/assistant/live-converse', [\App\Http\Controllers\Api\AiController::class, 'liveConverse'])->middleware('permission:chat with ai assistant');
 
     Route::post('dashboard/ai/ask',             [\App\Http\Controllers\Api\DashboardAiController::class, 'ask'])->middleware('permission:ask dashboard ai');
     Route::post('dashboard/ai/business-health', [\App\Http\Controllers\Api\DashboardAiController::class, 'businessHealth'])->middleware('permission:view dashboard ai business health');

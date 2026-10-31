@@ -26,6 +26,7 @@ import {
   FiCheck,
   FiCalendar,
   FiLock,
+  FiShield,
 } from 'react-icons/fi';
 
 import { useNotification } from '../components/NotificationContext';
@@ -66,11 +67,20 @@ interface LogUser {
 }
 
 interface ExtendedLogEntry extends Omit<AppLogEntry, 'id'> {
+  event_id?: string;
   user?: LogUser | null;
   user_name?: string;
   user_email?: string;
   user_id?: number;
   created_by?: string | number;
+  company_id?: number;
+  branch_id?: number;
+  resource_type?: string;
+  resource_id?: string | number;
+  previous_values?: Record<string, unknown> | null;
+  changed_values?: Record<string, unknown> | null;
+  request_id?: string;
+  reason?: string;
   ip_address?: string;
   user_agent?: string;
   metadata?: Record<string, unknown>;
@@ -1313,6 +1323,80 @@ export function AuditLogsPage() {
                             </pre>
                           </div>
                         )}
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* Enterprise Audit Metadata (Event ID, Request ID, Resource) */}
+                {(viewingLog.event_id || viewingLog.resource_type || viewingLog.reason) && (
+                  <>
+                    <Separator />
+                    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                      <div className="border-b border-slate-100 px-3.5 py-2.5">
+                        <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                          <FiShield size={12} /> Enterprise Audit Context
+                        </p>
+                      </div>
+                      <div className="divide-y divide-slate-100 text-xs">
+                        {viewingLog.event_id && (
+                          <div className="flex items-center justify-between px-3.5 py-2">
+                            <span className="text-slate-400">Event ID</span>
+                            <span className="font-mono text-slate-700">{viewingLog.event_id}</span>
+                          </div>
+                        )}
+                        {viewingLog.request_id && (
+                          <div className="flex items-center justify-between px-3.5 py-2">
+                            <span className="text-slate-400">Request ID</span>
+                            <span className="font-mono text-slate-700">{viewingLog.request_id}</span>
+                          </div>
+                        )}
+                        {viewingLog.resource_type && (
+                          <div className="flex items-center justify-between px-3.5 py-2">
+                            <span className="text-slate-400">Target Resource</span>
+                            <span className="font-semibold text-slate-800">
+                              {viewingLog.resource_type} #{viewingLog.resource_id || ''}
+                            </span>
+                          </div>
+                        )}
+                        {viewingLog.reason && (
+                          <div className="flex flex-col gap-1 px-3.5 py-2">
+                            <span className="text-slate-400">Audit Reason</span>
+                            <span className="text-slate-700 italic">{viewingLog.reason}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* Before & After Values Diff */}
+                {(viewingLog.previous_values || viewingLog.changed_values) && (
+                  <>
+                    <Separator />
+                    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                      <div className="border-b border-slate-100 px-3.5 py-2.5 bg-slate-50/50">
+                        <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-700">
+                          <FiActivity size={12} className="text-indigo-600" /> State Transition (Before &amp; After)
+                        </p>
+                      </div>
+                      <div className="grid grid-cols-2 divide-x divide-slate-100 p-3 text-xs gap-3">
+                        <div>
+                          <p className="font-semibold text-rose-600 mb-1.5 flex items-center gap-1">
+                            <span className="h-2 w-2 rounded-full bg-rose-500" /> Previous Values
+                          </p>
+                          <pre className="max-h-48 overflow-auto rounded-lg bg-rose-50/50 p-2 font-mono text-[10px] text-rose-900 border border-rose-100">
+                            {viewingLog.previous_values ? JSON.stringify(viewingLog.previous_values, null, 2) : 'None'}
+                          </pre>
+                        </div>
+                        <div>
+                          <p className="font-semibold text-emerald-600 mb-1.5 flex items-center gap-1">
+                            <span className="h-2 w-2 rounded-full bg-emerald-500" /> Changed / New Values
+                          </p>
+                          <pre className="max-h-48 overflow-auto rounded-lg bg-emerald-50/50 p-2 font-mono text-[10px] text-emerald-900 border border-emerald-100">
+                            {viewingLog.changed_values ? JSON.stringify(viewingLog.changed_values, null, 2) : 'None'}
+                          </pre>
+                        </div>
                       </div>
                     </div>
                   </>

@@ -1,10 +1,26 @@
 // src/pages/UsersPage.tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FiRefreshCw, FiLock, FiUser, FiShield, FiMail, FiAlertCircle } from 'react-icons/fi';
+import {
+  FiRefreshCw,
+  FiLock,
+  FiUser,
+  FiShield,
+  FiMail,
+  FiAlertCircle,
+  FiSlash,
+  FiCheck,
+  FiLogOut,
+  FiUnlock,
+  FiSearch,
+  FiActivity,
+  FiClock,
+} from 'react-icons/fi';
 import { ModernDataTable } from '../components/ModernDataTable';
 import { apiClient } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { useAuthStore } from '../store/auth';
+import { UserSecurityModal } from '../components/UserSecurityModal';
+import { UserBanModal } from '../components/UserBanModal';
 
 /* ------------------------------------------------------------------ */
 /* RBAC — Permission keys                                              */
@@ -12,22 +28,13 @@ import { useAuthStore } from '../store/auth';
 
 const PERMISSIONS = {
   USERS_VIEW: 'users.view',
+  USERS_BAN: 'users.ban',
 } as const;
-
-type PermissionKey = typeof PERMISSIONS[keyof typeof PERMISSIONS];
 
 /* ------------------------------------------------------------------ */
 /* RBAC — Store-backed permissions (admin-aware + notation-insensitive) */
 /* ------------------------------------------------------------------ */
 
-/**
- * Collapse a permission key so different notations of the SAME permission
- * match each other:
- *
- *   "users.view"       → "users view"
- *   "view users"       → "users view"
- *   "users:view"       → "users view"
- */
 function normalisePermission(input: string): string {
   return input
     .toLowerCase()
@@ -120,7 +127,16 @@ interface UserRow {
   name: string;
   email: string;
   roles: Array<{ id: number; name: string }>;
+  status?: 'active' | 'banned' | 'suspended' | 'inactive';
   is_active?: boolean;
+  failed_login_count?: number;
+  last_failed_login_at?: string;
+  lockout_until?: string;
+  last_login_at?: string;
+  last_login_ip?: string;
+  banned_at?: string;
+  banned_until?: string;
+  banned_reason?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -160,14 +176,25 @@ function formatDate(value?: string | null): string {
 /* ------------------------------------------------------------------ */
 
 export function UsersPage() {
-  const { showError } = useNotification();
+  const { showSuccess, showError } = useNotification();
   const { can, isAuthenticated, loadingUser } = usePagePermissions();
   const canView = can(PERMISSIONS.USERS_VIEW);
+  const canBan = can(PERMISSIONS.USERS_BAN);
 
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+
+  // Filters
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+
+  // Modals state
+  const [securityModalUserId, setSecurityModalUserId] = useState<number | null>(null);
+  const [securityModalUserName, setSecurityModalUserName] = useState<string>('');
+  const [banModalUser, setBanModalUser] = useState<UserRow | null>(null);
+  const [banModalMode, setBanModalMode] = useState<'ban' | 'unban'>('ban');
 
   const mountedRef = useRef(true);
   const requestIdRef = useRef(0);
@@ -205,7 +232,16 @@ export function UsersPage() {
               name: String(r.name ?? ''),
             }))
           : [],
+        status: (u.status as any) || (u.is_active === false ? 'inactive' : 'active'),
         is_active: typeof u.is_active === 'boolean' ? u.is_active : undefined,
+        failed_login_count: Number(u.failed_login_count ?? 0),
+        last_failed_login_at: u.last_failed_login_at ? String(u.last_failed_login_at) : undefined,
+        lockout_until: u.lockout_until ? String(u.lockout_until) : undefined,
+        last_login_at: u.last_login_at ? String(u.last_login_at) : undefined,
+        last_login_ip: u.last_login_ip ? String(u.last_login_ip) : undefined,
+        banned_at: u.banned_at ? String(u.banned_at) : undefined,
+        banned_until: u.banned_until ? String(u.banned_until) : undefined,
+        banned_reason: u.banned_reason ? String(u.banned_reason) : undefined,
         created_at: u.created_at ? String(u.created_at) : undefined,
         updated_at: u.updated_at ? String(u.updated_at) : undefined,
       }));
@@ -229,6 +265,55 @@ export function UsersPage() {
     void loadUsers();
   }, [loadUsers, canView]);
 
+  const handleResetLockout = async (userId: number, userName: string) => {
+    try {
+      await apiClient.resetUserLockout(userId);
+      showSuccess('Lockout Cleared', `Login restrictions reset for ${userName}.`);
+      void loadUsers();
+    } catch (err: any) {
+      showError('Action Failed', err?.response?.data?.message || err.message);
+    }
+  };
+
+  const handleForceLogout = async (userId: number, userName: string) => {
+    if (!window.confirm(`Revoke all active device sessions for ${userName}?`)) return;
+    try {
+      await apiClient.forceLogoutUser(userId);
+      showSuccess('Sessions Revoked', `All tokens for ${userName} have been invalidated.`);
+      void loadUsers();
+    } catch (err: any) {
+      showError('Action Failed', err?.response?.data?.message || err.message);
+    }
+  };
+
+  const filteredUsers = useMemo(() => {
+    return users.filter((u) => {
+      // Status filter
+      if (statusFilter !== 'all') {
+        const uStatus = u.status || (u.is_active === false ? 'inactive' : 'active');
+        if (statusFilter === 'locked') {
+          const isLocked = Boolean(
+            u.lockout_until && new Date(u.lockout_until).getTime() > Date.now(),
+          );
+          if (!isLocked) return false;
+        } else if (uStatus !== statusFilter) {
+          return false;
+        }
+      }
+
+      // Search filter
+      if (search.trim()) {
+        const q = search.toLowerCase();
+        const matchesName = u.name.toLowerCase().includes(q);
+        const matchesEmail = u.email.toLowerCase().includes(q);
+        const matchesRole = u.roles.some((r) => r.name.toLowerCase().includes(q));
+        if (!matchesName && !matchesEmail && !matchesRole) return false;
+      }
+
+      return true;
+    });
+  }, [users, statusFilter, search]);
+
   const columns = useMemo(
     () => [
       {
@@ -250,7 +335,7 @@ export function UsersPage() {
           </div>
         ),
         sortable: true,
-        width: '260px',
+        width: '240px',
       },
       {
         name: 'Email',
@@ -286,37 +371,145 @@ export function UsersPage() {
         sortable: true,
       },
       {
-        name: 'Status',
-        selector: (row: UserRow) => (row.is_active === false ? 'Inactive' : 'Active'),
+        name: 'Account Status',
+        selector: (row: UserRow) => row.status || (row.is_active === false ? 'inactive' : 'active'),
         cell: (row: UserRow) => {
-          const inactive = row.is_active === false;
+          const status = row.status || (row.is_active === false ? 'inactive' : 'active');
+          const isLocked = Boolean(
+            row.lockout_until && new Date(row.lockout_until).getTime() > Date.now(),
+          );
+
           return (
-            <span
-              className={
-                'inline-flex rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ' +
-                (inactive
-                  ? 'border-rose-200/70 bg-rose-50 text-rose-700'
-                  : 'border-emerald-200/70 bg-emerald-50 text-emerald-700')
-              }
-            >
-              {inactive ? 'Inactive' : 'Active'}
-            </span>
+            <div className="flex flex-col gap-1">
+              <span
+                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold capitalize ${
+                  status === 'banned'
+                    ? 'border border-rose-300 bg-rose-50 text-rose-700'
+                    : status === 'suspended'
+                    ? 'border border-amber-300 bg-amber-50 text-amber-800'
+                    : status === 'inactive'
+                    ? 'border border-slate-300 bg-slate-50 text-slate-600'
+                    : 'border border-emerald-300 bg-emerald-50 text-emerald-700'
+                }`}
+              >
+                {status}
+              </span>
+              {isLocked && (
+                <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-rose-600">
+                  <FiLock size={10} /> Lockout Active
+                </span>
+              )}
+            </div>
           );
         },
         sortable: true,
-        width: '120px',
+        width: '140px',
       },
       {
-        name: 'Created',
-        selector: (row: UserRow) => row.created_at || '',
+        name: 'Security & Logins',
+        selector: (row: UserRow) => row.last_login_at || '',
         cell: (row: UserRow) => (
-          <span className="text-sm text-slate-500">{formatDate(row.created_at)}</span>
+          <div className="text-xs">
+            <p className="text-slate-700">
+              {row.last_login_at ? formatDate(row.last_login_at) : 'Never'}
+            </p>
+            {row.last_login_ip && (
+              <p className="font-mono text-[10px] text-slate-400">{row.last_login_ip}</p>
+            )}
+            {(row.failed_login_count ?? 0) > 0 && (
+              <p className="font-semibold text-rose-600 text-[10px]">
+                {row.failed_login_count} failed
+              </p>
+            )}
+          </div>
         ),
         sortable: true,
         width: '140px',
       },
+      {
+        name: 'Actions',
+        cell: (row: UserRow) => {
+          const isBannedOrSuspended = row.status === 'banned' || row.status === 'suspended';
+          const hasLockout = Boolean(
+            (row.failed_login_count ?? 0) > 0 ||
+              (row.lockout_until && new Date(row.lockout_until).getTime() > Date.now()),
+          );
+
+          return (
+            <div className="flex items-center gap-1 py-1">
+              {/* Security & Sessions */}
+              <button
+                type="button"
+                onClick={() => {
+                  setSecurityModalUserId(row.id);
+                  setSecurityModalUserName(row.name);
+                }}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition"
+                title="View active sessions, threat history, and audit log"
+              >
+                <FiActivity size={12} className="text-indigo-600" />
+                Sessions
+              </button>
+
+              {/* Ban / Unban */}
+              {canBan && !isBannedOrSuspended && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBanModalUser(row);
+                    setBanModalMode('ban');
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-100 transition"
+                  title="Ban or temporarily suspend account"
+                >
+                  <FiSlash size={12} />
+                  Ban
+                </button>
+              )}
+
+              {canBan && isBannedOrSuspended && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBanModalUser(row);
+                    setBanModalMode('unban');
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 transition"
+                  title="Restore and unban user account"
+                >
+                  <FiCheck size={12} />
+                  Unban
+                </button>
+              )}
+
+              {/* Reset Lockout */}
+              {hasLockout && (
+                <button
+                  type="button"
+                  onClick={() => handleResetLockout(row.id, row.name)}
+                  className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-800 hover:bg-amber-100 transition"
+                  title="Reset failed login counter and lockout"
+                >
+                  <FiUnlock size={12} />
+                </button>
+              )}
+
+              {/* Force Logout */}
+              <button
+                type="button"
+                onClick={() => handleForceLogout(row.id, row.name)}
+                className="grid h-7 w-7 place-items-center rounded-lg border border-slate-200 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition"
+                title="Force logout all devices"
+              >
+                <FiLogOut size={12} />
+              </button>
+            </div>
+          );
+        },
+        width: '260px',
+      },
     ],
-    [],
+    [canBan],
   );
 
   /* --------------------------------------------------------------- */
@@ -338,16 +531,17 @@ export function UsersPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+    <div className="min-h-screen bg-gray-50 p-8 space-y-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex items-start gap-3">
           <span className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md">
             <FiUser size={20} />
           </span>
           <div>
-            <h1 className="text-3xl font-bold text-gray-900">Users</h1>
+            <h1 className="text-3xl font-bold text-gray-900">Enterprise Users &amp; Access</h1>
             <p className="text-gray-600">
-              Review and manage the available system users.
+              Account governance, device session termination, lockout resets, and administrative banning.
               {lastUpdated && (
                 <>
                   {' '}
@@ -370,8 +564,45 @@ export function UsersPage() {
         </button>
       </div>
 
+      {/* Filter Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="relative flex-1 min-w-[240px] max-w-md">
+          <FiSearch className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
+          <input
+            type="text"
+            placeholder="Search by name, email, or role…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full rounded-xl border border-slate-200 pl-9 pr-3 py-2 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+          />
+        </div>
+
+        <div className="flex items-center gap-1.5 overflow-x-auto">
+          {[
+            { id: 'all', label: 'All Users' },
+            { id: 'active', label: 'Active' },
+            { id: 'banned', label: 'Banned' },
+            { id: 'suspended', label: 'Suspended' },
+            { id: 'locked', label: 'Locked Out' },
+            { id: 'inactive', label: 'Inactive' },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setStatusFilter(tab.id)}
+              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${
+                statusFilter === tab.id
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-slate-50 text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {error && (
-        <div className="mb-4 flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
+        <div className="flex items-start gap-3 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">
           <FiAlertCircle className="mt-0.5 shrink-0" size={18} />
           <div className="min-w-0 flex-1">
             <p className="font-semibold">Unable to load users</p>
@@ -388,10 +619,28 @@ export function UsersPage() {
       )}
 
       <ModernDataTable
-        title="Users"
+        title={`Users (${filteredUsers.length})`}
         columns={columns}
-        data={users}
+        data={filteredUsers}
         loading={loading}
+      />
+
+      {/* User Security Overview Modal */}
+      <UserSecurityModal
+        userId={securityModalUserId}
+        userName={securityModalUserName}
+        isOpen={securityModalUserId !== null}
+        onClose={() => setSecurityModalUserId(null)}
+        onUserStatusChanged={() => void loadUsers()}
+      />
+
+      {/* User Ban / Unban Modal */}
+      <UserBanModal
+        user={banModalUser}
+        mode={banModalMode}
+        isOpen={banModalUser !== null}
+        onClose={() => setBanModalUser(null)}
+        onSuccess={() => void loadUsers()}
       />
     </div>
   );

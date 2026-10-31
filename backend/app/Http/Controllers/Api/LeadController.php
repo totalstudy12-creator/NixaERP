@@ -169,7 +169,7 @@ class LeadController extends Controller
     /**
      * Show lead details with activities and conversions.
      */
-    public function show(int $id): JsonResponse
+    public function show($id): JsonResponse
     {
         $lead = Lead::with([
             'assignee:id,name,email',
@@ -180,7 +180,14 @@ class LeadController extends Controller
             'convertedContact',
             'activities.user:id,name',
             'opportunities',
-        ])->findOrFail($id);
+        ])->find($id);
+
+        if (!$lead) {
+            return response()->json([
+                'success' => false,
+                'message' => "Lead #{$id} not found",
+            ], 404);
+        }
 
         return response()->json([
             'success' => true,
@@ -191,9 +198,15 @@ class LeadController extends Controller
     /**
      * Update lead details.
      */
-    public function update(Request $request, int $id): JsonResponse
+    public function update(Request $request, $id): JsonResponse
     {
-        $lead = Lead::findOrFail($id);
+        $lead = Lead::find($id);
+        if (!$lead) {
+            return response()->json([
+                'success' => false,
+                'message' => "Lead #{$id} not found",
+            ], 404);
+        }
 
         $validated = $request->validate([
             'name'           => 'required|string|max:255',
@@ -239,9 +252,15 @@ class LeadController extends Controller
     /**
      * Update lead stage (Kanban drop or quick action).
      */
-    public function updateStage(Request $request, int $id): JsonResponse
+    public function updateStage(Request $request, $id): JsonResponse
     {
-        $lead = Lead::findOrFail($id);
+        $lead = Lead::find($id);
+        if (!$lead) {
+            return response()->json([
+                'success' => false,
+                'message' => "Lead #{$id} not found",
+            ], 404);
+        }
 
         $validated = $request->validate([
             'stage'       => 'required|in:new,contacted,qualified,quotation_sent,negotiation,won,lost',
@@ -274,9 +293,15 @@ class LeadController extends Controller
     /**
      * Add activity / note / follow-up to lead timeline.
      */
-    public function addActivity(Request $request, int $id): JsonResponse
+    public function addActivity(Request $request, $id): JsonResponse
     {
-        $lead = Lead::findOrFail($id);
+        $lead = Lead::find($id);
+        if (!$lead) {
+            return response()->json([
+                'success' => false,
+                'message' => "Lead #{$id} not found",
+            ], 404);
+        }
 
         $validated = $request->validate([
             'activity_type'  => 'required|in:call,meeting,note,email,whatsapp,status_change,quotation',
@@ -310,9 +335,15 @@ class LeadController extends Controller
     /**
      * Convert Lead to Customer and/or Contact.
      */
-    public function convert(Request $request, int $id): JsonResponse
+    public function convert(Request $request, $id): JsonResponse
     {
-        $lead = Lead::findOrFail($id);
+        $lead = Lead::find($id);
+        if (!$lead) {
+            return response()->json([
+                'success' => false,
+                'message' => "Lead #{$id} not found",
+            ], 404);
+        }
 
         $validated = $request->validate([
             'create_customer' => 'nullable|boolean',
@@ -415,9 +446,15 @@ class LeadController extends Controller
     /**
      * Delete a lead.
      */
-    public function destroy(int $id): JsonResponse
+    public function destroy($id): JsonResponse
     {
-        $lead = Lead::findOrFail($id);
+        $lead = Lead::find($id);
+        if (!$lead) {
+            return response()->json([
+                'success' => false,
+                'message' => "Lead #{$id} not found",
+            ], 404);
+        }
         $lead->delete();
 
         return response()->json([

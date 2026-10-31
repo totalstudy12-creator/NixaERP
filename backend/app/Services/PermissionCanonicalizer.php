@@ -278,6 +278,75 @@ class PermissionCanonicalizer
         ],
 
         // ==========================================
+        // 2b. SECURITY FIREWALL & ACCESS CONTROL
+        // ==========================================
+        'security.view' => [
+            'group'       => 'Security & Firewall',
+            'label'       => 'View Security Center',
+            'description' => 'Access the security dashboard, active sessions, and firewall rules',
+        ],
+        'security.firewall.manage' => [
+            'group'       => 'Security & Firewall',
+            'label'       => 'Manage IP Firewall Rules',
+            'description' => 'Create, modify, block, and allowlist IP addresses and CIDR subnets',
+        ],
+        'security.sessions.manage' => [
+            'group'       => 'Security & Firewall',
+            'label'       => 'Manage User Sessions',
+            'description' => 'Inspect and terminate active device sessions across the enterprise',
+        ],
+        'users.ban' => [
+            'group'       => 'User Administration',
+            'label'       => 'Ban / Suspend Users',
+            'description' => 'Apply temporary suspensions or permanent bans to user accounts',
+        ],
+        'users.unban' => [
+            'group'       => 'User Administration',
+            'label'       => 'Unban / Reactivate Users',
+            'description' => 'Restore banned user accounts and reset lockout restrictions',
+        ],
+        'customers.360.view' => [
+            'group'       => 'Customers & CRM',
+            'label'       => 'View Customer 360 Workspace',
+            'description' => 'Inspect complete 360 customer profile, aging, and transaction history',
+        ],
+        'apps.view' => [
+            'group'       => 'App Ecosystem',
+            'label'       => 'View App Launcher',
+            'description' => 'View available connected business applications and versions',
+        ],
+        'apps.manage' => [
+            'group'       => 'App Ecosystem',
+            'label'       => 'Manage App Registry',
+            'description' => 'Configure connected applications, release updates, and API keys',
+        ],
+        'erp.access' => [
+            'group'       => 'App Ecosystem',
+            'label'       => 'Access Nixa ERP',
+            'description' => 'Access core enterprise ERP modules and workspaces',
+        ],
+        'wms.access' => [
+            'group'       => 'App Ecosystem',
+            'label'       => 'Access Nixa WMS',
+            'description' => 'Access warehouse management system modules and scanner views',
+        ],
+        'billing.access' => [
+            'group'       => 'App Ecosystem',
+            'label'       => 'Access Nixa Billing',
+            'description' => 'Access fast billing POS and thermal printing terminals',
+        ],
+        'hr.access' => [
+            'group'       => 'App Ecosystem',
+            'label'       => 'Access Nixa HR',
+            'description' => 'Access human resources directory, shifts, and payroll system',
+        ],
+        'crm.access' => [
+            'group'       => 'App Ecosystem',
+            'label'       => 'Access Nixa CRM',
+            'description' => 'Access CRM pipeline, opportunities, and lead conversion workflows',
+        ],
+
+        // ==========================================
         // 3. COMPANIES & BRANCHES
         // ==========================================
         'companies.view' => [

@@ -88,6 +88,7 @@ class PaymentController extends Controller
         $data = $request->validate([
             'company_id'        => ['nullable', $this->activeExists('companies')],
             'branch_id'         => ['nullable', $this->activeExistsForCompany($request)],
+            'customer_id'       => 'nullable|integer',
             'bank_account_id'   => 'nullable|exists:bank_accounts,id',
             'invoice_id'        => ['nullable', $this->activeExists('invoices')],
             'reference_no'      => 'nullable|string|max:255',
@@ -102,9 +103,17 @@ class PaymentController extends Controller
             'remarks'           => 'nullable|string',
         ]);
 
-        // Inherit branch_id from the invoice when not provided.
-        if (empty($data['branch_id']) && ! empty($data['invoice_id'])) {
-            $data['branch_id'] = Invoice::whereKey($data['invoice_id'])->value('branch_id');
+        // Inherit branch_id and customer_id from the invoice when not provided.
+        if (! empty($data['invoice_id'])) {
+            $inv = Invoice::find($data['invoice_id']);
+            if ($inv) {
+                if (empty($data['branch_id'])) {
+                    $data['branch_id'] = $inv->branch_id;
+                }
+                if (empty($data['customer_id']) && Schema::hasColumn('payments', 'customer_id')) {
+                    $data['customer_id'] = $inv->customer_id;
+                }
+            }
         }
 
         $data['transaction_date'] = $data['transaction_date'] ?? now()->toDateString();
@@ -188,6 +197,7 @@ class PaymentController extends Controller
         $data = $request->validate([
             'company_id'        => ['nullable', $this->activeExists('companies')],
             'branch_id'         => ['nullable', $this->activeExistsForCompany($request)],
+            'customer_id'       => 'nullable|integer',
             'bank_account_id'   => 'nullable|exists:bank_accounts,id',
             'invoice_id'        => ['nullable', $this->activeExists('invoices')],
             'reference_no'      => 'nullable|string|max:255',
@@ -202,8 +212,16 @@ class PaymentController extends Controller
             'remarks'           => 'nullable|string',
         ]);
 
-        if (empty($data['branch_id']) && ! empty($data['invoice_id'])) {
-            $data['branch_id'] = Invoice::whereKey($data['invoice_id'])->value('branch_id');
+        if (! empty($data['invoice_id'])) {
+            $inv = Invoice::find($data['invoice_id']);
+            if ($inv) {
+                if (empty($data['branch_id'])) {
+                    $data['branch_id'] = $inv->branch_id;
+                }
+                if (empty($data['customer_id']) && Schema::hasColumn('payments', 'customer_id')) {
+                    $data['customer_id'] = $inv->customer_id;
+                }
+            }
         }
 
         $data['transaction_date'] = $data['transaction_date'] ?? now()->toDateString();
@@ -341,17 +359,34 @@ class PaymentController extends Controller
         }
 
         $totalPaid   = (float) $paymentsQuery->sum('amount');
-        $totalAmount = (float) $invoice->total_amount;
+        $totalAmount = (float) ($invoice->grand_total > 0 ? $invoice->grand_total : $invoice->total_amount);
 
         if ($totalPaid <= 0) {
             $status = 'unpaid';
-        } elseif ($totalPaid >= $totalAmount) {
+            $paymentStatus = 'unpaid';
+        } elseif ($totalPaid >= ($totalAmount - 0.01)) {
             $status = 'paid';
+            $paymentStatus = 'paid';
         } else {
             $status = 'partial';
+            $paymentStatus = 'partial';
         }
 
-        $invoice->update(['status' => $status]);
+        $updates = ['status' => $status];
+        if (Schema::hasColumn('invoices', 'payment_status')) {
+            $updates['payment_status'] = $paymentStatus;
+        }
+        if (Schema::hasColumn('invoices', 'paid_amount')) {
+            $updates['paid_amount'] = $totalPaid;
+        }
+        if (Schema::hasColumn('invoices', 'balance_amount')) {
+            $updates['balance_amount'] = max(0, $totalAmount - $totalPaid);
+        }
+        if ($paymentStatus === 'paid' && Schema::hasColumn('invoices', 'paid_at') && empty($invoice->paid_at)) {
+            $updates['paid_at'] = now();
+        }
+
+        $invoice->update($updates);
     }
 
     /* ==================================================================
