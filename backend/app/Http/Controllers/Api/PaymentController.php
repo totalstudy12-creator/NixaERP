@@ -224,12 +224,14 @@ class PaymentController extends Controller
             }
         }
 
-        $data['transaction_date'] = $data['transaction_date'] ?? now()->toDateString();
+        $data['transaction_date'] = !empty($data['transaction_date'])
+            ? $data['transaction_date']
+            : ($payment->getRawOriginal('transaction_date') ?? now()->toDateString());
 
         if (empty($data['reference_no'])) {
-            $data['reference_no'] = 'PAY-'
+            $data['reference_no'] = $payment->reference_no ?: ('PAY-'
                 . ($data['invoice_id'] ?? $payment->id)
-                . '-' . now()->timestamp;
+                . '-' . now()->timestamp);
         }
 
         return DB::transaction(function () use ($data, $payment) {

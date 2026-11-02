@@ -79,7 +79,7 @@ const InvoicePrint80mm: React.FC<Props> = ({ invoice }) => {
       {/* Invoice Info */}
       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
         <div>Invoice #: <span className="bold">{invoice.invoice_no}</span></div>
-        <div>Date: {invoice.created_at ? new Date(invoice.created_at).toLocaleDateString() : ''}</div>
+        <div>Date: {invoice.invoice_date ? new Date(invoice.invoice_date).toLocaleDateString() : (invoice.created_at ? new Date(invoice.created_at).toLocaleDateString() : '')}</div>
       </div>
 
       {/* Customer */}

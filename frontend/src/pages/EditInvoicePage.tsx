@@ -11,6 +11,7 @@ import {
 } from 'react-icons/fi';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { apiClient } from '../api';
+import { QuantityInput } from '../components/QuantityInput';
 import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
 import { usePermission } from '../hooks/usePermission';
@@ -130,6 +131,8 @@ interface Product {
   stock_quantity?: number | string; unit?: string; sku?: string; barcode?: string;
   active?: boolean | number | string;
   purchase_price?: number | string;
+  description?: string;
+  qr_code?: string;
 }
 interface BankAccount { id: number; bank_name: string; account_no: string }
 
@@ -137,6 +140,7 @@ interface InvoiceItem {
   id?: number;
   product_id: number;
   product_name: string;
+  description?: string;
   hsn_sac_code: string;
   qty: number;
   uom: string;
@@ -517,13 +521,21 @@ const DEFAULT_TERMS =
   '5. Warranty (if any) is provided by the manufacturer.\n' +
   'Jurisdiction:';
 
+function getLocalToday(): string {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 const createInitialForm = (): InvoiceFormData => ({
   company_id: '', branch_id: '', customer_id: '', customer_name: '',
   billing_street: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
   shipping_street: '', shipping_city: '', shipping_state: '', shipping_country: 'India', shipping_pincode: '',
   contact_person: '', contact_no: '', gstin_pan: '',
   invoice_type: 'tax_invoice', invoice_no: '',
-  invoice_date: new Date().toISOString().slice(0, 10),
+  invoice_date: getLocalToday(),
   challan_no: '', challan_date: '', po_no: '', po_date: '',
   lr_no: '', eway_no: '', delivery_mode: '', payment_term: '',
   bank_id: '', packing_charges: 0,
@@ -589,6 +601,7 @@ export function EditInvoicePage() {
   const canCreateCustomer  = isSuperAdmin || can('create customers') || can('create dealers');
   const canCreateProduct   = isSuperAdmin || can('create products');
   const canRecordPayments  = isSuperAdmin || can('create payments');
+  const canEditPayments    = isSuperAdmin || can('edit payments') || can('create payments');
   const canDeletePayments  = isSuperAdmin || can('delete payments');
   const canAdjustStock     = isSuperAdmin || can('adjust stock') || can('manage inventory');
 
@@ -803,7 +816,7 @@ export function EditInvoicePage() {
                   amount: safeNumber(p.amount),
                   payment_method: (p.payment_method as PaymentEntry['payment_method']) || 'cash',
                   reference_no: p.reference_no || '',
-                  transaction_date: p.transaction_date?.split('T')[0] || '',
+                  transaction_date: p.transaction_date ? (p.transaction_date.includes('T') ? p.transaction_date.split('T')[0] : p.transaction_date.substring(0, 10)) : (p.payment_date?.substring(0, 10) || ''),
                   bank_name: p.bank_name || '',
                   account_number: p.account_number || '',
                   remarks: p.remarks || '',
@@ -821,6 +834,7 @@ export function EditInvoicePage() {
             id: Number.isFinite(serverItemId) ? serverItemId : undefined,
             product_id: it.product_id,
             product_name: it.product?.name || it.product_name || `Product #${it.product_id}`,
+            description: it.description || it.product?.description || '',
             hsn_sac_code: it.product?.hsn_sac_code || it.hsn_sac_code || '',
             qty: safeNumber(it.quantity ?? it.qty, 1),
             uom: it.product?.uom || it.uom || 'NOS',
@@ -985,6 +999,7 @@ export function EditInvoicePage() {
       const base = {
         product_id: product.id,
         product_name: sanitizeText(product.name, LIMITS.NAME),
+        description: product.description || '',
         hsn_sac_code: sanitizeText(product.hsn_sac_code || '', LIMITS.SHORT),
         qty: 1,
         uom: sanitizeText(product.uom || product.unit || 'NOS', 16),
@@ -1053,7 +1068,7 @@ export function EditInvoicePage() {
           amount: 0,
           payment_method: 'cash',
           reference_no: makeTxnId(),
-          transaction_date: new Date().toISOString().slice(0, 10),
+          transaction_date: getLocalToday(),
           bank_name: '',
           account_number: '',
           remarks: '',
@@ -1095,7 +1110,23 @@ export function EditInvoicePage() {
       e.preventDefault();
       const idx = productHighlight >= 0 ? productHighlight : 0;
       const p = filteredProducts[idx];
-      if (p) addItem(p);
+      if (p) {
+        addItem(p);
+      } else if (productSearch.trim()) {
+        const query = productSearch.trim();
+        apiClient.lookupBarcode(query)
+          .then((res: any) => {
+            const prod = res?.data ?? res;
+            if (prod && prod.id) {
+              addItem(prod);
+            } else {
+              showError('Not Found', `No product found matching "${query}"`);
+            }
+          })
+          .catch(() => {
+            showError('Not Found', `No product found matching "${query}"`);
+          });
+      }
       setProductHighlight(-1);
     } else if (e.key === 'Escape') {
       setShowProductDropdown(false);
@@ -1309,6 +1340,7 @@ export function EditInvoicePage() {
     const itemsPayload = items.map((i) => {
       const row: Record<string, unknown> = {
         product_id: i.product_id,
+        description: i.description || '',
         quantity: i.qty,
         unit_price: i.price,
         discount_type: i.discount_type,
@@ -1383,7 +1415,31 @@ export function EditInvoicePage() {
       // ── 1. Update invoice (header + items). The backend reconciles stock. ──
       await apiClient.updateInvoice(Number(id), payload);
 
-      // ── 2. Record newly-added payments — exact amounts, no capping. ──
+      // ── 2. Update existing modified payments and record newly-added payments ──
+      const existingPayments = form.payments.filter(
+        (p) => p.persisted && p.server_id && safeNumber(p.amount) > 0,
+      );
+      if (existingPayments.length > 0 && canEditPayments) {
+        await Promise.allSettled(
+          existingPayments.map((p) =>
+            apiClient.updatePayment(p.server_id!, {
+              company_id: Number(form.company_id),
+              branch_id: form.branch_id ? Number(form.branch_id) : null,
+              invoice_id: Number(id),
+              reference_no: p.reference_no,
+              amount: safeNumber(p.amount),
+              payment_method: p.payment_method,
+              status: 'completed',
+              payment_direction: p.payment_direction || 'inward',
+              transaction_date: p.transaction_date,
+              bank_name: p.bank_name,
+              account_number: p.account_number,
+              remarks: sanitizeText(p.remarks, LIMITS.TEXT),
+            })
+          )
+        );
+      }
+
       const newPayments = form.payments.filter(
         (p) => !p.persisted && safeNumber(p.amount) > 0,
       );
@@ -1663,6 +1719,7 @@ export function EditInvoicePage() {
         addItem({
           id: created.id,
           name: created.name,
+          description: created.description || '',
           hsn_sac_code: created.hsn_sac_code || '',
           uom: created.unit || 'NOS',
           price: created.sale_price || 0,
@@ -2328,8 +2385,16 @@ export function EditInvoicePage() {
                           onChange={(e) => updateItem(idx, 'product_name', sanitizeText(e.target.value, LIMITS.NAME))}
                           maxLength={LIMITS.NAME}
                           disabled={!canEditInvoice}
-                          className="w-full bg-transparent text-sm outline-none truncate"
+                          className="w-full bg-transparent text-sm font-medium outline-none truncate"
                           title={item.product_name}
+                        />
+                        <textarea
+                          placeholder="Description / specifications (optional)"
+                          value={item.description || ''}
+                          onChange={(e) => updateItem(idx, 'description', e.target.value)}
+                          rows={1}
+                          disabled={!canEditInvoice}
+                          className="w-full mt-0.5 text-xs text-slate-600 bg-transparent border-0 border-b border-transparent hover:border-slate-300 focus:border-indigo-400 focus:outline-none resize-none overflow-hidden"
                         />
                         <div className="flex items-center gap-2 text-[10px]">
                           <span className="text-slate-400">ID #{item.product_id}</span>
@@ -2358,11 +2423,13 @@ export function EditInvoicePage() {
                         </div>
                       </td>
                       <td className="py-2 px-3">
-                        <input
-                          type="number" min={1} step={1} inputMode="numeric"
+                        <QuantityInput
                           value={item.qty}
-                          onChange={(e) => updateItem(idx, 'qty', Math.max(1, Math.floor(safeNumber(e.target.value, 1))))}
+                          onChange={(v) => updateItem(idx, 'qty', v)}
+                          min={0.001}
+                          maxDecimals={3}
                           disabled={!canEditInvoice}
+                          aria-label={`Quantity for ${item.product_name}`}
                           className="w-16 bg-transparent text-center text-sm outline-none tabular-nums"
                         />
                       </td>
@@ -2502,14 +2569,25 @@ export function EditInvoicePage() {
                   disabled={!canEditInvoice}
                   className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-2 text-sm font-medium"
                 />
+                <textarea
+                  placeholder="Description / specifications (optional)"
+                  value={item.description || ''}
+                  onChange={(e) => updateItem(idx, 'description', e.target.value)}
+                  rows={2}
+                  disabled={!canEditInvoice}
+                  className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 resize-none"
+                />
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="text-[10px] uppercase text-slate-500">Qty</label>
-                    <input
-                      type="number" min={1} value={item.qty}
-                      onChange={(e) => updateItem(idx, 'qty', Math.max(1, Math.floor(safeNumber(e.target.value, 1))))}
+                    <QuantityInput
+                      value={item.qty}
+                      onChange={(v) => updateItem(idx, 'qty', v)}
+                      min={0.001}
+                      maxDecimals={3}
                       disabled={!canEditInvoice}
-                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-sm"
+                      aria-label={`Quantity for ${item.product_name}`}
+                      className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-sm text-right tabular-nums"
                     />
                   </div>
                   <div>
@@ -2820,13 +2898,13 @@ export function EditInvoicePage() {
                           type="number" min={0} step={0.01} placeholder="Amount"
                           value={pay.amount}
                           onChange={(e) => updatePayment(pay.id, 'amount', Math.max(0, safeNumber(e.target.value)))}
-                          disabled={pay.persisted || !canRecordPayments || !canEditInvoice}
+                          disabled={!canEditPayments || !canEditInvoice}
                           className={`${inputBase} text-right tabular-nums`}
                         />
                         <select
                           value={pay.payment_method}
                           onChange={(e) => updatePayment(pay.id, 'payment_method', e.target.value as PaymentEntry['payment_method'])}
-                          disabled={pay.persisted || !canRecordPayments || !canEditInvoice}
+                          disabled={!canEditPayments || !canEditInvoice}
                           className={inputBase}
                         >
                           <option value="UPI">UPI</option>
@@ -2839,13 +2917,13 @@ export function EditInvoicePage() {
                           value={pay.reference_no}
                           onChange={(e) => updatePayment(pay.id, 'reference_no', sanitizeText(e.target.value, LIMITS.SHORT))}
                           maxLength={LIMITS.SHORT}
-                          disabled={pay.persisted || !canRecordPayments || !canEditInvoice}
+                          disabled={!canEditPayments || !canEditInvoice}
                           className={`${inputBase} font-mono`}
                         />
                         <input
                           type="date" value={pay.transaction_date}
                           onChange={(e) => updatePayment(pay.id, 'transaction_date', e.target.value)}
-                          disabled={pay.persisted || !canRecordPayments || !canEditInvoice}
+                          disabled={!canEditPayments || !canEditInvoice}
                           className={inputBase}
                         />
                         <input
@@ -2853,7 +2931,7 @@ export function EditInvoicePage() {
                           value={pay.remarks}
                           onChange={(e) => updatePayment(pay.id, 'remarks', sanitizeText(e.target.value, LIMITS.TEXT))}
                           maxLength={LIMITS.TEXT}
-                          disabled={pay.persisted || !canRecordPayments || !canEditInvoice}
+                          disabled={!canEditPayments || !canEditInvoice}
                           className={`${inputBase} col-span-2`}
                         />
                       </div>

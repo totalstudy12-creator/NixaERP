@@ -6,7 +6,6 @@ import {
   DashboardPage,
   CompaniesPage,
   CustomersPage,
-  ProductsPage,
   OrdersPage,
   InvoicesPage,
   InvoiceDetailPage,
@@ -66,6 +65,7 @@ import {
   TicketsPage,
   ProjectBoardsPage,
   CalendarPage,
+  PublicInvoiceViewPage,
 } from './pages';
 import { AppLayout } from './components/AppLayout';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -151,7 +151,7 @@ const protectedRoutes: ProtectedRouteDef[] = [
   /* Masters */
   { path: 'companies', element: <CompaniesPage />, permissions: ['view companies'] },
   { path: 'customers', element: <CustomersPage />, permissions: ['view customers'] },
-  { path: 'products', element: <ProductsPage />, permissions: ['view products'] },
+  { path: 'products', element: <Navigate to="/inventory" replace />, permissions: ['view products'] },
   { path: 'branches', element: <BranchesPage />, permissions: ['view branches'] },
   {
     path: 'warehouses',
@@ -387,6 +387,7 @@ function App() {
 
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/public/invoice/:token" element={<PublicInvoiceViewPage />} />
 
         <Route
           path="/"

@@ -840,4 +840,293 @@ class AiController extends Controller
             'tts_failed'       => ($wavBase64 === null),
         ]);
     }
+
+    /**
+     * AI-Powered Product Improvement & Suggestion Assistant.
+     */
+    public function suggestProduct(Request $request)
+    {
+        $input = $request->validate([
+            'name'           => 'nullable|string|max:255',
+            'brand'          => 'nullable|string|max:150',
+            'category'       => 'nullable|string|max:150',
+            'unit'           => 'nullable|string|max:50',
+            'sku'            => 'nullable|string|max:100',
+            'hsn_sac_code'   => 'nullable|string|max:50',
+            'description'    => 'nullable|string|max:5000',
+            'purchase_price' => 'nullable|numeric|min:0',
+            'sale_price'     => 'nullable|numeric|min:0',
+            'tax_rate'       => 'nullable|numeric|min:0|max:100',
+        ]);
+
+        $rawName  = trim((string) ($input['name'] ?? ''));
+        $rawBrand = trim((string) ($input['brand'] ?? ''));
+        $rawDesc  = trim((string) ($input['description'] ?? ''));
+        $rawSku   = trim((string) ($input['sku'] ?? ''));
+
+        if (empty($rawName) && empty($rawDesc) && empty($rawBrand)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Please enter at least a product name, brand, or description for AI analysis.',
+            ], 422);
+        }
+
+        $geminiKey = self::resolveGeminiKey();
+        $verifySsl = filter_var(env('GEMINI_VERIFY_SSL', true), FILTER_VALIDATE_BOOLEAN);
+
+        // Fallback heuristic structure if Gemini key is missing or calls fail
+        $fallback = [
+            'name'         => ucwords(strtolower($rawName ?: 'Standard Product')),
+            'brand'        => $rawBrand ?: null,
+            'category'     => $input['category'] ?? 'General',
+            'unit'         => !empty($input['unit']) ? $input['unit'] : 'Piece',
+            'sku'          => !empty($rawSku) ? $rawSku : (strtoupper(substr(preg_replace('/[^A-Za-z0-9]/', '', $rawName ?: 'PRD'), 0, 6)) . '-' . rand(100, 999)),
+            'hsn_sac_code' => $input['hsn_sac_code'] ?? null,
+            'hsn_warning'  => 'Please verify the HSN/SAC code according to your business GST schedule.',
+            'tax_rate'     => isset($input['tax_rate']) ? (float) $input['tax_rate'] : 18.0,
+            'description'  => !empty($rawDesc) ? $rawDesc : ($rawName . ($rawBrand ? ' by ' . $rawBrand : '') . '. Professional grade inventory item.'),
+            'tags'         => array_values(array_filter(array_unique(explode(' ', strtolower(preg_replace('/[^A-Za-z0-9 ]/', '', $rawName . ' ' . $rawBrand)))))),
+            'improvements' => [
+                'Formatted product name in Title Case.',
+                'Generated standard inventory SKU.',
+            ],
+            'warnings'     => [],
+        ];
+
+        if (empty($geminiKey)) {
+            return response()->json([
+                'success' => true,
+                'data'    => $fallback,
+                'note'    => 'Gemini API key not configured in settings. Standard heuristics applied.',
+            ]);
+        }
+
+        $catPrompt = $input['category'] ?? '';
+        $unitPrompt = $input['unit'] ?? '';
+        $hsnPrompt = $input['hsn_sac_code'] ?? '';
+        $pricePrompt = $input['sale_price'] ?? '';
+        $taxPrompt = $input['tax_rate'] ?? '';
+
+        $prompt = <<<EOT
+You are an expert ERP Catalog Specialist, Indian GST Tax Consultant, and Inventory Data Architect for Nixa ERP.
+Analyze the following product information provided by a user (which may contain typos, Hindi/English/Hinglish phrasing, or missing attributes):
+
+- Name: {$rawName}
+- Brand: {$rawBrand}
+- Current Category: {$catPrompt}
+- Current Unit: {$unitPrompt}
+- Current SKU: {$rawSku}
+- Current HSN/SAC: {$hsnPrompt}
+- Current Description: {$rawDesc}
+- Sale Price: {$pricePrompt}
+- Tax Rate: {$taxPrompt}
+
+Task:
+1. Fix any spelling mistakes, grammatical errors, or awkward formatting in the product name and description.
+2. If Hindi or Hinglish is used, preserve the core meaning and provide a clean, professional English title and description (or appropriate bilingual terms where customary in Indian trade).
+3. Identify the brand if evident in the name.
+4. Suggest a standard Category (e.g., Electrical, Electronics, Hardware & Tools, Construction, Apparel, Home & Living, Groceries, Packaging, Industrial Supplies).
+5. Suggest a standard Unit of measurement (e.g. Piece, Meter, KG, Box, Roll, Packet, Liter, Dozen, Set, Pair, Quintal).
+6. Suggest a concise, clean alphanumeric SKU if not provided or if the current one is messy.
+7. Suggest the most likely Indian GST HSN or SAC code (4 to 8 digits) for this specific item type.
+8. Suggest the standard Indian GST tax rate (0, 5, 12, 18, or 28).
+9. Write a clean, professional, specifications-focused product description.
+10. Generate 3 to 6 search keywords / tags.
+11. List specific improvements made.
+12. List any warnings or missing details the user must manually confirm.
+
+Output Requirement:
+Respond with ONLY valid JSON with this exact schema (no markdown formatting, no ```json wrapper, no extra text):
+{
+  "name": "Improved Title Case Name",
+  "brand": "Brand or null",
+  "category": "Suggested Category",
+  "unit": "Piece",
+  "sku": "ABC-123",
+  "hsn_sac_code": "8544",
+  "hsn_warning": "Verify HSN code with your GST portal or tax consultant.",
+  "tax_rate": 18,
+  "description": "Professional specifications...",
+  "tags": ["keyword1", "keyword2"],
+  "improvements": ["Fixed typo in name", "Added HSN 8544 for electrical cable"],
+  "warnings": ["Please confirm gauge/size specification"]
+}
+EOT;
+
+        $modelsToTry = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+        $parsed = null;
+
+        foreach ($modelsToTry as $candidateModel) {
+            try {
+                $url = 'https://generativelanguage.googleapis.com/v1beta/models/' . rawurlencode($candidateModel) . ':generateContent';
+                $http = Http::timeout(20)->withHeaders([
+                    'Content-Type'   => 'application/json',
+                    'x-goog-api-key' => $geminiKey,
+                ]);
+
+                if (!$verifySsl) {
+                    $http = $http->withoutVerifying();
+                }
+
+                $resp = $http->post($url, [
+                    'contents' => [[
+                        'role'  => 'user',
+                        'parts' => [['text' => $prompt]],
+                    ]],
+                    'generationConfig' => [
+                        'temperature'     => 0.2,
+                        'maxOutputTokens' => 1024,
+                        'responseMimeType' => 'application/json',
+                    ],
+                ]);
+
+                if ($resp->successful()) {
+                    $rawResponse = (string) data_get($resp->json(), 'candidates.0.content.parts.0.text', '');
+                    $cleanJson = trim($rawResponse);
+                    if (str_starts_with($cleanJson, '```json')) {
+                        $cleanJson = trim(substr($cleanJson, 7));
+                    }
+                    if (str_starts_with($cleanJson, '```')) {
+                        $cleanJson = trim(substr($cleanJson, 3));
+                    }
+                    if (str_ends_with($cleanJson, '```')) {
+                        $cleanJson = trim(substr($cleanJson, 0, -3));
+                    }
+
+                    $decoded = json_decode($cleanJson, true);
+                    if (is_array($decoded) && !empty($decoded['name'])) {
+                        $parsed = $decoded;
+                        break;
+                    }
+                }
+            } catch (\Throwable $e) {
+                Log::warning("Gemini suggestProduct failed with {$candidateModel}: " . $e->getMessage());
+            }
+        }
+
+        if (!$parsed) {
+            return response()->json([
+                'success' => true,
+                'data'    => $fallback,
+                'note'    => 'AI generated heuristic suggestions (upstream connection unavailable).',
+            ]);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data'    => [
+                'name'         => $parsed['name'] ?? $fallback['name'],
+                'brand'        => $parsed['brand'] ?? $fallback['brand'],
+                'category'     => $parsed['category'] ?? $fallback['category'],
+                'unit'         => $parsed['unit'] ?? $fallback['unit'],
+                'sku'          => $parsed['sku'] ?? $fallback['sku'],
+                'hsn_sac_code' => $parsed['hsn_sac_code'] ?? $fallback['hsn_sac_code'],
+                'hsn_warning'  => $parsed['hsn_warning'] ?? $fallback['hsn_warning'],
+                'tax_rate'     => isset($parsed['tax_rate']) ? (float) $parsed['tax_rate'] : $fallback['tax_rate'],
+                'description'  => $parsed['description'] ?? $fallback['description'],
+                'tags'         => is_array($parsed['tags'] ?? null) ? $parsed['tags'] : $fallback['tags'],
+                'improvements' => is_array($parsed['improvements'] ?? null) ? $parsed['improvements'] : ['Optimized product catalog data with AI.'],
+                'warnings'     => is_array($parsed['warnings'] ?? null) ? $parsed['warnings'] : [],
+            ],
+        ]);
+    }
+
+    /**
+     * AI-assisted bulk suggestion for selected products.
+     * Analyzes natural language instructions and products to formulate structured price/stock modifications.
+     */
+    public function bulkSuggest(Request $request)
+    {
+        $request->validate([
+            'instruction' => 'required|string|max:500',
+            'products'    => 'required|array|min:1',
+        ]);
+
+        $instruction = $request->input('instruction');
+        $products = array_slice($request->input('products'), 0, 50);
+
+        $apiKey = $this->resolveGeminiKey();
+
+        if ($apiKey) {
+            $prompt = "You are an intelligent ERP inventory and pricing assistant. A user has selected multiple products and given the following instruction:\n"
+                . "\"{$instruction}\"\n\n"
+                . "The selected products are:\n" . json_encode(array_map(fn($p) => [
+                    'id' => $p['id'] ?? null,
+                    'name' => $p['name'] ?? '',
+                    'sku' => $p['sku'] ?? '',
+                    'sale_price' => $p['sale_price'] ?? 0,
+                    'purchase_price' => $p['purchase_price'] ?? 0,
+                    'stock_quantity' => $p['stock_quantity'] ?? 0,
+                    'unit' => $p['unit'] ?? 'Piece',
+                ], $products)) . "\n\n"
+                . "Analyze the instruction and determine the best structured actions to apply. Return a JSON object ONLY with the following schema:\n"
+                . "{\n"
+                . "  \"summary\": \"Brief explanation of what changes this recommendation will make\",\n"
+                . "  \"sale_price_action\": \"keep\" | \"set\" | \"increase_percent\" | \"decrease_percent\" | \"increase_fixed\" | \"decrease_fixed\",\n"
+                . "  \"sale_price_value\": number (or null if keep),\n"
+                . "  \"purchase_price_action\": \"keep\" | \"set\" | \"increase_percent\" | \"decrease_percent\" | \"increase_fixed\" | \"decrease_fixed\",\n"
+                . "  \"purchase_price_value\": number (or null if keep),\n"
+                . "  \"stock_quantity_action\": \"keep\" | \"set\" | \"add\" | \"subtract\",\n"
+                . "  \"stock_quantity_value\": number (or null if keep),\n"
+                . "  \"auto_generate_sku\": boolean,\n"
+                . "  \"auto_generate_barcode\": boolean,\n"
+                . "  \"tips\": [\"tip 1\", \"tip 2\"]\n"
+                . "}";
+
+            try {
+                $raw = $this->callGemini($apiKey, $prompt);
+                $clean = trim($raw);
+                if (preg_match('/```(?:json)?\s*([\s\S]*?)\s*```/', $clean, $matches)) {
+                    $clean = $matches[1];
+                }
+                $decoded = json_decode($clean, true);
+                if (is_array($decoded)) {
+                    return response()->json([
+                        'success' => true,
+                        'data'    => $decoded,
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                // heuristic fallback
+            }
+        }
+
+        $lower = strtolower($instruction);
+        $res = [
+            'summary' => "AI Heuristic Analysis for: \"{$instruction}\"",
+            'sale_price_action' => 'keep',
+            'sale_price_value' => null,
+            'purchase_price_action' => 'keep',
+            'purchase_price_value' => null,
+            'stock_quantity_action' => 'keep',
+            'stock_quantity_value' => null,
+            'auto_generate_sku' => str_contains($lower, 'sku'),
+            'auto_generate_barcode' => str_contains($lower, 'barcode') || str_contains($lower, 'qr'),
+            'tips' => ['Verify projected changes in the live preview before saving.'],
+        ];
+
+        if (preg_match('/(?:increase|markup|\+)\s*(?:by\s*)?(\d+(?:\.\d+)?)\s*%/i', $instruction, $m)) {
+            $res['sale_price_action'] = 'increase_percent';
+            $res['sale_price_value'] = (float) $m[1];
+            $res['summary'] = "Increasing selling prices by {$m[1]}% across all selected products.";
+        } elseif (preg_match('/(?:decrease|discount|reduce|-)\s*(?:by\s*)?(\d+(?:\.\d+)?)\s*%/i', $instruction, $m)) {
+            $res['sale_price_action'] = 'decrease_percent';
+            $res['sale_price_value'] = (float) $m[1];
+            $res['summary'] = "Applying {$m[1]}% discount on selling prices.";
+        }
+
+        if (preg_match('/(?:add|\+)\s*(\d+(?:\.\d+)?)\s*(?:units?|stock|qty)?/i', $instruction, $m)) {
+            $res['stock_quantity_action'] = 'add';
+            $res['stock_quantity_value'] = (float) $m[1];
+        } elseif (preg_match('/(?:deduct|subtract|reduce|-)\s*(\d+(?:\.\d+)?)\s*(?:units?|stock|qty)?/i', $instruction, $m)) {
+            $res['stock_quantity_action'] = 'subtract';
+            $res['stock_quantity_value'] = (float) $m[1];
+        }
+
+        return response()->json([
+            'success' => true,
+            'data'    => $res,
+        ]);
+    }
+
 }

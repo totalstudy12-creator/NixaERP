@@ -353,14 +353,19 @@ function addDaysToDateString(dateString: string, days: number): string {
 
 function toDateInput(value?: string | null): string {
   if (!value) return '';
-  const direct = value.slice(0, 10);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(direct)) return direct;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  const str = String(value).trim();
+  const match = str.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) {
+    return match[1];
+  }
+  const date = new Date(str);
+  if (!Number.isNaN(date.getTime())) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return '';
 }
 
 function formatDate(value?: string | null): string {

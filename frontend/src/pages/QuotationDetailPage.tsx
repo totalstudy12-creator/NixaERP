@@ -663,12 +663,22 @@ export function QuotationDetailPage() {
   /* ------------------ Modals ------------------ */
   const [showConvertModal, setShowConvertModal] = useState(false);
   const [warehouses, setWarehouses] = useState<any[]>([]);
-  const [convertForm, setConvertForm] = useState({
-    invoice_date: new Date().toISOString().slice(0, 10),
-    due_date: new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10),
-    auto_deduct_stock: true,
-    warehouse_id: '',
-    payment_term: 'Net 15',
+  const [convertForm, setConvertForm] = useState(() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const today = `${y}-${m}-${day}`;
+    const d15 = new Date();
+    d15.setDate(d15.getDate() + 15);
+    const due = `${d15.getFullYear()}-${String(d15.getMonth() + 1).padStart(2, '0')}-${String(d15.getDate()).padStart(2, '0')}`;
+    return {
+      invoice_date: today,
+      due_date: due,
+      auto_deduct_stock: true,
+      warehouse_id: '',
+      payment_term: 'Net 15',
+    };
   });
   const [converting, setConverting] = useState(false);
 

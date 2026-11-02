@@ -14,6 +14,7 @@ import {
   FiCreditCard,
   FiEdit2,
   FiFileText,
+  FiLink,
   FiHash,
   FiMail,
   FiPhone,
@@ -119,22 +120,22 @@ const THERMAL_TEXT_WIDTH: Record<
   '80mm': 48,
 };
 
+function getLocalToday(): string {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 const PAYMENT_METHODS = [
-  { value: 'manual', label: 'Manual' },
   { value: 'cash', label: 'Cash' },
   { value: 'upi', label: 'UPI' },
-  {
-    value: 'online',
-    label: 'Online Transfer',
-  },
-  {
-    value: 'cheque',
-    label: 'Cheque',
-  },
-  {
-    value: 'credit_card',
-    label: 'Credit Card',
-  },
+  { value: 'bank_transfer', label: 'Bank Transfer' },
+  { value: 'cheque', label: 'Cheque' },
+  { value: 'credit_card', label: 'Credit / Debit Card' },
+  { value: 'online', label: 'Online / Net Banking' },
+  { value: 'other', label: 'Other' },
 ] as const;
 
 const statusConfig: Record<
@@ -242,13 +243,37 @@ const formatDateSafe = (
     return '—';
   }
 
-  const date = new Date(value);
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime())
+      ? '—'
+      : value.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+
+  const str = String(value).trim();
+  const match = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (match) {
+    const [, y, m, d] = match;
+    const localDate = new Date(Number(y), Number(m) - 1, Number(d));
+    if (!Number.isNaN(localDate.getTime())) {
+      return new Intl.DateTimeFormat('en-IN', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      }).format(localDate);
+    }
+  }
+
+  const date = new Date(str);
 
   if (Number.isNaN(date.getTime())) {
     return '—';
   }
 
-  return date.toLocaleDateString();
+  return date.toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
 };
 
 const formatDateTimeSafe = (
@@ -258,13 +283,24 @@ const formatDateTimeSafe = (
     return '—';
   }
 
-  const date = new Date(value);
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? '—' : value.toLocaleString('en-IN');
+  }
+
+  const str = String(value).trim();
+  const date = new Date(str);
 
   if (Number.isNaN(date.getTime())) {
+    const match = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) {
+      const [, y, m, d] = match;
+      const localDate = new Date(Number(y), Number(m) - 1, Number(d));
+      return Number.isNaN(localDate.getTime()) ? '—' : localDate.toLocaleDateString('en-IN');
+    }
     return '—';
   }
 
-  return date.toLocaleString();
+  return date.toLocaleString('en-IN');
 };
 
 const clampText = (
@@ -337,13 +373,11 @@ export function InvoiceDetailPage() {
       null,
     );
 
-  const [paymentAmount, setPaymentAmount] =
-    useState('');
-
-  const [
-    paymentMethod,
-    setPaymentMethod,
-  ] = useState('manual');
+  const [paymentAmount, setPaymentAmount] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState('cash');
+  const [paymentDate, setPaymentDate] = useState<string>(() => getLocalToday());
+  const [paymentReference, setPaymentReference] = useState('');
+  const [paymentRemarks, setPaymentRemarks] = useState('');
 
   const [
     submittingPayment,
@@ -818,7 +852,7 @@ export function InvoiceDetailPage() {
                 invoice.id!,
 
               reference_no:
-                `PAY-${Date.now()}`,
+                paymentReference.trim() || `PAY-${Date.now()}`,
 
               amount,
 
@@ -827,6 +861,12 @@ export function InvoiceDetailPage() {
 
               payment_method:
                 paymentMethod,
+
+              transaction_date:
+                paymentDate || invoice.invoice_date?.split('T')[0] || new Date().toISOString().split('T')[0],
+
+              remarks:
+                paymentRemarks.trim() || undefined,
 
               status:
                 'completed',
@@ -879,6 +919,10 @@ export function InvoiceDetailPage() {
           });
 
           setPaymentAmount('');
+          setPaymentReference('');
+          setPaymentRemarks('');
+          setPaymentMethod('cash');
+          setPaymentDate(getLocalToday());
 
           await loadInvoice();
         } catch (err: any) {
@@ -1498,6 +1542,11 @@ export function InvoiceDetailPage() {
               lines.push(line),
           );
 
+          const itemDesc = cleanText(item.description || item.product?.description || '');
+          if (itemDesc) {
+            wrapPreviewAddress(itemDesc, width).forEach((l) => lines.push(`  `));
+          }
+
           lines.push(
             padColumns(
               `Qty: ${safeNumber(
@@ -1865,6 +1914,13 @@ export function InvoiceDetailPage() {
           ),
         );
 
+        if (inv.public_token) {
+          const publicUrl = `${window.location.origin}/public/invoice/${inv.public_token}`;
+          lines.push(divider);
+          lines.push('VIEW INVOICE ONLINE:');
+          lines.push(publicUrl);
+        }
+
         lines.push(equalsDivider);
 
         lines.push('THANK YOU!');
@@ -1903,6 +1959,24 @@ export function InvoiceDetailPage() {
   /* =========================================================================
    * WHATSAPP SHARE HANDLER
    * ======================================================================= */
+
+  const handleCopyPublicLink = useCallback(() => {
+    if (!invoice?.public_token) {
+      showError('Link Unavailable', 'Customer invoice link is not available.');
+      return;
+    }
+    const publicUrl = `${window.location.origin}/public/invoice/${invoice.public_token}`;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(publicUrl);
+    }
+    showSuccess('Customer Link Copied', 'Customer can view and download their invoice with only mobile verification.');
+    addAppLog({
+      module: 'Invoices',
+      action: 'Copy customer link',
+      status: 'success',
+      message: `Public invoice link copied for invoice ${invoice.invoice_no}`,
+    });
+  }, [invoice, showError, showSuccess]);
 
   const handleWhatsAppShare =
     useCallback(() => {
@@ -3017,6 +3091,13 @@ export function InvoiceDetailPage() {
               );
             },
           );
+
+          const itemDescRaster = cleanText(item.description || item.product?.description || '');
+          if (itemDescRaster) {
+            wrapTextAtFixedFont(itemDescRaster, format, Math.max(18, itemFontSize - 4)).forEach((l) => {
+              raw(renderTextRaster(l, format, { fixedFontSize: Math.max(18, itemFontSize - 4), top: 0, bottom: 0 }));
+            });
+          }
 
           text(
             padColumns(
@@ -4250,6 +4331,16 @@ export function InvoiceDetailPage() {
 
               <button
                 type="button"
+                onClick={handleCopyPublicLink}
+                className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium flex items-center gap-2 shadow-sm"
+                title="Copy public link that customer can open by entering their registered mobile number"
+              >
+                <FiLink size={16} />
+                Customer Link
+              </button>
+
+              <button
+                type="button"
                 onClick={
                   handleWhatsAppShare
                 }
@@ -4632,9 +4723,14 @@ export function InvoiceDetailPage() {
                           className="border-b border-slate-100"
                         >
                           <td className="px-4 py-3 text-slate-700">
-                            {item.product
-                              ?.name ||
-                              `Product #${item.product_id}`}
+                            <div className="font-medium text-slate-800">
+                              {item.product?.name || `Product #${item.product_id}`}
+                            </div>
+                            {(item.description || item.product?.description) && (
+                              <div className="text-xs text-slate-500 whitespace-pre-wrap mt-0.5">
+                                {item.description || item.product?.description}
+                              </div>
+                            )}
                           </td>
 
                           <td className="px-4 py-3 text-right text-slate-700">
@@ -4780,7 +4876,15 @@ export function InvoiceDetailPage() {
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-100 text-xs uppercase tracking-wide text-slate-500">
                       <th className="px-4 py-3 text-left">
+                        Date
+                      </th>
+
+                      <th className="px-4 py-3 text-left">
                         Reference
+                      </th>
+
+                      <th className="px-4 py-3 text-left">
+                        Method
                       </th>
 
                       <th className="px-4 py-3 text-right">
@@ -4788,11 +4892,7 @@ export function InvoiceDetailPage() {
                       </th>
 
                       <th className="px-4 py-3 text-left">
-                        Method
-                      </th>
-
-                      <th className="px-4 py-3 text-left">
-                        Date
+                        Notes / Remarks
                       </th>
                     </tr>
                   </thead>
@@ -4808,31 +4908,28 @@ export function InvoiceDetailPage() {
                           }
                           className="border-b border-slate-100"
                         >
-                          <td className="px-4 py-3 text-slate-700">
-                            {
-                              payment.reference_no
-                            }
+                          <td className="px-4 py-3 font-medium text-slate-800 whitespace-nowrap">
+                            {formatDateSafe(
+                              payment.transaction_date || payment.payment_date || payment.created_at,
+                            )}
                           </td>
 
-                          <td className="px-4 py-3 text-right font-medium">
-                            Rs{' '}
-                            {safeNumber(
-                              payment.amount,
-                            ).toFixed(
-                              2,
-                            )}
+                          <td className="px-4 py-3 text-slate-700 font-mono text-xs">
+                            {payment.reference_no || '-'}
                           </td>
 
                           <td className="px-4 py-3 capitalize">
-                            {
-                              payment.payment_method
-                            }
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700">
+                              {payment.payment_method}
+                            </span>
                           </td>
 
-                          <td className="px-4 py-3">
-                            {formatDateSafe(
-                              payment.created_at,
-                            )}
+                          <td className="px-4 py-3 text-right font-semibold text-emerald-700 tabular-nums">
+                            Rs {safeNumber(payment.amount).toFixed(2)}
+                          </td>
+
+                          <td className="px-4 py-3 text-slate-500 text-xs max-w-[200px] truncate">
+                            {(payment as any).remarks || (payment as any).notes || '-'}
                           </td>
                         </tr>
                       ),
@@ -4850,7 +4947,7 @@ export function InvoiceDetailPage() {
                         )}
                       </td>
 
-                      <td colSpan={2} />
+                      <td colSpan={3} />
                     </tr>
                   </tbody>
                 </table>
@@ -4867,111 +4964,101 @@ export function InvoiceDetailPage() {
                   Record a Payment
                 </h3>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">
                       Amount
                     </label>
-
                     <input
                       type="number"
                       min="0.01"
                       step="0.01"
-                      max={
-                        remainingAmount
-                      }
-                      value={
-                        paymentAmount
-                      }
-                      onChange={(
-                        event,
-                      ) =>
-                        setPaymentAmount(
-                          event.target
-                            .value,
-                        )
-                      }
-                      disabled={
-                        submittingPayment
-                      }
-                      placeholder={`Max Rs ${remainingAmount.toFixed(
-                        2,
-                      )}`}
-                      className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-white outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
+                      max={remainingAmount}
+                      value={paymentAmount}
+                      onChange={(e) => setPaymentAmount(e.target.value)}
+                      disabled={submittingPayment}
+                      placeholder={`Max Rs ${remainingAmount.toFixed(2)}`}
+                      className="w-full px-4 py-2 rounded-xl border border-slate-300 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
                     />
-
-                    <p className="mt-1 text-xs text-slate-500">
-                      Remaining: Rs{' '}
-                      {remainingAmount.toFixed(
-                        2,
-                      )}
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      Remaining: Rs {remainingAmount.toFixed(2)}
                     </p>
                   </div>
 
                   <div>
                     <label className="block text-xs font-medium text-slate-600 mb-1">
-                      Payment Method
+                      Payment Date
                     </label>
+                    <input
+                      type="date"
+                      value={paymentDate || (invoice?.invoice_date ? invoice.invoice_date.split('T')[0] : new Date().toISOString().split('T')[0])}
+                      onChange={(e) => setPaymentDate(e.target.value)}
+                      disabled={submittingPayment}
+                      className="w-full px-4 py-2 rounded-xl border border-slate-300 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
+                    />
+                  </div>
 
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                      Method
+                    </label>
                     <select
-                      value={
-                        paymentMethod
-                      }
-                      onChange={(
-                        event,
-                      ) =>
-                        setPaymentMethod(
-                          event.target
-                            .value,
-                        )
-                      }
-                      disabled={
-                        submittingPayment
-                      }
-                      className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-white outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
+                      value={paymentMethod}
+                      onChange={(e) => setPaymentMethod(e.target.value as any)}
+                      disabled={submittingPayment}
+                      className="w-full px-4 py-2 rounded-xl border border-slate-300 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
                     >
-                      {PAYMENT_METHODS.map(
-                        (
-                          method,
-                        ) => (
-                          <option
-                            key={
-                              method.value
-                            }
-                            value={
-                              method.value
-                            }
-                          >
-                            {
-                              method.label
-                            }
-                          </option>
-                        ),
-                      )}
+                      {PAYMENT_METHODS.map((method) => (
+                        <option key={method.value} value={method.value}>
+                          {method.label}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
-                  <div className="flex items-end">
-                    <button
-                      type="button"
-                      onClick={
-                        createPayment
-                      }
-                      disabled={
-                        submittingPayment ||
-                        !paymentAmount ||
-                        Number.parseFloat(
-                          paymentAmount,
-                        ) <= 0
-                      }
-                      className="w-full px-5 py-2.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 font-medium disabled:opacity-50 flex items-center justify-center gap-2"
-                    >
-                      <FiPlus size={16} />
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">
+                      Reference / Txn ID
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. UPI-12345"
+                      value={paymentReference}
+                      onChange={(e) => setPaymentReference(e.target.value)}
+                      disabled={submittingPayment}
+                      className="w-full px-4 py-2 rounded-xl border border-slate-300 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
+                    />
+                  </div>
 
-                      {submittingPayment
-                        ? 'Processing...'
-                        : 'Add Payment'}
-                    </button>
+                  <div className="sm:col-span-2 lg:col-span-5 grid grid-cols-1 lg:grid-cols-5 gap-3">
+                    <div className="lg:col-span-4">
+                      <label className="block text-xs font-medium text-slate-600 mb-1">
+                        Notes / Remarks (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Received via GPay / Cheque clearance note"
+                        value={paymentRemarks}
+                        onChange={(e) => setPaymentRemarks(e.target.value)}
+                        disabled={submittingPayment}
+                        className="w-full px-4 py-2 rounded-xl border border-slate-300 bg-white text-sm outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500"
+                      />
+                    </div>
+                    <div className="flex items-end">
+                      <button
+                        type="button"
+                        onClick={createPayment}
+                        disabled={
+                          submittingPayment ||
+                          !paymentAmount ||
+                          Number.parseFloat(paymentAmount) <= 0
+                        }
+                        className="w-full px-4 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 text-sm font-medium disabled:opacity-50 flex items-center justify-center gap-1.5 shadow-sm transition"
+                      >
+                        <FiPlus size={16} />
+                        {submittingPayment ? 'Processing...' : 'Record Payment'}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

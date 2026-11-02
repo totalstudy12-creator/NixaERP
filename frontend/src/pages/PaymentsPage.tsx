@@ -104,6 +104,7 @@ interface Payment {
   ledger_reference?: string | null;
   remarks?: string | null;
   payment_date?: string | null;
+  transaction_date?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   company_name?: string | null;
@@ -262,7 +263,7 @@ const dateTimeText = (v?: string | null) => {
   try { return formatDateTime(v); } catch { return v; }
 };
 
-const getDate = (p: Payment) => p.payment_date || p.created_at || '';
+const getDate = (p: Payment) => p.payment_date || p.transaction_date || p.created_at || '';
 
 const normalize = <T,>(response: unknown): T[] => {
   if (Array.isArray(response)) return response as T[];

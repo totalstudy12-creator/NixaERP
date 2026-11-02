@@ -13,6 +13,7 @@ import {
   FileCheck,
   FileText,
   Mail,
+  MapPin,
   MessageCircle,
   MoreHorizontal,
   Phone,
@@ -326,12 +327,19 @@ export function QuotationsPage() {
   const [convertModalQuotation, setConvertModalQuotation] = useState<any>(null);
   const [statusModalQuotation, setStatusModalQuotation] = useState<any>(null);
 
-  const [convertForm, setConvertForm] = useState({
-    invoice_date: new Date().toISOString().slice(0, 10),
-    due_date: new Date(Date.now() + 15 * 86400000).toISOString().slice(0, 10),
-    auto_deduct_stock: true,
-    payment_term: 'Net 15',
-    warehouse_id: '',
+  const [convertForm, setConvertForm] = useState(() => {
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const d15 = new Date();
+    d15.setDate(d15.getDate() + 15);
+    const due = `${d15.getFullYear()}-${String(d15.getMonth() + 1).padStart(2, '0')}-${String(d15.getDate()).padStart(2, '0')}`;
+    return {
+      invoice_date: today,
+      due_date: due,
+      auto_deduct_stock: true,
+      payment_term: 'Net 15',
+      warehouse_id: '',
+    };
   });
   const [convertError, setConvertError] = useState<{ due?: string }>({});
   const [converting, setConverting] = useState(false);
@@ -1543,6 +1551,12 @@ export function LeadsPage() {
                           {l.name}
                         </button>
                         <p className="text-xs text-slate-400">{l.phone || l.email || '—'}</p>
+                        {(l.city || l.state || l.address) && (
+                          <p className="mt-0.5 flex items-center gap-1 text-[11px] text-slate-500">
+                            <MapPin size={10} className="shrink-0 text-slate-400" />
+                            <span>{[l.city, l.state].filter(Boolean).join(', ') || l.address}</span>
+                          </p>
+                        )}
                       </td>
                       <td className="px-5 py-3.5 text-xs text-slate-600">
                         {l.branch?.name || '—'}
@@ -1680,6 +1694,11 @@ export function LeadsPage() {
               <DetailRow label="Phone" value={detailLead.phone} />
               <DetailRow label="Email" value={detailLead.email} />
               <DetailRow label="Deal Value" value={formatMoney(detailLead.expected_value)} highlight />
+              <DetailRow label="City" value={detailLead.city} />
+              <DetailRow label="State" value={detailLead.state} />
+              <div className="col-span-2 sm:col-span-3">
+                <DetailRow label="Address" value={detailLead.address} />
+              </div>
             </div>
 
             <form
@@ -1858,6 +1877,31 @@ export function LeadsPage() {
                     ))}
                   </select>
                 </Field>
+                <Field label="Address" className="sm:col-span-2">
+                  <textarea
+                    rows={2}
+                    value={leadForm.address}
+                    onChange={(e) => setLeadForm({ ...leadForm, address: e.target.value })}
+                    placeholder="Street address, building, locality…"
+                    className="w-full rounded-xl border border-slate-200 p-2 text-xs focus:border-indigo-500 focus:outline-none"
+                  />
+                </Field>
+                <Field label="City">
+                  <input
+                    value={leadForm.city}
+                    onChange={(e) => setLeadForm({ ...leadForm, city: e.target.value })}
+                    placeholder="City / District"
+                    className={inputCls}
+                  />
+                </Field>
+                <Field label="State">
+                  <input
+                    value={leadForm.state}
+                    onChange={(e) => setLeadForm({ ...leadForm, state: e.target.value })}
+                    placeholder="State"
+                    className={inputCls}
+                  />
+                </Field>
               </div>
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-6 py-3.5">
@@ -1985,6 +2029,15 @@ function LeadCard({
       {lead.company_name && (
         <p className="mt-0.5 flex items-center gap-1 text-xs text-slate-500">
           <Building size={11} /> {lead.company_name}
+        </p>
+      )}
+      {(lead.city || lead.state || lead.address) && (
+        <p
+          className="mt-1 flex items-center gap-1 text-[11px] text-slate-500 truncate"
+          title={lead.address ? `${lead.address}${lead.city ? `, ${lead.city}` : ''}${lead.state ? `, ${lead.state}` : ''}` : `${lead.city || ''} ${lead.state || ''}`}
+        >
+          <MapPin size={11} className="shrink-0 text-slate-400" />
+          <span>{[lead.city, lead.state].filter(Boolean).join(', ') || lead.address}</span>
         </p>
       )}
       {lead.branch?.name && (

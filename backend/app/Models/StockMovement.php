@@ -29,6 +29,10 @@ class StockMovement extends Model
 
     protected $casts = [
         'transaction_date' => 'datetime',
+        'quantity'         => 'decimal:3',
+        'stock_before'     => 'decimal:3',
+        'stock_after'      => 'decimal:3',
+        'unit_price'       => 'decimal:2',
     ];
 
     public function product(): BelongsTo

@@ -107,20 +107,24 @@ class ProductController extends Controller
             'name'           => 'required|string|max:255',
             'sku'            => 'required|string|max:100|unique:products,sku',
             'barcode'        => 'nullable|string|max:100|unique:products,barcode',
+            'qr_code'        => 'nullable|string|max:255',
             'brand'          => 'nullable|string|max:255',
             'unit'           => 'nullable|string|max:50',
             'purchase_price' => 'nullable|numeric|min:0',
             'sale_price'     => 'nullable|numeric|min:0',
             'tax_rate'       => 'nullable|numeric|min:0',
-            'stock_quantity' => 'nullable|integer|min:0',
-            'reorder_level'  => 'nullable|integer|min:0',
+            'stock_quantity' => 'nullable|numeric|min:0',
+            'reorder_level'  => 'nullable|numeric|min:0',
             'description'    => 'nullable|string',
             'active'         => 'boolean',
             'warehouse_id'   => 'nullable|exists:warehouses,id',
         ]);
 
-        if (isset($data['barcode']) && trim($data['barcode']) === '') {
-            $data['barcode'] = null;
+        if (empty($data['barcode'])) {
+            $data['barcode'] = Product::generateUniqueBarcode();
+        }
+        if (empty($data['qr_code'])) {
+            $data['qr_code'] = Product::generateUniqueQrCode($data['sku'] ?? 'PRD', $data['company_id'] ?? null);
         }
 
         $data = $this->prepareProductData($data);
@@ -583,13 +587,14 @@ class ProductController extends Controller
             'name'           => 'required|string|max:255',
             'sku'            => 'required|string|max:100|unique:products,sku,' . $product->id,
             'barcode'        => 'nullable|string|max:100|unique:products,barcode,' . $product->id,
+            'qr_code'        => 'nullable|string|max:255',
             'brand'          => 'nullable|string|max:255',
             'unit'           => 'nullable|string|max:50',
             'purchase_price' => 'nullable|numeric|min:0',
             'sale_price'     => 'nullable|numeric|min:0',
             'tax_rate'       => 'nullable|numeric|min:0',
-            'stock_quantity' => 'nullable|integer',          // ← allow negative
-            'reorder_level'  => 'nullable|integer|min:0',
+            'stock_quantity' => 'nullable|numeric',          // ← allow negative
+            'reorder_level'  => 'nullable|numeric|min:0',
             'description'    => 'nullable|string',
             'active'         => 'boolean',
         ]);
@@ -606,8 +611,8 @@ class ProductController extends Controller
         $product->update($data);
 
         if ($requestedStock !== null) {
-            $currentTotal = (int) ProductWarehouseStock::where('product_id', $product->id)->sum('quantity');
-            $difference   = (int) $requestedStock - $currentTotal;
+            $currentTotal = (float) ProductWarehouseStock::where('product_id', $product->id)->sum('quantity');
+            $difference = (float) $requestedStock - $currentTotal;
 
             if ($difference > 0) {
                 $this->adjustStock($product, $difference, 'IN', 'adjustment', 'Manual stock increase');
@@ -867,7 +872,7 @@ class ProductController extends Controller
     {
         $data = $request->validate([
             'warehouse_id'     => 'required|exists:warehouses,id',
-            'quantity'         => 'required|integer|min:0',   // ← was min:1
+            'quantity'         => 'required|numeric|min:0.001',
             'unit_cost'        => 'nullable|numeric|min:0',
             'reference_type'   => 'required|in:purchase,return,adjustment,transfer,opening_stock,manual,other',
             'reference_id'     => 'nullable|string|max:100',
@@ -948,7 +953,7 @@ class ProductController extends Controller
                     'stock_before'        => $before,
                     'quantity'            => $data['quantity'],
                     'stock_after'         => $after,
-                    'product_total_stock' => (int) $product->stock_quantity,
+                    'product_total_stock' => (float) $product->stock_quantity,
                 ],
             ]);
         } catch (\Exception $e) {
@@ -1046,7 +1051,7 @@ class ProductController extends Controller
                     'stock_before'        => $before,
                     'quantity'            => $data['quantity'],
                     'stock_after'         => $after,
-                    'product_total_stock' => (int) $product->stock_quantity,
+                    'product_total_stock' => (float) $product->stock_quantity,
                 ],
             ]);
         } catch (\Exception $e) {
@@ -1186,9 +1191,9 @@ class ProductController extends Controller
      */
     private function syncProductStock(Product $product): void
     {
-        $total = (int) ProductWarehouseStock::where('product_id', $product->id)->sum('quantity');
+        $total = (float) ProductWarehouseStock::where('product_id', $product->id)->sum('quantity');
 
-        if ((int) $product->stock_quantity !== $total) {
+        if (abs((float) $product->stock_quantity - $total) > 0.0001) {
             $product->stock_quantity = $total;
             $product->saveQuietly(); // use save() if you want updated_at bumped
         }
@@ -1238,7 +1243,7 @@ class ProductController extends Controller
      *
      * ✅ NEGATIVE STOCK ALLOWED — the `$after < 0` guard was removed.
      */
-    private function adjustStock(Product $product, int $qty, string $type, string $refType, string $remark)
+    private function adjustStock(Product $product, float $qty, string $type, string $refType, string $remark)
     {
         $warehouse = $product->warehouseStocks()->first();
         if (!$warehouse) {
@@ -1295,12 +1300,189 @@ class ProductController extends Controller
      */
     private function prepareProductData(array $data): array
     {
-        if (isset($data['barcode']) && trim($data['barcode']) === '') {
-            $data['barcode'] = null;
+        if (empty($data['barcode'])) {
+            $data['barcode'] = Product::generateUniqueBarcode();
+        }
+        if (empty($data['qr_code'])) {
+            $data['qr_code'] = Product::generateUniqueQrCode($data['sku'] ?? 'PRD', $data['company_id'] ?? null);
         }
         $data['purchase_price'] = $data['purchase_price'] ?? 0;
         $data['tax_rate']       = $data['tax_rate'] ?? 0;
         $data['reorder_level']  = $data['reorder_level'] ?? 0;
         return $data;
+    }
+
+    public function regenerateBarcode(Product $product)
+    {
+        $product->barcode = Product::generateUniqueBarcode();
+        $product->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Barcode regenerated successfully.',
+            'data'    => $product->fresh(),
+        ]);
+    }
+
+    public function regenerateQr(Product $product)
+    {
+        $product->qr_code = Product::generateUniqueQrCode($product->sku, $product->company_id);
+        $product->save();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'QR code regenerated successfully.',
+            'data'    => $product->fresh(),
+        ]);
+    }
+
+    /**
+     * Bulk edit products (prices, stock quantity, etc.)
+     */
+    public function bulkEdit(Request $request)
+    {
+        $data = $request->validate([
+            'product_ids'            => 'required|array|min:1',
+            'product_ids.*'          => 'required|integer|exists:products,id',
+            'sale_price_action'      => 'nullable|string|in:keep,set,increase_percent,decrease_percent,increase_fixed,decrease_fixed',
+            'sale_price_value'       => 'nullable|numeric|min:0',
+            'purchase_price_action'  => 'nullable|string|in:keep,set,increase_percent,decrease_percent,increase_fixed,decrease_fixed',
+            'purchase_price_value'   => 'nullable|numeric|min:0',
+            'stock_quantity_action'  => 'nullable|string|in:keep,set,add,subtract',
+            'stock_quantity_value'   => 'nullable|numeric',
+            'warehouse_id'           => 'nullable|exists:warehouses,id',
+            'remark'                 => 'nullable|string|max:255',
+            'auto_generate_sku'      => 'nullable|boolean',
+            'auto_generate_barcode'  => 'nullable|boolean',
+            'auto_generate_qr'       => 'nullable|boolean',
+        ]);
+
+        $canEditPurchase = $this->canEditPurchasePrice($request);
+        $products = Product::whereIn('id', $data['product_ids'])->get();
+        $updatedCount = 0;
+        $remark = $data['remark'] ?? 'Bulk inventory edit';
+
+        DB::transaction(function () use ($products, $data, $canEditPurchase, $remark, &$updatedCount) {
+            foreach ($products as $product) {
+                $changed = false;
+
+                // Sale Price Action
+                $spAction = $data['sale_price_action'] ?? 'keep';
+                if ($spAction !== 'keep' && isset($data['sale_price_value'])) {
+                    $val = (float) $data['sale_price_value'];
+                    $curr = (float) $product->sale_price;
+                    $newSp = $curr;
+                    if ($spAction === 'set') {
+                        $newSp = $val;
+                    } elseif ($spAction === 'increase_percent') {
+                        $newSp = $curr * (1 + ($val / 100));
+                    } elseif ($spAction === 'decrease_percent') {
+                        $newSp = max(0, $curr * (1 - ($val / 100)));
+                    } elseif ($spAction === 'increase_fixed') {
+                        $newSp = $curr + $val;
+                    } elseif ($spAction === 'decrease_fixed') {
+                        $newSp = max(0, $curr - $val);
+                    }
+                    $product->sale_price = round($newSp, 2);
+                    $changed = true;
+                }
+
+                // Purchase Price Action
+                $ppAction = $data['purchase_price_action'] ?? 'keep';
+                if ($canEditPurchase && $ppAction !== 'keep' && isset($data['purchase_price_value'])) {
+                    $val = (float) $data['purchase_price_value'];
+                    $curr = (float) $product->purchase_price;
+                    $newPp = $curr;
+                    if ($ppAction === 'set') {
+                        $newPp = $val;
+                    } elseif ($ppAction === 'increase_percent') {
+                        $newPp = $curr * (1 + ($val / 100));
+                    } elseif ($ppAction === 'decrease_percent') {
+                        $newPp = max(0, $curr * (1 - ($val / 100)));
+                    } elseif ($ppAction === 'increase_fixed') {
+                        $newPp = $curr + $val;
+                    } elseif ($ppAction === 'decrease_fixed') {
+                        $newPp = max(0, $curr - $val);
+                    }
+                    $product->purchase_price = round($newPp, 2);
+                    $changed = true;
+                }
+
+                // Auto-generate unique Barcode if requested
+                if (!empty($data['auto_generate_barcode'])) {
+                    $product->barcode = Product::generateUniqueBarcode();
+                    $changed = true;
+                }
+
+                // Auto-generate unique SKU if requested
+                if (!empty($data['auto_generate_sku'])) {
+                    $product->sku = Product::generateUniqueSku($product->name);
+                    $changed = true;
+                }
+
+                // Auto-generate unique QR if requested or if SKU changed
+                if (!empty($data['auto_generate_qr']) || (!empty($data['auto_generate_sku']) && empty($product->qr_code))) {
+                    $product->qr_code = Product::generateUniqueQrCode($product->sku, $product->company_id);
+                    $changed = true;
+                }
+
+                if ($changed) {
+                    $product->save();
+                }
+
+                // Stock Quantity Action
+                $sqAction = $data['stock_quantity_action'] ?? 'keep';
+                if ($sqAction !== 'keep' && isset($data['stock_quantity_value'])) {
+                    $val = (float) $data['stock_quantity_value'];
+                    $currentTotal = (float) ProductWarehouseStock::where('product_id', $product->id)->sum('quantity');
+
+                    if ($sqAction === 'set') {
+                        $diff = $val - $currentTotal;
+                        if ($diff > 0) {
+                            $this->adjustStock($product, $diff, 'IN', 'adjustment', $remark);
+                        } elseif ($diff < 0) {
+                            $this->adjustStock($product, abs($diff), 'OUT', 'adjustment', $remark);
+                        }
+                    } elseif ($sqAction === 'add' && $val > 0) {
+                        $this->adjustStock($product, $val, 'IN', 'adjustment', $remark);
+                    } elseif ($sqAction === 'subtract' && $val > 0) {
+                        $this->adjustStock($product, $val, 'OUT', 'adjustment', $remark);
+                    }
+                    $this->syncProductStock($product);
+                    $changed = true;
+                }
+
+                if ($changed) {
+                    $updatedCount++;
+                }
+            }
+        });
+
+        return response()->json([
+            'success'       => true,
+            'message'       => "Successfully updated {$updatedCount} products.",
+            'updated_count' => $updatedCount,
+        ]);
+    }
+
+    public function lookupBarcode(string $barcode)
+    {
+        $product = Product::with(['company', 'branch', 'warehouseStocks'])
+            ->where('barcode', $barcode)
+            ->orWhere('qr_code', $barcode)
+            ->orWhere('sku', $barcode)
+            ->first();
+
+        if (!$product) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Product not found for the provided barcode/QR code.',
+            ], 404);
+        }
+
+        return response()->json([
+            'success' => true,
+            'data'    => $product,
+        ]);
     }
 }

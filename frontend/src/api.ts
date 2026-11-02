@@ -801,6 +801,38 @@ export const apiClient = {
     return this.request('DELETE', `/products/${id}`);
   },
 
+  async regenerateBarcode(productId: number) {
+    return this.request('POST', `/products/${productId}/regenerate-barcode`);
+  },
+
+  async regenerateQr(productId: number) {
+    return this.request('POST', `/products/${productId}/regenerate-qr`);
+  },
+
+  async lookupBarcode(barcode: string) {
+    return this.request('GET', `/products/lookup-barcode/${encodeURIComponent(barcode)}`);
+  },
+
+  async suggestProduct(data: Record<string, any>) {
+    return this.request('POST', '/ai/products/suggest', data);
+  },
+
+  async bulkEditProducts(payload: Record<string, any>) {
+    return this.request('POST', '/products/bulk-edit', payload);
+  },
+
+  async aiBulkSuggest(instruction: string, products: any[]) {
+    return this.request('POST', '/ai/products/bulk-suggest', { instruction, products });
+  },
+
+  async getPublicInvoiceMetadata(token: string) {
+    return this.request('GET', `/public/invoices/${encodeURIComponent(token)}`);
+  },
+
+  async verifyPublicInvoice(token: string, mobile: string) {
+    return this.request('POST', `/public/invoices/${encodeURIComponent(token)}/verify`, { mobile });
+  },
+
   async importInventory(
     file: File,
     duplicateAction: 'skip' | 'update' | 'stop',

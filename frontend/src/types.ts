@@ -26,6 +26,8 @@ export interface Invoice {
   pan?: string;
   due_date?: string;
   status?: string;
+  public_token?: string;
+  public_url?: string;
   [key: string]: any;
 }
 

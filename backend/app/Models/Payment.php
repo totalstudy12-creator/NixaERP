@@ -32,8 +32,28 @@ class Payment extends Model
 
     protected $casts = [
         'amount' => 'decimal:2',
-        'transaction_date' => 'datetime',
     ];
+
+    protected $appends = [
+        'payment_date',
+    ];
+
+    public function getTransactionDateAttribute($value): ?string
+    {
+        return $value ? substr((string) $value, 0, 10) : null;
+    }
+
+    public function getPaymentDateAttribute(): ?string
+    {
+        return $this->transaction_date;
+    }
+
+    public function setTransactionDateAttribute($value): void
+    {
+        $this->attributes['transaction_date'] = !empty($value)
+            ? (strlen((string) $value) === 10 ? $value . ' 00:00:00' : (string) $value)
+            : now()->format('Y-m-d H:i:s');
+    }
 
     public function company()
     {

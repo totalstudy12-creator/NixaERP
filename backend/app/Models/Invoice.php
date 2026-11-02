@@ -15,6 +15,7 @@ class Invoice extends Model
         'customer_id',
         'order_id',
         'invoice_no',
+        'public_token',
         'total_amount',
         'tax_amount',
         'discount_amount',
@@ -84,10 +85,10 @@ class Invoice extends Model
         'tcs_amount'                => 'decimal:2',
         'round_off'                 => 'decimal:2',
         'subtotal'                  => 'decimal:2',
-        'due_date'                  => 'date',
-        'invoice_date'              => 'date',
-        'challan_date'              => 'date',
-        'po_date'                   => 'date',
+        'due_date'                  => 'date:Y-m-d',
+        'invoice_date'              => 'date:Y-m-d',
+        'challan_date'              => 'date:Y-m-d',
+        'po_date'                   => 'date:Y-m-d',
         'paid_at'                   => 'datetime',
         'reverse_charge'            => 'boolean',
         'keep_advance'              => 'boolean',
@@ -148,6 +149,24 @@ class Invoice extends Model
         } else {
             $this->attributes['paid_amount'] = $value;
         }
+    }
+
+    protected static function booted(): void
+    {
+        static::creating(function (Invoice $invoice) {
+            if (empty($invoice->public_token)) {
+                $token = bin2hex(random_bytes(16));
+                while (static::where('public_token', $token)->exists()) {
+                    $token = bin2hex(random_bytes(16));
+                }
+                $invoice->public_token = $token;
+            }
+        });
+    }
+
+    public function getPublicUrlAttribute(): string
+    {
+        return url("/public/invoice/{$this->public_token}");
     }
 
     public static function generateInvoiceNo(): string

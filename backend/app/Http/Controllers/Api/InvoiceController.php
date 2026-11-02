@@ -46,6 +46,7 @@ class InvoiceController extends Controller
                 'branch',
                 'customer',
                 'items.product',
+                'payments',
             ]);
 
         $sortBy = $request->input('sort_by', 'created_at');
@@ -586,7 +587,8 @@ class InvoiceController extends Controller
 
             'items.*.product_id' => 'required|exists:products,id',
 
-            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.quantity' => 'required|numeric|min:0.001',
+            'items.*.description' => 'nullable|string',
 
             'items.*.unit_price' => 'required|numeric|min:0',
 
@@ -696,10 +698,16 @@ class InvoiceController extends Controller
                 $totalDiscount += $discountAmount;
                 $totalTax += $cgstAmount + $sgstAmount + $igstAmount;
 
+                $product = Product::find($item['product_id']);
+                $itemDesc = !empty($item['description'])
+                    ? $item['description']
+                    : ($product?->description ?: $product?->name);
+
                 InvoiceItem::create([
                     'invoice_id' => $invoice->id,
                     'product_id' => $item['product_id'],
                     'quantity' => $qty,
+                    'description' => $itemDesc,
                     'unit_price' => $price,
                     'discount_type' => $discountType,
                     'discount_percent' => $item['discount_percent'] ?? 0,
@@ -930,7 +938,8 @@ class InvoiceController extends Controller
 
             'items.*.product_id' => 'required|exists:products,id',
 
-            'items.*.quantity' => 'required|numeric|min:0.01',
+            'items.*.quantity' => 'required|numeric|min:0.001',
+            'items.*.description' => 'nullable|string',
 
             'items.*.unit_price' => 'required|numeric|min:0',
 
@@ -1055,9 +1064,15 @@ class InvoiceController extends Controller
                 $totalDiscount += $discountAmount;
                 $totalTax += $cgstAmount + $sgstAmount + $igstAmount;
 
+                $product = Product::find($row['product_id']);
+                $itemDesc = array_key_exists('description', $row) && $row['description'] !== null
+                    ? $row['description']
+                    : ($product?->description ?: $product?->name);
+
                 $itemPayload = [
                     'product_id' => (int) $row['product_id'],
                     'quantity' => $qty,
+                    'description' => $itemDesc,
                     'unit_price' => $price,
                     'discount_type' => $discountType,
                     'discount_percent' => $row['discount_percent'] ?? 0,
@@ -1596,7 +1611,7 @@ class InvoiceController extends Controller
      *
      * NOTE: The caller MUST wrap this in a DB::transaction().
      */
-    private function deductInvoiceStock(Invoice $invoice): void
+    private function deductInvoiceStock(Invoice $invoice, ?int $explicitWarehouseId = null): void
     {
         $invoice->loadMissing('items');
 
@@ -1606,7 +1621,7 @@ class InvoiceController extends Controller
 
         $companyId     = (int) $invoice->company_id;
         $branchId      = $invoice->branch_id ? (int) $invoice->branch_id : null;
-        $warehouseId   = $this->resolveWarehouseId($invoice);
+        $warehouseId   = $explicitWarehouseId ?: $this->resolveWarehouseId($invoice);
         $businessDate  = $this->invoiceBusinessDate($invoice);
 
         foreach ($invoice->items as $item) {

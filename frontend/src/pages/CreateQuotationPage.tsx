@@ -238,8 +238,15 @@ export function CreateQuotationPage() {
     shipping_address: '',
     gstin: '',
     pan: '',
-    quotation_date: new Date().toISOString().slice(0, 10),
-    valid_until: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+    quotation_date: (() => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    })(),
+    valid_until: (() => {
+      const d = new Date();
+      d.setDate(d.getDate() + 30);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    })(),
     status: 'draft',
     notes: '',
     terms_and_conditions:
@@ -250,6 +257,35 @@ export function CreateQuotationPage() {
     shipping_charges: 0,
     other_charges: 0,
     round_off: 0,
+  });
+
+  /* ---- Quick Customer Creation Modal ---- */
+  const [showCustomerModal, setShowCustomerModal] = useState(false);
+  const [customerSubmitting, setCustomerSubmitting] = useState(false);
+  const [newCustomerForm, setNewCustomerForm] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    gst_number: '',
+    pan: '',
+    billing_street: '',
+    billing_city: '',
+    billing_state: '',
+    billing_pincode: '',
+  });
+
+  /* ---- Quick Product Creation Modal ---- */
+  const [showProductModal, setShowProductModal] = useState(false);
+  const [productSubmitting, setProductSubmitting] = useState(false);
+  const [newProductForm, setNewProductForm] = useState({
+    name: '',
+    sku: '',
+    unit: 'Piece',
+    sale_price: '',
+    hsn_sac_code: '',
+    tax_rate: '18',
+    stock_quantity: '0',
+    description: '',
   });
 
   /* ---- Dirty tracking ---- */
@@ -519,6 +555,54 @@ export function CreateQuotationPage() {
     [customers, handleClearCustomer, handleSelectCustomer],
   );
 
+  const handleCreateCustomer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCustomerForm.name.trim()) {
+      pushToast('error', 'Customer name is required');
+      return;
+    }
+    const resolvedCompanyId = meta.company_id || (companies.length > 0 ? String(companies[0].id) : '1');
+    setCustomerSubmitting(true);
+    try {
+      const payload: any = {
+        company_id: Number(resolvedCompanyId),
+        branch_id: meta.branch_id ? Number(meta.branch_id) : null,
+        name: newCustomerForm.name.trim(),
+        phone: newCustomerForm.phone.trim() || null,
+        contact_no: newCustomerForm.phone.trim() || null,
+        email: newCustomerForm.email.trim() || null,
+        gst_number: newCustomerForm.gst_number.trim() || null,
+        pan: newCustomerForm.pan.trim() || null,
+        billing_street: newCustomerForm.billing_street.trim() || null,
+        billing_city: newCustomerForm.billing_city.trim() || null,
+        billing_state: newCustomerForm.billing_state.trim() || null,
+        billing_pincode: newCustomerForm.billing_pincode.trim() || null,
+        status: 'active',
+      };
+      const res: any = await apiClient.createCustomer(payload);
+      const created = res?.data || res;
+      setCustomers((prev) => [created, ...prev]);
+      handleSelectCustomer(created);
+      setShowCustomerModal(false);
+      setNewCustomerForm({
+        name: '',
+        phone: '',
+        email: '',
+        gst_number: '',
+        pan: '',
+        billing_street: '',
+        billing_city: '',
+        billing_state: '',
+        billing_pincode: '',
+      });
+      pushToast('success', `Customer "${created.name}" created and selected!`);
+    } catch (err: any) {
+      pushToast('error', err?.message || 'Failed to create customer');
+    } finally {
+      setCustomerSubmitting(false);
+    }
+  };
+
   /* ---- Product fast-add from search ---- */
   const handleSelectProductFromSearch = useCallback((prod: any) => {
     if (!prod) return;
@@ -553,6 +637,54 @@ export function CreateQuotationPage() {
       return [...prev, row];
     });
   }, []);
+
+  const handleCreateProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newProductForm.name.trim()) {
+      pushToast('error', 'Product name is required');
+      return;
+    }
+    const resolvedCompanyId = meta.company_id || (companies.length > 0 ? String(companies[0].id) : '1');
+    const sku = newProductForm.sku.trim() || `PRD-${Date.now().toString(36).toUpperCase()}`;
+    const salePrice = safeNum(newProductForm.sale_price);
+
+    setProductSubmitting(true);
+    try {
+      const payload: any = {
+        company_id: Number(resolvedCompanyId),
+        branch_id: meta.branch_id ? Number(meta.branch_id) : null,
+        name: newProductForm.name.trim(),
+        sku,
+        unit: newProductForm.unit || 'Piece',
+        sale_price: salePrice,
+        purchase_price: 0,
+        tax_rate: safeNum(newProductForm.tax_rate),
+        hsn_sac_code: newProductForm.hsn_sac_code.trim() || null,
+        stock_quantity: Math.max(0, parseInt(newProductForm.stock_quantity || '0', 10)),
+        description: newProductForm.description.trim() || null,
+        active: true,
+      };
+      const created: any = await apiClient.createProduct(payload);
+      setProducts((prev) => [created, ...prev]);
+      handleSelectProductFromSearch(created);
+      setShowProductModal(false);
+      setNewProductForm({
+        name: '',
+        sku: '',
+        unit: 'Piece',
+        sale_price: '',
+        hsn_sac_code: '',
+        tax_rate: '18',
+        stock_quantity: '0',
+        description: '',
+      });
+      pushToast('success', `Product "${created.name}" created and added to quotation!`);
+    } catch (err: any) {
+      pushToast('error', err?.message || 'Failed to create product');
+    } finally {
+      setProductSubmitting(false);
+    }
+  };
 
   /* ---- Product select inside a row ---- */
   const handleProductSelect = useCallback(
@@ -915,7 +1047,16 @@ export function CreateQuotationPage() {
 
         {/* Section 2: Customer */}
         <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <SectionHeading icon={<User size={16} className="text-indigo-600" />} title="Customer & Billing" />
+          <div className="flex items-center justify-between">
+            <SectionHeading icon={<User size={16} className="text-indigo-600" />} title="Customer & Billing" />
+            <button
+              type="button"
+              onClick={() => setShowCustomerModal(true)}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 shadow-sm transition hover:bg-indigo-100"
+            >
+              <Plus size={13} /> New Customer
+            </button>
+          </div>
           <div className="grid gap-4 text-xs sm:grid-cols-2 lg:grid-cols-4">
             <Field label="Select Existing Customer" className="sm:col-span-2">
               <div ref={customerDropdownRef} className="relative">
@@ -1113,13 +1254,34 @@ export function CreateQuotationPage() {
                 </p>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={addItemRow}
-              className="inline-flex items-center gap-1.5 self-start rounded-xl bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 sm:self-auto"
-            >
-              <Plus size={14} /> Add Line
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setNewProductForm({
+                    name: '',
+                    sku: `PRD-${Date.now().toString(36).toUpperCase()}`,
+                    unit: 'Piece',
+                    sale_price: '',
+                    hsn_sac_code: '',
+                    tax_rate: '18',
+                    stock_quantity: '0',
+                    description: '',
+                  });
+                  setShowProductModal(true);
+                }}
+                className="inline-flex items-center gap-1.5 self-start rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100 sm:self-auto"
+              >
+                <Plus size={13} /> New Product
+              </button>
+              <button
+                type="button"
+                onClick={addItemRow}
+                className="inline-flex items-center gap-1.5 self-start rounded-xl bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 sm:self-auto"
+              >
+                <Plus size={14} /> Add Line
+              </button>
+            </div>
           </div>
 
           {fieldErrors.items && (
@@ -1192,9 +1354,31 @@ export function CreateQuotationPage() {
               <div className="absolute left-0 right-0 z-50 mt-1.5 max-h-72 divide-y divide-slate-100 overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-xl">
                 {filteredProducts.length === 0 ? (
                   <div className="p-4 text-center text-xs text-slate-500">
-                    No products found for &ldquo;
-                    <span className="font-semibold text-slate-700">{catalogSearch}</span>
-                    &rdquo;. Add a custom line below instead.
+                    <p>
+                      No products found for &ldquo;
+                      <span className="font-semibold text-slate-700">{catalogSearch}</span>
+                      &rdquo;.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewProductForm({
+                          name: catalogSearch.trim(),
+                          sku: `PRD-${Date.now().toString(36).toUpperCase()}`,
+                          unit: 'Piece',
+                          sale_price: '',
+                          hsn_sac_code: '',
+                          tax_rate: '18',
+                          stock_quantity: '0',
+                          description: '',
+                        });
+                        setShowProductModal(true);
+                        setShowDropdown(false);
+                      }}
+                      className="mt-2 inline-flex items-center gap-1 font-semibold text-indigo-600 hover:underline"
+                    >
+                      <Plus size={12} /> Create product &ldquo;{catalogSearch}&rdquo;
+                    </button>
                   </div>
                 ) : (
                   filteredProducts.map((p, idx) => (
@@ -1344,6 +1528,278 @@ export function CreateQuotationPage() {
         </div>
       </div>
 
+      {/* Quick Customer Creation Modal */}
+      {showCustomerModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto text-xs">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <User className="text-indigo-600" size={18} />
+                <h3 className="text-sm font-bold text-slate-900">Add New Customer</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCustomerModal(false)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateCustomer} className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Customer / Company Name *</label>
+                <input
+                  required
+                  value={newCustomerForm.name}
+                  onChange={(e) => setNewCustomerForm((p) => ({ ...p, name: e.target.value }))}
+                  placeholder="e.g. Acme Enterprises Ltd."
+                  className="field-input w-full"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Phone / WhatsApp</label>
+                  <input
+                    value={newCustomerForm.phone}
+                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, phone: e.target.value }))}
+                    placeholder="9876543210"
+                    className="field-input w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Email</label>
+                  <input
+                    type="email"
+                    value={newCustomerForm.email}
+                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, email: e.target.value }))}
+                    placeholder="billing@acme.com"
+                    className="field-input w-full"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">GSTIN</label>
+                  <input
+                    value={newCustomerForm.gst_number}
+                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, gst_number: e.target.value.toUpperCase() }))}
+                    placeholder="22AAAAA0000A1Z5"
+                    className="field-input w-full font-mono uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">PAN</label>
+                  <input
+                    value={newCustomerForm.pan}
+                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, pan: e.target.value.toUpperCase() }))}
+                    placeholder="ABCDE1234F"
+                    className="field-input w-full font-mono uppercase"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Street Address</label>
+                <textarea
+                  rows={2}
+                  value={newCustomerForm.billing_street}
+                  onChange={(e) => setNewCustomerForm((p) => ({ ...p, billing_street: e.target.value }))}
+                  placeholder="Office #101, Industrial Area"
+                  className="field-input w-full"
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">City</label>
+                  <input
+                    value={newCustomerForm.billing_city}
+                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, billing_city: e.target.value }))}
+                    placeholder="City"
+                    className="field-input w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">State</label>
+                  <input
+                    value={newCustomerForm.billing_state}
+                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, billing_state: e.target.value }))}
+                    placeholder="State"
+                    className="field-input w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Pincode</label>
+                  <input
+                    value={newCustomerForm.billing_pincode}
+                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, billing_pincode: e.target.value }))}
+                    placeholder="110001"
+                    className="field-input w-full"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowCustomerModal(false)}
+                  className="rounded-xl border border-slate-200 px-4 py-2 font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={customerSubmitting}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
+                >
+                  {customerSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  {customerSubmitting ? 'Creating…' : 'Save & Select Customer'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Product Creation Modal */}
+      {showProductModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto text-xs">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <Package className="text-emerald-600" size={18} />
+                <h3 className="text-sm font-bold text-slate-900">Add New Product</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowProductModal(false)}
+                className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateProduct} className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Product Name *</label>
+                <input
+                  required
+                  value={newProductForm.name}
+                  onChange={(e) => setNewProductForm((p) => ({ ...p, name: e.target.value }))}
+                  placeholder="e.g. Premium Hydraulic Valve 1/2"
+                  className="field-input w-full"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">SKU</label>
+                  <input
+                    value={newProductForm.sku}
+                    onChange={(e) => setNewProductForm((p) => ({ ...p, sku: e.target.value }))}
+                    placeholder="Auto-generated if empty"
+                    className="field-input w-full font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Unit</label>
+                  <input
+                    value={newProductForm.unit}
+                    onChange={(e) => setNewProductForm((p) => ({ ...p, unit: e.target.value }))}
+                    placeholder="Piece, Box, Kg, Mtr"
+                    className="field-input w-full"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Sale Price (₹) *</label>
+                  <input
+                    required
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={newProductForm.sale_price}
+                    onChange={(e) => setNewProductForm((p) => ({ ...p, sale_price: e.target.value }))}
+                    placeholder="0.00"
+                    className="field-input w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">HSN / SAC Code</label>
+                  <input
+                    value={newProductForm.hsn_sac_code}
+                    onChange={(e) => setNewProductForm((p) => ({ ...p, hsn_sac_code: e.target.value }))}
+                    placeholder="8481"
+                    className="field-input w-full"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">GST Tax Rate (%)</label>
+                  <select
+                    value={newProductForm.tax_rate}
+                    onChange={(e) => setNewProductForm((p) => ({ ...p, tax_rate: e.target.value }))}
+                    className="field-input w-full"
+                  >
+                    <option value="0">0%</option>
+                    <option value="5">5%</option>
+                    <option value="12">12%</option>
+                    <option value="18">18%</option>
+                    <option value="28">28%</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Initial Stock</label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={newProductForm.stock_quantity}
+                    onChange={(e) => setNewProductForm((p) => ({ ...p, stock_quantity: e.target.value }))}
+                    placeholder="0"
+                    className="field-input w-full"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Description</label>
+                <textarea
+                  rows={2}
+                  value={newProductForm.description}
+                  onChange={(e) => setNewProductForm((p) => ({ ...p, description: e.target.value }))}
+                  placeholder="Item details, model, specifications…"
+                  className="field-input w-full"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowProductModal(false)}
+                  className="rounded-xl border border-slate-200 px-4 py-2 font-semibold text-slate-600 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={productSubmitting}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  {productSubmitting && <Loader2 size={13} className="animate-spin" />}
+                  {productSubmitting ? 'Creating…' : 'Save & Add Product'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
       <style>{`
         @keyframes slideIn { from { opacity:0; transform: translateX(20px); } to { opacity:1; transform: translateX(0); } }
         .animate-slide-in { animation: slideIn 0.22s ease-out; }

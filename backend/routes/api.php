@@ -24,6 +24,7 @@ use App\Http\Controllers\Api\GeminiVoiceController;
 use App\Http\Controllers\Api\HealthController;
 use App\Http\Controllers\Api\InboxController;
 use App\Http\Controllers\Api\InvoiceController;
+use App\Http\Controllers\Api\PublicInvoiceController;
 use App\Http\Controllers\Api\MarketingController;
 use App\Http\Controllers\Api\McpController;
 use App\Http\Controllers\Api\NotificationController;
@@ -70,6 +71,11 @@ use Illuminate\Support\Facades\Route;
 |       REST resource below is written as explicit Route::get/post/put/delete
 |       calls so each HTTP verb is gated by exactly ONE permission.
 */
+
+
+/* ==================== PUBLIC — Customer Invoice Access =================== */
+Route::get('public/invoices/{token}', [PublicInvoiceController::class, 'getMetadata']);
+Route::post('public/invoices/{token}/verify', [PublicInvoiceController::class, 'verify']);
 
 /* ============================= HEALTH (public) ========================== */
 Route::get('status', fn () => response()->json([
@@ -335,6 +341,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/',                [ProductController::class, 'index'])->middleware('permission:view products');
         Route::get('/all',             [ProductController::class, 'all'])->middleware('permission:view products');
         Route::get('/low-stock',       [DashboardController::class, 'lowStockProducts'])->middleware('permission:view low stock products');
+        Route::post('/bulk-edit',      [ProductController::class, 'bulkEdit'])->middleware('permission:edit products');
         Route::get('/{product}',       [ProductController::class, 'show'])->middleware('permission:view products');
         Route::post('/',               [ProductController::class, 'store'])->middleware('permission:create products');
         Route::match(['put', 'patch'], '/{product}', [ProductController::class, 'update'])->middleware('permission:edit products');
@@ -799,6 +806,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('ai/assistant/chat',    [\App\Http\Controllers\Api\AiController::class, 'chat'])->middleware('permission:chat with ai assistant');
     Route::post('ai/assistant/voice',   [\App\Http\Controllers\Api\AiController::class, 'voice'])->middleware('permission:chat with ai assistant');
     Route::post('ai/assistant/live-converse', [\App\Http\Controllers\Api\AiController::class, 'liveConverse'])->middleware('permission:chat with ai assistant');
+    Route::post('ai/products/bulk-suggest',   [\App\Http\Controllers\Api\AiController::class, 'bulkSuggest'])->middleware('permission:edit products');
+    Route::post('ai/products/suggest',        [\App\Http\Controllers\Api\AiController::class, 'suggestProduct'])->middleware('permission:create products,edit products');
 
     Route::post('dashboard/ai/ask',             [\App\Http\Controllers\Api\DashboardAiController::class, 'ask'])->middleware('permission:ask dashboard ai');
     Route::post('dashboard/ai/business-health', [\App\Http\Controllers\Api\DashboardAiController::class, 'businessHealth'])->middleware('permission:view dashboard ai business health');
@@ -834,6 +843,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/products/{product}/stock-in',  [ProductController::class, 'stockIn'])->middleware('permission:edit products');
     Route::post('/products/{product}/stock-out', [ProductController::class, 'stockOut'])->middleware('permission:edit products');
     Route::post('/products/{product}/transfer',  [ProductController::class, 'transfer'])->middleware('permission:edit products');
+    Route::post('/products/{product}/regenerate-barcode', [ProductController::class, 'regenerateBarcode'])->middleware('permission:edit products');
+    Route::post('/products/{product}/regenerate-qr',      [ProductController::class, 'regenerateQr'])->middleware('permission:edit products');
+    Route::get('/products/lookup-barcode/{barcode}',      [ProductController::class, 'lookupBarcode'])->middleware('permission:view products');
 
     /* --------------------------- Sales Returns ------------------------- */
     // Update / Delete now check the correct permissions (sales.returns.update

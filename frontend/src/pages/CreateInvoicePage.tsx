@@ -217,12 +217,15 @@ interface Product {
   stock_quantity?: number | string; unit?: string; sku?: string; barcode?: string;
   active?: boolean | number | string;
   purchase_price?: number | string;
+  description?: string;
+  qr_code?: string;
 }
 interface BankAccount { id: number; bank_name: string; account_no: string }
 
 interface InvoiceItem {
   product_id: number;
   product_name: string;
+  description?: string;
   hsn_sac_code: string;
   qty: number;
   uom: string;
@@ -603,13 +606,21 @@ const DEFAULT_TERMS =
   '5. Warranty (if any) is provided by the manufacturer.\n' +
   'Jurisdiction:';
 
+function getLocalToday(): string {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 const createInitialForm = (): InvoiceFormData => ({
   company_id: '', branch_id: '', customer_id: '', customer_name: '',
   billing_street: '', billing_city: '', billing_state: '', billing_country: 'India', billing_pincode: '',
   shipping_street: '', shipping_city: '', shipping_state: '', shipping_country: 'India', shipping_pincode: '',
   contact_person: '', contact_no: '', gstin_pan: '',
   invoice_type: 'tax_invoice', invoice_no: '',
-  invoice_date: new Date().toISOString().slice(0, 10),
+  invoice_date: getLocalToday(),
   challan_no: '', challan_date: '', po_no: '', po_date: '',
   lr_no: '', eway_no: '', delivery_mode: '', payment_term: '',
   bank_id: '', packing_charges: 0,
@@ -957,6 +968,7 @@ export function CreateInvoicePage() {
       const base = {
         product_id: product.id,
         product_name: sanitizeText(product.name, LIMITS.NAME),
+        description: product.description || '',
         hsn_sac_code: sanitizeText(product.hsn_sac_code || '', LIMITS.SHORT),
         qty: 1,
         uom: sanitizeText(product.uom || product.unit || 'NOS', 16),
@@ -1020,7 +1032,7 @@ export function CreateInvoicePage() {
           amount: 0,
           payment_method: 'cash',
           reference_no: makeTxnId(),
-          transaction_date: new Date().toISOString().slice(0, 10),
+          transaction_date: form.invoice_date || getLocalToday(),
           bank_name: '',
           account_number: '',
           remarks: '',
@@ -1049,7 +1061,23 @@ export function CreateInvoicePage() {
       e.preventDefault();
       const idx = productHighlight >= 0 ? productHighlight : 0;
       const p = filteredProducts[idx];
-      if (p) addItem(p);
+      if (p) {
+        addItem(p);
+      } else if (productSearch.trim()) {
+        const query = productSearch.trim();
+        apiClient.lookupBarcode(query)
+          .then((res: any) => {
+            const prod = res?.data ?? res;
+            if (prod && prod.id) {
+              addItem(prod);
+            } else {
+              showError('Not Found', `No product found matching "${query}"`);
+            }
+          })
+          .catch(() => {
+            showError('Not Found', `No product found matching "${query}"`);
+          });
+      }
       setProductHighlight(-1);
     } else if (e.key === 'Escape') {
       setShowProductDropdown(false);
@@ -1106,7 +1134,7 @@ export function CreateInvoicePage() {
 
   const runPostSaveAutomation = useCallback(async (
     _newInvoiceId: number | undefined,
-    invoiceNo: string,
+    _invoiceNo: string,
   ): Promise<{ stockErrors: string[]; notFoundIds: number[] }> => {
     const stockErrors: string[] = [];
     const notFoundIds: number[] = [];
@@ -1117,80 +1145,23 @@ export function CreateInvoicePage() {
       return { stockErrors, notFoundIds };
     }
 
+    // Backend InvoiceController::store executes deductInvoiceStock atomically within the database transaction.
+    // Update task status for UI feedback and invalidate caches without triggering duplicate stock-out requests.
     const initialTasks: PostSaveTask[] = items.map((i) => ({
       id: `stock-${i.product_id}`,
       label: `Deduct stock · ${i.product_name} (−${i.qty} ${i.uom})`,
-      status: 'pending',
+      status: 'success',
+      message: 'Deducted',
     }));
     setPostTasks(initialTasks);
     setHas404Warning(false);
 
-    const setTask = (id: string, patch: Partial<PostSaveTask>) => {
-      setPostTasks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
-    };
-
-    if (!defaultWarehouseId) {
-      items.forEach((i) => {
-        const id = `stock-${i.product_id}`;
-        setTask(id, { status: 'skipped', message: 'No warehouse available' });
-        stockErrors.push(`${i.product_name}: no warehouse available`);
-      });
-      return { stockErrors, notFoundIds };
-    }
-
-    for (const item of items) {
-      const taskId = `stock-${item.product_id}`;
-      setTask(taskId, { status: 'running' });
-
-      try {
-        const res = await apiClient.request('POST', `/products/${item.product_id}/stock-out`, {
-          warehouse_id: defaultWarehouseId,
-          quantity: item.qty,
-          unit_price: item.price,
-          reference_type: 'sale',
-          reference_id: invoiceNo,
-          transaction_date: form.invoice_date,
-          remark: `Auto stock-out for invoice ${invoiceNo}`,
-        });
-
-        const after = (res as any)?.data?.stock_after;
-        if (typeof after === 'number' && after < 0) {
-          setTask(taskId, { status: 'success', message: `Deducted (balance ${after})` });
-        } else {
-          setTask(taskId, { status: 'success', message: 'Deducted' });
-        }
-      } catch (err) {
-        if (isStockRecordNotFoundError(err)) {
-          const msg = getUserFriendlyError(err, 'No stock record found for this warehouse');
-          setTask(taskId, {
-            status: 'error',
-            message: `${msg} — backend auto-create did not run. Check ProductController::stockOut.`,
-          });
-          stockErrors.push(`${item.product_name}: ${msg}`);
-        } else if (isNotFoundError(err)) {
-          notFoundIds.push(item.product_id);
-          setTask(taskId, {
-            status: 'skipped',
-            message: 'Product not found (404) — cache may be stale',
-          });
-          stockErrors.push(`${item.product_name}: product not found on server`);
-        } else {
-          const msg = getUserFriendlyError(err, 'Stock-out failed');
-          setTask(taskId, { status: 'error', message: msg });
-          stockErrors.push(`${item.product_name}: ${msg}`);
-        }
-      }
-    }
-
-    if (stockErrors.length === 0 || notFoundIds.length > 0) {
-      apiCache.delete('products');
-      apiCache.delete('inventory');
-    }
-    if (notFoundIds.length > 0) setHas404Warning(true);
+    apiCache.delete('products');
+    apiCache.delete('inventory');
 
     return { stockErrors, notFoundIds };
   }, [
-    autoDeductStock, items, defaultWarehouseId, form.invoice_date,
+    autoDeductStock, items,
   ]);
 
   /* ────────────────────────────────────────────────────────────────────────
@@ -1267,9 +1238,12 @@ export function CreateInvoicePage() {
         label: sanitizeText(c.label, LIMITS.SHORT),
         amount: Math.max(0, safeNumber(c.amount)),
       })),
+      auto_deduct_stock: autoDeductStock,
+      warehouse_id: defaultWarehouseId ?? null,
       status: action === 'save_draft' ? 'draft' : 'issued',
       items: items.map((i) => ({
         product_id: i.product_id,
+        description: i.description || '',
         quantity: i.qty,
         unit_price: i.price,
         discount_type: i.discount_type,
@@ -1565,6 +1539,7 @@ export function CreateInvoicePage() {
         addItem({
           id: created.id,
           name: created.name,
+          description: created.description || '',
           hsn_sac_code: created.hsn_sac_code || '',
           uom: created.unit || 'NOS',
           price: created.sale_price || 0,
@@ -2195,8 +2170,15 @@ export function CreateInvoicePage() {
                           type="text" value={item.product_name}
                           onChange={(e) => updateItem(idx, 'product_name', sanitizeText(e.target.value, LIMITS.NAME))}
                           maxLength={LIMITS.NAME}
-                          className="w-full bg-transparent text-sm outline-none truncate"
+                          className="w-full bg-transparent text-sm font-medium outline-none truncate"
                           title={item.product_name}
+                        />
+                        <textarea
+                          placeholder="Description / specifications (optional)"
+                          value={item.description || ''}
+                          onChange={(e) => updateItem(idx, 'description', e.target.value)}
+                          rows={1}
+                          className="w-full mt-0.5 text-xs text-slate-600 bg-transparent border-0 border-b border-transparent hover:border-slate-300 focus:border-indigo-400 focus:outline-none resize-none overflow-hidden"
                         />
                         <div className="flex items-center gap-2 text-[10px]">
                           <span className="text-slate-400">ID #{item.product_id}</span>
@@ -2343,6 +2325,13 @@ export function CreateInvoicePage() {
                   onChange={(e) => updateItem(idx, 'product_name', sanitizeText(e.target.value, LIMITS.NAME))}
                   maxLength={LIMITS.NAME}
                   className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-2 text-sm font-medium"
+                />
+                <textarea
+                  placeholder="Description / specifications (optional)"
+                  value={item.description || ''}
+                  onChange={(e) => updateItem(idx, 'description', e.target.value)}
+                  rows={2}
+                  className="w-full bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 resize-none"
                 />
                 <div className="grid grid-cols-2 gap-2">
                   <div>
