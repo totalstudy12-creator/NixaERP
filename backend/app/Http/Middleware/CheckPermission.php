@@ -27,6 +27,13 @@ class CheckPermission
             return response()->json(['message' => 'Unauthenticated.'], Response::HTTP_UNAUTHORIZED);
         }
 
+        if (method_exists($user, 'isBanned') && $user->isBanned()) {
+            return response()->json([
+                'message' => 'Your account has been banned or suspended.',
+                'error' => 'ACCOUNT_BANNED',
+            ], Response::HTTP_FORBIDDEN);
+        }
+
         if (empty($permissions)) {
             return $next($request);
         }

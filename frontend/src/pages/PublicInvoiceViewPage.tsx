@@ -30,6 +30,7 @@ export function PublicInvoiceViewPage() {
     payment_status?: string;
   } | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Verification state
   const [mobileInput, setMobileInput] = useState('');
@@ -39,30 +40,39 @@ export function PublicInvoiceViewPage() {
   const [invoiceData, setInvoiceData] = useState<any | null>(null);
   const [copied, setCopied] = useState(false);
 
-  useEffect(() => {
+  const loadMeta = async () => {
     if (!token) {
       setNotFound(true);
       setLoading(false);
       return;
     }
-
-    const loadMeta = async () => {
-      setLoading(true);
-      try {
-        const res: any = await apiClient.getPublicInvoiceMetadata(token);
-        if (res?.success) {
-          setMetadata(res);
-        } else {
-          setNotFound(true);
-        }
-      } catch (err: any) {
-        console.error('Failed to load public invoice metadata:', err);
+    setLoading(true);
+    setLoadError(null);
+    setNotFound(false);
+    try {
+      const res: any = await apiClient.getPublicInvoiceMetadata(token);
+      if (res?.success) {
+        setMetadata(res);
+      } else {
         setNotFound(true);
-      } finally {
-        setLoading(false);
       }
-    };
+    } catch (err: any) {
+      console.error('Failed to load public invoice metadata:', err);
+      if (err.response?.status === 404) {
+        setNotFound(true);
+      } else {
+        setLoadError(
+          err.response?.data?.message ||
+            err.message ||
+            'Unable to connect to the server. Please check your connection and try again.'
+        );
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
 
+  useEffect(() => {
     loadMeta();
   }, [token]);
 
@@ -109,6 +119,35 @@ export function PublicInvoiceViewPage() {
         <div className="flex flex-col items-center gap-3">
           <div className="h-10 w-10 animate-spin rounded-full border-4 border-indigo-600 border-t-transparent" />
           <p className="text-sm font-semibold text-slate-700">Connecting to secure customer portal...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-lg border border-slate-200">
+          <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-amber-50 text-amber-600">
+            <FiRefreshCw size={28} />
+          </div>
+          <h2 className="text-xl font-bold text-slate-900 mb-1">Connection Issue</h2>
+          <p className="text-xs text-slate-500 mb-6">{loadError}</p>
+          <div className="flex items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={loadMeta}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-700 transition"
+            >
+              <FiRefreshCw size={14} /> Try Again
+            </button>
+            <a
+              href="/"
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 transition"
+            >
+              <FiArrowLeft size={14} /> Return to Home
+            </a>
+          </div>
         </div>
       </div>
     );

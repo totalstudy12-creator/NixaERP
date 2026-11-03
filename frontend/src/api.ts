@@ -2463,6 +2463,14 @@ export const apiClient = {
     return this.request('GET', `/v1/apps/${encodeURIComponent(identifier)}/handshake?version=${encodeURIComponent(version)}`);
   },
 
+  async checkAppOta(identifier: string, version = '1.0.0') {
+    return this.request('GET', `/v1/apps/${encodeURIComponent(identifier)}/check-update?version=${encodeURIComponent(version)}`);
+  },
+
+  async testFlutterLogin(identifier: string, data: { email: string; password: string; device_name?: string; app_version?: string }) {
+    return this.request('POST', `/v1/apps/${encodeURIComponent(identifier)}/login`, data);
+  },
+
   // ---------------------------------------------------------------------------
   // BANK & CASH MANAGEMENT + AUTOMATED RECONCILIATION
   // ---------------------------------------------------------------------------
@@ -2864,6 +2872,10 @@ export const apiClient = {
   },
 
   // --- User Account Control & Banning ---
+  async getBannedUsers() {
+    return this.request('GET', '/users/banned');
+  },
+
   async banUser(userId: number, data: { action: 'ban' | 'suspend' | 'deactivate'; reason: string; duration_minutes?: number; duration_days?: number }) {
     return this.request('POST', `/users/${userId}/ban`, data);
   },

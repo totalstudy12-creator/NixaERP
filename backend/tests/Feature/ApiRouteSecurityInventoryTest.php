@@ -24,7 +24,9 @@ class ApiRouteSecurityInventoryTest extends TestCase
             'api/webhooks/whatsapp',
             'api/webhooks/twilio/notification-status',
             'api/v1/apps/{identifier}/handshake',
+            'api/v1/apps/{identifier}/check-update',
             'api/v1/apps/{identifier}/ping',
+            'api/v1/apps/{identifier}/login',
             'api/public/invoices/{token}',
             'api/public/invoices/{token}/verify',
         ];
@@ -72,6 +74,8 @@ class ApiRouteSecurityInventoryTest extends TestCase
             'POST api/auth/sessions/terminate-others',
             'POST api/auth/change-password',
             'GET api/apps/launcher',
+            'GET api/v1/apps/{identifier}/profile',
+            'POST api/v1/apps/{identifier}/logout',
             'GET api/permissions/me',
             'GET api/audit-logs',
             'POST api/audit-logs',

@@ -46,6 +46,7 @@ import { apiClient, API_BASE } from '../api';
 import { useNotification } from '../components/NotificationContext';
 import { TwoFactorSettings } from '../features/security/TwoFactorSettings';
 import { ConnectedAppsSettings } from '../features/apps/ConnectedAppsSettings';
+import { UserBanManagement } from '../features/security/UserBanManagement';
 import { FiSmartphone } from 'react-icons/fi';
 import { useAuthStore } from '../store/auth';
 import { getCronHealth, type CronTask } from '../services/healthService';
@@ -1885,7 +1886,7 @@ export function SettingsPage() {
             }`}
           >
             <FiSmartphone className="mr-1 inline" size={14} />
-            Connected Apps
+            Mobile Apps &amp; OTA
           </button>
         )}
 
@@ -3363,6 +3364,7 @@ export function SettingsPage() {
       {activeTab === 'security' && (
         <div className="space-y-6">
           <TwoFactorSettings />
+          <UserBanManagement />
 
           <div className="grid gap-4 md:grid-cols-3">
             <div className="rounded-xl border border-slate-200 bg-white p-4">

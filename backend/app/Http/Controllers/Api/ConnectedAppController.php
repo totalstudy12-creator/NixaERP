@@ -4,6 +4,11 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\ConnectedApp;
+use App\Models\User;
+use App\Models\UserSession;
+use App\Services\AuditLogger;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
@@ -225,6 +230,14 @@ class ConnectedAppController extends Controller
             ],
             'allowed_roles' => $app->allowed_roles ?: [],
             'settings' => $app->settings ?: (object)[],
+            'endpoints' => [
+                'handshake' => "/api/v1/apps/{$app->app_identifier}/handshake",
+                'check_update' => "/api/v1/apps/{$app->app_identifier}/check-update",
+                'login' => "/api/v1/apps/{$app->app_identifier}/login",
+                'logout' => "/api/v1/apps/{$app->app_identifier}/logout",
+                'profile' => "/api/v1/apps/{$app->app_identifier}/profile",
+                'ping' => "/api/v1/apps/{$app->app_identifier}/ping",
+            ],
         ]);
     }
 
@@ -245,6 +258,295 @@ class ConnectedAppController extends Controller
         return response()->json([
             'success' => true,
             'synced_at' => now()->toIso8601String(),
+        ]);
+    }
+
+    /**
+     * Flutter OTA Version & Update Check Endpoint.
+     * GET /api/v1/apps/{identifier}/check-update
+     */
+    public function checkUpdate(Request $request, string $identifier)
+    {
+        $app = ConnectedApp::where('app_identifier', $identifier)->first();
+
+        if (!$app) {
+            return response()->json([
+                'success' => false,
+                'error' => 'APP_NOT_REGISTERED',
+                'message' => "Application '{$identifier}' is not registered with this RaptorERP server.",
+            ], 404);
+        }
+
+        if (!$app->is_active) {
+            return response()->json([
+                'success' => false,
+                'error' => 'APP_DISABLED',
+                'message' => "Access for {$app->name} has been disabled by the system administrator.",
+                'is_active' => false,
+            ], 403);
+        }
+
+        $clientVersion = $request->header('X-App-Version') ?: $request->query('version', '1.0.0');
+        $versionStatus = $app->checkVersion($clientVersion);
+
+        $app->update(['last_sync_at' => now()]);
+
+        return response()->json([
+            'success' => true,
+            'app_identifier' => $app->app_identifier,
+            'app_name' => $app->name,
+            'maintenance_mode' => (bool) $app->maintenance_mode,
+            'maintenance_message' => $app->maintenance_message,
+            'ota' => $versionStatus,
+            'timestamp' => now()->toIso8601String(),
+        ]);
+    }
+
+    /**
+     * Dedicated Flutter App Authentication Endpoint.
+     * POST /api/v1/apps/{identifier}/login
+     */
+    public function login(Request $request, string $identifier)
+    {
+        $app = ConnectedApp::where('app_identifier', $identifier)->first();
+
+        if (!$app) {
+            return response()->json([
+                'success' => false,
+                'error' => 'APP_NOT_REGISTERED',
+                'message' => "Application '{$identifier}' is not registered.",
+            ], 404);
+        }
+
+        if (!$app->is_active) {
+            return response()->json([
+                'success' => false,
+                'error' => 'APP_DISABLED',
+                'message' => "Access for {$app->name} has been disabled by the system administrator.",
+            ], 403);
+        }
+
+        $validated = $request->validate([
+            'email' => 'required|string',
+            'password' => 'required|string',
+            'device_name' => 'nullable|string|max:100',
+            'device_id' => 'nullable|string|max:100',
+            'platform' => 'nullable|string|max:50',
+            'app_version' => 'nullable|string|max:30',
+        ]);
+
+        $login = trim($validated['email']);
+        $password = $validated['password'];
+
+        $user = User::where('email', $login)
+            ->orWhere('phone', $login)
+            ->first();
+
+        if (!$user || !Hash::check($password, $user->password)) {
+            return response()->json([
+                'success' => false,
+                'error' => 'INVALID_CREDENTIALS',
+                'message' => 'The provided credentials do not match our records.',
+            ], 401);
+        }
+
+        // Ban & Suspension check
+        if ($user->isBanned()) {
+            $reason = $user->banned_reason ? ": {$user->banned_reason}" : '';
+            return response()->json([
+                'success' => false,
+                'error' => 'ACCOUNT_BANNED',
+                'status' => $user->status,
+                'message' => 'Your account has been ' . ($user->status === 'suspended' ? 'suspended' : 'banned') . $reason,
+                'banned_at' => $user->banned_at?->toISOString(),
+                'banned_until' => $user->banned_until?->toISOString(),
+                'banned_reason' => $user->banned_reason,
+            ], 403);
+        }
+
+        // Lockout check
+        if ($user->isLockedOut()) {
+            return response()->json([
+                'success' => false,
+                'error' => 'ACCOUNT_LOCKED',
+                'message' => 'Account is temporarily locked due to too many failed attempts.',
+                'lockout_until' => $user->lockout_until?->toISOString(),
+            ], 423);
+        }
+
+        // Maintenance mode check (Super Admin / Admin bypass)
+        $isSuperAdmin = $user->hasRole('Admin') || $user->hasRole('Super Admin');
+        if ($app->maintenance_mode && !$isSuperAdmin) {
+            return response()->json([
+                'success' => false,
+                'error' => 'MAINTENANCE_MODE',
+                'message' => $app->maintenance_message ?: 'This application is currently in maintenance mode.',
+                'maintenance' => true,
+            ], 503);
+        }
+
+        // Check Allowed Roles
+        if (!empty($app->allowed_roles) && !$isSuperAdmin) {
+            $userRoleNames = $user->roles->pluck('name')->toArray();
+            $hasAllowedRole = count(array_intersect($userRoleNames, $app->allowed_roles)) > 0;
+            if (!$hasAllowedRole) {
+                return response()->json([
+                    'success' => false,
+                    'error' => 'ROLE_UNAUTHORIZED',
+                    'message' => "Your role does not have authorization to access {$app->name}.",
+                    'allowed_roles' => $app->allowed_roles,
+                ], 403);
+            }
+        }
+
+        // Check OTA Version if client version passed
+        $clientVersion = $validated['app_version'] ?? $request->header('X-App-Version', '1.0.0');
+        $versionStatus = $app->checkVersion($clientVersion);
+        if ($versionStatus['is_force_update']) {
+            return response()->json([
+                'success' => false,
+                'error' => 'UPGRADE_REQUIRED',
+                'message' => "Version {$clientVersion} is outdated. Please update {$app->name} to continue.",
+                'ota' => $versionStatus,
+            ], 426);
+        }
+
+        // Create Sanctum Token
+        $deviceName = $validated['device_name'] ?: 'mobile_device';
+        $tokenName = 'flutter_' . $app->app_identifier . '_' . Str::slug($deviceName);
+        $token = $user->createToken($tokenName)->plainTextToken;
+
+        // Record User Session
+        try {
+            UserSession::create([
+                'user_id' => $user->id,
+                'session_id' => Str::random(40),
+                'ip_address' => $request->ip() ?: '127.0.0.1',
+                'user_agent' => $request->userAgent() ?: 'Flutter/' . $app->app_identifier,
+                'device_type' => 'mobile',
+                'browser' => 'Flutter Mobile (' . $app->app_identifier . ')',
+                'platform' => $validated['platform'] ?: 'flutter',
+                'last_activity_at' => now(),
+                'is_active' => true,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('Could not record mobile user session: ' . $e->getMessage());
+        }
+
+        // Update last login
+        $user->update([
+            'last_login_at' => now(),
+            'last_login_ip' => $request->ip(),
+            'failed_login_count' => 0,
+        ]);
+
+        $app->update(['last_sync_at' => now()]);
+
+        AuditLogger::log(
+            'Mobile Auth',
+            'Flutter App Login',
+            'info',
+            "User {$user->email} logged in to Flutter app {$app->name} from device {$deviceName}",
+            'User',
+            $user->id,
+            null,
+            ['app' => $app->app_identifier, 'device' => $deviceName],
+            null,
+            $user,
+            $request
+        );
+
+        return response()->json([
+            'success' => true,
+            'message' => "Authenticated successfully with {$app->name}.",
+            'token' => $token,
+            'token_type' => 'Bearer',
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'phone' => $user->phone,
+                'status' => $user->status ?? 'active',
+                'roles' => $user->roles->pluck('name'),
+                'permissions' => $user->resolvePermissions()->pluck('name'),
+                'company_id' => $user->company_id,
+                'branch_id' => $user->branch_id,
+            ],
+            'app' => [
+                'name' => $app->name,
+                'identifier' => $app->app_identifier,
+                'category' => $app->category,
+                'platform' => $app->platform,
+                'settings' => $app->settings ?: (object)[],
+            ],
+            'ota' => $versionStatus,
+            'server' => [
+                'name' => config('app.name', 'RaptorERP'),
+                'version' => '1.2.3',
+                'timestamp' => now()->toIso8601String(),
+            ],
+        ]);
+    }
+
+    /**
+     * Flutter App Authenticated Profile & Live Permissions.
+     * GET /api/v1/apps/{identifier}/profile
+     */
+    public function profile(Request $request, string $identifier)
+    {
+        $app = ConnectedApp::where('app_identifier', $identifier)->first();
+        if (!$app) {
+            return response()->json(['success' => false, 'message' => 'App not registered.'], 404);
+        }
+
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(['success' => false, 'message' => 'Unauthenticated.'], 401);
+        }
+
+        if ($user->isBanned()) {
+            $user->tokens()->delete();
+            return response()->json([
+                'success' => false,
+                'error' => 'ACCOUNT_BANNED',
+                'message' => 'Your account has been banned or suspended.',
+            ], 403);
+        }
+
+        $app->update(['last_sync_at' => now()]);
+
+        return response()->json([
+            'success' => true,
+            'user' => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'email' => $user->email,
+                'phone' => $user->phone,
+                'status' => $user->status ?? 'active',
+                'roles' => $user->roles->pluck('name'),
+                'permissions' => $user->resolvePermissions()->pluck('name'),
+                'company_id' => $user->company_id,
+                'branch_id' => $user->branch_id,
+            ],
+            'app_settings' => $app->settings ?: (object)[],
+            'app_maintenance' => (bool) $app->maintenance_mode,
+        ]);
+    }
+
+    /**
+     * Flutter App Logout & Revoke Current Device Token.
+     * POST /api/v1/apps/{identifier}/logout
+     */
+    public function logout(Request $request, string $identifier)
+    {
+        $user = $request->user();
+        if ($user && $user->currentAccessToken()) {
+            $user->currentAccessToken()->delete();
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Logged out successfully from Flutter mobile app.',
         ]);
     }
 

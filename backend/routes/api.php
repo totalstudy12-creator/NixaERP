@@ -130,9 +130,11 @@ Route::post('/webhooks/whatsapp', [WhatsAppWebhookController::class, 'handle'])-
 Route::post('/webhooks/twilio/notification-status', [NotificationController::class, 'twilioStatus'])->middleware('throttle:120,1');
 Route::get('marketing/gbp-locations',                   [MarketingController::class, 'gbpLocations']);
 
-/* ========================== FLUTTER APPS — public handshake =============== */
-Route::get('v1/apps/{identifier}/handshake', [ConnectedAppController::class, 'handshake']);
-Route::post('v1/apps/{identifier}/ping',     [ConnectedAppController::class, 'ping']);
+/* ========================== FLUTTER APPS — public handshake, OTA & auth =============== */
+Route::get('v1/apps/{identifier}/handshake',    [ConnectedAppController::class, 'handshake']);
+Route::get('v1/apps/{identifier}/check-update', [ConnectedAppController::class, 'checkUpdate']);
+Route::post('v1/apps/{identifier}/ping',        [ConnectedAppController::class, 'ping']);
+Route::post('v1/apps/{identifier}/login',       [ConnectedAppController::class, 'login'])->middleware('throttle:30,1');
 
 /* =========================================================================
  |  PROTECTED — auth:sanctum + RBAC
@@ -271,7 +273,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Users
     Route::get('users',                           [UserAccessController::class, 'users'])->middleware('permission:view users');
-    Route::get('users/{userId}',                  [UserAccessController::class, 'showUser'])->middleware('permission:view users');
+    Route::get('users/banned',                    [UserAccessController::class, 'bannedUsers'])->middleware('permission:view users');
+    Route::get('users/{userId}',                  [UserAccessController::class, 'showUser'])->whereNumber('userId')->middleware('permission:view users');
     Route::post('users',                          [UserAccessController::class, 'storeUser'])->middleware('permission:create users');
     Route::put('users/{userId}',                  [UserAccessController::class, 'updateUser'])->middleware('permission:edit users');
     Route::delete('users/{userId}',               [UserAccessController::class, 'destroyUser'])->middleware('permission:delete users');
@@ -747,6 +750,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('apps/launcher', [ConnectedAppController::class, 'launcher']);
     Route::apiResource('connected-apps', ConnectedAppController::class)->middleware('permission:view settings');
     Route::post('connected-apps/{app}/regenerate-token', [ConnectedAppController::class, 'regenerateToken'])->middleware('permission:edit settings');
+    Route::get('v1/apps/{identifier}/profile', [ConnectedAppController::class, 'profile']);
+    Route::post('v1/apps/{identifier}/logout', [ConnectedAppController::class, 'logout']);
 
     /* ---------------------- Security Firewall & Sessions --------------- */
     Route::prefix('security')->group(function () {

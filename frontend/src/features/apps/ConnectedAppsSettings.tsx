@@ -1,5 +1,5 @@
 // src/features/apps/ConnectedAppsSettings.tsx
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   FiSmartphone,
   FiPlus,
@@ -21,6 +21,11 @@ import {
   FiX,
   FiClock,
   FiCheckCircle,
+  FiUploadCloud,
+  FiCode,
+  FiPlay,
+  FiShield,
+  FiDownload,
 } from 'react-icons/fi';
 
 import { apiClient } from '../../api';
@@ -73,16 +78,36 @@ export function ConnectedAppsSettings() {
   const [revealedKeys, setRevealedKeys] = useState<Record<number, boolean>>({});
   const [copiedKeyId, setCopiedKeyId] = useState<number | null>(null);
 
-  // Modal State
+  // Add / Edit Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingApp, setEditingApp] = useState<ConnectedAppItem | null>(null);
   const [formSubmitting, setFormSubmitting] = useState(false);
+
+  // OTA Quick Deployment Modal State
+  const [otaModalApp, setOtaModalApp] = useState<ConnectedAppItem | null>(null);
+  const [otaForm, setOtaForm] = useState({
+    current_version: '',
+    min_supported_version: '',
+    force_update: false,
+    apk_download_url: '',
+    release_notes: '',
+  });
+  const [otaSubmitting, setOtaSubmitting] = useState(false);
+
+  // Interactive OTA Simulator State
+  const [simulatorApp, setSimulatorApp] = useState<ConnectedAppItem | null>(null);
+  const [simulatingVersion, setSimulatingVersion] = useState('1.0.0');
+  const [simulatorLoading, setSimulatorLoading] = useState(false);
+  const [simulatorResult, setSimulatorResult] = useState<any>(null);
+
+  // Flutter Code Integration Modal State
+  const [codeGuideApp, setCodeGuideApp] = useState<ConnectedAppItem | null>(null);
 
   // Test Handshake State
   const [testingHandshakeId, setTestingHandshakeId] = useState<string | null>(null);
   const [handshakeResult, setHandshakeResult] = useState<{ identifier: string; data: unknown } | null>(null);
 
-  // Form State
+  // Create / Edit Form State
   const [formData, setFormData] = useState({
     name: '',
     app_identifier: '',
@@ -108,7 +133,7 @@ export function ConnectedAppsSettings() {
       if (Array.isArray(list)) {
         setApps(list);
       }
-    } catch (err) {
+    } catch {
       showError('Failed to load apps', 'Could not retrieve connected application registry.');
     } finally {
       setLoading(false);
@@ -201,8 +226,7 @@ export function ConnectedAppsSettings() {
   const handleRegenerateToken = async (app: ConnectedAppItem) => {
     if (!window.confirm(`Regenerate API token for '${app.name}'? Connected Flutter devices must update their token.`)) return;
     try {
-      const res = await apiClient.regenerateAppToken(app.id);
-      const data = (res as { api_key?: string })?.api_key ? res : (res as { data?: { api_key: string } })?.data;
+      await apiClient.regenerateAppToken(app.id);
       showSuccess('Token Regenerated', `New API key generated for ${app.name}.`);
       void loadApps();
     } catch {
@@ -210,6 +234,7 @@ export function ConnectedAppsSettings() {
     }
   };
 
+  // Quick Toggles
   const handleToggleMaintenance = async (app: ConnectedAppItem) => {
     const nextMode = !app.maintenance_mode;
     try {
@@ -223,6 +248,77 @@ export function ConnectedAppsSettings() {
       void loadApps();
     } catch {
       showError('Update failed', 'Could not change maintenance mode.');
+    }
+  };
+
+  const handleToggleForceUpdate = async (app: ConnectedAppItem) => {
+    const nextForce = !app.force_update;
+    try {
+      await apiClient.updateConnectedApp(app.id, { force_update: nextForce });
+      showSuccess('OTA Policy Updated', `Mandatory update ${nextForce ? 'ENFORCED' : 'OPTIONAL'} for ${app.name}.`);
+      void loadApps();
+    } catch {
+      showError('Update failed', 'Could not toggle force update policy.');
+    }
+  };
+
+  const handleToggleActive = async (app: ConnectedAppItem) => {
+    const nextActive = !app.is_active;
+    try {
+      await apiClient.updateConnectedApp(app.id, { is_active: nextActive });
+      showSuccess('Status Updated', `${app.name} is now ${nextActive ? 'ACTIVE' : 'DISABLED'}.`);
+      void loadApps();
+    } catch {
+      showError('Update failed', 'Could not change app status.');
+    }
+  };
+
+  // OTA Quick Deploy Modal
+  const openOtaDeployModal = (app: ConnectedAppItem) => {
+    setOtaModalApp(app);
+    setOtaForm({
+      current_version: app.current_version,
+      min_supported_version: app.min_supported_version,
+      force_update: Boolean(app.force_update),
+      apk_download_url: app.apk_download_url || '',
+      release_notes: app.release_notes || '',
+    });
+  };
+
+  const handleSaveOtaDeploy = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!otaModalApp) return;
+
+    setOtaSubmitting(true);
+    try {
+      await apiClient.updateConnectedApp(otaModalApp.id, otaForm);
+      showSuccess('OTA Deployed', `Version ${otaForm.current_version} published for ${otaModalApp.name}!`);
+      setOtaModalApp(null);
+      void loadApps();
+    } catch (err: any) {
+      showError('Deployment failed', err?.backendMessage || err?.message || 'Could not deploy OTA update.');
+    } finally {
+      setOtaSubmitting(false);
+    }
+  };
+
+  // OTA Simulator
+  const openSimulator = (app: ConnectedAppItem) => {
+    setSimulatorApp(app);
+    setSimulatingVersion('1.0.0');
+    setSimulatorResult(null);
+    void runSimulation(app.app_identifier, '1.0.0');
+  };
+
+  const runSimulation = async (identifier: string, version: string) => {
+    setSimulatorLoading(true);
+    try {
+      const res = await apiClient.checkAppOta(identifier, version);
+      setSimulatorResult(res);
+    } catch (err: any) {
+      setSimulatorResult(err?.response?.data || { error: 'Connection failed' });
+    } finally {
+      setSimulatorLoading(false);
     }
   };
 
@@ -291,16 +387,16 @@ export function ConnectedAppsSettings() {
         <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <span className="flex h-2 w-2 rounded-full bg-emerald-500" />
+              <span className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-600">
                 Flutter Mobile Ecosystem · RaptorERP v1.2.3
               </p>
             </div>
             <h2 className="text-xl font-bold text-slate-900">
-              Connected Applications &amp; Mobile Control Hub
+              Flutter Mobile Apps &amp; OTA Update Manager
             </h2>
             <p className="mt-1 text-xs text-slate-600 sm:text-sm">
-              Control and version-manage your 3 official Flutter mobile apps (<strong>Nixa WMS</strong>, <strong>Nixa AI Agent</strong>, <strong>Nixa Billing</strong>) and future custom applications.
+              Live control hub for <strong>Nixa WMS</strong>, <strong>Nixa AI Agent</strong>, and <strong>Nixa Billing POS</strong>. Push Over-The-Air (OTA) updates, toggle maintenance mode, enforce version upgrades, and test mobile client handshakes.
             </p>
           </div>
 
@@ -327,21 +423,21 @@ export function ConnectedAppsSettings() {
 
         {/* Quick Stats Pill */}
         <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <div className="rounded-xl border border-indigo-100 bg-white/80 p-3">
+          <div className="rounded-xl border border-indigo-100 bg-white/90 p-3">
             <p className="text-[10px] font-bold uppercase text-slate-400">Total Registered Apps</p>
             <p className="mt-0.5 text-lg font-bold text-slate-900">{apps.length}</p>
           </div>
-          <div className="rounded-xl border border-emerald-100 bg-white/80 p-3">
+          <div className="rounded-xl border border-emerald-100 bg-white/90 p-3">
             <p className="text-[10px] font-bold uppercase text-emerald-600">Active Flutter Apps</p>
             <p className="mt-0.5 text-lg font-bold text-emerald-700">{apps.filter((a) => a.is_active).length}</p>
           </div>
-          <div className="rounded-xl border border-amber-100 bg-white/80 p-3">
+          <div className="rounded-xl border border-amber-100 bg-white/90 p-3">
             <p className="text-[10px] font-bold uppercase text-amber-600">Under Maintenance</p>
             <p className="mt-0.5 text-lg font-bold text-amber-700">{apps.filter((a) => a.maintenance_mode).length}</p>
           </div>
-          <div className="rounded-xl border border-purple-100 bg-white/80 p-3">
-            <p className="text-[10px] font-bold uppercase text-purple-600">Framework Ready</p>
-            <p className="mt-0.5 text-xs font-bold text-purple-700">Flutter 3.x / Dart 3.x</p>
+          <div className="rounded-xl border border-rose-100 bg-white/90 p-3">
+            <p className="text-[10px] font-bold uppercase text-rose-600">Force OTA Enforced</p>
+            <p className="mt-0.5 text-lg font-bold text-rose-700">{apps.filter((a) => a.force_update).length}</p>
           </div>
         </div>
       </div>
@@ -408,7 +504,7 @@ export function ConnectedAppsSettings() {
                 key={app.id}
                 className={`flex flex-col justify-between overflow-hidden rounded-2xl border bg-white p-5 shadow-sm transition hover:shadow-md ${
                   !app.is_active
-                    ? 'border-slate-200 opacity-60'
+                    ? 'border-slate-200 opacity-60 bg-slate-50/50'
                     : app.maintenance_mode
                     ? 'border-amber-300 bg-amber-50/20'
                     : 'border-slate-200'
@@ -428,16 +524,23 @@ export function ConnectedAppsSettings() {
                     </div>
 
                     <div className="flex flex-col items-end gap-1">
-                      <Badge
-                        variant="outline"
-                        className={`text-[10px] font-semibold ${
-                          app.is_active
-                            ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-                            : 'border-slate-200 bg-slate-100 text-slate-500'
-                        }`}
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleActive(app)}
+                        className="cursor-pointer"
+                        title="Click to toggle active state"
                       >
-                        {app.is_active ? 'Active' : 'Disabled'}
-                      </Badge>
+                        <Badge
+                          variant="outline"
+                          className={`text-[10px] font-semibold transition ${
+                            app.is_active
+                              ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                              : 'border-slate-300 bg-slate-100 text-slate-600 hover:bg-slate-200'
+                          }`}
+                        >
+                          {app.is_active ? 'Active' : 'Disabled'}
+                        </Badge>
+                      </button>
                       {app.maintenance_mode && (
                         <Badge variant="outline" className="border-amber-200 bg-amber-50 text-[10px] text-amber-800">
                           Maintenance
@@ -451,24 +554,49 @@ export function ConnectedAppsSettings() {
                     {app.description || 'No description provided.'}
                   </p>
 
-                  {/* Version Control Badge Box */}
-                  <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-slate-700">Latest Release:</span>
+                  {/* Version Control & OTA Box */}
+                  <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50/80 p-3.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                        OTA Version Status
+                      </span>
+                      <Button
+                        size="sm"
+                        onClick={() => openOtaDeployModal(app)}
+                        className="h-6 rounded-md bg-indigo-600 px-2 text-[10px] font-semibold text-white hover:bg-indigo-700 shadow-sm"
+                      >
+                        <FiUploadCloud className="mr-1" size={11} /> Deploy OTA
+                      </Button>
+                    </div>
+
+                    <div className="flex items-center justify-between text-xs pt-1">
+                      <span className="text-slate-600">Latest Release:</span>
                       <span className="font-mono font-bold text-indigo-700">v{app.current_version}</span>
                     </div>
-                    <div className="mt-1 flex items-center justify-between text-[11px] text-slate-500">
-                      <span>Min Supported:</span>
-                      <span className="font-mono">v{app.min_supported_version}</span>
+
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-600">Min Supported:</span>
+                      <span className="font-mono text-slate-700">v{app.min_supported_version}</span>
                     </div>
-                    <div className="mt-1 flex items-center justify-between text-[11px] text-slate-500">
-                      <span>Force Update:</span>
-                      <span className={app.force_update ? 'font-bold text-rose-600' : 'text-slate-600'}>
-                        {app.force_update ? 'Enforced' : 'Optional'}
-                      </span>
+
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-600">Force Upgrade:</span>
+                      <button
+                        type="button"
+                        onClick={() => void handleToggleForceUpdate(app)}
+                        className={`rounded px-1.5 py-0.5 text-[10px] font-bold transition ${
+                          app.force_update
+                            ? 'bg-rose-100 text-rose-700 hover:bg-rose-200'
+                            : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
+                        }`}
+                        title="Click to toggle force update"
+                      >
+                        {app.force_update ? 'ENFORCED' : 'OPTIONAL'}
+                      </button>
                     </div>
+
                     {app.apk_download_url && (
-                      <div className="mt-2 pt-1 border-t border-slate-200/60 flex items-center justify-between text-[11px]">
+                      <div className="mt-2 pt-2 border-t border-slate-200 flex items-center justify-between text-[11px]">
                         <span className="text-slate-500">APK Package:</span>
                         <a
                           href={app.apk_download_url}
@@ -476,7 +604,7 @@ export function ConnectedAppsSettings() {
                           rel="noreferrer"
                           className="inline-flex items-center gap-1 font-semibold text-indigo-600 hover:underline"
                         >
-                          Download APK <FiExternalLink size={10} />
+                          <FiDownload size={11} /> Download Link
                         </a>
                       </div>
                     )}
@@ -485,7 +613,7 @@ export function ConnectedAppsSettings() {
                   {/* Security / API Key Box */}
                   <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50/70 p-3">
                     <div className="flex items-center justify-between text-[10px] font-bold uppercase text-slate-400">
-                      <span>Flutter Device Auth Key</span>
+                      <span>Device API Key</span>
                       <button
                         type="button"
                         onClick={() => setRevealedKeys((r) => ({ ...r, [app.id]: !r[app.id] }))}
@@ -539,20 +667,26 @@ export function ConnectedAppsSettings() {
 
                 {/* Bottom Actions */}
                 <div className="mt-5 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => void handleTestHandshake(app)}
-                      disabled={testingHandshakeId === app.app_identifier}
-                      className="h-8 rounded-lg text-xs font-semibold text-indigo-700 border-indigo-200 hover:bg-indigo-50"
-                      title="Test client sync with this app"
+                      onClick={() => openSimulator(app)}
+                      className="h-8 rounded-lg text-xs font-semibold text-emerald-700 border-emerald-200 hover:bg-emerald-50"
+                      title="Simulate OTA update check for this app"
                     >
-                      <FiActivity
-                        className={`mr-1 ${testingHandshakeId === app.app_identifier ? 'animate-spin' : ''}`}
-                        size={12}
-                      />
-                      Sync Test
+                      <FiPlay className="mr-1 text-emerald-600" size={11} />
+                      Simulate OTA
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setCodeGuideApp(app)}
+                      className="h-8 rounded-lg text-xs font-semibold text-slate-700 border-slate-200 hover:bg-slate-100"
+                      title="View Flutter/Dart Integration Code"
+                    >
+                      <FiCode className="mr-1 text-indigo-600" size={12} />
+                      Code Guide
                     </Button>
                     <Button
                       size="sm"
@@ -573,6 +707,15 @@ export function ConnectedAppsSettings() {
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
+                      onClick={() => void handleTestHandshake(app)}
+                      disabled={testingHandshakeId === app.app_identifier}
+                      className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-indigo-600"
+                      title="Test client sync with this app"
+                    >
+                      <FiActivity className={testingHandshakeId === app.app_identifier ? 'animate-spin' : ''} size={14} />
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => void handleRegenerateToken(app)}
                       className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
                       title="Regenerate API Token"
@@ -583,7 +726,7 @@ export function ConnectedAppsSettings() {
                       type="button"
                       onClick={() => openEditModal(app)}
                       className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-indigo-600"
-                      title="Edit Application"
+                      title="Edit Application Settings"
                     >
                       <FiEdit size={14} />
                     </button>
@@ -600,6 +743,328 @@ export function ConnectedAppsSettings() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* OTA Quick Deploy Modal */}
+      {otaModalApp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="grid h-8 w-8 place-items-center rounded-xl bg-indigo-50 text-indigo-600">
+                  <FiUploadCloud size={18} />
+                </span>
+                <div>
+                  <h3 className="font-bold text-slate-900">Deploy OTA Update — {otaModalApp.name}</h3>
+                  <p className="text-xs text-slate-500">Push version upgrade to all active mobile devices</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOtaModalApp(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100"
+              >
+                <FiX size={16} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveOtaDeploy} className="mt-4 space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs font-semibold text-slate-700">Latest Release Version *</label>
+                  <input
+                    type="text"
+                    required
+                    value={otaForm.current_version}
+                    onChange={(e) => setOtaForm({ ...otaForm, current_version: e.target.value })}
+                    placeholder="e.g. 1.2.4"
+                    className="mt-1 h-9 w-full rounded-xl border border-slate-200 px-3 font-mono text-xs text-slate-800 outline-none focus:border-indigo-400"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-700">Minimum Supported Version *</label>
+                  <input
+                    type="text"
+                    required
+                    value={otaForm.min_supported_version}
+                    onChange={(e) => setOtaForm({ ...otaForm, min_supported_version: e.target.value })}
+                    placeholder="e.g. 1.1.0"
+                    className="mt-1 h-9 w-full rounded-xl border border-slate-200 px-3 font-mono text-xs text-slate-800 outline-none focus:border-indigo-400"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-700">APK Package Download URL</label>
+                <input
+                  type="url"
+                  value={otaForm.apk_download_url}
+                  onChange={(e) => setOtaForm({ ...otaForm, apk_download_url: e.target.value })}
+                  placeholder="https://downloads.nixaerp.com/apps/nixa-v1.2.4.apk"
+                  className="mt-1 h-9 w-full rounded-xl border border-slate-200 px-3 text-xs text-slate-800 outline-none focus:border-indigo-400"
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-700">Release Notes / Changelog</label>
+                <textarea
+                  rows={3}
+                  value={otaForm.release_notes}
+                  onChange={(e) => setOtaForm({ ...otaForm, release_notes: e.target.value })}
+                  placeholder="What's new in this build..."
+                  className="mt-1 w-full rounded-xl border border-slate-200 p-2.5 text-xs text-slate-800 outline-none focus:border-indigo-400"
+                />
+              </div>
+
+              <div className="rounded-xl border border-rose-100 bg-rose-50/60 p-3">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={otaForm.force_update}
+                    onChange={(e) => setOtaForm({ ...otaForm, force_update: e.target.checked })}
+                    className="h-4 w-4 rounded border-rose-300 text-rose-600 focus:ring-rose-500"
+                  />
+                  <div>
+                    <span className="text-xs font-bold text-rose-900">Enforce Mandatory Upgrade (Kill-Switch)</span>
+                    <p className="text-[11px] text-rose-700">
+                      Devices running older versions will be blocked with a modal until they download the new APK.
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setOtaModalApp(null)}
+                  className="rounded-xl text-xs"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={otaSubmitting}
+                  className="rounded-xl bg-indigo-600 px-5 text-xs font-semibold text-white hover:bg-indigo-700"
+                >
+                  {otaSubmitting ? 'Publishing...' : 'Deploy OTA Upgrade'}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Interactive OTA Simulator Modal */}
+      {simulatorApp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="grid h-8 w-8 place-items-center rounded-xl bg-emerald-50 text-emerald-600">
+                  <FiPlay size={16} />
+                </span>
+                <div>
+                  <h3 className="font-bold text-slate-900">OTA Simulator — {simulatorApp.name}</h3>
+                  <p className="text-xs text-slate-500">Test how Flutter devices experience update policies</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSimulatorApp(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100"
+              >
+                <FiX size={16} />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-700">Simulate Client App Version:</label>
+                <div className="mt-1 flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={simulatingVersion}
+                    onChange={(e) => setSimulatingVersion(e.target.value)}
+                    placeholder="e.g. 1.0.0"
+                    className="h-9 w-40 rounded-xl border border-slate-200 px-3 font-mono text-xs text-slate-800 outline-none focus:border-indigo-400"
+                  />
+                  <Button
+                    size="sm"
+                    onClick={() => void runSimulation(simulatorApp.app_identifier, simulatingVersion)}
+                    disabled={simulatorLoading}
+                    className="h-9 rounded-xl bg-emerald-600 px-4 text-xs font-semibold text-white hover:bg-emerald-700"
+                  >
+                    <FiRefreshCw className={`mr-1.5 ${simulatorLoading ? 'animate-spin' : ''}`} size={12} />
+                    Run Simulation
+                  </Button>
+                </div>
+              </div>
+
+              {/* Simulation Result Preview */}
+              {simulatorResult && (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <p className="text-xs font-bold uppercase text-slate-500 mb-2">Simulated Flutter Device UI Experience</p>
+
+                  {simulatorResult?.ota?.is_force_update ? (
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-rose-900">
+                      <div className="flex items-center gap-2 font-bold text-sm text-rose-800">
+                        <FiAlertTriangle /> BLOCKING MODAL: Mandatory Update Required
+                      </div>
+                      <p className="mt-1 text-xs">
+                        The app prevents all operations until user updates from <strong>v{simulatingVersion}</strong> to <strong>v{simulatorResult.ota.current_version}</strong>.
+                      </p>
+                      {simulatorResult.ota.apk_download_url && (
+                        <a
+                          href={simulatorResult.ota.apk_download_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-3 inline-flex items-center gap-1 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm"
+                        >
+                          <FiDownload size={13} /> Download Update APK
+                        </a>
+                      )}
+                    </div>
+                  ) : simulatorResult?.ota?.is_update_available ? (
+                    <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4 text-indigo-900">
+                      <div className="flex items-center gap-2 font-bold text-sm text-indigo-800">
+                        <FiCheckCircle /> OPTIONAL BANNER: Update Available
+                      </div>
+                      <p className="mt-1 text-xs">
+                        User can continue using the app normally, but an update banner notifies them that <strong>v{simulatorResult.ota.current_version}</strong> is ready.
+                      </p>
+                      {simulatorResult.ota.release_notes && (
+                        <p className="mt-2 text-[11px] italic text-indigo-700">
+                          Changelog: {simulatorResult.ota.release_notes}
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-900">
+                      <div className="flex items-center gap-2 font-bold text-sm text-emerald-800">
+                        <FiCheckCircle /> UP TO DATE: Normal Seamless Sync
+                      </div>
+                      <p className="mt-1 text-xs">
+                        Client is on the latest build (v{simulatingVersion}). No update prompts are triggered.
+                      </p>
+                    </div>
+                  )}
+
+                  <details className="mt-3">
+                    <summary className="cursor-pointer text-[11px] font-semibold text-slate-500 hover:text-slate-800">
+                      View Raw JSON Payload
+                    </summary>
+                    <pre className="mt-2 max-h-48 overflow-y-auto rounded-lg bg-slate-900 p-3 font-mono text-[11px] text-emerald-400">
+                      {JSON.stringify(simulatorResult, null, 2)}
+                    </pre>
+                  </details>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-4 flex justify-end">
+              <Button size="sm" onClick={() => setSimulatorApp(null)} className="rounded-xl bg-slate-900 text-white">
+                Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Flutter Integration Code Guide Modal */}
+      {codeGuideApp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="grid h-8 w-8 place-items-center rounded-xl bg-indigo-50 text-indigo-600">
+                  <FiCode size={18} />
+                </span>
+                <div>
+                  <h3 className="font-bold text-slate-900">Flutter Client Integration — {codeGuideApp.name}</h3>
+                  <p className="text-xs text-slate-500">API connection endpoints and Dart client snippet</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCodeGuideApp(null)}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100"
+              >
+                <FiX size={16} />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+              {/* Endpoint Table */}
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-1.5 text-xs font-mono">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Handshake:</span>
+                  <span className="text-indigo-700 font-bold">GET /api/v1/apps/{codeGuideApp.app_identifier}/handshake</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">OTA Check:</span>
+                  <span className="text-indigo-700 font-bold">GET /api/v1/apps/{codeGuideApp.app_identifier}/check-update</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Login:</span>
+                  <span className="text-emerald-700 font-bold">POST /api/v1/apps/{codeGuideApp.app_identifier}/login</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Profile:</span>
+                  <span className="text-blue-700 font-bold">GET /api/v1/apps/{codeGuideApp.app_identifier}/profile</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Heartbeat:</span>
+                  <span className="text-slate-700 font-bold">POST /api/v1/apps/{codeGuideApp.app_identifier}/ping</span>
+                </div>
+              </div>
+
+              {/* Dart Snippet */}
+              <div>
+                <p className="text-xs font-semibold text-slate-700 mb-1.5">Dart / Flutter HTTP Client Example:</p>
+                <pre className="rounded-xl bg-slate-900 p-4 font-mono text-xs text-emerald-400 overflow-x-auto">
+{`import 'dart:convert';
+import 'package:http/http.dart' as http;
+
+class RaptorApiClient {
+  static const String baseUrl = '${window.location.origin}/api';
+  static const String appSlug = '${codeGuideApp.app_identifier}';
+
+  // 1. Handshake & OTA Check
+  static Future<Map<String, dynamic>> checkOta(String version) async {
+    final res = await http.get(
+      Uri.parse('\$baseUrl/v1/apps/\$appSlug/check-update?version=\$version'),
+      headers: {'X-App-Version': version},
+    );
+    return jsonDecode(res.body);
+  }
+
+  // 2. Mobile Login (rejects banned users & unauthorized roles)
+  static Future<Map<String, dynamic>> login(String email, String password) async {
+    final res = await http.post(
+      Uri.parse('\$baseUrl/v1/apps/\$appSlug/login'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'email': email,
+        'password': password,
+        'device_name': 'Flutter Mobile',
+        'app_version': '${codeGuideApp.current_version}',
+      }),
+    );
+    return jsonDecode(res.body);
+  }
+}`}
+                </pre>
+              </div>
+            </div>
+
+            <div className="mt-4 flex justify-end">
+              <Button size="sm" onClick={() => setCodeGuideApp(null)} className="rounded-xl bg-slate-900 text-white">
+                Done
+              </Button>
+            </div>
+          </div>
         </div>
       )}
 

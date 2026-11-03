@@ -244,6 +244,24 @@ class UserAccessController extends Controller
      * inside serializeUser(). This avoids the `addEagerConstraints`
      * clash with the User model's Collection-returning resolver.
      */
+    public function bannedUsers(Request $request): JsonResponse
+    {
+        $users = User::with(['roles', 'banHistories.performer:id,name'])
+            ->whereIn('status', ['banned', 'suspended', 'inactive'])
+            ->orWhereNotNull('banned_at')
+            ->orderByDesc('banned_at')
+            ->get();
+
+        return response()->json([
+            'success' => true,
+            'data'    => $users->map(function (User $u) {
+                $serialized = $this->serializeUser($u);
+                $serialized['ban_history'] = $u->banHistories;
+                return $serialized;
+            }),
+        ]);
+    }
+
     public function users(): JsonResponse
     {
         $users = User::with('roles')->orderBy('name')->get();

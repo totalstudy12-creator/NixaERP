@@ -15,7 +15,7 @@ class PublicInvoiceController extends Controller
      */
     public function getMetadata(string $token)
     {
-        $invoice = Invoice::with(['company:id,name,email,phone,logo', 'customer:id,name,contact_no,phone'])
+        $invoice = Invoice::with(['company:id,name,email,phone,website,address,gst_number', 'customer:id,name,contact_no,phone'])
             ->where('public_token', $token)
             ->first();
 
@@ -37,12 +37,16 @@ class PublicInvoiceController extends Controller
             $maskedPhone = str_repeat('•', max(4, strlen($cleanPhone) - 4)) . $last4;
         }
 
+        $companyLogo = \App\Models\Setting::where('key', 'company_logo')->value('value')
+            ?: \App\Models\Setting::where('key', 'logo')->value('value')
+            ?: null;
+
         return response()->json([
             'success'               => true,
             'requires_verification' => true,
             'invoice_no'            => $invoice->invoice_no,
             'company_name'          => $invoice->company->name ?? 'NIXA ERP',
-            'company_logo'          => $invoice->company->logo ?? null,
+            'company_logo'          => $companyLogo,
             'masked_mobile'         => $maskedPhone,
             'invoice_date'          => $invoice->invoice_date,
             'payment_status'        => $invoice->payment_status ?? $invoice->status,
