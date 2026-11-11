@@ -278,6 +278,35 @@ class PermissionCanonicalizer
         ],
 
         // ==========================================
+        // 2a. BACKUP & DISASTER RECOVERY
+        // ==========================================
+        'system.backups.view' => [
+            'group'       => 'Backup and Disaster Recovery',
+            'label'       => 'View Backup Center',
+            'description' => 'Inspect automated backup statuses, schedules, Google Drive storage quotas, and run history',
+        ],
+        'system.backups.create' => [
+            'group'       => 'Backup and Disaster Recovery',
+            'label'       => 'Execute Backups',
+            'description' => 'Trigger manual or on-demand encrypted database and files backups to Google Drive',
+        ],
+        'system.backups.restore' => [
+            'group'       => 'Backup and Disaster Recovery',
+            'label'       => 'Restore Backups',
+            'description' => 'Execute disaster recovery database and asset restoration workflows',
+        ],
+        'system.backups.delete' => [
+            'group'       => 'Backup and Disaster Recovery',
+            'label'       => 'Prune and Delete Backups',
+            'description' => 'Delete remote backup artifacts or trigger retention pruning policies',
+        ],
+        'system.backups.settings' => [
+            'group'       => 'Backup and Disaster Recovery',
+            'label'       => 'Manage Backup Settings',
+            'description' => 'Configure Google Drive OAuth integration, retention rules, and alerts',
+        ],
+
+        // ==========================================
         // 2b. SECURITY FIREWALL & ACCESS CONTROL
         // ==========================================
         'security.view' => [
@@ -819,6 +848,65 @@ class PermissionCanonicalizer
         ],
 
         // ==========================================
+        // 8C. CASH DRAWER MANAGEMENT
+        // ==========================================
+        'finance.cash_drawer.view' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'View Cash Drawers',
+            'description' => 'Browse cash drawers, active sessions, and cash balances',
+        ],
+        'finance.cash_drawer.create' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'Create Cash Drawers',
+            'description' => 'Register and configure new cash drawers for branches',
+        ],
+        'finance.cash_drawer.open' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'Open Cash Drawer Session',
+            'description' => 'Count denominations and open daily cash drawer sessions',
+        ],
+        'finance.cash_drawer.close' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'Close Cash Drawer Session',
+            'description' => 'Count closing cash and submit daily register closing reconciliation',
+        ],
+        'finance.cash_drawer.cash_in' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'Record Cash In',
+            'description' => 'Enter cash-in receipts, customer cash, and cash float deposits',
+        ],
+        'finance.cash_drawer.cash_out' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'Record Cash Out',
+            'description' => 'Enter cash-out disbursements, staff expenses, and cash payments',
+        ],
+        'finance.cash_drawer.transfer' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'Transfer Cash',
+            'description' => 'Initiate, receive, and confirm inter-drawer and cross-branch cash transfers',
+        ],
+        'finance.cash_drawer.adjust' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'Adjust Cash Balance',
+            'description' => 'Perform authorized opening and closing cash adjustments with audit trail',
+        ],
+        'finance.cash_drawer.approve' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'Approve Cash Discrepancies',
+            'description' => 'Review and approve closing cash shortage or excess discrepancies',
+        ],
+        'finance.cash_drawer.report' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'Cash Drawer Reports',
+            'description' => 'Inspect daily cash book, cashier summaries, differences, and export logs',
+        ],
+        'finance.cash_drawer.manage' => [
+            'group'       => 'Cash Drawer',
+            'label'       => 'Full Cash Drawer Management',
+            'description' => 'Full administrative control over cash drawers, sessions, and settings',
+        ],
+
+        // ==========================================
         // 9. HR & PAYROLL
         // ==========================================
         'employees.view' => [
@@ -920,6 +1008,155 @@ class PermissionCanonicalizer
             'label'       => 'Manage AI Providers',
             'description' => 'Configure Gemini API keys and fallback models',
         ],
+
+        // ==========================================
+        // DELIVERY & LOGISTICS MANAGEMENT
+        // ==========================================
+        'delivery.orders.view' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'View Delivery Orders',
+            'description' => 'List and inspect invoice delivery orders, schedules, and customer addresses',
+        ],
+        'delivery.orders.create' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Create Delivery Order',
+            'description' => 'Create delivery orders linked to sales invoices',
+        ],
+        'delivery.orders.update' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Update Delivery Order',
+            'description' => 'Modify delivery destination address, contact, and instructions',
+        ],
+        'delivery.orders.schedule' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Schedule Delivery',
+            'description' => 'Assign expected delivery date and time slots',
+        ],
+        'delivery.orders.reschedule' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Reschedule Delivery',
+            'description' => 'Postpone or reschedule delivery orders',
+        ],
+        'delivery.orders.cancel' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Cancel Delivery',
+            'description' => 'Cancel pending delivery orders',
+        ],
+        'delivery.orders.confirm' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Confirm Delivery',
+            'description' => 'Record delivery confirmation, receiver proof, and partial delivery',
+        ],
+        'delivery.vehicles.view' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'View Vehicles',
+            'description' => 'List and inspect carrier vehicles, capacities, and availability',
+        ],
+        'delivery.vehicles.create' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Create Vehicle',
+            'description' => 'Register new delivery vehicles and carriers',
+        ],
+        'delivery.vehicles.update' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Update Vehicle',
+            'description' => 'Modify vehicle specifications, driver bindings, and maintenance status',
+        ],
+        'delivery.vehicles.manage' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Manage Vehicles',
+            'description' => 'Full administrative control over delivery vehicle fleet',
+        ],
+        'delivery.drivers.view' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'View Drivers',
+            'description' => 'List and inspect delivery drivers and availability',
+        ],
+        'delivery.drivers.manage' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Manage Drivers',
+            'description' => 'Register, update, and manage delivery drivers',
+        ],
+        'delivery.trips.view' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'View Trips',
+            'description' => 'Inspect multi-order vehicle trips and routes',
+        ],
+        'delivery.trips.create' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Create Trip',
+            'description' => 'Plan and combine multiple customer orders into a single vehicle trip',
+        ],
+        'delivery.trips.update' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Update Trip',
+            'description' => 'Modify trip details, route sequence, and assignments',
+        ],
+        'delivery.trips.assign_vehicle' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Assign Vehicle & Driver',
+            'description' => 'Allocate carrier vehicles and drivers to delivery trips',
+        ],
+        'delivery.trips.dispatch' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Dispatch Trip',
+            'description' => 'Authorize and record departure of loaded vehicle on road',
+        ],
+        'delivery.trips.close' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Close Trip',
+            'description' => 'Finalize completed trip and release vehicle and driver',
+        ],
+        'delivery.routes.view' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'View Routes',
+            'description' => 'View map routes, area groupings, and stops',
+        ],
+        'delivery.routes.manage' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Manage Routes',
+            'description' => 'Reorder stops and configure delivery routes',
+        ],
+        'delivery.loading.view' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'View Loading Checklist',
+            'description' => 'View warehouse-wise product picking checklists for trips',
+        ],
+        'delivery.loading.manage' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Manage Loading',
+            'description' => 'Record picked quantities and godown picking checkpoints',
+        ],
+        'delivery.loading.confirm' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Confirm Loading',
+            'description' => 'Verify and finalize loading before vehicle dispatch',
+        ],
+        'delivery.costs.view' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'View Transport Costs',
+            'description' => 'View trip transportation costs and invoice-wise allocations',
+        ],
+        'delivery.costs.manage' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Manage Transport Costs',
+            'description' => 'Allocate trip expenses proportionally or equally across orders',
+        ],
+        'delivery.costs.approve' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Approve Transport Costs',
+            'description' => 'Approve final transportation cost allocations',
+        ],
+        'delivery.reports.view' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'View Delivery Reports',
+            'description' => 'Access delivery performance, vehicle utilization, and trip analytics',
+        ],
+        'delivery.reports.export' => [
+            'group'       => 'Logistics & Delivery',
+            'label'       => 'Export Delivery Reports',
+            'description' => 'Export logistics and delivery reports to CSV / Excel',
+        ],
     ];
 
     /**
@@ -1000,6 +1237,22 @@ class PermissionCanonicalizer
         'export audit logs'             => 'audit_logs.export',
         'manage audit logs'             => 'audit_logs.export',
 
+        // --- Backup & Disaster Recovery ---
+        'backup.view'                   => 'system.backups.view',
+        'view backups'                  => 'system.backups.view',
+        'backups.view'                  => 'system.backups.view',
+        'backup.create'                 => 'system.backups.create',
+        'create backups'                => 'system.backups.create',
+        'backups.create'                => 'system.backups.create',
+        'backup.restore'                => 'system.backups.restore',
+        'restore backups'               => 'system.backups.restore',
+        'backups.restore'               => 'system.backups.restore',
+        'backup.download'               => 'system.backups.view',
+        'backup.delete'                 => 'system.backups.delete',
+        'delete backups'                => 'system.backups.delete',
+        'backups.delete'                => 'system.backups.delete',
+        'backup.settings'               => 'system.backups.settings',
+        'manage backup settings'        => 'system.backups.settings',
         // --- Companies & Branches ---
         'view companies'                => 'companies.view',
         'create companies'              => 'companies.create',
@@ -1140,6 +1393,19 @@ class PermissionCanonicalizer
         'approve cash closings'         => 'banking.cash_closing.approve',
         'view reconciliation rules'     => 'banking.rules.view',
         'manage reconciliation rules'   => 'banking.rules.manage',
+
+        // --- Cash Drawer Aliases ---
+        'view cash drawers'             => 'finance.cash_drawer.view',
+        'create cash drawers'           => 'finance.cash_drawer.create',
+        'open cash drawer'              => 'finance.cash_drawer.open',
+        'close cash drawer'             => 'finance.cash_drawer.close',
+        'cash in'                       => 'finance.cash_drawer.cash_in',
+        'cash out'                      => 'finance.cash_drawer.cash_out',
+        'transfer cash'                 => 'finance.cash_drawer.transfer',
+        'adjust cash drawer'            => 'finance.cash_drawer.adjust',
+        'approve cash discrepancies'    => 'finance.cash_drawer.approve',
+        'view cash drawer reports'      => 'finance.cash_drawer.report',
+        'manage cash drawers'           => 'finance.cash_drawer.manage',
     ];
 
     /**

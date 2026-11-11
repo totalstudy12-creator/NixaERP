@@ -105,7 +105,7 @@ class ProductController extends Controller
             'company_id'     => 'required|exists:companies,id',
             'branch_id'      => 'nullable|exists:branches,id',
             'name'           => 'required|string|max:255',
-            'sku'            => 'required|string|max:100|unique:products,sku',
+            'sku'            => 'nullable|string|max:100|unique:products,sku',
             'barcode'        => 'nullable|string|max:100|unique:products,barcode',
             'qr_code'        => 'nullable|string|max:255',
             'brand'          => 'nullable|string|max:255',
@@ -120,6 +120,9 @@ class ProductController extends Controller
             'warehouse_id'   => 'nullable|exists:warehouses,id',
         ]);
 
+        if (empty($data['sku'])) {
+            $data['sku'] = Product::generateUniqueSku($data['name'] ?? null);
+        }
         if (empty($data['barcode'])) {
             $data['barcode'] = Product::generateUniqueBarcode();
         }
@@ -995,17 +998,15 @@ class ProductController extends Controller
 
             // ✅ AUTO-CREATE the missing stock row (quantity 0) — no more 404
             if (!$stock) {
-                $stock = ProductWarehouseStock::create([
-                    'product_id'         => $product->id,
-                    'warehouse_id'       => $data['warehouse_id'],
-                    'company_id'         => $product->company_id,
-                    'branch_id'          => $product->branch_id,
-                    'quantity'           => 0,
-                    'reserved_quantity'  => 0,
-                    'available_quantity' => 0,
-                    'average_cost'       => $product->purchase_price ?? 0,
-                    'last_purchase_price'=> $product->purchase_price ?? 0,
-                ]);
+                $stock = ProductWarehouseStock::getOrCreateStock(
+                    $product->id,
+                    $data['warehouse_id'],
+                    $product->company_id,
+                    $product->branch_id
+                );
+                $stock->average_cost        = $product->purchase_price ?? 0;
+                $stock->last_purchase_price = $product->purchase_price ?? 0;
+                $stock->save();
                 // Re-fetch with lock so we own the row for the update below
                 $stock = ProductWarehouseStock::where('id', $stock->id)
                     ->lockForUpdate()
@@ -1205,17 +1206,18 @@ class ProductController extends Controller
     private function createInitialStock(Product $product, int $warehouseId)
     {
         DB::transaction(function () use ($product, $warehouseId) {
-            ProductWarehouseStock::create([
-                'product_id'         => $product->id,
-                'warehouse_id'       => $warehouseId,
-                'company_id'         => $product->company_id,
-                'branch_id'          => $product->branch_id,
-                'quantity'           => $product->stock_quantity,
-                'reserved_quantity'  => 0,
-                'available_quantity' => $product->stock_quantity,
-                'average_cost'       => $product->purchase_price,
-                'last_purchase_price'=> $product->purchase_price,
-            ]);
+            $whStock = ProductWarehouseStock::getOrCreateStock(
+                $product->id,
+                $warehouseId,
+                $product->company_id,
+                $product->branch_id
+            );
+            $whStock->quantity            = $product->stock_quantity;
+            $whStock->reserved_quantity   = 0;
+            $whStock->available_quantity  = $product->stock_quantity;
+            $whStock->average_cost        = $product->purchase_price;
+            $whStock->last_purchase_price = $product->purchase_price;
+            $whStock->save();
 
             StockMovement::create([
                 'product_id'       => $product->id,
@@ -1249,16 +1251,13 @@ class ProductController extends Controller
         if (!$warehouse) {
             $defaultWarehouse = Warehouse::first();
             if (!$defaultWarehouse) return;
-            $warehouse = ProductWarehouseStock::create([
-                'product_id'         => $product->id,
-                'warehouse_id'       => $defaultWarehouse->id,
-                'company_id'         => $product->company_id,
-                'branch_id'          => $product->branch_id,
-                'quantity'           => 0,
-                'reserved_quantity'  => 0,
-                'available_quantity' => 0,
-                'average_cost'       => 0,
-            ]);
+            $warehouse = ProductWarehouseStock::getOrCreateStock(
+                $product->id,
+                $defaultWarehouse->id,
+                $product->company_id,
+                $product->branch_id
+            );
+            $warehouse->save();
         }
 
         DB::transaction(function () use ($product, $warehouse, $qty, $type, $refType, $remark) {
@@ -1462,6 +1461,18 @@ class ProductController extends Controller
             'success'       => true,
             'message'       => "Successfully updated {$updatedCount} products.",
             'updated_count' => $updatedCount,
+        ]);
+    }
+
+    public function generateSku(Request $request)
+    {
+        $name = $request->query('name');
+        $prefix = $request->query('prefix', 'PRD');
+        $sku = Product::generateUniqueSku($name, $prefix);
+
+        return response()->json([
+            'success' => true,
+            'sku'     => $sku,
         ]);
     }
 

@@ -27,6 +27,10 @@ import {
   AlertTriangle,
   Loader2,
   Info,
+  Truck,
+  ShoppingBag,
+  Boxes,
+  UserCircle,
 } from 'lucide-react';
 import { apiClient } from '../api';
 import { useAuthStore } from '../store/auth';
@@ -35,7 +39,7 @@ import { useAuthStore } from '../store/auth';
  * Types
  * ========================================================== */
 interface QuotationLineItem {
-  uid: string; // stable client-side key
+  uid: string;
   product_id?: number | null;
   item_name: string;
   description?: string;
@@ -51,6 +55,8 @@ interface QuotationLineItem {
   sku?: string;
 }
 
+type CustomerType = 'customer' | 'dealer' | 'distributor';
+
 interface MetaState {
   quotation_number: string;
   company_id: string;
@@ -65,6 +71,7 @@ interface MetaState {
   pan: string;
   quotation_date: string;
   valid_until: string;
+  estimated_delivery_date: string;
   status: string;
   notes: string;
   terms_and_conditions: string;
@@ -79,22 +86,66 @@ interface ChargesState {
 type FieldErrors = Partial<Record<keyof MetaState | 'items', string>>;
 
 /* ============================================================
- * Constants
+ * Limits
  * ========================================================== */
+const LIMITS = {
+  quotationNumberMin: 1,
+  quotationNumberMax: 40,
+  nameMin: 1,
+  nameMax: 200,
+  descriptionMax: 500,
+  notesMax: 2000,
+  addressMax: 500,
+  cityMax: 100,
+  stateMax: 100,
+  contactPersonMax: 100,
+  skuMax: 50,
+  hsnMin: 2,
+  hsnMax: 8,
+  pincodeMin: 4,
+  pincodeMax: 10,
+  phoneMin: 7,
+  phoneMax: 20,
+  emailMax: 120,
+  gstinLength: 15,
+  panLength: 10,
+  quantityMin: 0.01,
+  quantityMax: 1_000_000,
+  unitPriceMin: 0,
+  unitPriceMax: 100_000_000,
+  discountMin: 0,
+  discountMax: 100,
+  taxMin: 0,
+  taxMax: 100,
+  stockMin: 0,
+  stockMax: 10_000_000,
+  chargesMin: 0,
+  chargesMax: 10_000_000,
+  roundOffMin: -10_000,
+  roundOffMax: 10_000,
+} as const;
+
 const GST_SLABS = [0, 5, 12, 18, 28] as const;
 
 const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const PHONE_REGEX = /^[+]?[\d\s\-()]{7,20}$/;
+const QUOTATION_NUMBER_REGEX = /^[A-Z0-9\-_/]{1,40}$/;
 
-const MAX_TEXT = 500;
-const MAX_NOTES = 2000;
+const MAX_TEXT = LIMITS.nameMax;
+const MAX_NOTES = LIMITS.notesMax;
 const PRODUCT_SELECT_LIMIT = 500;
 const SEARCH_DEBOUNCE_MS = 250;
 
+const UNIT_OPTIONS = [
+  'Piece', 'Box', 'Kg', 'Gram', 'Liter', 'Milliliter', 'Meter',
+  'Centimeter', 'Pack', 'Set', 'Carton', 'Bag', 'Bottle', 'Dozen',
+  'Bundle', 'Roll', 'Sheet', 'Drum', 'Pallet', 'Hour', 'Day',
+] as const;
+
 /* ============================================================
- * Utility (stable, outside component)
+ * Utility
  * ========================================================== */
 const newUid = () =>
   `li_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -125,34 +176,126 @@ const safeNum = (v: unknown): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
+/**
+ * Coerce a GST slab value while preserving a legitimate 0.
+ * Returns fallback ONLY when the raw value is truly missing/invalid.
+ */
+const coerceGstSlab = (raw: unknown, fallback = 18): number => {
+  if (raw === null || raw === undefined || raw === '') return fallback;
+  const n = typeof raw === 'number' ? raw : parseFloat(String(raw));
+  if (!Number.isFinite(n) || n < 0 || n > 100) return fallback;
+  // If it's exactly one of the standard slabs, use it verbatim
+  if ((GST_SLABS as readonly number[]).includes(n)) return n;
+  return n; // keep custom slab values (e.g. 7) as-is
+};
+
+/** Coerce quantity — defaults ONLY when missing/invalid, NOT when 0. */
+const coerceQuantity = (raw: unknown, fallback = 1): number => {
+  if (raw === null || raw === undefined || raw === '') return fallback;
+  const n = typeof raw === 'number' ? raw : parseFloat(String(raw));
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+};
+
+/** Coerce numeric value with fallback that also preserves 0. */
+const coerceNumeric = (raw: unknown, fallback = 0): number => {
+  if (raw === null || raw === undefined || raw === '') return fallback;
+  const n = typeof raw === 'number' ? raw : parseFloat(String(raw));
+  return Number.isFinite(n) ? n : fallback;
+};
+
 const clampStr = (v: unknown, max: number): string =>
   String(v ?? '').slice(0, max);
 
-const pickProductPrice = (p: any): number =>
-  safeNum(p?.sale_price ?? p?.price ?? p?.unit_price ?? p?.selling_price ?? 0);
+const clampNum = (v: number, min: number, max: number): number => {
+  if (!Number.isFinite(v)) return min;
+  return Math.min(Math.max(v, min), max);
+};
 
-const pickProductTax = (p: any): number => safeNum(p?.tax_rate ?? 18);
+const digitsOnly = (v: string): string => v.replace(/\D/g, '');
+const phoneSafe = (v: string): string => v.replace(/[^\d+\s\-()]/g, '');
+const upperOnly = (v: string): string => v.toUpperCase();
+const alnumUpper = (v: string): string =>
+  v.toUpperCase().replace(/[^A-Z0-9\-_/]/g, '');
+
+const pickProductPrice = (p: any): number => {
+  const raw = p?.sale_price ?? p?.price ?? p?.unit_price ?? p?.selling_price;
+  return coerceNumeric(raw, 0);
+};
+
+/** Product tax — preserves 0%, only defaults to 18 when field is absent/invalid. */
+const pickProductTax = (p: any): number => {
+  const raw = p?.tax_rate ?? p?.gst_rate ?? p?.gst_slab;
+  return coerceGstSlab(raw, 18);
+};
 
 const pickProductHsn = (p: any): string =>
   String(p?.hsn_code ?? p?.hsn_sac_code ?? '');
+
+const todayISO = (offsetDays = 0) => {
+  const d = new Date();
+  if (offsetDays) d.setDate(d.getDate() + offsetDays);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 /* ============================================================
  * Validation
  * ========================================================== */
 function validateMeta(meta: MetaState): FieldErrors {
   const e: FieldErrors = {};
-  if (!meta.quotation_number.trim()) e.quotation_number = 'Quotation number is required';
+
+  const qn = meta.quotation_number.trim();
+  if (!qn) e.quotation_number = 'Quotation number is required';
+  else if (qn.length < LIMITS.quotationNumberMin)
+    e.quotation_number = `Min ${LIMITS.quotationNumberMin} characters`;
+  else if (qn.length > LIMITS.quotationNumberMax)
+    e.quotation_number = `Max ${LIMITS.quotationNumberMax} characters`;
+  else if (!QUOTATION_NUMBER_REGEX.test(qn))
+    e.quotation_number = 'Only A-Z, 0-9, -, _, / allowed';
+
   if (!meta.company_id) e.company_id = 'Company is required';
   if (!meta.branch_id) e.branch_id = 'Branch is required';
-  if (!meta.customer_name.trim()) e.customer_name = 'Customer name is required';
-  if (meta.customer_email && !EMAIL_REGEX.test(meta.customer_email))
-    e.customer_email = 'Invalid email format';
-  if (meta.customer_phone && !PHONE_REGEX.test(meta.customer_phone))
-    e.customer_phone = 'Invalid phone format';
-  if (meta.gstin && !GSTIN_REGEX.test(meta.gstin.toUpperCase()))
-    e.gstin = 'Invalid GSTIN (15 chars, e.g. 27AAAAA0000A1Z5)';
-  if (meta.pan && !PAN_REGEX.test(meta.pan.toUpperCase()))
-    e.pan = 'Invalid PAN (10 chars, e.g. ABCDE1234F)';
+
+  const cn = meta.customer_name.trim();
+  if (!cn) e.customer_name = 'Customer name is required';
+  else if (cn.length < LIMITS.nameMin)
+    e.customer_name = `Min ${LIMITS.nameMin} character`;
+  else if (cn.length > LIMITS.nameMax)
+    e.customer_name = `Max ${LIMITS.nameMax} characters`;
+
+  if (meta.customer_email) {
+    if (meta.customer_email.length > LIMITS.emailMax)
+      e.customer_email = `Max ${LIMITS.emailMax} characters`;
+    else if (!EMAIL_REGEX.test(meta.customer_email))
+      e.customer_email = 'Invalid email format';
+  }
+
+  if (meta.customer_phone) {
+    const digits = digitsOnly(meta.customer_phone);
+    if (digits.length < LIMITS.phoneMin)
+      e.customer_phone = `Min ${LIMITS.phoneMin} digits`;
+    else if (meta.customer_phone.length > LIMITS.phoneMax)
+      e.customer_phone = `Max ${LIMITS.phoneMax} characters`;
+    else if (!PHONE_REGEX.test(meta.customer_phone))
+      e.customer_phone = 'Invalid phone format';
+  }
+
+  if (meta.gstin) {
+    if (meta.gstin.length !== LIMITS.gstinLength)
+      e.gstin = `GSTIN must be ${LIMITS.gstinLength} characters`;
+    else if (!GSTIN_REGEX.test(meta.gstin.toUpperCase()))
+      e.gstin = 'Invalid GSTIN format';
+  }
+
+  if (meta.pan) {
+    if (meta.pan.length !== LIMITS.panLength)
+      e.pan = `PAN must be ${LIMITS.panLength} characters`;
+    else if (!PAN_REGEX.test(meta.pan.toUpperCase()))
+      e.pan = 'Invalid PAN format';
+  }
+
+  if (meta.billing_address && meta.billing_address.length > LIMITS.addressMax)
+    e.billing_address = `Max ${LIMITS.addressMax} characters`;
+
   if (!meta.quotation_date) e.quotation_date = 'Date is required';
   if (
     meta.valid_until &&
@@ -160,6 +303,18 @@ function validateMeta(meta: MetaState): FieldErrors {
     new Date(meta.valid_until) < new Date(meta.quotation_date)
   )
     e.valid_until = 'Valid-until must be on or after quotation date';
+  if (
+    meta.estimated_delivery_date &&
+    meta.quotation_date &&
+    new Date(meta.estimated_delivery_date) < new Date(meta.quotation_date)
+  )
+    e.estimated_delivery_date = 'Delivery date cannot be before quotation date';
+
+  if (meta.notes && meta.notes.length > LIMITS.notesMax)
+    e.notes = `Max ${LIMITS.notesMax} characters`;
+  if (meta.terms_and_conditions && meta.terms_and_conditions.length > LIMITS.notesMax)
+    e.terms_and_conditions = `Max ${LIMITS.notesMax} characters`;
+
   return e;
 }
 
@@ -167,15 +322,33 @@ function validateItems(items: QuotationLineItem[]): string | null {
   if (items.length === 0) return 'At least one line item is required';
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
-    if (!it.item_name.trim()) return `Row ${i + 1}: item name is required`;
-    if (!Number.isFinite(it.quantity) || it.quantity <= 0)
-      return `Row ${i + 1}: quantity must be greater than 0`;
-    if (it.unit_price < 0) return `Row ${i + 1}: rate cannot be negative`;
-    if (it.discount_percent < 0 || it.discount_percent > 100)
-      return `Row ${i + 1}: discount must be between 0 and 100`;
-    if (it.hsn_code && it.hsn_code.length > 8)
-      return `Row ${i + 1}: HSN code looks too long`;
+    const name = it.item_name.trim();
+    if (!name) return `Row ${i + 1}: item name is required`;
+    if (name.length > LIMITS.nameMax)
+      return `Row ${i + 1}: item name max ${LIMITS.nameMax} characters`;
+    if (!Number.isFinite(it.quantity) || it.quantity < LIMITS.quantityMin)
+      return `Row ${i + 1}: quantity must be ≥ ${LIMITS.quantityMin}`;
+    if (it.quantity > LIMITS.quantityMax)
+      return `Row ${i + 1}: quantity max ${LIMITS.quantityMax.toLocaleString()}`;
+    if (it.unit_price < LIMITS.unitPriceMin)
+      return `Row ${i + 1}: rate cannot be negative`;
+    if (it.unit_price > LIMITS.unitPriceMax)
+      return `Row ${i + 1}: rate max ${LIMITS.unitPriceMax.toLocaleString()}`;
+    if (it.discount_percent < LIMITS.discountMin || it.discount_percent > LIMITS.discountMax)
+      return `Row ${i + 1}: discount must be between ${LIMITS.discountMin} and ${LIMITS.discountMax}`;
+    if (it.hsn_code && it.hsn_code.length > LIMITS.hsnMax)
+      return `Row ${i + 1}: HSN/SAC max ${LIMITS.hsnMax} digits`;
   }
+  return null;
+}
+
+function validateCharges(charges: ChargesState): string | null {
+  if (charges.shipping_charges < LIMITS.chargesMin || charges.shipping_charges > LIMITS.chargesMax)
+    return `Shipping must be between ${LIMITS.chargesMin} and ${LIMITS.chargesMax.toLocaleString()}`;
+  if (charges.other_charges < LIMITS.chargesMin || charges.other_charges > LIMITS.chargesMax)
+    return `Other charges must be between ${LIMITS.chargesMin} and ${LIMITS.chargesMax.toLocaleString()}`;
+  if (charges.round_off < LIMITS.roundOffMin || charges.round_off > LIMITS.roundOffMax)
+    return `Round off must be between ${LIMITS.roundOffMin} and ${LIMITS.roundOffMax}`;
   return null;
 }
 
@@ -205,7 +378,6 @@ export function CreateQuotationPage() {
   const isEditing = Boolean(id);
   const user = useAuthStore((s) => s.user);
 
-  /* ---- Loading / saving / errors ---- */
   const [loadingInitial, setLoadingInitial] = useState(isEditing);
   const [saving, setSaving] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
@@ -219,13 +391,11 @@ export function CreateQuotationPage() {
     }, 4500);
   }, []);
 
-  /* ---- Auxiliary lists ---- */
   const [branches, setBranches] = useState<any[]>([]);
   const [companies, setCompanies] = useState<any[]>([]);
   const [customers, setCustomers] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
 
-  /* ---- Split state: meta / items / charges (perf) ---- */
   const [meta, setMeta] = useState<MetaState>(() => ({
     quotation_number: '',
     company_id: (user as any)?.company_id ? String((user as any).company_id) : '',
@@ -238,15 +408,9 @@ export function CreateQuotationPage() {
     shipping_address: '',
     gstin: '',
     pan: '',
-    quotation_date: (() => {
-      const d = new Date();
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    })(),
-    valid_until: (() => {
-      const d = new Date();
-      d.setDate(d.getDate() + 30);
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    })(),
+    quotation_date: todayISO(),
+    valid_until: todayISO(30),
+    estimated_delivery_date: todayISO(7),
     status: 'draft',
     notes: '',
     terms_and_conditions:
@@ -259,11 +423,14 @@ export function CreateQuotationPage() {
     round_off: 0,
   });
 
-  /* ---- Quick Customer Creation Modal ---- */
   const [showCustomerModal, setShowCustomerModal] = useState(false);
   const [customerSubmitting, setCustomerSubmitting] = useState(false);
   const [newCustomerForm, setNewCustomerForm] = useState({
+    type: 'customer' as CustomerType,
+    company_id: '',
+    branch_id: '',
     name: '',
+    contact_person: '',
     phone: '',
     email: '',
     gst_number: '',
@@ -274,10 +441,11 @@ export function CreateQuotationPage() {
     billing_pincode: '',
   });
 
-  /* ---- Quick Product Creation Modal ---- */
   const [showProductModal, setShowProductModal] = useState(false);
   const [productSubmitting, setProductSubmitting] = useState(false);
   const [newProductForm, setNewProductForm] = useState({
+    company_id: '',
+    branch_id: '',
     name: '',
     sku: '',
     unit: 'Piece',
@@ -288,7 +456,6 @@ export function CreateQuotationPage() {
     description: '',
   });
 
-  /* ---- Dirty tracking ---- */
   const snapshotRef = useRef<string>('');
   useEffect(() => {
     if (!loadingInitial) {
@@ -301,7 +468,6 @@ export function CreateQuotationPage() {
     return JSON.stringify({ meta, items, charges }) !== snapshotRef.current;
   }, [meta, items, charges]);
 
-  /* ---- beforeunload ---- */
   useEffect(() => {
     if (!isDirty || saving) return;
     const handler = (e: BeforeUnloadEvent) => {
@@ -312,7 +478,6 @@ export function CreateQuotationPage() {
     return () => window.removeEventListener('beforeunload', handler);
   }, [isDirty, saving]);
 
-  /* ---- Load auxiliary data ---- */
   useEffect(() => {
     const controller = new AbortController();
     (async () => {
@@ -361,7 +526,13 @@ export function CreateQuotationPage() {
     return () => controller.abort();
   }, [isEditing, pushToast]);
 
-  /* ---- Load quotation for edit ---- */
+  /* ----------------------------------------------------------
+   * LOAD QUOTATION FOR EDIT
+   * ----------------------------------------------------------
+   * FIX: uses coerceGstSlab / coerceQuantity so a saved 0% GST
+   * (or a fractional qty) is preserved instead of being replaced
+   * by the fallback (18% / 1) due to `0 || 18` short-circuit.
+   * -------------------------------------------------------- */
   useEffect(() => {
     if (!id) return;
     const controller = new AbortController();
@@ -391,14 +562,15 @@ export function CreateQuotationPage() {
           pan: q.pan || '',
           quotation_date: q.quotation_date?.slice(0, 10) || '',
           valid_until: q.valid_until?.slice(0, 10) || '',
+          estimated_delivery_date: q.estimated_delivery_date?.slice(0, 10) || '',
           status: q.status || 'draft',
           notes: q.notes || '',
           terms_and_conditions: q.terms_and_conditions || '',
         });
         setCharges({
-          shipping_charges: safeNum(q.shipping_charges),
-          other_charges: safeNum(q.other_charges),
-          round_off: safeNum(q.round_off),
+          shipping_charges: coerceNumeric(q.shipping_charges, 0),
+          other_charges: coerceNumeric(q.other_charges, 0),
+          round_off: coerceNumeric(q.round_off, 0),
         });
         setItems(
           (q.items || []).map((it: any) => ({
@@ -407,11 +579,13 @@ export function CreateQuotationPage() {
             item_name: it.item_name || '',
             description: it.description || '',
             hsn_code: it.hsn_code || '',
-            quantity: safeNum(it.quantity) || 1,
-            unit_price: safeNum(it.unit_price),
-            discount_percent: safeNum(it.discount_percent),
-            discount_amount: safeNum(it.discount_amount),
-            gst_slab: safeNum(it.gst_slab) || 18,
+            // FIXED — preserves 0 qty and fractional qty; falls back to 1 only when absent
+            quantity: coerceQuantity(it.quantity, 1),
+            unit_price: coerceNumeric(it.unit_price, 0),
+            discount_percent: coerceNumeric(it.discount_percent, 0),
+            discount_amount: coerceNumeric(it.discount_amount, 0),
+            // FIXED — preserves 0% GST; falls back to 18 only when absent/invalid
+            gst_slab: coerceGstSlab(it.gst_slab, 18),
             is_inter_state: Boolean(it.is_inter_state),
           })),
         );
@@ -427,7 +601,6 @@ export function CreateQuotationPage() {
     return () => controller.abort();
   }, [id, navigate, pushToast]);
 
-  /* ---- Stable updaters ---- */
   const updateMeta = useCallback(<K extends keyof MetaState>(key: K, value: MetaState[K]) => {
     setMeta((prev) => ({ ...prev, [key]: value }));
     setFieldErrors((prev) => (prev[key] ? { ...prev, [key]: undefined } : prev));
@@ -449,13 +622,12 @@ export function CreateQuotationPage() {
     setItems((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== idx)));
   }, []);
 
-  /* ---- Customer search state ---- */
+  /* ---- Customer search ---- */
   const [customerSearch, setCustomerSearch] = useState('');
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   const [customerHighlightIndex, setCustomerHighlightIndex] = useState(-1);
   const customerDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Close customer dropdown on outside click
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (customerDropdownRef.current && !customerDropdownRef.current.contains(e.target as Node)) {
@@ -466,12 +638,9 @@ export function CreateQuotationPage() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // Filter customers by name, phone, email, gstin, city, code
   const filteredCustomers = useMemo(() => {
     const q = customerSearch.trim().toLowerCase();
-    if (!q) {
-      return customers.slice(0, 15);
-    }
+    if (!q) return customers.slice(0, 15);
     return customers
       .filter((c) => {
         const name = (c.name || '').toLowerCase();
@@ -480,19 +649,20 @@ export function CreateQuotationPage() {
         const gstin = (c.gst_number || c.gstin || '').toLowerCase();
         const city = (c.billing_city || c.city || '').toLowerCase();
         const code = (c.customer_code || c.code || '').toLowerCase();
+        const contact = (c.contact_person || '').toLowerCase();
         return (
           name.includes(q) ||
           phone.includes(q) ||
           email.includes(q) ||
           gstin.includes(q) ||
           city.includes(q) ||
-          code.includes(q)
+          code.includes(q) ||
+          contact.includes(q)
         );
       })
       .slice(0, 25);
   }, [customers, customerSearch]);
 
-  // Synchronize customer search text when meta.customer_id is set
   useEffect(() => {
     if (meta.customer_id && customers.length > 0) {
       const c = customers.find((cust) => String(cust.id) === String(meta.customer_id));
@@ -540,20 +710,56 @@ export function CreateQuotationPage() {
     setShowCustomerDropdown(false);
   }, [updateMeta]);
 
-  /* ---- Customer fast-select fallback ---- */
-  const handleCustomerSelect = useCallback(
-    (customerIdStr: string) => {
-      if (!customerIdStr) {
-        handleClearCustomer();
-        return;
-      }
-      const cust = customers.find((c) => String(c.id) === customerIdStr);
-      if (cust) {
-        handleSelectCustomer(cust);
-      }
-    },
-    [customers, handleClearCustomer, handleSelectCustomer],
-  );
+  const branchesForCustomerModal = useMemo(() => {
+    if (!newCustomerForm.company_id) return branches;
+    const list = branches.filter(
+      (b) => !b.company_id || String(b.company_id) === String(newCustomerForm.company_id),
+    );
+    return list.length > 0 ? list : branches;
+  }, [branches, newCustomerForm.company_id]);
+
+  const branchesForProductModal = useMemo(() => {
+    if (!newProductForm.company_id) return branches;
+    const list = branches.filter(
+      (b) => !b.company_id || String(b.company_id) === String(newProductForm.company_id),
+    );
+    return list.length > 0 ? list : branches;
+  }, [branches, newProductForm.company_id]);
+
+  const openCustomerModal = useCallback(() => {
+    setNewCustomerForm({
+      type: 'customer',
+      company_id: meta.company_id || (companies[0]?.id ? String(companies[0].id) : ''),
+      branch_id: meta.branch_id || '',
+      name: '',
+      contact_person: '',
+      phone: '',
+      email: '',
+      gst_number: '',
+      pan: '',
+      billing_street: '',
+      billing_city: '',
+      billing_state: '',
+      billing_pincode: '',
+    });
+    setShowCustomerModal(true);
+  }, [meta.company_id, meta.branch_id, companies]);
+
+  const openProductModal = useCallback((prefillName?: string) => {
+    setNewProductForm({
+      company_id: meta.company_id || (companies[0]?.id ? String(companies[0].id) : ''),
+      branch_id: meta.branch_id || '',
+      name: prefillName ?? '',
+      sku: `PRD-${Date.now().toString(36).toUpperCase()}`,
+      unit: 'Piece',
+      sale_price: '',
+      hsn_sac_code: '',
+      tax_rate: '18',
+      stock_quantity: '0',
+      description: '',
+    });
+    setShowProductModal(true);
+  }, [meta.company_id, meta.branch_id, companies]);
 
   const handleCreateCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -561,13 +767,38 @@ export function CreateQuotationPage() {
       pushToast('error', 'Customer name is required');
       return;
     }
-    const resolvedCompanyId = meta.company_id || (companies.length > 0 ? String(companies[0].id) : '1');
+    if (!newCustomerForm.company_id) {
+      pushToast('error', 'Company is required');
+      return;
+    }
+    if (newCustomerForm.email && !EMAIL_REGEX.test(newCustomerForm.email)) {
+      pushToast('error', 'Invalid email format');
+      return;
+    }
+    if (newCustomerForm.phone) {
+      const digits = digitsOnly(newCustomerForm.phone);
+      if (digits.length < LIMITS.phoneMin) {
+        pushToast('error', `Phone must be at least ${LIMITS.phoneMin} digits`);
+        return;
+      }
+    }
+    if (newCustomerForm.gst_number && !GSTIN_REGEX.test(newCustomerForm.gst_number)) {
+      pushToast('error', 'Invalid GSTIN format');
+      return;
+    }
+    if (newCustomerForm.pan && !PAN_REGEX.test(newCustomerForm.pan)) {
+      pushToast('error', 'Invalid PAN format');
+      return;
+    }
+
     setCustomerSubmitting(true);
     try {
       const payload: any = {
-        company_id: Number(resolvedCompanyId),
-        branch_id: meta.branch_id ? Number(meta.branch_id) : null,
+        company_id: Number(newCustomerForm.company_id),
+        branch_id: newCustomerForm.branch_id ? Number(newCustomerForm.branch_id) : null,
+        type: newCustomerForm.type || 'customer',
         name: newCustomerForm.name.trim(),
+        contact_person: newCustomerForm.contact_person.trim() || null,
         phone: newCustomerForm.phone.trim() || null,
         contact_no: newCustomerForm.phone.trim() || null,
         email: newCustomerForm.email.trim() || null,
@@ -577,25 +808,16 @@ export function CreateQuotationPage() {
         billing_city: newCustomerForm.billing_city.trim() || null,
         billing_state: newCustomerForm.billing_state.trim() || null,
         billing_pincode: newCustomerForm.billing_pincode.trim() || null,
-        status: 'active',
+        is_active: true,
       };
       const res: any = await apiClient.createCustomer(payload);
       const created = res?.data || res;
       setCustomers((prev) => [created, ...prev]);
       handleSelectCustomer(created);
       setShowCustomerModal(false);
-      setNewCustomerForm({
-        name: '',
-        phone: '',
-        email: '',
-        gst_number: '',
-        pan: '',
-        billing_street: '',
-        billing_city: '',
-        billing_state: '',
-        billing_pincode: '',
-      });
-      pushToast('success', `Customer "${created.name}" created and selected!`);
+      const label = newCustomerForm.type === 'dealer' ? 'Dealer' :
+        newCustomerForm.type === 'distributor' ? 'Distributor' : 'Customer';
+      pushToast('success', `${label} "${created.name}" created and selected!`);
     } catch (err: any) {
       pushToast('error', err?.message || 'Failed to create customer');
     } finally {
@@ -603,7 +825,7 @@ export function CreateQuotationPage() {
     }
   };
 
-  /* ---- Product fast-add from search ---- */
+  /* Uses pickProductTax → preserves 0% on any product */
   const handleSelectProductFromSearch = useCallback((prod: any) => {
     if (!prod) return;
     const row: QuotationLineItem = {
@@ -619,7 +841,7 @@ export function CreateQuotationPage() {
       gst_slab: pickProductTax(prod),
       is_inter_state: false,
       stock_quantity: prod.stock_quantity ?? 0,
-      unit: prod.unit || 'pcs',
+      unit: prod.unit || 'Piece',
       sku: prod.sku || '',
     };
     setItems((prev) => {
@@ -644,23 +866,45 @@ export function CreateQuotationPage() {
       pushToast('error', 'Product name is required');
       return;
     }
-    const resolvedCompanyId = meta.company_id || (companies.length > 0 ? String(companies[0].id) : '1');
-    const sku = newProductForm.sku.trim() || `PRD-${Date.now().toString(36).toUpperCase()}`;
+    if (!newProductForm.company_id) {
+      pushToast('error', 'Company is required');
+      return;
+    }
     const salePrice = safeNum(newProductForm.sale_price);
+    if (!Number.isFinite(salePrice) || salePrice < LIMITS.unitPriceMin) {
+      pushToast('error', 'Sale price must be a non-negative number');
+      return;
+    }
+    if (salePrice > LIMITS.unitPriceMax) {
+      pushToast('error', `Sale price max ${LIMITS.unitPriceMax.toLocaleString()}`);
+      return;
+    }
+    const taxRate = safeNum(newProductForm.tax_rate);
+    if (taxRate < LIMITS.taxMin || taxRate > LIMITS.taxMax) {
+      pushToast('error', 'Tax rate must be between 0 and 100');
+      return;
+    }
+    const stock = parseInt(newProductForm.stock_quantity || '0', 10);
+    if (!Number.isFinite(stock) || stock < LIMITS.stockMin || stock > LIMITS.stockMax) {
+      pushToast('error', `Stock must be between ${LIMITS.stockMin} and ${LIMITS.stockMax.toLocaleString()}`);
+      return;
+    }
+
+    const sku = newProductForm.sku.trim() || `PRD-${Date.now().toString(36).toUpperCase()}`;
 
     setProductSubmitting(true);
     try {
       const payload: any = {
-        company_id: Number(resolvedCompanyId),
-        branch_id: meta.branch_id ? Number(meta.branch_id) : null,
+        company_id: Number(newProductForm.company_id),
+        branch_id: newProductForm.branch_id ? Number(newProductForm.branch_id) : null,
         name: newProductForm.name.trim(),
         sku,
         unit: newProductForm.unit || 'Piece',
         sale_price: salePrice,
         purchase_price: 0,
-        tax_rate: safeNum(newProductForm.tax_rate),
+        tax_rate: taxRate,
         hsn_sac_code: newProductForm.hsn_sac_code.trim() || null,
-        stock_quantity: Math.max(0, parseInt(newProductForm.stock_quantity || '0', 10)),
+        stock_quantity: stock,
         description: newProductForm.description.trim() || null,
         active: true,
       };
@@ -668,16 +912,6 @@ export function CreateQuotationPage() {
       setProducts((prev) => [created, ...prev]);
       handleSelectProductFromSearch(created);
       setShowProductModal(false);
-      setNewProductForm({
-        name: '',
-        sku: '',
-        unit: 'Piece',
-        sale_price: '',
-        hsn_sac_code: '',
-        tax_rate: '18',
-        stock_quantity: '0',
-        description: '',
-      });
       pushToast('success', `Product "${created.name}" created and added to quotation!`);
     } catch (err: any) {
       pushToast('error', err?.message || 'Failed to create product');
@@ -686,7 +920,7 @@ export function CreateQuotationPage() {
     }
   };
 
-  /* ---- Product select inside a row ---- */
+  /* Uses pickProductTax → preserves 0% when selecting from catalog */
   const handleProductSelect = useCallback(
     (index: number, productIdStr: string) => {
       const pId = productIdStr ? Number(productIdStr) : null;
@@ -702,14 +936,13 @@ export function CreateQuotationPage() {
         hsn_code: pickProductHsn(prod),
         gst_slab: pickProductTax(prod),
         stock_quantity: prod.stock_quantity ?? 0,
-        unit: prod.unit || 'pcs',
+        unit: prod.unit || 'Piece',
         sku: prod.sku || '',
       });
     },
     [products, updateItem],
   );
 
-  /* ---- Debounced search ---- */
   const [catalogSearch, setCatalogSearch] = useState('');
   const [showDropdown, setShowDropdown] = useState(false);
   const [highlight, setHighlight] = useState(-1);
@@ -732,7 +965,6 @@ export function CreateQuotationPage() {
     return out;
   }, [products, debouncedQuery]);
 
-  /* ---- Branch filter ---- */
   const filteredBranches = useMemo(() => {
     if (!meta.company_id) return branches;
     const list = branches.filter(
@@ -741,7 +973,6 @@ export function CreateQuotationPage() {
     return list.length > 0 ? list : branches;
   }, [branches, meta.company_id]);
 
-  /* ---- Calculated totals (depends on items + charges only) ---- */
   const totals = useMemo(() => {
     let subtotal = 0;
     let discount = 0;
@@ -781,14 +1012,14 @@ export function CreateQuotationPage() {
     return { subtotal, discount, taxable, cgst, sgst, igst, tax, grand };
   }, [items, charges]);
 
-  /* ---- Save ---- */
   const handleSubmit = useCallback(
     async (targetStatus?: string) => {
       const mErr = validateMeta(meta);
       const itemErr = validateItems(items);
-      if (Object.keys(mErr).length > 0 || itemErr) {
+      const chargesErr = validateCharges(charges);
+      if (Object.keys(mErr).length > 0 || itemErr || chargesErr) {
         setFieldErrors({ ...mErr, ...(itemErr ? { items: itemErr } : {}) });
-        pushToast('error', itemErr || 'Please fix the highlighted fields.');
+        pushToast('error', itemErr || chargesErr || 'Please fix the highlighted fields.');
         window.scrollTo({ top: 0, behavior: 'smooth' });
         return;
       }
@@ -800,6 +1031,8 @@ export function CreateQuotationPage() {
           company_id: meta.company_id || companies[0]?.id || 1,
           branch_id: meta.branch_id ? Number(meta.branch_id) : null,
           status: targetStatus || meta.status || 'draft',
+          estimated_delivery_date: meta.estimated_delivery_date || null,
+          valid_until: meta.valid_until || null,
           shipping_charges: safeNum(charges.shipping_charges),
           other_charges: safeNum(charges.other_charges),
           round_off: safeNum(charges.round_off),
@@ -838,7 +1071,6 @@ export function CreateQuotationPage() {
     [meta, items, charges, companies, isEditing, id, navigate, pushToast],
   );
 
-  /* ---- Keyboard shortcut: Ctrl/Cmd+S ---- */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
@@ -850,7 +1082,6 @@ export function CreateQuotationPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [handleSubmit, saving]);
 
-  /* ---- Navigation guard for back button ---- */
   const handleBack = useCallback(() => {
     if (isDirty && !saving) {
       if (!window.confirm('You have unsaved changes. Discard and leave?')) return;
@@ -858,7 +1089,6 @@ export function CreateQuotationPage() {
     navigate('/quotations');
   }, [isDirty, saving, navigate]);
 
-  /* ---- Loading skeleton ---- */
   if (loadingInitial) {
     return (
       <div className="min-h-screen bg-slate-50/60 p-6">
@@ -874,7 +1104,6 @@ export function CreateQuotationPage() {
 
   return (
     <div className="min-h-screen bg-slate-50/60 pb-28">
-      {/* Toasts */}
       <div className="pointer-events-none fixed right-4 top-20 z-[60] flex w-full max-w-sm flex-col gap-2">
         {toasts.map((t) => (
           <div
@@ -906,7 +1135,6 @@ export function CreateQuotationPage() {
         ))}
       </div>
 
-      {/* Header */}
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
           <div className="flex min-w-0 items-center gap-3">
@@ -966,22 +1194,27 @@ export function CreateQuotationPage() {
       </header>
 
       <main className="mx-auto max-w-7xl space-y-6 px-4 py-6 sm:px-6">
-        {/* Section 1: Context */}
         <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <SectionHeading
             icon={<Building size={16} className="text-indigo-600" />}
             title="Quotation Context & Company / Branch"
             hint="Required fields marked *"
           />
-          <div className="grid gap-4 text-xs sm:grid-cols-2 lg:grid-cols-5">
+          <div className="grid gap-4 text-xs sm:grid-cols-2 lg:grid-cols-3">
             <Field label="Quotation Number *" error={fieldErrors.quotation_number}>
               <input
+                type="text"
                 value={meta.quotation_number}
                 onChange={(e) =>
-                  updateMeta('quotation_number', clampStr(e.target.value, 40).toUpperCase())
+                  updateMeta('quotation_number', alnumUpper(clampStr(e.target.value, LIMITS.quotationNumberMax)))
                 }
                 placeholder="QT-2026-0001"
                 className="field-input font-mono font-bold"
+                minLength={LIMITS.quotationNumberMin}
+                maxLength={LIMITS.quotationNumberMax}
+                pattern="[A-Za-z0-9\-_/]+"
+                autoComplete="off"
+                spellCheck={false}
               />
             </Field>
 
@@ -1000,12 +1233,11 @@ export function CreateQuotationPage() {
                   }));
                 }}
                 className="field-input"
+                required
               >
                 <option value="">-- Choose Company --</option>
                 {companies.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
+                  <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
               </select>
             </Field>
@@ -1015,6 +1247,7 @@ export function CreateQuotationPage() {
                 value={meta.branch_id}
                 onChange={(e) => updateMeta('branch_id', e.target.value)}
                 className="field-input"
+                required
               >
                 <option value="">-- Choose Branch --</option>
                 {filteredBranches.map((b) => (
@@ -1031,6 +1264,7 @@ export function CreateQuotationPage() {
                 value={meta.quotation_date}
                 onChange={(e) => updateMeta('quotation_date', e.target.value)}
                 className="field-input"
+                required
               />
             </Field>
 
@@ -1040,21 +1274,37 @@ export function CreateQuotationPage() {
                 value={meta.valid_until}
                 onChange={(e) => updateMeta('valid_until', e.target.value)}
                 className="field-input"
+                min={meta.quotation_date || undefined}
               />
+            </Field>
+
+            <Field label="Estimated Delivery Date" error={fieldErrors.estimated_delivery_date}>
+              <div className="relative">
+                <Truck
+                  size={14}
+                  className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                />
+                <input
+                  type="date"
+                  value={meta.estimated_delivery_date}
+                  onChange={(e) => updateMeta('estimated_delivery_date', e.target.value)}
+                  className="field-input pl-8"
+                  min={meta.quotation_date || undefined}
+                />
+              </div>
             </Field>
           </div>
         </section>
 
-        {/* Section 2: Customer */}
         <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex items-center justify-between">
             <SectionHeading icon={<User size={16} className="text-indigo-600" />} title="Customer & Billing" />
             <button
               type="button"
-              onClick={() => setShowCustomerModal(true)}
+              onClick={openCustomerModal}
               className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-semibold text-indigo-700 shadow-sm transition hover:bg-indigo-100"
             >
-              <Plus size={13} /> New Customer
+              <Plus size={13} /> New Customer / Dealer
             </button>
           </div>
           <div className="grid gap-4 text-xs sm:grid-cols-2 lg:grid-cols-4">
@@ -1066,7 +1316,7 @@ export function CreateQuotationPage() {
                     type="text"
                     value={customerSearch}
                     onChange={(e) => {
-                      setCustomerSearch(e.target.value);
+                      setCustomerSearch(clampStr(e.target.value, LIMITS.nameMax));
                       setShowCustomerDropdown(true);
                       setCustomerHighlightIndex(-1);
                       if (meta.customer_id && e.target.value !== meta.customer_name) {
@@ -1097,6 +1347,8 @@ export function CreateQuotationPage() {
                     }}
                     placeholder="Search customer by name, phone, email, GSTIN, city..."
                     className="field-input pl-8 pr-20"
+                    maxLength={LIMITS.nameMax}
+                    autoComplete="off"
                   />
 
                   <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
@@ -1118,11 +1370,10 @@ export function CreateQuotationPage() {
                   </div>
                 </div>
 
-                {/* Customer Search Dropdown */}
                 {showCustomerDropdown && (
                   <div className="absolute left-0 right-0 z-30 mt-1 max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl divide-y divide-slate-100">
                     <div className="bg-slate-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500 flex justify-between items-center">
-                      <span>Customer Directory ({filteredCustomers.length})</span>
+                      <span>Directory ({filteredCustomers.length})</span>
                       {customerSearch ? <span>Matches for &ldquo;{customerSearch}&rdquo;</span> : <span>Click to select</span>}
                     </div>
 
@@ -1137,6 +1388,12 @@ export function CreateQuotationPage() {
                         const phone = c.phone || c.contact_no || c.mobile;
                         const gstin = c.gst_number || c.gstin;
                         const city = c.billing_city || c.city;
+                        const typeLabel = c.type || 'customer';
+                        const typeBadge = typeLabel === 'dealer'
+                          ? 'bg-violet-100 text-violet-700'
+                          : typeLabel === 'distributor'
+                            ? 'bg-teal-100 text-teal-700'
+                            : 'bg-emerald-100 text-emerald-700';
 
                         return (
                           <div
@@ -1154,17 +1411,18 @@ export function CreateQuotationPage() {
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-2">
                                 <span className="font-semibold text-xs text-slate-900 truncate">{c.name}</span>
-                                {c.customer_group && (
-                                  <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-medium bg-slate-100 text-slate-600">
-                                    {c.customer_group}
-                                  </span>
-                                )}
+                                <span className={`inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-semibold capitalize ${typeBadge}`}>
+                                  {typeLabel}
+                                </span>
                                 {isSelected && (
                                   <span className="text-[10px] text-indigo-600 font-bold flex items-center gap-0.5">
                                     <CheckCircle size={10} /> Active
                                   </span>
                                 )}
                               </div>
+                              {c.contact_person && (
+                                <p className="text-[11px] text-slate-600 mt-0.5">👤 {c.contact_person}</p>
+                              )}
                               <div className="flex flex-wrap items-center gap-2 mt-0.5 text-[11px] text-slate-500">
                                 {phone && <span>📞 {phone}</span>}
                                 {c.email && <span>✉️ {c.email}</span>}
@@ -1187,62 +1445,97 @@ export function CreateQuotationPage() {
 
             <Field label="Customer Name *" error={fieldErrors.customer_name}>
               <input
+                type="text"
                 value={meta.customer_name}
-                onChange={(e) => updateMeta('customer_name', clampStr(e.target.value, MAX_TEXT))}
+                onChange={(e) => updateMeta('customer_name', clampStr(e.target.value, LIMITS.nameMax))}
                 placeholder="Full customer name"
                 className="field-input"
+                required
+                minLength={LIMITS.nameMin}
+                maxLength={LIMITS.nameMax}
+                autoComplete="name"
               />
             </Field>
 
             <Field label="Phone / WhatsApp" error={fieldErrors.customer_phone}>
               <input
+                type="tel"
+                inputMode="tel"
                 value={meta.customer_phone}
-                onChange={(e) => updateMeta('customer_phone', clampStr(e.target.value, 20))}
+                onChange={(e) =>
+                  updateMeta('customer_phone', phoneSafe(clampStr(e.target.value, LIMITS.phoneMax)))
+                }
                 placeholder="+91 98xxx xxxxx"
                 className="field-input"
+                minLength={LIMITS.phoneMin}
+                maxLength={LIMITS.phoneMax}
+                pattern="[+]?[0-9\s\-()]{7,20}"
+                autoComplete="tel"
               />
             </Field>
 
             <Field label="Email" error={fieldErrors.customer_email}>
               <input
                 type="email"
+                inputMode="email"
                 value={meta.customer_email}
-                onChange={(e) => updateMeta('customer_email', clampStr(e.target.value, 120))}
+                onChange={(e) => updateMeta('customer_email', clampStr(e.target.value, LIMITS.emailMax))}
                 placeholder="client@example.com"
                 className="field-input"
+                maxLength={LIMITS.emailMax}
+                autoComplete="email"
               />
             </Field>
 
             <Field label="GSTIN" error={fieldErrors.gstin}>
               <input
+                type="text"
                 value={meta.gstin}
-                onChange={(e) => updateMeta('gstin', e.target.value.toUpperCase().slice(0, 15))}
+                onChange={(e) =>
+                  updateMeta('gstin', upperOnly(alnumUpper(clampStr(e.target.value, LIMITS.gstinLength))))
+                }
                 placeholder="27AAAAA0000A1Z5"
                 className="field-input font-mono"
+                minLength={LIMITS.gstinLength}
+                maxLength={LIMITS.gstinLength}
+                pattern="[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]"
+                spellCheck={false}
               />
             </Field>
 
             <Field label="PAN" error={fieldErrors.pan}>
               <input
+                type="text"
                 value={meta.pan}
-                onChange={(e) => updateMeta('pan', e.target.value.toUpperCase().slice(0, 10))}
+                onChange={(e) =>
+                  updateMeta('pan', upperOnly(clampStr(e.target.value.replace(/[^A-Za-z0-9]/g, ''), LIMITS.panLength)))
+                }
                 placeholder="ABCDE1234F"
                 className="field-input font-mono"
+                minLength={LIMITS.panLength}
+                maxLength={LIMITS.panLength}
+                pattern="[A-Z]{5}[0-9]{4}[A-Z]"
+                spellCheck={false}
               />
             </Field>
 
-            <Field label="Billing Address" className="sm:col-span-2">
-              <input
+            <Field label="Billing Address" className="sm:col-span-2 lg:col-span-4">
+              <textarea
                 value={meta.billing_address}
-                onChange={(e) => updateMeta('billing_address', clampStr(e.target.value, MAX_TEXT))}
+                onChange={(e) => updateMeta('billing_address', clampStr(e.target.value, LIMITS.addressMax))}
                 placeholder="Street, city, state, pin"
-                className="field-input"
+                className="field-input resize-y py-2"
+                maxLength={LIMITS.addressMax}
+                rows={2}
+                autoComplete="street-address"
               />
+              <p className="mt-1 text-[10px] text-slate-400 text-right">
+                {meta.billing_address.length} / {LIMITS.addressMax}
+              </p>
             </Field>
           </div>
         </section>
 
-        {/* Section 3: Items */}
         <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="flex flex-col gap-3 border-b border-slate-100 pb-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-2">
@@ -1257,19 +1550,7 @@ export function CreateQuotationPage() {
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => {
-                  setNewProductForm({
-                    name: '',
-                    sku: `PRD-${Date.now().toString(36).toUpperCase()}`,
-                    unit: 'Piece',
-                    sale_price: '',
-                    hsn_sac_code: '',
-                    tax_rate: '18',
-                    stock_quantity: '0',
-                    description: '',
-                  });
-                  setShowProductModal(true);
-                }}
+                onClick={() => openProductModal()}
                 className="inline-flex items-center gap-1.5 self-start rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100 sm:self-auto"
               >
                 <Plus size={13} /> New Product
@@ -1290,7 +1571,6 @@ export function CreateQuotationPage() {
             </div>
           )}
 
-          {/* Catalog search */}
           <div className="relative">
             <div className="relative">
               <Search
@@ -1301,7 +1581,7 @@ export function CreateQuotationPage() {
                 type="text"
                 value={catalogSearch}
                 onChange={(e) => {
-                  setCatalogSearch(e.target.value);
+                  setCatalogSearch(clampStr(e.target.value, LIMITS.nameMax));
                   setShowDropdown(true);
                   setHighlight(-1);
                 }}
@@ -1334,6 +1614,8 @@ export function CreateQuotationPage() {
                 className="w-full rounded-xl border border-slate-300 bg-slate-50/60 py-2.5 pl-10 pr-10 text-xs shadow-inner transition focus:border-indigo-500 focus:bg-white focus:ring-2 focus:ring-indigo-100 md:text-sm"
                 aria-autocomplete="list"
                 aria-expanded={showDropdown}
+                maxLength={LIMITS.nameMax}
+                autoComplete="off"
               />
               {catalogSearch && (
                 <button
@@ -1362,17 +1644,7 @@ export function CreateQuotationPage() {
                     <button
                       type="button"
                       onClick={() => {
-                        setNewProductForm({
-                          name: catalogSearch.trim(),
-                          sku: `PRD-${Date.now().toString(36).toUpperCase()}`,
-                          unit: 'Piece',
-                          sale_price: '',
-                          hsn_sac_code: '',
-                          tax_rate: '18',
-                          stock_quantity: '0',
-                          description: '',
-                        });
-                        setShowProductModal(true);
+                        openProductModal(catalogSearch.trim());
                         setShowDropdown(false);
                       }}
                       className="mt-2 inline-flex items-center gap-1 font-semibold text-indigo-600 hover:underline"
@@ -1399,7 +1671,6 @@ export function CreateQuotationPage() {
             )}
           </div>
 
-          {/* Items table */}
           <div className="overflow-x-auto rounded-2xl border border-slate-200">
             <table className="w-full min-w-[900px] text-left text-xs">
               <thead className="bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
@@ -1433,28 +1704,35 @@ export function CreateQuotationPage() {
           </div>
         </section>
 
-        {/* Section 4: Notes + Summary */}
         <section className="grid gap-6 lg:grid-cols-2">
           <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
             <h2 className="text-sm font-bold text-slate-900">Terms &amp; Remarks</h2>
-            <Field label="Terms and Conditions">
+            <Field label="Terms and Conditions" error={fieldErrors.terms_and_conditions}>
               <textarea
                 rows={4}
                 value={meta.terms_and_conditions}
                 onChange={(e) =>
-                  updateMeta('terms_and_conditions', clampStr(e.target.value, MAX_NOTES))
+                  updateMeta('terms_and_conditions', clampStr(e.target.value, LIMITS.notesMax))
                 }
                 className="field-input resize-y py-2"
+                maxLength={LIMITS.notesMax}
               />
+              <p className="mt-1 text-[10px] text-slate-400 text-right">
+                {meta.terms_and_conditions.length} / {LIMITS.notesMax}
+              </p>
             </Field>
-            <Field label="Internal Notes">
+            <Field label="Internal Notes" error={fieldErrors.notes}>
               <textarea
                 rows={2}
                 value={meta.notes}
-                onChange={(e) => updateMeta('notes', clampStr(e.target.value, MAX_NOTES))}
+                onChange={(e) => updateMeta('notes', clampStr(e.target.value, LIMITS.notesMax))}
                 placeholder="Optional internal remarks"
                 className="field-input resize-y py-2"
+                maxLength={LIMITS.notesMax}
               />
+              <p className="mt-1 text-[10px] text-slate-400 text-right">
+                {meta.notes.length} / {LIMITS.notesMax}
+              </p>
             </Field>
           </div>
 
@@ -1474,18 +1752,24 @@ export function CreateQuotationPage() {
             <ChargeInput
               label="Shipping / Freight"
               value={charges.shipping_charges}
-              onChange={(v) => updateCharge('shipping_charges', v)}
+              onChange={(v) => updateCharge('shipping_charges', clampNum(v, LIMITS.chargesMin, LIMITS.chargesMax))}
+              min={LIMITS.chargesMin}
+              max={LIMITS.chargesMax}
             />
             <ChargeInput
               label="Packing & Other"
               value={charges.other_charges}
-              onChange={(v) => updateCharge('other_charges', v)}
+              onChange={(v) => updateCharge('other_charges', clampNum(v, LIMITS.chargesMin, LIMITS.chargesMax))}
+              min={LIMITS.chargesMin}
+              max={LIMITS.chargesMax}
             />
             <ChargeInput
               label="Round Off"
               value={charges.round_off}
-              onChange={(v) => updateCharge('round_off', v)}
+              onChange={(v) => updateCharge('round_off', clampNum(v, LIMITS.roundOffMin, LIMITS.roundOffMax))}
               allowNegative
+              min={LIMITS.roundOffMin}
+              max={LIMITS.roundOffMax}
             />
 
             <div className="flex items-center justify-between border-t-2 border-slate-900 pt-3 text-sm font-bold text-slate-900">
@@ -1496,7 +1780,6 @@ export function CreateQuotationPage() {
         </section>
       </main>
 
-      {/* Sticky bottom bar */}
       <div className="fixed bottom-0 left-0 right-0 z-30 border-t border-slate-200 bg-white/95 px-4 py-3 shadow-lg backdrop-blur">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
           <button
@@ -1528,14 +1811,15 @@ export function CreateQuotationPage() {
         </div>
       </div>
 
-      {/* Quick Customer Creation Modal */}
       {showCustomerModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
           <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto text-xs">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
                 <User className="text-indigo-600" size={18} />
-                <h3 className="text-sm font-bold text-slate-900">Add New Customer</h3>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Add New {newCustomerForm.type === 'dealer' ? 'Dealer' : newCustomerForm.type === 'distributor' ? 'Distributor' : 'Customer'}
+                </h3>
               </div>
               <button
                 type="button"
@@ -1548,34 +1832,146 @@ export function CreateQuotationPage() {
 
             <form onSubmit={handleCreateCustomer} className="space-y-3">
               <div>
-                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Customer / Company Name *</label>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">Type *</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { value: 'customer', label: 'Customer', icon: User },
+                      { value: 'dealer', label: 'Dealer', icon: ShoppingBag },
+                      { value: 'distributor', label: 'Distributor', icon: Boxes },
+                    ] as const
+                  ).map((opt) => {
+                    const Icon = opt.icon;
+                    const active = newCustomerForm.type === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={() => setNewCustomerForm((p) => ({ ...p, type: opt.value }))}
+                        className={`flex items-center justify-center gap-1.5 rounded-xl border px-3 py-2.5 text-xs font-semibold transition ${
+                          active
+                            ? 'border-indigo-500 bg-indigo-50 text-indigo-700 ring-2 ring-indigo-100'
+                            : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        <Icon size={13} />
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Company *</label>
+                  <select
+                    required
+                    value={newCustomerForm.company_id}
+                    onChange={(e) => {
+                      const compId = e.target.value;
+                      const matches = branches.filter(
+                        (b) => !b.company_id || String(b.company_id) === String(compId),
+                      );
+                      setNewCustomerForm((p) => ({
+                        ...p,
+                        company_id: compId,
+                        branch_id: matches.length > 0 ? String(matches[0].id) : '',
+                      }));
+                    }}
+                    className="field-input w-full"
+                  >
+                    <option value="">-- Choose Company --</option>
+                    {companies.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Branch</label>
+                  <select
+                    value={newCustomerForm.branch_id}
+                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, branch_id: e.target.value }))}
+                    className="field-input w-full"
+                  >
+                    <option value="">-- No Branch --</option>
+                    {branchesForCustomerModal.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} ({b.code || 'BR'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  {newCustomerForm.type === 'customer' ? 'Customer' : newCustomerForm.type === 'dealer' ? 'Dealer' : 'Distributor'} / Company Name *
+                </label>
                 <input
+                  type="text"
                   required
                   value={newCustomerForm.name}
-                  onChange={(e) => setNewCustomerForm((p) => ({ ...p, name: e.target.value }))}
+                  onChange={(e) => setNewCustomerForm((p) => ({ ...p, name: clampStr(e.target.value, LIMITS.nameMax) }))}
                   placeholder="e.g. Acme Enterprises Ltd."
                   className="field-input w-full"
+                  minLength={LIMITS.nameMin}
+                  maxLength={LIMITS.nameMax}
+                  autoComplete="organization"
                 />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                  Contact Person
+                </label>
+                <div className="relative">
+                  <UserCircle
+                    size={14}
+                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                  />
+                  <input
+                    type="text"
+                    value={newCustomerForm.contact_person}
+                    onChange={(e) =>
+                      setNewCustomerForm((p) => ({ ...p, contact_person: clampStr(e.target.value, LIMITS.contactPersonMax) }))
+                    }
+                    placeholder="e.g. Rahul Sharma (Manager)"
+                    className="field-input w-full pl-8"
+                    maxLength={LIMITS.contactPersonMax}
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">Phone / WhatsApp</label>
                   <input
+                    type="tel"
+                    inputMode="tel"
                     value={newCustomerForm.phone}
-                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, phone: e.target.value }))}
+                    onChange={(e) =>
+                      setNewCustomerForm((p) => ({ ...p, phone: phoneSafe(clampStr(e.target.value, LIMITS.phoneMax)) }))
+                    }
                     placeholder="9876543210"
                     className="field-input w-full"
+                    minLength={LIMITS.phoneMin}
+                    maxLength={LIMITS.phoneMax}
+                    pattern="[+]?[0-9\s\-()]{7,20}"
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">Email</label>
                   <input
                     type="email"
+                    inputMode="email"
                     value={newCustomerForm.email}
-                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, email: e.target.value }))}
+                    onChange={(e) =>
+                      setNewCustomerForm((p) => ({ ...p, email: clampStr(e.target.value, LIMITS.emailMax) }))
+                    }
                     placeholder="billing@acme.com"
                     className="field-input w-full"
+                    maxLength={LIMITS.emailMax}
                   />
                 </div>
               </div>
@@ -1584,19 +1980,39 @@ export function CreateQuotationPage() {
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">GSTIN</label>
                   <input
+                    type="text"
                     value={newCustomerForm.gst_number}
-                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, gst_number: e.target.value.toUpperCase() }))}
+                    onChange={(e) =>
+                      setNewCustomerForm((p) => ({
+                        ...p,
+                        gst_number: upperOnly(alnumUpper(clampStr(e.target.value, LIMITS.gstinLength))),
+                      }))
+                    }
                     placeholder="22AAAAA0000A1Z5"
                     className="field-input w-full font-mono uppercase"
+                    minLength={LIMITS.gstinLength}
+                    maxLength={LIMITS.gstinLength}
+                    pattern="[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]"
+                    spellCheck={false}
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">PAN</label>
                   <input
+                    type="text"
                     value={newCustomerForm.pan}
-                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, pan: e.target.value.toUpperCase() }))}
+                    onChange={(e) =>
+                      setNewCustomerForm((p) => ({
+                        ...p,
+                        pan: upperOnly(clampStr(e.target.value.replace(/[^A-Za-z0-9]/g, ''), LIMITS.panLength)),
+                      }))
+                    }
                     placeholder="ABCDE1234F"
                     className="field-input w-full font-mono uppercase"
+                    minLength={LIMITS.panLength}
+                    maxLength={LIMITS.panLength}
+                    pattern="[A-Z]{5}[0-9]{4}[A-Z]"
+                    spellCheck={false}
                   />
                 </div>
               </div>
@@ -1606,9 +2022,10 @@ export function CreateQuotationPage() {
                 <textarea
                   rows={2}
                   value={newCustomerForm.billing_street}
-                  onChange={(e) => setNewCustomerForm((p) => ({ ...p, billing_street: e.target.value }))}
+                  onChange={(e) => setNewCustomerForm((p) => ({ ...p, billing_street: clampStr(e.target.value, LIMITS.addressMax) }))}
                   placeholder="Office #101, Industrial Area"
                   className="field-input w-full"
+                  maxLength={LIMITS.addressMax}
                 />
               </div>
 
@@ -1616,28 +2033,46 @@ export function CreateQuotationPage() {
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">City</label>
                   <input
+                    type="text"
                     value={newCustomerForm.billing_city}
-                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, billing_city: e.target.value }))}
+                    onChange={(e) =>
+                      setNewCustomerForm((p) => ({ ...p, billing_city: clampStr(e.target.value, LIMITS.cityMax) }))
+                    }
                     placeholder="City"
                     className="field-input w-full"
+                    maxLength={LIMITS.cityMax}
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">State</label>
                   <input
+                    type="text"
                     value={newCustomerForm.billing_state}
-                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, billing_state: e.target.value }))}
+                    onChange={(e) =>
+                      setNewCustomerForm((p) => ({ ...p, billing_state: clampStr(e.target.value, LIMITS.stateMax) }))
+                    }
                     placeholder="State"
                     className="field-input w-full"
+                    maxLength={LIMITS.stateMax}
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">Pincode</label>
                   <input
+                    type="text"
+                    inputMode="numeric"
                     value={newCustomerForm.billing_pincode}
-                    onChange={(e) => setNewCustomerForm((p) => ({ ...p, billing_pincode: e.target.value }))}
+                    onChange={(e) =>
+                      setNewCustomerForm((p) => ({
+                        ...p,
+                        billing_pincode: digitsOnly(clampStr(e.target.value, LIMITS.pincodeMax)),
+                      }))
+                    }
                     placeholder="110001"
-                    className="field-input w-full"
+                    className="field-input w-full font-mono"
+                    minLength={LIMITS.pincodeMin}
+                    maxLength={LIMITS.pincodeMax}
+                    pattern="[0-9]{4,10}"
                   />
                 </div>
               </div>
@@ -1656,7 +2091,7 @@ export function CreateQuotationPage() {
                   className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
                 >
                   {customerSubmitting && <Loader2 size={13} className="animate-spin" />}
-                  {customerSubmitting ? 'Creating…' : 'Save & Select Customer'}
+                  {customerSubmitting ? 'Creating…' : 'Save & Select'}
                 </button>
               </div>
             </form>
@@ -1664,7 +2099,6 @@ export function CreateQuotationPage() {
         </div>
       )}
 
-      {/* Quick Product Creation Modal */}
       {showProductModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
           <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto text-xs">
@@ -1683,14 +2117,59 @@ export function CreateQuotationPage() {
             </div>
 
             <form onSubmit={handleCreateProduct} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Company *</label>
+                  <select
+                    required
+                    value={newProductForm.company_id}
+                    onChange={(e) => {
+                      const compId = e.target.value;
+                      const matches = branches.filter(
+                        (b) => !b.company_id || String(b.company_id) === String(compId),
+                      );
+                      setNewProductForm((p) => ({
+                        ...p,
+                        company_id: compId,
+                        branch_id: matches.length > 0 ? String(matches[0].id) : '',
+                      }));
+                    }}
+                    className="field-input w-full"
+                  >
+                    <option value="">-- Choose Company --</option>
+                    {companies.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 mb-1">Branch</label>
+                  <select
+                    value={newProductForm.branch_id}
+                    onChange={(e) => setNewProductForm((p) => ({ ...p, branch_id: e.target.value }))}
+                    className="field-input w-full"
+                  >
+                    <option value="">-- No Branch --</option>
+                    {branchesForProductModal.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name} ({b.code || 'BR'})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
               <div>
                 <label className="block text-[11px] font-semibold text-slate-700 mb-1">Product Name *</label>
                 <input
+                  type="text"
                   required
                   value={newProductForm.name}
-                  onChange={(e) => setNewProductForm((p) => ({ ...p, name: e.target.value }))}
+                  onChange={(e) => setNewProductForm((p) => ({ ...p, name: clampStr(e.target.value, LIMITS.nameMax) }))}
                   placeholder="e.g. Premium Hydraulic Valve 1/2"
                   className="field-input w-full"
+                  minLength={LIMITS.nameMin}
+                  maxLength={LIMITS.nameMax}
                 />
               </div>
 
@@ -1698,20 +2177,26 @@ export function CreateQuotationPage() {
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">SKU</label>
                   <input
+                    type="text"
                     value={newProductForm.sku}
-                    onChange={(e) => setNewProductForm((p) => ({ ...p, sku: e.target.value }))}
+                    onChange={(e) => setNewProductForm((p) => ({ ...p, sku: alnumUpper(clampStr(e.target.value, LIMITS.skuMax)) }))}
                     placeholder="Auto-generated if empty"
                     className="field-input w-full font-mono"
+                    maxLength={LIMITS.skuMax}
+                    spellCheck={false}
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">Unit</label>
-                  <input
+                  <select
                     value={newProductForm.unit}
                     onChange={(e) => setNewProductForm((p) => ({ ...p, unit: e.target.value }))}
-                    placeholder="Piece, Box, Kg, Mtr"
                     className="field-input w-full"
-                  />
+                  >
+                    {UNIT_OPTIONS.map((u) => (
+                      <option key={u} value={u}>{u}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
@@ -1719,10 +2204,12 @@ export function CreateQuotationPage() {
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">Sale Price (₹) *</label>
                   <input
-                    required
                     type="number"
+                    required
+                    inputMode="decimal"
                     step="0.01"
-                    min="0"
+                    min={LIMITS.unitPriceMin}
+                    max={LIMITS.unitPriceMax}
                     value={newProductForm.sale_price}
                     onChange={(e) => setNewProductForm((p) => ({ ...p, sale_price: e.target.value }))}
                     placeholder="0.00"
@@ -1732,10 +2219,19 @@ export function CreateQuotationPage() {
                 <div>
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">HSN / SAC Code</label>
                   <input
+                    type="text"
+                    inputMode="numeric"
                     value={newProductForm.hsn_sac_code}
-                    onChange={(e) => setNewProductForm((p) => ({ ...p, hsn_sac_code: e.target.value }))}
+                    onChange={(e) =>
+                      setNewProductForm((p) => ({
+                        ...p,
+                        hsn_sac_code: digitsOnly(clampStr(e.target.value, LIMITS.hsnMax)),
+                      }))
+                    }
                     placeholder="8481"
-                    className="field-input w-full"
+                    className="field-input w-full font-mono"
+                    maxLength={LIMITS.hsnMax}
+                    pattern="[0-9]{0,8}"
                   />
                 </div>
               </div>
@@ -1759,9 +2255,12 @@ export function CreateQuotationPage() {
                   <label className="block text-[11px] font-semibold text-slate-700 mb-1">Initial Stock</label>
                   <input
                     type="number"
-                    min="0"
+                    inputMode="numeric"
+                    min={LIMITS.stockMin}
+                    max={LIMITS.stockMax}
+                    step="1"
                     value={newProductForm.stock_quantity}
-                    onChange={(e) => setNewProductForm((p) => ({ ...p, stock_quantity: e.target.value }))}
+                    onChange={(e) => setNewProductForm((p) => ({ ...p, stock_quantity: digitsOnly(e.target.value) }))}
                     placeholder="0"
                     className="field-input w-full"
                   />
@@ -1773,10 +2272,14 @@ export function CreateQuotationPage() {
                 <textarea
                   rows={2}
                   value={newProductForm.description}
-                  onChange={(e) => setNewProductForm((p) => ({ ...p, description: e.target.value }))}
+                  onChange={(e) => setNewProductForm((p) => ({ ...p, description: clampStr(e.target.value, LIMITS.descriptionMax) }))}
                   placeholder="Item details, model, specifications…"
                   className="field-input w-full"
+                  maxLength={LIMITS.descriptionMax}
                 />
+                <p className="mt-1 text-[10px] text-slate-400 text-right">
+                  {newProductForm.description.length} / {LIMITS.descriptionMax}
+                </p>
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
@@ -1905,19 +2408,25 @@ function ChargeInput({
   value,
   onChange,
   allowNegative,
+  min,
+  max,
 }: {
   label: string;
   value: number;
   onChange: (v: number) => void;
   allowNegative?: boolean;
+  min?: number;
+  max?: number;
 }) {
   return (
     <div className="flex items-center justify-between pt-2">
       <span className="text-slate-600">{label}</span>
       <input
         type="number"
+        inputMode="decimal"
         step="0.01"
-        min={allowNegative ? undefined : 0}
+        min={allowNegative ? min : (min ?? 0)}
+        max={max}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
         className="h-8 w-32 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-right text-xs focus:border-indigo-500 focus:bg-white focus:outline-none"
@@ -1941,6 +2450,7 @@ function ProductSearchRow({
   const reorder = safeNum(product.reorder_level) || 5;
   const price = pickProductPrice(product);
   const unit = product.unit || 'pcs';
+  const gst = pickProductTax(product);
   const isOut = stock <= 0;
   const isLow = !isOut && stock <= reorder;
 
@@ -1964,12 +2474,8 @@ function ProductSearchRow({
           )}
         </div>
         <div className="mt-1 flex items-center gap-3 text-[11px] text-slate-500">
-          {product.brand && (
-            <span>
-              {product.brand}
-            </span>
-          )}
-          <span>GST {pickProductTax(product)}%</span>
+          {product.brand && <span>{product.brand}</span>}
+          <span>GST {gst}%</span>
           {product.unit && <span>{product.unit}</span>}
         </div>
       </div>
@@ -2069,10 +2575,13 @@ const LineItemRow = memo(function LineItemRow({
         )}
 
         <input
+          type="text"
           value={item.item_name}
-          onChange={(e) => onUpdate(index, { item_name: clampStr(e.target.value, MAX_TEXT) })}
+          onChange={(e) => onUpdate(index, { item_name: clampStr(e.target.value, LIMITS.nameMax) })}
           placeholder="Item name"
           className="h-8 w-full rounded-lg border border-slate-200 px-2.5 text-xs font-semibold focus:border-indigo-500 focus:outline-none"
+          maxLength={LIMITS.nameMax}
+          required
         />
 
         {productMeta ? (
@@ -2106,18 +2615,26 @@ const LineItemRow = memo(function LineItemRow({
 
       <td className="px-3 py-3">
         <input
+          type="text"
+          inputMode="numeric"
           value={item.hsn_code || ''}
-          onChange={(e) => onUpdate(index, { hsn_code: e.target.value.toUpperCase().slice(0, 8) })}
+          onChange={(e) =>
+            onUpdate(index, { hsn_code: digitsOnly(clampStr(e.target.value, LIMITS.hsnMax)) })
+          }
           placeholder="HSN/SAC"
           className="h-8 w-full rounded-lg border border-slate-200 px-2 font-mono text-xs focus:border-indigo-500 focus:outline-none"
+          maxLength={LIMITS.hsnMax}
+          pattern="[0-9]{0,8}"
         />
       </td>
 
       <td className="px-3 py-3">
         <input
           type="number"
+          inputMode="decimal"
           step="0.01"
-          min="0.01"
+          min={LIMITS.quantityMin}
+          max={LIMITS.quantityMax}
           value={item.quantity}
           onChange={(e) => onUpdate(index, { quantity: Number(e.target.value) })}
           className="h-8 w-full rounded-lg border border-slate-200 px-2 text-xs font-medium focus:border-indigo-500 focus:outline-none"
@@ -2127,8 +2644,10 @@ const LineItemRow = memo(function LineItemRow({
       <td className="px-3 py-3">
         <input
           type="number"
+          inputMode="decimal"
           step="0.01"
-          min="0"
+          min={LIMITS.unitPriceMin}
+          max={LIMITS.unitPriceMax}
           value={item.unit_price}
           onChange={(e) => onUpdate(index, { unit_price: Number(e.target.value) })}
           className="h-8 w-full rounded-lg border border-slate-200 px-2 text-xs font-medium focus:border-indigo-500 focus:outline-none"
@@ -2138,11 +2657,16 @@ const LineItemRow = memo(function LineItemRow({
       <td className="px-3 py-3">
         <input
           type="number"
+          inputMode="decimal"
           step="0.01"
-          min="0"
-          max="100"
+          min={LIMITS.discountMin}
+          max={LIMITS.discountMax}
           value={item.discount_percent}
-          onChange={(e) => onUpdate(index, { discount_percent: Number(e.target.value) })}
+          onChange={(e) =>
+            onUpdate(index, {
+              discount_percent: clampNum(Number(e.target.value), LIMITS.discountMin, LIMITS.discountMax),
+            })
+          }
           className="h-8 w-full rounded-lg border border-slate-200 px-2 text-xs focus:border-indigo-500 focus:outline-none"
         />
       </td>

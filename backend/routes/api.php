@@ -1,16 +1,20 @@
 <?php
 
+use App\Http\Controllers\Api\DeliveryController;
+
 use App\Http\Controllers\Api\AccountingController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AttendanceController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BackupController;
+use App\Http\Controllers\Api\BackupSystemController;
 use App\Http\Controllers\Api\BiometricAttendanceController;
 use App\Http\Controllers\Api\BiometricDeviceController;
 use App\Http\Controllers\Api\BiometricScanController;
 use App\Http\Controllers\Api\BranchController;
 use App\Http\Controllers\Api\CompanyController;
 use App\Http\Controllers\Api\ConnectedAppController;
+use App\Http\Controllers\Api\CashDrawerController;
 use App\Http\Controllers\Api\CustomerController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\DealerController;
@@ -344,6 +348,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/',                [ProductController::class, 'index'])->middleware('permission:view products');
         Route::get('/all',             [ProductController::class, 'all'])->middleware('permission:view products');
         Route::get('/low-stock',       [DashboardController::class, 'lowStockProducts'])->middleware('permission:view low stock products');
+        Route::get('/generate-sku',    [ProductController::class, 'generateSku'])->middleware('permission:view products,create products');
         Route::post('/bulk-edit',      [ProductController::class, 'bulkEdit'])->middleware('permission:edit products');
         Route::get('/{product}',       [ProductController::class, 'show'])->middleware('permission:view products');
         Route::post('/',               [ProductController::class, 'store'])->middleware('permission:create products');
@@ -478,6 +483,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/',               [InvoiceController::class, 'store'])->middleware('permission:create invoices');
         Route::match(['put', 'patch'], '/{invoice}', [InvoiceController::class, 'update'])->middleware('permission:edit invoices');
         Route::delete('/{invoice}',    [InvoiceController::class, 'destroy'])->middleware('permission:delete invoices');
+        Route::patch('/{invoice}/delivery-status', [InvoiceController::class, 'updateDeliveryStatus'])->middleware('permission:edit invoices');
+        Route::patch('/{invoice}/items/{item}/delivery-status', [InvoiceController::class, 'updateItemDeliveryStatus'])->middleware('permission:edit invoices');
     });
 
     /* ------------------------ Purchase Invoices ------------------------ */
@@ -563,6 +570,37 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('rules/{id}',         [\App\Http\Controllers\Api\BankCashController::class, 'updateRule'])->middleware('permission:banking.reconciliation.manage');
         Route::delete('rules/{id}',      [\App\Http\Controllers\Api\BankCashController::class, 'deleteRule'])->middleware('permission:banking.reconciliation.manage');
         Route::post('rules/{id}/toggle', [\App\Http\Controllers\Api\BankCashController::class, 'toggleRule'])->middleware('permission:banking.reconciliation.manage');
+    });
+
+    /* ---------------------- Cash Drawer Management ---------------------- */
+    Route::prefix('finance/cash-drawers')->group(function () {
+        Route::get('',                             [CashDrawerController::class, 'index'])->middleware('permission:finance.cash_drawer.view,view accounting accounts');
+        Route::post('',                            [CashDrawerController::class, 'store'])->middleware('permission:finance.cash_drawer.create,finance.cash_drawer.manage');
+        Route::get('{id}',                         [CashDrawerController::class, 'show'])->middleware('permission:finance.cash_drawer.view,view accounting accounts');
+        Route::put('{id}',                         [CashDrawerController::class, 'update'])->middleware('permission:finance.cash_drawer.manage');
+        Route::get('{id}/sessions',                [CashDrawerController::class, 'listSessions'])->middleware('permission:finance.cash_drawer.view,view accounting accounts');
+        Route::get('{id}/active-session',          [CashDrawerController::class, 'getActiveSession'])->middleware('permission:finance.cash_drawer.view,view accounting accounts');
+        Route::post('{id}/open',                   [CashDrawerController::class, 'openSession'])->middleware('permission:finance.cash_drawer.open,finance.cash_drawer.manage');
+        Route::post('{id}/close',                  [CashDrawerController::class, 'closeSession'])->middleware('permission:finance.cash_drawer.close,finance.cash_drawer.manage');
+        Route::post('{id}/cash-in',                [CashDrawerController::class, 'cashIn'])->middleware('permission:finance.cash_drawer.cash_in,finance.cash_drawer.manage');
+        Route::post('{id}/cash-out',               [CashDrawerController::class, 'cashOut'])->middleware('permission:finance.cash_drawer.cash_out,finance.cash_drawer.manage');
+        Route::get('{id}/transactions',            [CashDrawerController::class, 'listTransactions'])->middleware('permission:finance.cash_drawer.view,view accounting accounts');
+    });
+
+    Route::prefix('finance/cash-drawer')->group(function () {
+        Route::get('dashboard',                    [CashDrawerController::class, 'dashboard'])->middleware('permission:finance.cash_drawer.view,view accounting accounts');
+        Route::get('transactions',                 [CashDrawerController::class, 'listTransactions'])->middleware('permission:finance.cash_drawer.view,view accounting accounts');
+        Route::get('denominations',                [CashDrawerController::class, 'getDenominations'])->middleware('permission:finance.cash_drawer.view,view accounting accounts');
+        Route::get('audit-logs',                   [CashDrawerController::class, 'auditLogs'])->middleware('permission:finance.cash_drawer.manage,audit.logs.view');
+        Route::get('export-csv',                   [CashDrawerController::class, 'exportCsv'])->middleware('permission:finance.cash_drawer.report,finance.cash_drawer.view');
+        Route::post('sessions/{id}/review-discrepancy', [CashDrawerController::class, 'reviewDiscrepancy'])->middleware('permission:finance.cash_drawer.approve,finance.cash_drawer.manage');
+    });
+
+    Route::prefix('finance/cash-drawer-transfers')->group(function () {
+        Route::get('',                             [CashDrawerController::class, 'listTransfers'])->middleware('permission:finance.cash_drawer.transfer,finance.cash_drawer.view');
+        Route::post('',                            [CashDrawerController::class, 'initiateTransfer'])->middleware('permission:finance.cash_drawer.transfer,finance.cash_drawer.manage');
+        Route::post('{id}/receive',                [CashDrawerController::class, 'receiveTransfer'])->middleware('permission:finance.cash_drawer.transfer,finance.cash_drawer.manage');
+        Route::post('{id}/reject',                 [CashDrawerController::class, 'rejectTransfer'])->middleware('permission:finance.cash_drawer.transfer,finance.cash_drawer.manage');
     });
 
     /* ------------------------------ Sales ------------------------------ */
@@ -777,6 +815,35 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('backups/restore',          [BackupController::class, 'restore'])->middleware('permission:restore backup');
     Route::get('backups/{backup}/download', [BackupController::class, 'download'])->middleware('permission:download backup');
 
+    /* ---------------- Google Drive Backup & Disaster Recovery --------------- */
+    Route::prefix('backup-system')->group(function () {
+        Route::get('status', [BackupSystemController::class, 'status'])->middleware('permission:system.backups.view');
+        Route::get('connections', [BackupSystemController::class, 'listConnections'])->middleware('permission:system.backups.view');
+        Route::post('connections/{id}/test', [BackupSystemController::class, 'testConnection'])->middleware('permission:system.backups.view');
+        Route::post('connections/{id}/disconnect', [BackupSystemController::class, 'disconnect'])->middleware('permission:system.backups.settings');
+
+        Route::get('oauth/redirect', [BackupSystemController::class, 'getOAuthRedirect'])->middleware('permission:system.backups.settings');
+        Route::post('oauth/callback', [BackupSystemController::class, 'handleOAuthCallback'])->middleware('permission:system.backups.settings');
+
+        Route::get('drive/folders', [BackupSystemController::class, 'listDriveFolders'])->middleware('permission:system.backups.settings');
+        Route::post('drive/folders', [BackupSystemController::class, 'createDriveFolder'])->middleware('permission:system.backups.settings');
+
+        Route::get('direct-download', [BackupSystemController::class, 'directDownload'])->middleware('permission:system.backups.view');
+        Route::get('runs', [BackupSystemController::class, 'listRuns'])->middleware('permission:system.backups.view');
+        Route::get('runs/{id}', [BackupSystemController::class, 'showRun'])->middleware('permission:system.backups.view');
+        Route::get('runs/{id}/download', [BackupSystemController::class, 'downloadRun'])->middleware('permission:system.backups.view');
+        Route::post('runs', [BackupSystemController::class, 'triggerRun'])->middleware('permission:system.backups.create');
+        Route::post('runs/{id}/verify', [BackupSystemController::class, 'verifyRun'])->middleware('permission:system.backups.view');
+        Route::post('runs/{id}/restore', [BackupSystemController::class, 'restoreRun'])->middleware('permission:system.backups.restore');
+        Route::delete('runs/{id}', [BackupSystemController::class, 'destroyRun'])->middleware('permission:system.backups.delete');
+
+        Route::get('settings', [BackupSystemController::class, 'getSettings'])->middleware('permission:system.backups.settings');
+        Route::put('settings', [BackupSystemController::class, 'updateSettings'])->middleware('permission:system.backups.settings');
+        Route::post('retention/run', [BackupSystemController::class, 'runRetention'])->middleware('permission:system.backups.delete');
+        Route::get('audit-logs', [BackupSystemController::class, 'auditLogs'])->middleware('permission:system.backups.view');
+    });
+
+
     /* ----------------------------- Marketing --------------------------- */
     Route::prefix('marketing')->group(function () {
         Route::get('dashboard', [MarketingController::class, 'dashboard'])->middleware('permission:view marketing dashboard');
@@ -919,5 +986,53 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::patch('/{printJob}/status',       [PrintJobController::class, 'updateStatus'])->middleware('permission:printing.print_labels');
         Route::post('/{printJob}/cancel',        [PrintJobController::class, 'cancel'])->middleware('permission:printing.cancel_jobs');
         Route::post('/{printJob}/reprint',       [PrintJobController::class, 'reprint'])->middleware('permission:printing.reprint');
+    });
+
+    /* ---------------------- Smart Delivery & Logistics Management ---------------------- */
+    Route::prefix('deliveries')->group(function () {
+        Route::get('dashboard',                 [DeliveryController::class, 'dashboard'])->middleware('permission:delivery.orders.view');
+        Route::get('orders',                    [DeliveryController::class, 'orders'])->middleware('permission:delivery.orders.view');
+        Route::post('orders',                   [DeliveryController::class, 'createOrder'])->middleware('permission:delivery.orders.create');
+        Route::get('orders/{order}',            [DeliveryController::class, 'showOrder'])->middleware('permission:delivery.orders.view');
+        Route::put('orders/{order}',            [DeliveryController::class, 'updateOrder'])->middleware('permission:delivery.orders.update');
+        Route::post('orders/{order}/schedule',  [DeliveryController::class, 'scheduleOrder'])->middleware('permission:delivery.orders.schedule');
+        Route::post('orders/{order}/cancel',    [DeliveryController::class, 'cancelOrder'])->middleware('permission:delivery.orders.cancel');
+        Route::post('orders/{order}/confirm',   [DeliveryController::class, 'confirmOrder'])->middleware('permission:delivery.orders.confirm');
+
+        // Vehicles
+        Route::get('vehicles',                  [DeliveryController::class, 'vehicles'])->middleware('permission:delivery.vehicles.view');
+        Route::post('vehicles',                 [DeliveryController::class, 'createVehicle'])->middleware('permission:delivery.vehicles.create');
+        Route::put('vehicles/{vehicle}',        [DeliveryController::class, 'updateVehicle'])->middleware('permission:delivery.vehicles.update');
+
+        // Drivers
+        Route::get('drivers',                   [DeliveryController::class, 'drivers'])->middleware('permission:delivery.drivers.view');
+        Route::post('drivers',                  [DeliveryController::class, 'createDriver'])->middleware('permission:delivery.drivers.manage');
+        Route::put('drivers/{driver}',          [DeliveryController::class, 'updateDriver'])->middleware('permission:delivery.drivers.manage');
+
+        // Trips & Route Planning
+        Route::get('trips',                     [DeliveryController::class, 'trips'])->middleware('permission:delivery.trips.view');
+        Route::post('trips',                    [DeliveryController::class, 'createTrip'])->middleware('permission:delivery.trips.create');
+        Route::get('trips/{trip}',              [DeliveryController::class, 'showTrip'])->middleware('permission:delivery.trips.view');
+        Route::post('trips/{trip}/reorder',     [DeliveryController::class, 'reorderStops'])->middleware('permission:delivery.routes.manage');
+        Route::post('trips/{trip}/confirm-loading', [DeliveryController::class, 'confirmLoading'])->middleware('permission:delivery.loading.confirm');
+        Route::post('trips/{trip}/dispatch',    [DeliveryController::class, 'dispatchTrip'])->middleware('permission:delivery.trips.dispatch');
+        Route::post('trips/{trip}/close',       [DeliveryController::class, 'closeTrip'])->middleware('permission:delivery.trips.close');
+
+        // Godown Loading Items
+        Route::put('loading-items/{loadingItem}', [DeliveryController::class, 'updateLoadingItem'])->middleware('permission:delivery.loading.manage');
+
+        // Transportation Cost Allocation
+        Route::post('trips/{trip}/allocate-cost', [DeliveryController::class, 'allocateCost'])->middleware('permission:delivery.costs.manage');
+        Route::post('trips/{trip}/approve-cost',  [DeliveryController::class, 'approveCost'])->middleware('permission:delivery.costs.approve');
+        Route::put('cost-allocations/{allocation}', [DeliveryController::class, 'adjustAllocation'])->middleware('permission:delivery.costs.manage');
+
+        // Calendar & Areas
+        Route::get('calendar',                  [DeliveryController::class, 'calendar'])->middleware('permission:delivery.orders.view');
+        Route::get('areas',                     [DeliveryController::class, 'areas'])->middleware('permission:delivery.orders.view');
+        Route::post('areas',                    [DeliveryController::class, 'createArea'])->middleware('permission:delivery.routes.manage');
+
+        // Reports
+        Route::get('reports',                   [DeliveryController::class, 'reports'])->middleware('permission:delivery.reports.view');
+        Route::get('reports/export',            [DeliveryController::class, 'exportReport'])->middleware('permission:delivery.reports.export');
     });
 });

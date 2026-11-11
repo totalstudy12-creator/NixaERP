@@ -41,4 +41,38 @@ class ProductWarehouseStock extends Model
     {
         return $this->belongsTo(Branch::class);
     }
+
+    /**
+     * Retrieve or instantiate the unique warehouse stock record for a product and warehouse.
+     * Guaranteed never to violate the (product_id, warehouse_id) unique constraint.
+     */
+    public static function getOrCreateStock(
+        int $productId,
+        int $warehouseId,
+        ?int $companyId = null,
+        ?int $branchId = null
+    ): self {
+        $stock = static::firstOrNew(
+            [
+                'product_id'   => $productId,
+                'warehouse_id' => $warehouseId,
+            ],
+            [
+                'company_id'         => $companyId,
+                'branch_id'          => $branchId,
+                'quantity'           => 0,
+                'reserved_quantity'  => 0,
+                'available_quantity' => 0,
+            ]
+        );
+
+        if (! $stock->company_id && $companyId) {
+            $stock->company_id = $companyId;
+        }
+        if (! $stock->branch_id && $branchId) {
+            $stock->branch_id = $branchId;
+        }
+
+        return $stock;
+    }
 }

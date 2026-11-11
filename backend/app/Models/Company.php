@@ -27,9 +27,9 @@ class Company extends Model
         'active' => 'boolean',
     ];
 
-    public function branches()
+    public function cashDrawers()
     {
-        return $this->hasMany(Branch::class);
+        return $this->hasMany(CashDrawer::class);
     }
 
     public function warehouses()

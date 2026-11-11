@@ -71,6 +71,10 @@ class Invoice extends Model
         'additional_charges',
         'subtotal',
         'quotation_id',
+        'delivery_status',
+        'packed_at',
+        'dispatched_at',
+        'delivered_at',
     ];
 
     protected $casts = [
@@ -93,6 +97,9 @@ class Invoice extends Model
         'reverse_charge'            => 'boolean',
         'keep_advance'              => 'boolean',
         'additional_charges'        => 'array',
+        'packed_at'                 => 'datetime',
+        'dispatched_at'             => 'datetime',
+        'delivered_at'              => 'datetime',
     ];
 
     public function company()
@@ -128,6 +135,59 @@ class Invoice extends Model
     public function payments()
     {
         return $this->hasMany(Payment::class);
+    }
+
+    public function deliveryOrder()
+    {
+        return $this->hasOne(DeliveryOrder::class);
+    }
+
+    public function deliveryOrders()
+    {
+        return $this->hasMany(DeliveryOrder::class);
+    }
+
+    /**
+     * Recalculate and synchronize delivery_status from individual line items.
+     */
+    public function syncDeliveryStatusFromItems(): self
+    {
+        $this->loadMissing('items');
+
+        if ($this->items->isEmpty()) {
+            return $this;
+        }
+
+        $statuses = $this->items->pluck('delivery_status')->map(fn($s) => strtolower(trim((string)$s)))->all();
+        $unique = array_values(array_unique($statuses));
+
+        if (count($unique) === 1 && $unique[0] === 'delivered') {
+            $this->delivery_status = 'delivered';
+            if (!$this->delivered_at) {
+                $this->delivered_at = now();
+            }
+        } elseif (count($unique) === 1 && $unique[0] === 'packed') {
+            $this->delivery_status = 'packed';
+            if (!$this->packed_at) {
+                $this->packed_at = now();
+            }
+        } elseif (count($unique) === 1 && $unique[0] === 'pending') {
+            $this->delivery_status = 'pending';
+        } elseif (in_array('delivered', $statuses) || in_array('sent', $statuses)) {
+            $this->delivery_status = 'sent';
+            if (!$this->dispatched_at) {
+                $this->dispatched_at = now();
+            }
+        } elseif (in_array('packed', $statuses)) {
+            $this->delivery_status = 'packed';
+            if (!$this->packed_at) {
+                $this->packed_at = now();
+            }
+        }
+
+        $this->saveQuietly();
+
+        return $this;
     }
 
     public function getPaymentReceivedAttribute()

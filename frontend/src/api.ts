@@ -387,7 +387,19 @@ export const apiClient = {
       requestOptions.body = isFormData ? data : JSON.stringify(data);
     }
 
-    const requestUrl = `${API_BASE}${normalizeEndpoint(endpoint)}`;
+    const paramsToBuild = options?.params;
+    let queryString = '';
+    if (paramsToBuild && typeof paramsToBuild === 'object') {
+      queryString = buildQuery(paramsToBuild);
+    }
+    const cleanEndpoint = normalizeEndpoint(endpoint);
+    const requestUrl = `${API_BASE}${cleanEndpoint}${
+      queryString
+        ? cleanEndpoint.includes('?')
+          ? '&' + queryString.replace(/^\?/, '')
+          : queryString
+        : ''
+    }`;
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
@@ -787,6 +799,14 @@ export const apiClient = {
 
   async getAllProducts() {
     return this.request('GET', '/products?per_page=all');
+  },
+
+  async generateProductSku(name?: string, prefix?: string): Promise<{ success: boolean; sku: string }> {
+    const params = new URLSearchParams();
+    if (name) params.append('name', name);
+    if (prefix) params.append('prefix', prefix);
+    const query = params.toString() ? `?${params.toString()}` : '';
+    return this.request('GET', `/products/generate-sku${query}`);
   },
 
   async createProduct(data: any) {
@@ -1545,6 +1565,21 @@ export const apiClient = {
     }
     return this.request('PUT', `/invoices/${id}`, data);
   },
+  async updateInvoiceDeliveryStatus(
+    id: number | string,
+    data: { delivery_status: string; items?: any[]; notes?: string }
+  ) {
+    return this.request('PATCH', `/invoices/${id}/delivery-status`, data);
+  },
+
+  async updateInvoiceItemDeliveryStatus(
+    invoiceId: number | string,
+    itemId: number | string,
+    data: { delivery_status: string; packed_quantity?: number; delivered_quantity?: number }
+  ) {
+    return this.request('PATCH', `/invoices/${invoiceId}/items/${itemId}/delivery-status`, data);
+  },
+
 
   async deleteInvoice(id: number) {
     if (!Number.isInteger(id) || id <= 0) {
@@ -2946,6 +2981,71 @@ export const apiClient = {
   async getAdminSystemOverview() {
     return this.request('GET', '/admin/system-overview');
   },
+  // --- Cash Drawer Management ---
+  async getCashDrawers(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/finance/cash-drawers${query ? '?' + query : ''}`);
+  },
+
+  async getCashDrawer(id: number) {
+    return this.request('GET', `/finance/cash-drawers/${id}`);
+  },
+
+  async createCashDrawer(data: Record<string, unknown>) {
+    return this.request('POST', '/finance/cash-drawers', data);
+  },
+
+  async updateCashDrawer(id: number, data: Record<string, unknown>) {
+    return this.request('PUT', `/finance/cash-drawers/${id}`, data);
+  },
+
+  async getActiveCashDrawerSession(drawerId: number) {
+    return this.request('GET', `/finance/cash-drawers/${drawerId}/active-session`);
+  },
+
+  async openCashDrawerSession(drawerId: number, data: Record<string, unknown>) {
+    return this.request('POST', `/finance/cash-drawers/${drawerId}/open`, data);
+  },
+
+  async closeCashDrawerSession(drawerId: number, data: Record<string, unknown>) {
+    return this.request('POST', `/finance/cash-drawers/${drawerId}/close`, data);
+  },
+
+  async recordCashIn(drawerId: number, data: Record<string, unknown>) {
+    return this.request('POST', `/finance/cash-drawers/${drawerId}/cash-in`, data);
+  },
+
+  async recordCashOut(drawerId: number, data: Record<string, unknown>) {
+    return this.request('POST', `/finance/cash-drawers/${drawerId}/cash-out`, data);
+  },
+
+  async getCashDrawerTransactions(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/finance/cash-drawer/transactions${query ? '?' + query : ''}`);
+  },
+
+  async getCashDrawerDashboard(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/finance/cash-drawer/dashboard${query ? '?' + query : ''}`);
+  },
+
+  async getCashDrawerTransfers(params: Record<string, unknown> = {}) {
+    const query = buildQuery(params);
+    return this.request('GET', `/finance/cash-drawer-transfers${query ? '?' + query : ''}`);
+  },
+
+  async initiateCashDrawerTransfer(data: Record<string, unknown>) {
+    return this.request('POST', '/finance/cash-drawer-transfers', data);
+  },
+
+  async receiveCashDrawerTransfer(transferId: number, data: Record<string, unknown> = {}) {
+    return this.request('POST', `/finance/cash-drawer-transfers/${transferId}/receive`, data);
+  },
+
+  async rejectCashDrawerTransfer(transferId: number, data: Record<string, unknown>) {
+    return this.request('POST', `/finance/cash-drawer-transfers/${transferId}/reject`, data);
+  },
+
 };
 
 export default apiClient;

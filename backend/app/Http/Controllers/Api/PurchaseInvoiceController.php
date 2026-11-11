@@ -570,12 +570,12 @@ class PurchaseInvoiceController extends Controller
                     'created_by'       => Auth::id(),
                 ]);
 
-                $warehouseStock = ProductWarehouseStock::firstOrNew([
-                    'product_id'   => $product->id,
-                    'warehouse_id' => $warehouse->id,
-                    'company_id'   => $validated['company_id'],
-                    'branch_id'    => $branch->id,
-                ]);
+                $warehouseStock = ProductWarehouseStock::getOrCreateStock(
+                    $product->id,
+                    $warehouse->id,
+                    $validated['company_id'] ?? null,
+                    $branch->id ?? null
+                );
                 $warehouseStock->quantity            = (float) ($warehouseStock->quantity ?? 0) + $quantity;
                 $warehouseStock->available_quantity  = (float) ($warehouseStock->available_quantity ?? 0) + $quantity;
                 $warehouseStock->last_purchase_price = $purchasePrice;
@@ -954,18 +954,16 @@ class PurchaseInvoiceController extends Controller
                     'created_by'       => Auth::id(),
                 ]);
 
-                $whStock = ProductWarehouseStock::where([
-                    'product_id'   => $product->id,
-                    'warehouse_id' => $warehouse->id,
-                    'company_id'   => $validated['company_id'],
-                    'branch_id'    => $branch->id,
-                ])->first();
+                $whStock = ProductWarehouseStock::getOrCreateStock(
+                    $product->id,
+                    $warehouse->id,
+                    $validated['company_id'] ?? null,
+                    $branch->id ?? null
+                );
 
-                if ($whStock) {
-                    $whStock->quantity           = max(0, (float) $whStock->quantity - $qty);
-                    $whStock->available_quantity = max(0, (float) $whStock->available_quantity - $qty);
-                    $whStock->save();
-                }
+                $whStock->quantity           = max(0, (float) ($whStock->quantity ?? 0) - $qty);
+                $whStock->available_quantity = max(0, (float) ($whStock->available_quantity ?? 0) - $qty);
+                $whStock->save();
             }
 
             $purchase->items()->delete();
@@ -1003,12 +1001,12 @@ class PurchaseInvoiceController extends Controller
                     'created_by'       => Auth::id(),
                 ]);
 
-                $whStock = ProductWarehouseStock::firstOrNew([
-                    'product_id'   => $product->id,
-                    'warehouse_id' => $warehouse->id,
-                    'company_id'   => $validated['company_id'],
-                    'branch_id'    => $branch->id,
-                ]);
+                $whStock = ProductWarehouseStock::getOrCreateStock(
+                    $product->id,
+                    $warehouse->id,
+                    $validated['company_id'] ?? null,
+                    $branch->id ?? null
+                );
                 $whStock->quantity            = (float) ($whStock->quantity ?? 0) + $qty;
                 $whStock->available_quantity  = (float) ($whStock->available_quantity ?? 0) + $qty;
                 $whStock->last_purchase_price = $price;
@@ -1164,18 +1162,16 @@ class PurchaseInvoiceController extends Controller
                 ]);
 
                 if ($warehouseId) {
-                    $whStock = ProductWarehouseStock::where([
-                        'product_id'   => $product->id,
-                        'warehouse_id' => $warehouseId,
-                        'company_id'   => $companyId,
-                    ])->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
-                      ->first();
+                    $whStock = ProductWarehouseStock::getOrCreateStock(
+                        $product->id,
+                        $warehouseId,
+                        $companyId,
+                        $branchId
+                    );
 
-                    if ($whStock) {
-                        $whStock->quantity           = max(0, (float) $whStock->quantity - $qty);
-                        $whStock->available_quantity = max(0, (float) $whStock->available_quantity - $qty);
-                        $whStock->save();
-                    }
+                    $whStock->quantity           = max(0, (float) ($whStock->quantity ?? 0) - $qty);
+                    $whStock->available_quantity = max(0, (float) ($whStock->available_quantity ?? 0) - $qty);
+                    $whStock->save();
                 }
             }
 

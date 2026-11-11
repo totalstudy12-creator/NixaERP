@@ -47,6 +47,10 @@ class InvoiceController extends Controller
                 'customer',
                 'items.product',
                 'payments',
+                'deliveryOrder:id,company_id,branch_id,invoice_id,delivery_order_no,status,expected_delivery_date,delivery_completed_at,current_trip_id,recipient_name,recipient_phone,town,district',
+                'deliveryOrder.currentTrip:id,trip_code,vehicle_id,driver_id,status,actual_departure,actual_return',
+                'deliveryOrder.currentTrip.vehicle:id,name,registration_number',
+                'deliveryOrder.currentTrip.driver:id,name,contact_number',
             ]);
 
         $sortBy = $request->input('sort_by', 'created_at');
@@ -300,6 +304,12 @@ class InvoiceController extends Controller
                 'invoices.customer_id',
                 (int) $request->input('customer_id')
             );
+        }
+        if ($request->filled('delivery_status')) {
+            $deliveryStatus = trim((string) $request->input('delivery_status'));
+            if ($deliveryStatus !== '' && $deliveryStatus !== 'all') {
+                $query->where('invoices.delivery_status', $deliveryStatus);
+            }
         }
 
         if ($request->filled('status')) {
@@ -815,6 +825,10 @@ class InvoiceController extends Controller
                 'customer',
                 'items.product',
                 'payments',
+                'deliveryOrder.items',
+                'deliveryOrder.currentTrip.vehicle',
+                'deliveryOrder.currentTrip.driver',
+                'deliveryOrder.statusHistories',
             ])
         );
     }
@@ -1665,28 +1679,22 @@ class InvoiceController extends Controller
             ]);
 
             if ($warehouseId) {
-                $whStock = ProductWarehouseStock::where([
-                    'product_id'   => $product->id,
-                    'warehouse_id' => $warehouseId,
-                    'company_id'   => $companyId,
-                ])
-                    ->when(
-                        $branchId,
-                        fn ($q) => $q->where('branch_id', $branchId)
-                    )
-                    ->first();
+                $whStock = ProductWarehouseStock::getOrCreateStock(
+                    $product->id,
+                    $warehouseId,
+                    $companyId,
+                    $branchId
+                );
 
-                if ($whStock) {
-                    $whStock->quantity = max(
-                        0,
-                        (float) $whStock->quantity - $qty
-                    );
-                    $whStock->available_quantity = max(
-                        0,
-                        (float) $whStock->available_quantity - $qty
-                    );
-                    $whStock->save();
-                }
+                $whStock->quantity = max(
+                    0,
+                    (float) ($whStock->quantity ?? 0) - $qty
+                );
+                $whStock->available_quantity = max(
+                    0,
+                    (float) ($whStock->available_quantity ?? 0) - $qty
+                );
+                $whStock->save();
             }
         }
     }
@@ -1771,12 +1779,12 @@ class InvoiceController extends Controller
             ]);
 
             if ($warehouseId) {
-                $whStock = ProductWarehouseStock::firstOrNew([
-                    'product_id'   => $product->id,
-                    'warehouse_id' => $warehouseId,
-                    'company_id'   => $companyId,
-                    'branch_id'    => $branchId,
-                ]);
+                $whStock = ProductWarehouseStock::getOrCreateStock(
+                    $product->id,
+                    $warehouseId,
+                    $companyId,
+                    $branchId
+                );
 
                 $whStock->quantity = (float) ($whStock->quantity ?? 0) + $qty;
                 $whStock->available_quantity = (float) ($whStock->available_quantity ?? 0) + $qty;
@@ -1869,19 +1877,16 @@ class InvoiceController extends Controller
             ]);
 
             if ($warehouseId) {
-                $whStock = ProductWarehouseStock::where([
-                    'product_id'   => $product->id,
-                    'warehouse_id' => $warehouseId,
-                    'company_id'   => $companyId,
-                ])
-                    ->when($branchId, fn ($q) => $q->where('branch_id', $branchId))
-                    ->first();
+                $whStock = ProductWarehouseStock::getOrCreateStock(
+                    $product->id,
+                    $warehouseId,
+                    $companyId,
+                    $branchId
+                );
 
-                if ($whStock) {
-                    $whStock->quantity = max(0, (float) $whStock->quantity - $qty);
-                    $whStock->available_quantity = max(0, (float) $whStock->available_quantity - $qty);
-                    $whStock->save();
-                }
+                $whStock->quantity = max(0, (float) ($whStock->quantity ?? 0) - $qty);
+                $whStock->available_quantity = max(0, (float) ($whStock->available_quantity ?? 0) - $qty);
+                $whStock->save();
             }
         };
 
@@ -1921,12 +1926,12 @@ class InvoiceController extends Controller
             ]);
 
             if ($warehouseId) {
-                $whStock = ProductWarehouseStock::firstOrNew([
-                    'product_id'   => $product->id,
-                    'warehouse_id' => $warehouseId,
-                    'company_id'   => $companyId,
-                    'branch_id'    => $branchId,
-                ]);
+                $whStock = ProductWarehouseStock::getOrCreateStock(
+                    $product->id,
+                    $warehouseId,
+                    $companyId,
+                    $branchId
+                );
 
                 $whStock->quantity = (float) ($whStock->quantity ?? 0) + $qty;
                 $whStock->available_quantity = (float) ($whStock->available_quantity ?? 0) + $qty;
@@ -2023,5 +2028,87 @@ class InvoiceController extends Controller
         }
 
         return $generated;
+    }
+    /**
+     * Update delivery status for an invoice and optionally its items.
+     * Connected to Logistics & Delivery module.
+     */
+    public function updateDeliveryStatus(Request $request, Invoice $invoice)
+    {
+        $validated = $request->validate([
+            'delivery_status' => ['required', 'string', Rule::in(['pending', 'packed', 'sent', 'delivered'])],
+            'items' => ['nullable', 'array'],
+            'items.*.id' => ['required_with:items', 'integer'],
+            'items.*.delivery_status' => ['nullable', 'string', Rule::in(['pending', 'packed', 'sent', 'delivered'])],
+            'items.*.packed_quantity' => ['nullable', 'numeric', 'min:0'],
+            'items.*.delivered_quantity' => ['nullable', 'numeric', 'min:0'],
+            'notes' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $deliveryService = app(\App\Services\DeliveryService::class);
+        $invoice = $deliveryService->syncFromInvoiceDeliveryStatus(
+            $invoice,
+            $validated['delivery_status'],
+            $validated['items'] ?? [],
+            Auth::user()
+        );
+
+        return response()->json([
+            'status' => 'success',
+            'message' => "Delivery status updated to '{$validated['delivery_status']}'.",
+            'data' => $invoice->load(['items.product', 'deliveryOrder.items', 'deliveryOrder.currentTrip']),
+        ]);
+    }
+
+    /**
+     * Update delivery status of a single invoice line item.
+     */
+    public function updateItemDeliveryStatus(Request $request, Invoice $invoice, InvoiceItem $item)
+    {
+        if ($item->invoice_id !== $invoice->id) {
+            return response()->json(['message' => 'Item does not belong to this invoice.'], 422);
+        }
+
+        $validated = $request->validate([
+            'delivery_status' => ['required', 'string', Rule::in(['pending', 'packed', 'sent', 'delivered'])],
+            'packed_quantity' => ['nullable', 'numeric', 'min:0'],
+            'delivered_quantity' => ['nullable', 'numeric', 'min:0'],
+        ]);
+
+        $packedQty = isset($validated['packed_quantity'])
+            ? (float) $validated['packed_quantity']
+            : ($validated['delivery_status'] !== 'pending' ? (float) $item->quantity : (float) $item->packed_quantity);
+
+        $deliveredQty = isset($validated['delivered_quantity'])
+            ? (float) $validated['delivered_quantity']
+            : ($validated['delivery_status'] === 'delivered' ? (float) $item->quantity : (float) $item->delivered_quantity);
+
+        $item->update([
+            'delivery_status' => $validated['delivery_status'],
+            'packed_quantity' => $packedQty,
+            'delivered_quantity' => $deliveredQty,
+        ]);
+
+        // Sync with DeliveryOrderItem if exists
+        $deliveryOrderItem = \App\Models\DeliveryOrderItem::where('invoice_item_id', $item->id)->first();
+        if ($deliveryOrderItem) {
+            $deliveryOrderItem->update([
+                'loaded_quantity' => $packedQty,
+                'delivered_quantity' => $deliveredQty,
+                'pending_quantity' => max(0, (float)$deliveryOrderItem->requested_quantity - $deliveredQty),
+            ]);
+        }
+
+        // Recalculate invoice overall delivery status
+        $invoice->syncDeliveryStatusFromItems();
+
+        return response()->json([
+            'status' => 'success',
+            'message' => "Item delivery status updated to '{$validated['delivery_status']}'.",
+            'data' => [
+                'item' => $item->fresh(),
+                'invoice' => $invoice->fresh(['items']),
+            ],
+        ]);
     }
 }

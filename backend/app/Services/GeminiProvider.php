@@ -74,7 +74,7 @@ class GeminiProvider implements AiProviderInterface
             $payload['systemInstruction'] = $systemInstruction;
         }
 
-        $modelsToTry = array_unique([$model, 'gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.8-flash', 'gemini-2.5-pro']);
+        $modelsToTry = array_unique([$model, 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-3.5-flash']);
         $lastError = null;
 
         // Verify TLS certificate in production; allow dev override only if explicitly configured

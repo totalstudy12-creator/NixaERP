@@ -147,12 +147,12 @@ class GeminiVoiceController extends Controller
     public function testConnection()
     {
         try {
-            $apiKey = env('GEMINI_API_KEY');
+            $apiKey = $this->getApiKey();
 
             if (!$apiKey) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'GEMINI_API_KEY not configured in .env file',
+                    'message' => 'Gemini API key not configured. Save your key in Settings → AI.',
                     'api_key_configured' => false,
                 ], 200);
             }
@@ -172,7 +172,7 @@ class GeminiVoiceController extends Controller
                 'success' => false,
                 'message' => 'Gemini API connection failed',
                 'error' => $e->getMessage(),
-                'api_key_configured' => (bool) env('GEMINI_API_KEY'),
+                'api_key_configured' => (bool) $this->getApiKey(),
             ], 200);
         }
     }
@@ -212,9 +212,17 @@ class GeminiVoiceController extends Controller
                 ]);
 
             $tokenName = null;
+            $authType = 'ephemeral';
             if ($response->successful()) {
                 $data = $response->json();
                 $tokenName = $data['name'] ?? null;
+            }
+
+            // Fallback: If AI Studio API key doesn't support ephemeral token endpoint,
+            // pass apiKey directly with auth_type: 'key' so client connects via ?key=
+            if (!$tokenName && !empty($apiKey)) {
+                $tokenName = $apiKey;
+                $authType = 'key';
             }
 
             $livePort = env('GEMINI_LIVE_PORT', 8008);
@@ -227,6 +235,7 @@ class GeminiVoiceController extends Controller
             return response()->json([
                 'success' => true,
                 'token' => $tokenName,
+                'auth_type' => $authType,
                 'ws_url' => $wsUrl,
                 'model' => 'models/gemini-3.8-live',
                 'context' => $context,
@@ -248,19 +257,29 @@ class GeminiVoiceController extends Controller
     {
         // 1. Try DB settings table first
         $savedKey = \App\Models\Setting::where('key', 'ai_gemini_api_key')->value('value');
-        if ($savedKey) {
+        if (!empty($savedKey)) {
             try {
                 $dec = Crypt::decryptString($savedKey);
-                if (!empty($dec)) return $dec;
+                if (!empty($dec)) return trim($dec);
             } catch (\Throwable $e) {
+                if (!str_starts_with($savedKey, 'eyJpdiI6')) {
+                    return trim($savedKey);
+                }
                 Log::warning('Saved Gemini key in settings could not be decrypted.');
             }
         }
 
         // 2. Try DB ai_providers table (primary provider)
-        $provider = \App\Models\AiProvider::where('enabled', true)->first();
-        if ($provider && !empty($provider->key) && !str_starts_with((string)$provider->key, 'eyJpdiI6Ik')) {
-            return $provider->key;
+        try {
+            $provider = \App\Models\AiProvider::where('enabled', true)->first();
+            if ($provider && !empty($provider->key)) {
+                $pKey = (string) $provider->key;
+                if (!str_starts_with($pKey, 'eyJpdiI6')) {
+                    return trim($pKey);
+                }
+            }
+        } catch (\Throwable $e) {
+            // ignore
         }
 
         // 3. Fallback to env
@@ -381,12 +400,14 @@ class GeminiVoiceController extends Controller
         $includeInventory = (bool) preg_match('/inventory|stock|product|low stock|out of stock/', $q);
         $includeEmployees = (bool) preg_match('/employee|staff|worker|attendance/', $q);
         $includeProfit = (bool) preg_match('/profit|margin|net profit|gross profit/', $q);
-        $includePayments = (bool) preg_match('/payment|cash|bank|receivable|payable|due/', $q);
-        $includeOrders = (bool) preg_match('/order|purchase order|sales order/', $q);
+        $includePayments = (bool) preg_match('/payment|cash|bank|payable/', $q);
+        $includeOrders = (bool) preg_match('/\border\b|purchase order|sales order/', $q);
+        $includeDeliveries = (bool) preg_match('/delivery|trip|route|vehicle|dispatch|logistics|driver|carrier|toto|warisaliganj|kashichak|nalanda|nawada/', $q);
+        $includeReceivables = (bool) preg_match('/receivable|due|outstanding|overdue|pending payment|debt|balance|aging/', $q);
 
         // If no specific intent detected, include a broad overview
-        if (!$includeSales && !$includePurchases && !$includeCustomers && !$includeInventory && !$includeEmployees && !$includeProfit && !$includePayments && !$includeOrders) {
-            $includeSales = $includePurchases = $includeInventory = $includeProfit = true;
+        if (!$includeSales && !$includePurchases && !$includeCustomers && !$includeInventory && !$includeEmployees && !$includeProfit && !$includePayments && !$includeOrders && !$includeDeliveries && !$includeReceivables) {
+            $includeSales = $includePurchases = $includeInventory = $includeProfit = $includeDeliveries = $includeReceivables = true;
         }
 
         $context = "Real-time NixaERP Business Data:\n";
@@ -479,6 +500,67 @@ class GeminiVoiceController extends Controller
             $pendingOrders = (int) Order::where('status', 'pending')->count();
             $context .= "- Total Orders: {$totalOrders}\n";
             $context .= "- Pending Orders: {$pendingOrders}\n";
+        }
+
+        if ($includeDeliveries) {
+            $contextService = app(\App\Services\AiContextService::class);
+            $user = auth()->user();
+            $delSummary = $contextService->getDeliveryLogisticsSummary($user?->company_id, $user?->branch_id);
+
+            if ($delSummary['available'] ?? false) {
+                $context .= "- Smart Logistics, Delivery Orders & Vehicle Trips:\n";
+                $context .= "  - Total Delivery Orders: {$delSummary['total_delivery_orders']}\n";
+                $context .= "  - Pending Orders to Schedule/Dispatch: {$delSummary['pending_orders_count']}\n";
+                $context .= "  - Active In-Transit Orders: {$delSummary['in_transit_count']}\n";
+                $context .= "  - Delivered Today: {$delSummary['delivered_today_count']}\n";
+                $context .= "  - Active/Scheduled Vehicle Trips: {$delSummary['active_trips_count']}\n";
+
+                if (!empty($delSummary['active_trips'])) {
+                    $context .= "  - Active Trips Details:\n";
+                    foreach ($delSummary['active_trips'] as $tr) {
+                        $context .= "    * Trip {$tr['trip_code']}: Vehicle {$tr['vehicle']}, Driver {$tr['driver']}, Status: {$tr['status']}, Customers: {$tr['customers_count']}, Planned Date: {$tr['planned_date']}\n";
+                    }
+                }
+
+                if (!empty($delSummary['pending_orders'])) {
+                    $context .= "  - Pending Orders Waiting for Dispatch:\n";
+                    foreach (array_slice($delSummary['pending_orders'], 0, 5) as $po) {
+                        $context .= "    * Order {$po['order_no']}: Customer '{$po['customer']}', Area/Town: '{$po['town']}, {$po['district']}', Priority: {$po['priority']}, Status: {$po['status']}\n";
+                    }
+                }
+
+                if (!empty($delSummary['covered_delivery_areas'])) {
+                    $context .= "  - Service Delivery Hubs: " . implode(', ', array_slice($delSummary['covered_delivery_areas'], 0, 8)) . "\n";
+                }
+            }
+        }
+
+        if ($includeReceivables) {
+            $contextService = app(\App\Services\AiContextService::class);
+            $user = auth()->user();
+            $recSummary = $contextService->getOutstandingReceivablesSummary($user?->company_id, $user?->branch_id);
+
+            if ($recSummary['available'] ?? false) {
+                $context .= "- Customer Receivables & Overdue Dues:\n";
+                $context .= "  - Total Outstanding Receivables: ₹" . number_format($recSummary['total_outstanding_receivables'], 2) . "\n";
+                $context .= "  - Total Overdue Receivables: ₹" . number_format($recSummary['total_overdue_amount'], 2) . "\n";
+                $context .= "  - Unpaid / Partially Paid Invoices: {$recSummary['unpaid_invoices_count']}\n";
+                $context .= "  - Overdue Invoices Count: {$recSummary['overdue_invoices_count']}\n";
+
+                if (!empty($recSummary['top_debtors'])) {
+                    $context .= "  - Top Customers with Outstanding Dues:\n";
+                    foreach ($recSummary['top_debtors'] as $deb) {
+                        $context .= "    * {$deb['customer']}: Pending ₹" . number_format($deb['pending_balance'], 2) . " across {$deb['invoice_count']} invoices (Oldest due: " . ($deb['oldest_due_date'] ?: 'n/a') . ")\n";
+                    }
+                }
+
+                if (!empty($recSummary['recent_critical_invoices'])) {
+                    $context .= "  - Critical Overdue Invoices:\n";
+                    foreach ($recSummary['recent_critical_invoices'] as $ci) {
+                        $context .= "    * Inv #{$ci['invoice_no']} ({$ci['customer']}): Pending ₹" . number_format($ci['balance'], 2) . " (Due: {$ci['due_date']}, {$ci['days_overdue']} days overdue)\n";
+                    }
+                }
+            }
         }
 
         return $context;

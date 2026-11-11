@@ -26,6 +26,12 @@ export interface Invoice {
   pan?: string;
   due_date?: string;
   status?: string;
+  delivery_status?: 'pending' | 'packed' | 'sent' | 'delivered' | string;
+  packed_at?: string | null;
+  dispatched_at?: string | null;
+  delivered_at?: string | null;
+  deliveryOrder?: any;
+  delivery_order?: any;
   public_token?: string;
   public_url?: string;
   [key: string]: any;
@@ -44,6 +50,9 @@ export interface InvoiceItem {
   quantity: number;
   unit_price: number;
   total: number;
+  delivery_status?: 'pending' | 'packed' | 'sent' | 'delivered' | string;
+  packed_quantity?: number | string | null;
+  delivered_quantity?: number | string | null;
   [key: string]: any;
 }
 

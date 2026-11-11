@@ -58,8 +58,6 @@ return [
         'private_key' => env('WEBPUSH_VAPID_PRIVATE_KEY'),
     ],
 
-    
-
     /*
     |--------------------------------------------------------------------------
     | Socialite Providers
@@ -95,8 +93,16 @@ return [
         'client_secret' => env('GOOGLE_CLIENT_SECRET'),
         'redirect' => env('GOOGLE_REDIRECT_URI'),
     ],
+
+    'google_drive' => [
+        'client_id' => env('GOOGLE_DRIVE_CLIENT_ID', env('GOOGLE_CLIENT_ID')),
+        'client_secret' => env('GOOGLE_DRIVE_CLIENT_SECRET', env('GOOGLE_CLIENT_SECRET')),
+        'redirect_uri' => env('GOOGLE_DRIVE_REDIRECT_URI', rtrim(env('APP_URL', 'http://localhost'), '/') . '/api/backups/google/callback'),
+        'picker_api_key' => env('GOOGLE_DRIVE_PICKER_API_KEY'),
+    ],
+
     'gemini' => [
-    'api_key' => env('GEMINI_API_KEY'),
-    'model' => env('GEMINI_MODEL', 'gemini-3.5-flash'),
+        'api_key' => env('GEMINI_API_KEY'),
+        'model' => env('GEMINI_MODEL', 'gemini-3.5-flash'),
     ],
 ];

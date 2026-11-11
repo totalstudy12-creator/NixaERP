@@ -483,10 +483,10 @@ export function FloatingVoiceAgent() {
         <section
           role="dialog"
           aria-label="Live Voice Agent"
-          className="relative mb-3 flex w-[370px] max-w-[calc(100vw-32px)] flex-col overflow-hidden rounded-3xl border border-slate-700/60 bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 p-5 text-white shadow-[0_24px_50px_-12px_rgba(0,0,0,0.85)] ring-1 ring-white/10 backdrop-blur-xl sm:w-[390px]"
+          className="relative mb-3 flex w-[370px] max-w-[calc(100vw-32px)] flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 text-slate-800 shadow-2xl ring-1 ring-slate-900/5 backdrop-blur-xl sm:w-[390px]"
         >
           {/* Top Bar */}
-          <div className="flex items-center justify-between pb-3 border-b border-white/10">
+          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
             <div className="flex items-center gap-2.5">
               <span className="relative flex h-3 w-3">
                 <span
@@ -497,7 +497,7 @@ export function FloatingVoiceAgent() {
                       ? 'bg-sky-400'
                       : voiceState === 'thinking'
                       ? 'bg-indigo-400'
-                      : 'bg-slate-400'
+                      : 'bg-slate-300'
                   }`}
                 />
                 <span
@@ -508,15 +508,15 @@ export function FloatingVoiceAgent() {
                       ? 'bg-sky-500'
                       : voiceState === 'thinking'
                       ? 'bg-indigo-500'
-                      : 'bg-slate-500'
+                      : 'bg-slate-400'
                   }`}
                 />
               </span>
               <div>
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-                  Nixa Live Voice Agent
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900">
+                  Raptor Live Voice Agent
                 </h3>
-                <p className="text-[10px] text-slate-400 font-medium">
+                <p className="text-[10px] text-slate-500 font-medium">
                   {voiceState === 'listening'
                     ? 'Listening to you…'
                     : voiceState === 'speaking'
@@ -533,7 +533,7 @@ export function FloatingVoiceAgent() {
                 type="button"
                 onClick={() => setShowSettings((s) => !s)}
                 className={`grid h-8 w-8 place-items-center rounded-xl transition ${
-                  showSettings ? 'bg-white/20 text-white' : 'text-slate-400 hover:bg-white/10 hover:text-white'
+                  showSettings ? 'bg-slate-100 text-slate-900' : 'text-slate-400 hover:bg-slate-50 hover:text-slate-700'
                 }`}
                 title="Voice Persona Settings"
               >
@@ -543,7 +543,7 @@ export function FloatingVoiceAgent() {
                 type="button"
                 onClick={() => setShowHistory((h) => !h)}
                 className={`grid h-8 w-8 place-items-center rounded-xl transition ${
-                  showHistory ? 'bg-white/20 text-white' : 'text-slate-400 hover:bg-white/10 hover:text-white'
+                  showHistory ? 'bg-slate-100 text-slate-900' : 'text-slate-400 hover:bg-slate-50 hover:text-slate-700'
                 }`}
                 title="Conversation Subtitles History"
               >
@@ -555,7 +555,7 @@ export function FloatingVoiceAgent() {
                   setIsOpen(false);
                   handleStopAll();
                 }}
-                className="grid h-8 w-8 place-items-center rounded-xl text-slate-400 hover:bg-white/10 hover:text-white transition"
+                className="grid h-8 w-8 place-items-center rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition"
                 title="Minimize Agent"
               >
                 <X size={16} />
@@ -565,18 +565,18 @@ export function FloatingVoiceAgent() {
 
           {/* Settings Drawer */}
           {showSettings && (
-            <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 p-3.5 space-y-3">
+            <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 p-3.5 space-y-3">
               <div className="flex items-center justify-between">
-                <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-300">
+                <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-600">
                   Voice Persona
                 </label>
                 <select
                   value={voicePersona}
                   onChange={(e) => setVoicePersona(e.target.value)}
-                  className="rounded-lg border border-white/20 bg-slate-800 px-2.5 py-1 text-xs font-semibold text-white outline-none"
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-800 outline-none shadow-xs"
                 >
                   {VOICE_PERSONAS.map((p) => (
-                    <option key={p.id} value={p.id} className="bg-slate-900 text-white">
+                    <option key={p.id} value={p.id} className="bg-white text-slate-800">
                       {p.name} ({p.tone})
                     </option>
                   ))}
@@ -584,14 +584,14 @@ export function FloatingVoiceAgent() {
               </div>
 
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-300">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-600">
                   Hands-Free Loop
                 </span>
                 <button
                   type="button"
                   onClick={() => setHandsFree((h) => !h)}
                   className={`rounded-full px-3 py-1 text-[11px] font-bold transition ${
-                    handsFree ? 'bg-emerald-500 text-white shadow-emerald-500/30 shadow' : 'bg-slate-800 text-slate-400'
+                    handsFree ? 'bg-emerald-600 text-white shadow-emerald-500/25 shadow-xs' : 'bg-slate-200 text-slate-600'
                   }`}
                 >
                   {handsFree ? 'Continuous ON' : 'Push-To-Talk'}
@@ -602,12 +602,12 @@ export function FloatingVoiceAgent() {
 
           {/* Subtitles / Spoken History Drawer */}
           {showHistory ? (
-            <div className="my-4 max-h-56 space-y-2.5 overflow-y-auto rounded-2xl border border-white/10 bg-slate-950/60 p-3">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+            <div className="my-4 max-h-56 space-y-2.5 overflow-y-auto rounded-2xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
                 Spoken Dialogue History
               </p>
               {turns.length === 0 ? (
-                <p className="text-xs text-slate-500 italic py-4 text-center">
+                <p className="text-xs text-slate-400 italic py-4 text-center">
                   No spoken turns yet. Speak into the microphone to begin.
                 </p>
               ) : (
@@ -616,14 +616,14 @@ export function FloatingVoiceAgent() {
                     key={t.id}
                     className={`rounded-xl p-2.5 text-xs ${
                       t.role === 'user'
-                        ? 'border border-emerald-500/20 bg-emerald-500/10 text-emerald-100'
-                        : 'border border-sky-500/20 bg-sky-500/10 text-sky-100'
+                        ? 'border border-emerald-200 bg-emerald-50 text-emerald-900'
+                        : 'border border-indigo-200 bg-indigo-50 text-indigo-900'
                     }`}
                   >
-                    <span className="block text-[9px] font-bold uppercase tracking-wider opacity-60">
+                    <span className="block text-[9px] font-bold uppercase tracking-wider opacity-70">
                       {t.role === 'user' ? 'You Spoke' : `Agent (${voicePersona})`}
                     </span>
-                    <p className="mt-0.5 leading-relaxed">{t.text}</p>
+                    <p className="mt-0.5 leading-relaxed font-medium">{t.text}</p>
                   </div>
                 ))
               )}
@@ -637,12 +637,12 @@ export function FloatingVoiceAgent() {
                 <span
                   className={`absolute -inset-4 rounded-full blur-xl transition-all duration-500 ${
                     voiceState === 'listening'
-                      ? 'bg-emerald-500/30 scale-125'
+                      ? 'bg-emerald-500/20 scale-125'
                       : voiceState === 'speaking'
-                      ? 'bg-sky-500/40 scale-125'
+                      ? 'bg-indigo-500/25 scale-125'
                       : voiceState === 'thinking'
-                      ? 'bg-indigo-500/30 animate-pulse'
-                      : 'bg-emerald-500/15 scale-100'
+                      ? 'bg-amber-500/20 animate-pulse'
+                      : 'bg-indigo-500/10 scale-100'
                   }`}
                 />
 
@@ -657,16 +657,16 @@ export function FloatingVoiceAgent() {
                       startListeningSession();
                     }
                   }}
-                  className={`relative flex h-28 w-28 items-center justify-center rounded-full border-2 transition-all duration-300 shadow-2xl ${
+                  className={`relative flex h-28 w-28 items-center justify-center rounded-full border-2 transition-all duration-300 shadow-xl ${
                     isMuted
-                      ? 'border-amber-400/80 bg-gradient-to-br from-amber-500/20 to-amber-700/30'
+                      ? 'border-amber-300 bg-gradient-to-br from-amber-50 to-amber-100'
                       : voiceState === 'listening'
-                      ? 'border-emerald-400 bg-gradient-to-br from-emerald-500 via-teal-600 to-emerald-700 shadow-emerald-500/40 scale-105'
+                      ? 'border-emerald-400 bg-gradient-to-br from-emerald-500 to-teal-600 shadow-emerald-500/30 scale-105'
                       : voiceState === 'speaking'
-                      ? 'border-sky-400 bg-gradient-to-br from-sky-500 via-indigo-600 to-violet-700 shadow-sky-500/40 animate-pulse'
+                      ? 'border-indigo-400 bg-gradient-to-br from-indigo-600 via-indigo-500 to-violet-600 shadow-indigo-500/30 animate-pulse'
                       : voiceState === 'thinking'
-                      ? 'border-indigo-400 bg-gradient-to-br from-indigo-500 via-purple-600 to-indigo-800 animate-spin'
-                      : 'border-white/20 bg-gradient-to-br from-slate-800 via-slate-800 to-slate-900 hover:border-emerald-400/60'
+                      ? 'border-amber-400 bg-gradient-to-br from-amber-500 via-orange-500 to-indigo-600 animate-spin'
+                      : 'border-slate-200 bg-gradient-to-br from-white via-indigo-50/50 to-slate-100 hover:border-indigo-300'
                   }`}
                   title={
                     voiceState === 'speaking'
@@ -677,13 +677,13 @@ export function FloatingVoiceAgent() {
                   }
                 >
                   {isMuted ? (
-                    <MicOff size={34} className="text-amber-300" />
+                    <MicOff size={34} className="text-amber-600" />
                   ) : voiceState === 'speaking' ? (
                     <Volume2 size={36} className="text-white animate-bounce" />
                   ) : voiceState === 'thinking' ? (
                     <Sparkles size={34} className="text-white" />
                   ) : (
-                    <Mic size={34} className={voiceState === 'listening' ? 'text-white' : 'text-emerald-400'} />
+                    <Mic size={34} className={voiceState === 'listening' ? 'text-white' : 'text-indigo-600'} />
                   )}
                 </button>
               </div>
@@ -692,15 +692,15 @@ export function FloatingVoiceAgent() {
               <LiveWaveVisualizer voiceState={voiceState} isMuted={isMuted} />
 
               {/* Live Subtitle Transcript */}
-              <div className="mt-3.5 w-full min-h-[58px] rounded-2xl border border-white/10 bg-white/5 p-3 text-center">
+              <div className="mt-3.5 w-full min-h-[58px] rounded-2xl border border-slate-200 bg-slate-50 p-3 text-center">
                 {currentTranscript ? (
-                  <p className="text-xs font-medium text-emerald-200">
-                    <span className="text-[10px] uppercase font-bold text-emerald-400 tracking-wider mr-1.5">You:</span>
+                  <p className="text-xs font-semibold text-emerald-800">
+                    <span className="text-[10px] uppercase font-bold text-emerald-600 tracking-wider mr-1.5">You:</span>
                     "{currentTranscript}"
                   </p>
                 ) : lastAgentReply ? (
-                  <p className="text-xs font-medium text-slate-200 line-clamp-2">
-                    <span className="text-[10px] uppercase font-bold text-sky-400 tracking-wider mr-1.5">Agent:</span>
+                  <p className="text-xs font-medium text-slate-800 line-clamp-2">
+                    <span className="text-[10px] uppercase font-bold text-indigo-600 tracking-wider mr-1.5">Agent:</span>
                     "{lastAgentReply}"
                   </p>
                 ) : (
@@ -715,7 +715,7 @@ export function FloatingVoiceAgent() {
           {/* Quick Voice Suggestions */}
           {!showHistory && (
             <div className="mt-1 space-y-1.5">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
                 Quick Spoken Inquiries
               </p>
               <div className="grid grid-cols-2 gap-1.5">
@@ -725,9 +725,9 @@ export function FloatingVoiceAgent() {
                     type="button"
                     onClick={() => void processVoiceTurn(q)}
                     disabled={voiceState === 'thinking'}
-                    className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 p-2 text-left text-[11px] font-medium text-slate-300 transition hover:border-emerald-400/40 hover:bg-white/10 hover:text-white disabled:opacity-40"
+                    className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50/80 p-2 text-left text-[11px] font-semibold text-slate-700 transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-700 disabled:opacity-40"
                   >
-                    <Play size={10} className="shrink-0 text-emerald-400" />
+                    <Play size={10} className="shrink-0 text-indigo-600" />
                     <span className="truncate">{q}</span>
                   </button>
                 ))}
@@ -737,21 +737,21 @@ export function FloatingVoiceAgent() {
 
           {/* Error Banner */}
           {errorMessage && (
-            <div className="mt-3 flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/15 p-2.5 text-xs text-rose-200">
-              <AlertCircle size={14} className="shrink-0 text-rose-400" />
+            <div className="mt-3 flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 p-2.5 text-xs text-rose-700">
+              <AlertCircle size={14} className="shrink-0 text-rose-500" />
               <span className="flex-1">{errorMessage}</span>
             </div>
           )}
 
           {/* Bottom Action Controls */}
-          <div className="mt-4 flex items-center justify-between border-t border-white/10 pt-3">
+          <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
             <button
               type="button"
               onClick={() => setIsMuted((m) => !m)}
               className={`flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-semibold transition ${
                 isMuted
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                  : 'bg-white/10 text-slate-300 hover:bg-white/15 hover:text-white'
+                  ? 'bg-amber-50 text-amber-700 border border-amber-300'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
               }`}
             >
               {isMuted ? <MicOff size={14} /> : <Mic size={14} />}

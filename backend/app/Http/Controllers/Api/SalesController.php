@@ -36,7 +36,13 @@ class SalesController extends Controller
 
         $totalPaid = (float) Payment::query()
             ->when($companyId, fn($q) => $q->where('company_id', $companyId))
-            ->where('type', 'in')
+            ->where(function ($q) {
+                if (\Illuminate\Support\Facades\Schema::hasColumn('payments', 'payment_direction')) {
+                    $q->where('payment_direction', 'inward');
+                } elseif (\Illuminate\Support\Facades\Schema::hasColumn('payments', 'type')) {
+                    $q->where('type', 'in');
+                }
+            })
             ->sum('amount');
 
         $outstanding = max(0, $totalSales - $totalPaid);

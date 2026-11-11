@@ -586,6 +586,9 @@ class AiController extends Controller
         $context['top_products']  = $this->contextService->getTopProducts(5);
         $context['top_customers'] = $this->contextService->getTopCustomers(5);
         $context['profit_loss_report'] = $this->contextService->getFinancialContextForQuery($message, $user->company_id, $user->branch_id);
+        $context['logistics_delivery'] = $this->contextService->getDeliveryLogisticsSummary($user->company_id, $user->branch_id);
+        $context['receivables_aging']  = $this->contextService->getOutstandingReceivablesSummary($user->company_id, $user->branch_id);
+        $context['cash_banking']       = $this->contextService->getCashAndBankSummary($user->company_id, $user->branch_id);
 
         try {
             $context['inventory_sample'] = Product::limit(15)->get([

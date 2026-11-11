@@ -26,6 +26,9 @@ class InvoiceItem extends Model
         'tax_rate',
         'subtotal',
         'total',
+        'delivery_status',
+        'packed_quantity',
+        'delivered_quantity',
     ];
 
     protected $casts = [
@@ -42,6 +45,8 @@ class InvoiceItem extends Model
         'tax_rate'         => 'decimal:2',
         'subtotal'         => 'decimal:2',
         'total'            => 'decimal:2',
+        'packed_quantity'  => 'decimal:2',
+        'delivered_quantity' => 'decimal:2',
         'is_inter_state'   => 'boolean',
     ];
 
@@ -58,5 +63,10 @@ class InvoiceItem extends Model
     public function product()
     {
         return $this->belongsTo(Product::class);
+    }
+
+    public function deliveryOrderItem()
+    {
+        return $this->hasOne(DeliveryOrderItem::class, 'invoice_item_id');
     }
 }

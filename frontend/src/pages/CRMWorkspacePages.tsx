@@ -12,11 +12,9 @@ import {
   Eye,
   FileCheck,
   FileText,
-  Mail,
   MapPin,
   MessageCircle,
   MoreHorizontal,
-  Phone,
   Plus,
   Printer,
   RefreshCw,
@@ -30,13 +28,14 @@ import {
   XCircle,
   Loader2,
   Info,
-  ChevronDown,
+  Filter,
 } from 'lucide-react';
 import { apiClient } from '../api';
 import { useAuthStore } from '../store/auth';
+import BulkQuotationPrint from '../components/BulkQuotationPrint';
 
 /* ============================================================
- * SHARED KIT
+ * FORMATTERS / VALIDATORS
  * ========================================================== */
 const formatMoney = (amount: number | string | undefined | null): string => {
   const n = Number(amount || 0);
@@ -81,19 +80,162 @@ function useDebouncedValue<T>(value: T, delay = 250): T {
   return v;
 }
 
+/* ============================================================
+ * DATE RANGE
+ * ========================================================== */
+type DatePreset =
+  | 'all'
+  | 'today'
+  | 'yesterday'
+  | '7d'
+  | '30d'
+  | 'this_month'
+  | 'last_month'
+  | 'this_year'
+  | 'custom';
+
+const DATE_PRESETS: { value: DatePreset; label: string }[] = [
+  { value: 'all', label: 'All Time' },
+  { value: 'today', label: 'Today' },
+  { value: 'yesterday', label: 'Yesterday' },
+  { value: '7d', label: 'Last 7 Days' },
+  { value: '30d', label: 'Last 30 Days' },
+  { value: 'this_month', label: 'This Month' },
+  { value: 'last_month', label: 'Last Month' },
+  { value: 'this_year', label: 'This Year' },
+  { value: 'custom', label: 'Custom Range' },
+];
+
+const toISO = (d: Date) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+};
+
+function dateRangeFromPreset(
+  preset: DatePreset,
+  customFrom?: string,
+  customTo?: string,
+): { from?: string; to?: string } {
+  const now = new Date();
+  switch (preset) {
+    case 'all':
+      return {};
+    case 'today':
+      return { from: toISO(now), to: toISO(now) };
+    case 'yesterday': {
+      const y = new Date(now);
+      y.setDate(y.getDate() - 1);
+      return { from: toISO(y), to: toISO(y) };
+    }
+    case '7d': {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 6);
+      return { from: toISO(d), to: toISO(now) };
+    }
+    case '30d': {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 29);
+      return { from: toISO(d), to: toISO(now) };
+    }
+    case 'this_month': {
+      const start = new Date(now.getFullYear(), now.getMonth(), 1);
+      return { from: toISO(start), to: toISO(now) };
+    }
+    case 'last_month': {
+      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const end = new Date(now.getFullYear(), now.getMonth(), 0);
+      return { from: toISO(start), to: toISO(end) };
+    }
+    case 'this_year': {
+      const start = new Date(now.getFullYear(), 0, 1);
+      return { from: toISO(start), to: toISO(now) };
+    }
+    case 'custom':
+      return { from: customFrom || undefined, to: customTo || undefined };
+    default:
+      return {};
+  }
+}
+
+/* ============================================================
+ * AUTH / REFERENCE DATA
+ * ========================================================== */
+function useCurrentCompanyId(): number {
+  const user = useAuthStore((s) => (s as any).user);
+  const activeCompany = useAuthStore((s) => (s as any).activeCompany);
+  return Number(activeCompany?.id ?? user?.company_id ?? user?.active_company_id ?? 0) || 0;
+}
+
+function useReferenceData() {
+  const [companies, setCompanies] = useState<any[]>([]);
+  const [branches, setBranches] = useState<any[]>([]);
+  useEffect(() => {
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const [c, b] = await Promise.all([apiClient.getCompanies(), apiClient.getBranches()]);
+        if (controller.signal.aborted) return;
+        setCompanies(Array.isArray(c) ? c : (c as any)?.data || []);
+        setBranches(Array.isArray(b) ? b : (b as any)?.data || []);
+      } catch { /* soft */ }
+    })();
+    return () => controller.abort();
+  }, []);
+  return { companies, branches };
+}
+
+function usePersistedToggle(storageKey: string, defaultOpen = false) {
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch { /* ignore */ }
+    return defaultOpen;
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(storageKey, open ? '1' : '0'); } catch { /* ignore */ }
+  }, [storageKey, open]);
+  const toggle = useCallback(() => setOpen((v) => !v), []);
+  return { open, setOpen, toggle };
+}
+
+/* ============================================================
+ * TOASTS
+ * ========================================================== */
 type ToastKind = 'success' | 'error' | 'info';
 type ToastItem = { id: number; type: ToastKind; message: string };
 
 function useToasts() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const push = useCallback((type: ToastKind, message: string) => {
-    const t: ToastItem = { id: Date.now() + Math.random(), type, message };
-    setToasts((prev) => [...prev, t]);
-    setTimeout(() => setToasts((prev) => prev.filter((x) => x.id !== t.id)), 4500);
-  }, []);
+  const timersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+
   const dismiss = useCallback((id: number) => {
+    const t = timersRef.current.get(id);
+    if (t) { clearTimeout(t); timersRef.current.delete(id); }
     setToasts((prev) => prev.filter((x) => x.id !== id));
   }, []);
+
+  const push = useCallback((type: ToastKind, message: string) => {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev, { id, type, message }]);
+    const timer = setTimeout(() => {
+      setToasts((prev) => prev.filter((x) => x.id !== id));
+      timersRef.current.delete(id);
+    }, 4500);
+    timersRef.current.set(id, timer);
+  }, []);
+
+  useEffect(() => {
+    const map = timersRef.current;
+    return () => {
+      map.forEach((t) => clearTimeout(t));
+      map.clear();
+    };
+  }, []);
+
   return { toasts, push, dismiss };
 }
 
@@ -139,6 +281,9 @@ function ToastStack({
   );
 }
 
+/* ============================================================
+ * MODAL
+ * ========================================================== */
 function Modal({
   children,
   onClose,
@@ -149,14 +294,13 @@ function Modal({
   size?: 'sm' | 'md' | 'lg' | 'xl';
 }) {
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => {
       document.removeEventListener('keydown', onKey);
-      document.body.style.overflow = '';
+      document.body.style.overflow = prev;
     };
   }, [onClose]);
 
@@ -211,6 +355,9 @@ function ModalHeader({
   );
 }
 
+/* ============================================================
+ * ACTION MENU
+ * ========================================================== */
 type MenuItem = {
   label: string;
   icon?: React.ReactNode;
@@ -249,10 +396,7 @@ function ActionMenu({ items }: { items: MenuItem[] }) {
               key={i}
               type="button"
               disabled={item.disabled}
-              onClick={() => {
-                setOpen(false);
-                item.onClick();
-              }}
+              onClick={() => { setOpen(false); item.onClick(); }}
               className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-xs transition disabled:opacity-40 ${
                 item.destructive
                   ? 'text-rose-600 hover:bg-rose-50'
@@ -273,6 +417,9 @@ function ActionMenu({ items }: { items: MenuItem[] }) {
   );
 }
 
+/* ============================================================
+ * SMALL UI PARTS
+ * ========================================================== */
 function Skeleton({ className = '' }: { className?: string }) {
   return <div className={`animate-pulse rounded-lg bg-slate-100 ${className}`} />;
 }
@@ -304,38 +451,245 @@ function Field({
 const inputCls =
   'mt-1 h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-xs outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100';
 
+const filterSelectCls =
+  'h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 outline-none focus:border-indigo-500';
+
+/* ============================================================
+ * FILTER COMPONENTS
+ * ========================================================== */
+function FilterToggle({
+  open,
+  onToggle,
+  activeCount,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  activeCount: number;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={open ? 'Hide filters' : 'Show filters'}
+      aria-expanded={open}
+      title={open ? 'Hide filters' : 'Show filters'}
+      className={`relative grid h-9 w-9 place-items-center rounded-lg border transition ${
+        open
+          ? 'border-indigo-200 bg-indigo-50 text-indigo-700 shadow-sm hover:bg-indigo-100'
+          : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-700'
+      }`}
+    >
+      <Filter size={16} />
+      {activeCount > 0 && (
+        <span className="absolute -right-1.5 -top-1.5 grid h-4 min-w-[16px] place-items-center rounded-full bg-rose-500 px-1 text-[9px] font-bold leading-none text-white ring-2 ring-white">
+          {activeCount > 9 ? '9+' : activeCount}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function DateRangeControls({
+  preset,
+  onPresetChange,
+  from,
+  to,
+  onFromChange,
+  onToChange,
+}: {
+  preset: DatePreset;
+  onPresetChange: (p: DatePreset) => void;
+  from: string;
+  to: string;
+  onFromChange: (v: string) => void;
+  onToChange: (v: string) => void;
+}) {
+  return (
+    <>
+      <select
+        aria-label="Date range"
+        value={preset}
+        onChange={(e) => onPresetChange(e.target.value as DatePreset)}
+        className={filterSelectCls}
+      >
+        {DATE_PRESETS.map((p) => (
+          <option key={p.value} value={p.value}>{p.label}</option>
+        ))}
+      </select>
+      {preset === 'custom' && (
+        <>
+          <input
+            type="date"
+            aria-label="From date"
+            value={from}
+            onChange={(e) => onFromChange(e.target.value)}
+            className={filterSelectCls}
+          />
+          <span className="text-xs text-slate-400">to</span>
+          <input
+            type="date"
+            aria-label="To date"
+            value={to}
+            onChange={(e) => onToChange(e.target.value)}
+            className={filterSelectCls}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+function CompanyBranchControls({
+  companies,
+  branches,
+  company,
+  branch,
+  onCompanyChange,
+  onBranchChange,
+}: {
+  companies: any[];
+  branches: any[];
+  company: string;
+  branch: string;
+  onCompanyChange: (v: string) => void;
+  onBranchChange: (v: string) => void;
+}) {
+  const filteredBranches = useMemo(
+    () =>
+      company === 'all'
+        ? branches
+        : branches.filter((b) => String(b.company_id) === company),
+    [branches, company],
+  );
+  return (
+    <>
+      <select
+        aria-label="Company"
+        value={company}
+        onChange={(e) => { onCompanyChange(e.target.value); onBranchChange('all'); }}
+        className={filterSelectCls}
+      >
+        <option value="all">All Companies</option>
+        {companies.map((c) => (
+          <option key={c.id} value={String(c.id)}>{c.name}</option>
+        ))}
+      </select>
+      <select
+        aria-label="Branch"
+        value={branch}
+        onChange={(e) => onBranchChange(e.target.value)}
+        className={filterSelectCls}
+      >
+        <option value="all">All Branches</option>
+        {filteredBranches.map((b) => (
+          <option key={b.id} value={String(b.id)}>{b.name}</option>
+        ))}
+      </select>
+    </>
+  );
+}
+
+function activeDateFilterCount(preset: DatePreset): number {
+  return preset === 'all' ? 0 : 1;
+}
+
 /* ============================================================
  * QUOTATIONS PAGE
  * ========================================================== */
 export function QuotationsPage() {
   const navigate = useNavigate();
   const { toasts, push, dismiss } = useToasts();
+  const { companies, branches } = useReferenceData();
 
   const [quotations, setQuotations] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search);
   const [statusFilter, setStatusFilter] = useState('all');
+  const [companyFilter, setCompanyFilter] = useState('all');
   const [branchFilter, setBranchFilter] = useState('all');
+  const [datePreset, setDatePreset] = useState<DatePreset>('today');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [bulkPrintQuotations, setBulkPrintQuotations] = useState<any[] | null>(null);
+  const [bulkPrinting, setBulkPrinting] = useState(false);
+
+  const allSelected = quotations.length > 0 && quotations.every((q) => selectedIds.includes(q.id));
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedIds([]);
+    } else {
+      setSelectedIds(quotations.map((q) => q.id));
+    }
+  };
+  const toggleSelectOne = (id: number) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const handleBulkPrint = async () => {
+    if (!selectedIds.length) return;
+    setBulkPrinting(true);
+    try {
+      const detailPromises = selectedIds.map(async (id) => {
+        try {
+          const res: any = await apiClient.getQuotation(id);
+          return res?.data ?? res;
+        } catch {
+          return quotations.find((q) => q.id === id) ?? null;
+        }
+      });
+      const loaded = await Promise.all(detailPromises);
+      const valid = loaded.filter(Boolean);
+      if (!valid.length) {
+        push('error', 'Could not load quotation details for printing.');
+        return;
+      }
+      setBulkPrintQuotations(valid);
+      push('success', `Prepared ${valid.length} quotation(s) for printing.`);
+    } catch (err: any) {
+      push('error', err?.message || 'Failed to prepare bulk print.');
+    } finally {
+      setBulkPrinting(false);
+    }
+  };
+
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalCount, setTotalCount] = useState(0);
 
-  // Modals
+  const { open: filtersOpen, toggle: toggleFilters } = usePersistedToggle(
+    'quotations:filtersOpen:v2',
+    false,
+  );
+
+  const activeFilterCount =
+    (statusFilter !== 'all' ? 1 : 0) +
+    (companyFilter !== 'all' ? 1 : 0) +
+    (branchFilter !== 'all' ? 1 : 0) +
+    activeDateFilterCount(datePreset) +
+    (search.trim() ? 1 : 0);
+
+  const dateRange = useMemo(
+    () => dateRangeFromPreset(datePreset, customFrom, customTo),
+    [datePreset, customFrom, customTo],
+  );
+
   const [convertModalQuotation, setConvertModalQuotation] = useState<any>(null);
   const [statusModalQuotation, setStatusModalQuotation] = useState<any>(null);
 
   const [convertForm, setConvertForm] = useState(() => {
     const d = new Date();
-    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const today = toISO(d);
     const d15 = new Date();
     d15.setDate(d15.getDate() + 15);
-    const due = `${d15.getFullYear()}-${String(d15.getMonth() + 1).padStart(2, '0')}-${String(d15.getDate()).padStart(2, '0')}`;
     return {
       invoice_date: today,
-      due_date: due,
+      due_date: toISO(d15),
       auto_deduct_stock: true,
       payment_term: 'Net 15',
       warehouse_id: '',
@@ -351,11 +705,8 @@ export function QuotationsPage() {
   });
   const [statusError, setStatusError] = useState<{ reason?: string }>({});
 
-  // Auxiliary
   const [warehouses, setWarehouses] = useState<any[]>([]);
-  const [branches, setBranches] = useState<any[]>([]);
 
-  /* ---- Load list ---- */
   useEffect(() => {
     const controller = new AbortController();
     (async () => {
@@ -364,7 +715,10 @@ export function QuotationsPage() {
         const params: Record<string, unknown> = { page, per_page: 15 };
         if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
         if (statusFilter !== 'all') params.status = statusFilter;
+        if (companyFilter !== 'all') params.company_id = companyFilter;
         if (branchFilter !== 'all') params.branch_id = branchFilter;
+        if (dateRange.from) params.from_date = dateRange.from;
+        if (dateRange.to) params.to_date = dateRange.to;
 
         const [quotesRes, summaryRes] = await Promise.all([
           apiClient.getQuotations(params),
@@ -389,33 +743,28 @@ export function QuotationsPage() {
       }
     })();
     return () => controller.abort();
-  }, [page, debouncedSearch, statusFilter, branchFilter, push]);
+  }, [page, debouncedSearch, statusFilter, companyFilter, branchFilter, dateRange, refreshKey, push]);
 
-  /* ---- Load aux ---- */
   useEffect(() => {
     const controller = new AbortController();
     (async () => {
       try {
-        const [w, b] = await Promise.all([apiClient.getWarehouses(), apiClient.getBranches()]);
+        const w = await apiClient.getWarehouses();
         if (controller.signal.aborted) return;
         setWarehouses(Array.isArray(w) ? w : (w as any)?.data || []);
-        setBranches(Array.isArray(b) ? b : (b as any)?.data || []);
-      } catch {
-        /* soft */
-      }
+      } catch { /* soft */ }
     })();
     return () => controller.abort();
   }, []);
 
-  const resetPage = useCallback(() => setPage(1), []);
+  const resetPage = useCallback(() => { setPage(1); setSelectedIds([]); }, []);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const handleDuplicate = async (id: number) => {
     try {
       const res: any = await apiClient.duplicateQuotation(id);
       push('success', res?.message || 'Quotation duplicated');
-      setPage((p) => p); // trigger reload
-      // Force reload by toggling a dummy — simplest: use a state counter
-      window.location.reload(); // fallback — see note below
+      reload();
     } catch (err: any) {
       push('error', err?.message || 'Could not duplicate quotation');
     }
@@ -427,6 +776,7 @@ export function QuotationsPage() {
       await apiClient.deleteQuotation(id);
       push('success', 'Quotation deleted');
       setQuotations((prev) => prev.filter((q) => q.id !== id));
+      setTotalCount((c) => Math.max(0, c - 1));
     } catch (err: any) {
       push('error', err?.message || 'Could not delete quotation');
     }
@@ -439,10 +789,7 @@ export function QuotationsPage() {
     if (convertForm.invoice_date && convertForm.due_date && convertForm.due_date < convertForm.invoice_date) {
       errs.due = 'Due date must be on or after invoice date';
     }
-    if (Object.keys(errs).length > 0) {
-      setConvertError(errs);
-      return;
-    }
+    if (Object.keys(errs).length > 0) { setConvertError(errs); return; }
     setConvertError({});
     setConverting(true);
     try {
@@ -456,9 +803,7 @@ export function QuotationsPage() {
       push('success', `Converted to Invoice #${res?.invoice?.invoice_no || ''}`);
       setConvertModalQuotation(null);
       setQuotations((prev) =>
-        prev.map((q) =>
-          q.id === convertModalQuotation.id ? { ...q, status: 'converted' } : q,
-        ),
+        prev.map((q) => (q.id === convertModalQuotation.id ? { ...q, status: 'converted' } : q)),
       );
     } catch (err: any) {
       push('error', err?.message || 'Failed to convert quotation');
@@ -541,7 +886,6 @@ export function QuotationsPage() {
     <div className="mx-auto max-w-7xl space-y-6 p-4 md:p-6">
       <ToastStack toasts={toasts} onDismiss={dismiss} />
 
-      {/* Hero */}
       <section className="overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 p-6 text-white shadow-sm">
         <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
           <div className="max-w-2xl">
@@ -557,7 +901,7 @@ export function QuotationsPage() {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setPage((p) => p)}
+              onClick={reload}
               className="inline-flex items-center gap-2 rounded-xl border border-white/20 bg-white/10 px-4 py-2.5 text-xs font-semibold transition hover:bg-white/20"
             >
               <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh
@@ -572,7 +916,6 @@ export function QuotationsPage() {
         </div>
       </section>
 
-      {/* Metrics */}
       <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetricCard
           label="Total Proposals"
@@ -603,45 +946,76 @@ export function QuotationsPage() {
         />
       </section>
 
-      {/* Filters + Table */}
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="flex flex-col gap-3 border-b border-slate-100 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="relative w-full sm:max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
             <input
               value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                resetPage();
-              }}
+              onChange={(e) => { setSearch(e.target.value); resetPage(); }}
               placeholder="Search quotation #, customer, phone…"
               className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3 text-xs outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
             />
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={branchFilter}
-              onChange={(e) => {
-                setBranchFilter(e.target.value);
-                resetPage();
-              }}
-              className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 outline-none focus:border-indigo-500"
-            >
-              <option value="all">All Branches</option>
-              {branches.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name}
-                </option>
-              ))}
-            </select>
+          <div className="flex items-center gap-2">
+            <FilterToggle open={filtersOpen} onToggle={toggleFilters} activeCount={activeFilterCount} />
+          </div>
+        </div>
+
+        {selectedIds.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-indigo-100 bg-indigo-50/80 px-4 py-2.5">
+            <div className="flex items-center gap-2">
+              <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-indigo-600 px-2 text-xs font-bold text-white">
+                {selectedIds.length}
+              </span>
+              <span className="text-xs font-semibold text-indigo-950">
+                quotation{selectedIds.length > 1 ? 's' : ''} selected
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleBulkPrint}
+                disabled={bulkPrinting}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-500 disabled:opacity-50"
+              >
+                <Printer size={13} className={bulkPrinting ? 'animate-spin' : ''} />
+                {bulkPrinting ? 'Preparing…' : `Bulk Print (${selectedIds.length})`}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedIds([])}
+                className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-white hover:text-slate-900"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        )}
+
+        {filtersOpen && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-slate-50/60 px-4 py-3">
+            <CompanyBranchControls
+              companies={companies}
+              branches={branches}
+              company={companyFilter}
+              branch={branchFilter}
+              onCompanyChange={(v) => { setCompanyFilter(v); resetPage(); }}
+              onBranchChange={(v) => { setBranchFilter(v); resetPage(); }}
+            />
+            <DateRangeControls
+              preset={datePreset}
+              onPresetChange={(p) => { setDatePreset(p); resetPage(); }}
+              from={customFrom}
+              to={customTo}
+              onFromChange={(v) => { setCustomFrom(v); resetPage(); }}
+              onToChange={(v) => { setCustomTo(v); resetPage(); }}
+            />
             <div className="inline-flex rounded-lg bg-slate-100 p-1 text-xs font-semibold">
               {['all', 'draft', 'sent', 'accepted', 'converted', 'expired'].map((s) => (
                 <button
                   key={s}
-                  onClick={() => {
-                    setStatusFilter(s);
-                    resetPage();
-                  }}
+                  onClick={() => { setStatusFilter(s); resetPage(); }}
                   className={`rounded-md px-2.5 py-1.5 capitalize transition ${
                     statusFilter === s
                       ? 'bg-white text-indigo-700 shadow-sm'
@@ -653,26 +1027,24 @@ export function QuotationsPage() {
               ))}
             </div>
           </div>
-        </div>
+        )}
 
         {loading ? (
           <div className="space-y-2 p-4">
-            {[1, 2, 3, 4, 5].map((i) => (
-              <Skeleton key={i} className="h-12 w-full" />
-            ))}
+            {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-12 w-full" />)}
           </div>
         ) : quotations.length === 0 ? (
           <div className="p-12 text-center">
             <FileText size={40} className="mx-auto text-slate-300" />
             <p className="mt-3 text-sm font-medium text-slate-700">
-              {search || statusFilter !== 'all' ? 'No matching quotations' : 'No quotations yet'}
+              {activeFilterCount > 0 ? 'No matching quotations' : 'No quotations yet'}
             </p>
             <p className="mt-1 text-xs text-slate-500">
-              {search || statusFilter !== 'all'
+              {activeFilterCount > 0
                 ? 'Try adjusting your filters.'
                 : 'Create your first proposal to get started.'}
             </p>
-            {!search && statusFilter === 'all' && (
+            {activeFilterCount === 0 && (
               <button
                 onClick={() => navigate('/quotations/create')}
                 className="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-indigo-500"
@@ -686,6 +1058,15 @@ export function QuotationsPage() {
             <table className="w-full min-w-[850px] text-left text-sm">
               <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500">
                 <tr>
+                  <th className="w-10 px-4 py-3.5 text-center">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={toggleSelectAll}
+                      className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      title="Select all on this page"
+                    />
+                  </th>
                   <th className="px-5 py-3.5 font-semibold">Quotation #</th>
                   <th className="px-5 py-3.5 font-semibold">Customer</th>
                   <th className="px-5 py-3.5 font-semibold">Branch</th>
@@ -698,7 +1079,15 @@ export function QuotationsPage() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {quotations.map((quote) => (
-                  <tr key={quote.id} className="transition hover:bg-slate-50/70">
+                  <tr key={quote.id} className={`transition hover:bg-slate-50/70 ${selectedIds.includes(quote.id) ? 'bg-indigo-50/40' : ''}`}>
+                    <td className="w-10 px-4 py-3.5 text-center" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.includes(quote.id)}
+                        onChange={() => toggleSelectOne(quote.id)}
+                        className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                    </td>
                     <td className="px-5 py-3.5">
                       <button
                         onClick={() => navigate(`/quotations/${quote.id}`)}
@@ -752,6 +1141,23 @@ export function QuotationsPage() {
                             <FileCheck size={12} /> Convert
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            (async () => {
+                              try {
+                                const res: any = await apiClient.getQuotation(quote.id);
+                                setBulkPrintQuotations([res?.data ?? res ?? quote]);
+                              } catch {
+                                setBulkPrintQuotations([quote]);
+                              }
+                            })();
+                          }}
+                          title="Print Quotation"
+                          className="rounded-lg p-1.5 text-slate-600 transition hover:bg-slate-100 hover:text-indigo-600"
+                        >
+                          <Printer size={15} />
+                        </button>
                         {quote.customer_phone && (
                           <a
                             href={whatsappLink(quote)}
@@ -798,14 +1204,12 @@ export function QuotationsPage() {
                               onClick: () => handleDuplicate(quote.id),
                             },
                             ...(quote.status !== 'converted'
-                              ? [
-                                  {
-                                    label: 'Delete',
-                                    icon: <Trash2 size={13} />,
-                                    onClick: () => handleDelete(quote.id),
-                                    destructive: true,
-                                  },
-                                ]
+                              ? [{
+                                  label: 'Delete',
+                                  icon: <Trash2 size={13} />,
+                                  onClick: () => handleDelete(quote.id),
+                                  destructive: true,
+                                }]
                               : []),
                           ]}
                         />
@@ -820,30 +1224,23 @@ export function QuotationsPage() {
 
         {totalPages > 1 && (
           <div className="flex items-center justify-between border-t border-slate-100 px-5 py-3">
-            <p className="text-xs text-slate-500">
-              Page {page} of {totalPages} · {totalCount} total
-            </p>
+            <p className="text-xs text-slate-500">Page {page} of {totalPages} · {totalCount} total</p>
             <div className="flex items-center gap-2">
               <button
                 disabled={page <= 1}
                 onClick={() => setPage((p) => p - 1)}
                 className="rounded-lg border border-slate-200 px-3 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
-              >
-                Previous
-              </button>
+              >Previous</button>
               <button
                 disabled={page >= totalPages}
                 onClick={() => setPage((p) => p + 1)}
                 className="rounded-lg border border-slate-200 px-3 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-50 disabled:opacity-40"
-              >
-                Next
-              </button>
+              >Next</button>
             </div>
           </div>
         )}
       </section>
 
-      {/* Convert Modal */}
       {convertModalQuotation && (
         <Modal onClose={() => setConvertModalQuotation(null)}>
           <ModalHeader
@@ -855,56 +1252,42 @@ export function QuotationsPage() {
           <form onSubmit={handleConvert} className="flex min-h-0 flex-1 flex-col">
             <div className="space-y-4 overflow-y-auto p-6 text-xs">
               <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 p-3 text-emerald-800">
-                Creates a Sales Invoice for{' '}
-                <strong>{formatMoney(convertModalQuotation.total_amount)}</strong> and deducts inventory.
+                Creates a Sales Invoice for <strong>{formatMoney(convertModalQuotation.total_amount)}</strong> and deducts inventory.
               </div>
-
               <div className="grid grid-cols-2 gap-3">
                 <Field label="Invoice Date *">
                   <input
-                    type="date"
-                    required
+                    type="date" required
                     value={convertForm.invoice_date}
-                    onChange={(e) =>
-                      setConvertForm({ ...convertForm, invoice_date: e.target.value })
-                    }
+                    onChange={(e) => setConvertForm({ ...convertForm, invoice_date: e.target.value })}
                     className={inputCls}
                   />
                 </Field>
                 <Field label="Due Date *" error={convertError.due}>
                   <input
-                    type="date"
-                    required
+                    type="date" required
                     value={convertForm.due_date}
                     onChange={(e) => setConvertForm({ ...convertForm, due_date: e.target.value })}
                     className={inputCls}
                   />
                 </Field>
               </div>
-
               <Field label="Dispatch Warehouse">
                 <select
                   value={convertForm.warehouse_id}
-                  onChange={(e) =>
-                    setConvertForm({ ...convertForm, warehouse_id: e.target.value })
-                  }
+                  onChange={(e) => setConvertForm({ ...convertForm, warehouse_id: e.target.value })}
                   className={inputCls}
                 >
                   <option value="">Default warehouse</option>
                   {warehouses.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name} ({w.code || 'MAIN'})
-                    </option>
+                    <option key={w.id} value={w.id}>{w.name} ({w.code || 'MAIN'})</option>
                   ))}
                 </select>
               </Field>
-
               <Field label="Payment Terms">
                 <select
                   value={convertForm.payment_term}
-                  onChange={(e) =>
-                    setConvertForm({ ...convertForm, payment_term: e.target.value })
-                  }
+                  onChange={(e) => setConvertForm({ ...convertForm, payment_term: e.target.value })}
                   className={inputCls}
                 >
                   <option value="Immediate">Immediate</option>
@@ -914,19 +1297,14 @@ export function QuotationsPage() {
                   <option value="Net 60">Net 60 Days</option>
                 </select>
               </Field>
-
               <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-3">
                 <input
                   type="checkbox"
                   checked={convertForm.auto_deduct_stock}
-                  onChange={(e) =>
-                    setConvertForm({ ...convertForm, auto_deduct_stock: e.target.checked })
-                  }
+                  onChange={(e) => setConvertForm({ ...convertForm, auto_deduct_stock: e.target.checked })}
                   className="mt-0.5 rounded border-slate-300 text-emerald-600"
                 />
-                <span className="text-slate-700">
-                  Deduct warehouse inventory for catalog products
-                </span>
+                <span className="text-slate-700">Deduct warehouse inventory for catalog products</span>
               </label>
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-6 py-3.5">
@@ -934,9 +1312,7 @@ export function QuotationsPage() {
                 type="button"
                 onClick={() => setConvertModalQuotation(null)}
                 className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
+              >Cancel</button>
               <button
                 type="submit"
                 disabled={converting}
@@ -950,7 +1326,13 @@ export function QuotationsPage() {
         </Modal>
       )}
 
-      {/* Status Modal */}
+      {bulkPrintQuotations && (
+        <BulkQuotationPrint
+          quotations={bulkPrintQuotations}
+          onReady={() => setBulkPrintQuotations(null)}
+        />
+      )}
+
       {statusModalQuotation && (
         <Modal onClose={() => setStatusModalQuotation(null)} size="sm">
           <ModalHeader
@@ -973,28 +1355,22 @@ export function QuotationsPage() {
                   <option value="rejected">Rejected / Lost</option>
                 </select>
               </Field>
-
               {statusForm.status === 'rejected' && (
                 <Field label="Rejection Reason *" error={statusError.reason}>
                   <textarea
                     rows={3}
                     value={statusForm.rejection_reason}
-                    onChange={(e) =>
-                      setStatusForm({ ...statusForm, rejection_reason: e.target.value })
-                    }
+                    onChange={(e) => setStatusForm({ ...statusForm, rejection_reason: e.target.value })}
                     placeholder="e.g. Budget constraints, competitor selected…"
                     className="mt-1 w-full rounded-xl border border-slate-200 p-2.5 text-xs outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-100"
                   />
                 </Field>
               )}
-
               <Field label="Follow-up Date">
                 <input
                   type="date"
                   value={statusForm.follow_up_date}
-                  onChange={(e) =>
-                    setStatusForm({ ...statusForm, follow_up_date: e.target.value })
-                  }
+                  onChange={(e) => setStatusForm({ ...statusForm, follow_up_date: e.target.value })}
                   className={inputCls}
                 />
               </Field>
@@ -1004,15 +1380,11 @@ export function QuotationsPage() {
                 type="button"
                 onClick={() => setStatusModalQuotation(null)}
                 className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
+              >Cancel</button>
               <button
                 type="submit"
                 className="rounded-xl bg-indigo-600 px-5 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700"
-              >
-                Update Status
-              </button>
+              >Update Status</button>
             </div>
           </form>
         </Modal>
@@ -1087,6 +1459,8 @@ const emptyLeadForm = () => ({
 
 export function LeadsPage() {
   const { toasts, push, dismiss } = useToasts();
+  const companyId = useCurrentCompanyId();
+  const { companies, branches } = useReferenceData();
 
   const [leads, setLeads] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
@@ -1094,10 +1468,32 @@ export function LeadsPage() {
   const [viewMode, setViewMode] = useState<'kanban' | 'table'>('kanban');
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search);
+
   const [stageFilter, setStageFilter] = useState<string>('all');
   const [sourceFilter, setSourceFilter] = useState('all');
+  const [companyFilter, setCompanyFilter] = useState('all');
   const [branchFilter, setBranchFilter] = useState('all');
-  const [branches, setBranches] = useState<any[]>([]);
+  const [datePreset, setDatePreset] = useState<DatePreset>('today');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+
+  const { open: filtersOpen, toggle: toggleFilters } = usePersistedToggle(
+    'leads:filtersOpen:v2',
+    false,
+  );
+
+  const activeFilterCount =
+    (stageFilter !== 'all' ? 1 : 0) +
+    (sourceFilter !== 'all' ? 1 : 0) +
+    (companyFilter !== 'all' ? 1 : 0) +
+    (branchFilter !== 'all' ? 1 : 0) +
+    activeDateFilterCount(datePreset) +
+    (search.trim() ? 1 : 0);
+
+  const dateRange = useMemo(
+    () => dateRangeFromPreset(datePreset, customFrom, customTo),
+    [datePreset, customFrom, customTo],
+  );
 
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editingLead, setEditingLead] = useState<any>(null);
@@ -1133,7 +1529,10 @@ export function LeadsPage() {
         if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
         if (stageFilter !== 'all') params.stage = stageFilter;
         if (sourceFilter !== 'all') params.source = sourceFilter;
+        if (companyFilter !== 'all') params.company_id = companyFilter;
         if (branchFilter !== 'all') params.branch_id = branchFilter;
+        if (dateRange.from) params.from_date = dateRange.from;
+        if (dateRange.to) params.to_date = dateRange.to;
 
         const [leadsRes, sumRes] = await Promise.all([
           apiClient.getLeads(params),
@@ -1150,23 +1549,10 @@ export function LeadsPage() {
       }
     })();
     return () => controller.abort();
-  }, [debouncedSearch, stageFilter, sourceFilter, branchFilter, refreshKey, push]);
+  }, [debouncedSearch, stageFilter, sourceFilter, companyFilter, branchFilter, dateRange, refreshKey, push]);
 
-  useEffect(() => {
-    const controller = new AbortController();
-    (async () => {
-      try {
-        const bRes: any = await apiClient.getBranches();
-        if (controller.signal.aborted) return;
-        setBranches(Array.isArray(bRes) ? bRes : bRes?.data || []);
-      } catch {
-        /* soft */
-      }
-    })();
-    return () => controller.abort();
-  }, []);
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  // Memoize per-stage groups
   const groupedLeads = useMemo(() => {
     const groups: Record<string, any[]> = {};
     for (const st of LEAD_STAGES) groups[st.key] = [];
@@ -1179,10 +1565,7 @@ export function LeadsPage() {
   const stageTotal = useMemo(() => {
     const totals: Record<string, number> = {};
     for (const st of LEAD_STAGES) {
-      totals[st.key] = (groupedLeads[st.key] || []).reduce(
-        (s, l) => s + safeNum(l.expected_value),
-        0,
-      );
+      totals[st.key] = (groupedLeads[st.key] || []).reduce((s, l) => s + safeNum(l.expected_value), 0);
     }
     return totals;
   }, [groupedLeads]);
@@ -1200,15 +1583,13 @@ export function LeadsPage() {
     if (!leadForm.name.trim()) errs.name = 'Name is required';
     if (!validators.email(leadForm.email)) errs.email = 'Invalid email format';
     if (!validators.phone(leadForm.phone)) errs.phone = 'Invalid phone format';
-    if (Object.keys(errs).length > 0) {
-      setLeadErrors(errs);
-      return;
-    }
+    if (Object.keys(errs).length > 0) { setLeadErrors(errs); return; }
+
     setSaving(true);
     try {
       const payload: any = {
         ...leadForm,
-        company_id: 1,
+        ...(companyId > 0 ? { company_id: companyId } : {}),
         branch_id: leadForm.branch_id ? Number(leadForm.branch_id) : null,
         expected_value: leadForm.expected_value ? Number(leadForm.expected_value) : 0,
       };
@@ -1225,16 +1606,14 @@ export function LeadsPage() {
       setCreateModalOpen(false);
       setLeads((prev) => {
         if (editingLead) {
-          return prev.map((l) =>
-            l.id === editingLead.id ? { ...l, ...leadForm, ...(savedLead?.id ? savedLead : {}) } : l,
-          );
+          return prev.map((l) => (l.id === editingLead.id ? { ...l, ...leadForm, ...(savedLead?.id ? savedLead : {}) } : l));
         }
         if (savedLead && savedLead.id) {
           return [savedLead, ...prev.filter((l) => l.id !== savedLead.id)];
         }
         return prev;
       });
-      setRefreshKey((k) => k + 1);
+      reload();
     } catch (err: any) {
       push('error', err?.message || 'Could not save lead');
     } finally {
@@ -1246,18 +1625,11 @@ export function LeadsPage() {
     e.preventDefault();
     if (!stageModalLead?.id) return;
     try {
-      await apiClient.updateLeadStage(
-        stageModalLead.id,
-        stageForm.stage,
-        stageForm.note,
-        stageForm.lost_reason,
-      );
-      setLeads((prev) =>
-        prev.map((l) => (l.id === stageModalLead.id ? { ...l, stage: stageForm.stage } : l)),
-      );
+      await apiClient.updateLeadStage(stageModalLead.id, stageForm.stage, stageForm.note, stageForm.lost_reason);
+      setLeads((prev) => prev.map((l) => (l.id === stageModalLead.id ? { ...l, stage: stageForm.stage } : l)));
       push('success', `Moved to ${stageForm.stage.replace('_', ' ')}`);
       setStageModalLead(null);
-      setRefreshKey((k) => k + 1);
+      reload();
     } catch (err: any) {
       push('error', err?.message || 'Failed to update stage');
     }
@@ -1273,7 +1645,7 @@ export function LeadsPage() {
       setDetailLead(fresh?.data || fresh);
       setActivityForm({ activity_type: 'call', title: '', description: '', follow_up_date: '' });
       push('success', 'Activity logged');
-      setRefreshKey((k) => k + 1);
+      reload();
     } catch (err: any) {
       push('error', err?.message || 'Failed to log activity');
     } finally {
@@ -1288,7 +1660,7 @@ export function LeadsPage() {
       await apiClient.convertLead(lead.id, { create_customer: true, create_contact: true });
       push('success', `Converted "${lead.name}" to Customer`);
       setLeads((prev) => prev.map((l) => (l.id === lead.id ? { ...l, stage: 'won' } : l)));
-      setRefreshKey((k) => k + 1);
+      reload();
     } catch (err: any) {
       push('error', err?.message || 'Failed to convert lead');
     }
@@ -1301,7 +1673,6 @@ export function LeadsPage() {
       setDetailLead(res?.data || res);
     } catch (err: any) {
       push('error', err?.message || 'Could not load lead');
-      // If the lead doesn't exist on server, filter out invalid/stale lead from local state
       setLeads((prev) => prev.filter((l) => l.id !== id));
     }
   };
@@ -1314,7 +1685,7 @@ export function LeadsPage() {
       setLeads((prev) => prev.filter((l) => l.id !== id));
       if (detailLead?.id === id) setDetailLead(null);
       push('success', 'Lead deleted successfully');
-      setRefreshKey((k) => k + 1);
+      reload();
     } catch (err: any) {
       push('error', err?.message || 'Failed to delete lead');
     }
@@ -1324,16 +1695,11 @@ export function LeadsPage() {
     <div className="mx-auto max-w-7xl space-y-6 p-4 md:p-6">
       <ToastStack toasts={toasts} onDismiss={dismiss} />
 
-      {/* Hero */}
       <section className="overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 p-6 text-white shadow-sm">
         <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
           <div className="max-w-2xl">
-            <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-indigo-300">
-              CRM · Sales Pipeline
-            </p>
-            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
-              Leads & Prospects
-            </h1>
+            <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-indigo-300">CRM · Sales Pipeline</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Leads & Prospects</h1>
             <p className="mt-2 text-sm leading-6 text-slate-300">
               Track enquiries, manage stages, log activities, and convert won deals into accounts.
             </p>
@@ -1345,17 +1711,13 @@ export function LeadsPage() {
                 className={`rounded-lg px-3 py-1.5 font-semibold transition ${
                   viewMode === 'kanban' ? 'bg-white text-slate-900' : 'text-white/80 hover:text-white'
                 }`}
-              >
-                Kanban
-              </button>
+              >Kanban</button>
               <button
                 onClick={() => setViewMode('table')}
                 className={`rounded-lg px-3 py-1.5 font-semibold transition ${
                   viewMode === 'table' ? 'bg-white text-slate-900' : 'text-white/80 hover:text-white'
                 }`}
-              >
-                Table
-              </button>
+              >Table</button>
             </div>
             <button
               onClick={() => openCreate()}
@@ -1367,7 +1729,6 @@ export function LeadsPage() {
         </div>
       </section>
 
-      {/* Metrics */}
       <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <MetricCard
           label="Total Leads"
@@ -1397,68 +1758,73 @@ export function LeadsPage() {
         />
       </section>
 
-      {/* Filters */}
-      <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-        <div className="relative w-full sm:max-w-sm">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by name, company, phone…"
-            className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3 text-xs outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-          />
+      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="relative w-full sm:max-w-sm">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by name, company, phone…"
+              className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-9 pr-3 text-xs outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <FilterToggle open={filtersOpen} onToggle={toggleFilters} activeCount={activeFilterCount} />
+          </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <select
-            value={stageFilter}
-            onChange={(e) => setStageFilter(e.target.value)}
-            className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs outline-none focus:border-indigo-500"
-          >
-            <option value="all">All Stages</option>
-            {LEAD_STAGES.map((st) => (
-              <option key={st.key} value={st.key}>
-                {st.label}
-              </option>
-            ))}
-          </select>
-          <select
-            value={sourceFilter}
-            onChange={(e) => setSourceFilter(e.target.value)}
-            className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs outline-none focus:border-indigo-500"
-          >
-            <option value="all">All Sources</option>
-            <option value="website">Website</option>
-            <option value="referral">Referral</option>
-            <option value="walk_in">Walk-in</option>
-            <option value="social_media">Social Media</option>
-            <option value="campaign">Campaign</option>
-            <option value="cold_call">Cold Call</option>
-          </select>
-          <select
-            value={branchFilter}
-            onChange={(e) => setBranchFilter(e.target.value)}
-            className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs outline-none focus:border-indigo-500"
-          >
-            <option value="all">All Branches</option>
-            {branches.map((b) => (
-              <option key={b.id} value={b.id}>
-                {b.name}
-              </option>
-            ))}
-          </select>
-        </div>
+
+        {filtersOpen && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+            <CompanyBranchControls
+              companies={companies}
+              branches={branches}
+              company={companyFilter}
+              branch={branchFilter}
+              onCompanyChange={setCompanyFilter}
+              onBranchChange={setBranchFilter}
+            />
+            <DateRangeControls
+              preset={datePreset}
+              onPresetChange={setDatePreset}
+              from={customFrom}
+              to={customTo}
+              onFromChange={setCustomFrom}
+              onToChange={setCustomTo}
+            />
+            <select
+              value={stageFilter}
+              onChange={(e) => setStageFilter(e.target.value)}
+              className={filterSelectCls}
+            >
+              <option value="all">All Stages</option>
+              {LEAD_STAGES.map((st) => (
+                <option key={st.key} value={st.key}>{st.label}</option>
+              ))}
+            </select>
+            <select
+              value={sourceFilter}
+              onChange={(e) => setSourceFilter(e.target.value)}
+              className={filterSelectCls}
+            >
+              <option value="all">All Sources</option>
+              <option value="website">Website</option>
+              <option value="referral">Referral</option>
+              <option value="walk_in">Walk-in</option>
+              <option value="social_media">Social Media</option>
+              <option value="campaign">Campaign</option>
+              <option value="cold_call">Cold Call</option>
+            </select>
+          </div>
+        )}
       </div>
 
-      {/* View */}
       {viewMode === 'kanban' ? (
         <div className="flex gap-4 overflow-x-auto pb-4">
           {LEAD_STAGES.map((st) => {
             const stageLeads = groupedLeads[st.key] || [];
             return (
-              <div
-                key={st.key}
-                className="flex min-h-[500px] w-80 flex-shrink-0 flex-col rounded-2xl border border-slate-200 bg-slate-100/70 p-3"
-              >
+              <div key={st.key} className="flex min-h-[500px] w-80 flex-shrink-0 flex-col rounded-2xl border border-slate-200 bg-slate-100/70 p-3">
                 <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-2">
                   <div className="flex items-center gap-2">
                     <span className="text-xs font-semibold text-slate-800">{st.label}</span>
@@ -1508,23 +1874,21 @@ export function LeadsPage() {
         <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           {loading ? (
             <div className="space-y-2 p-4">
-              {[1, 2, 3, 4].map((i) => (
-                <Skeleton key={i} className="h-12 w-full" />
-              ))}
+              {[1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-12 w-full" />)}
             </div>
           ) : leads.length === 0 ? (
             <EmptyState
               icon={<UserPlus size={40} className="text-slate-300" />}
-              title="No leads yet"
-              description="Add your first prospect to start tracking."
-              action={
+              title={activeFilterCount > 0 ? 'No matching leads' : 'No leads yet'}
+              description={activeFilterCount > 0 ? 'Try adjusting your filters.' : 'Add your first prospect to start tracking.'}
+              action={activeFilterCount === 0 ? (
                 <button
                   onClick={() => openCreate()}
                   className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-indigo-500"
                 >
                   <Plus size={14} /> Add Lead
                 </button>
-              }
+              ) : undefined}
             />
           ) : (
             <div className="overflow-x-auto">
@@ -1558,12 +1922,8 @@ export function LeadsPage() {
                           </p>
                         )}
                       </td>
-                      <td className="px-5 py-3.5 text-xs text-slate-600">
-                        {l.branch?.name || '—'}
-                      </td>
-                      <td className="px-5 py-3.5 text-xs text-slate-600">
-                        {l.company_name || '—'}
-                      </td>
+                      <td className="px-5 py-3.5 text-xs text-slate-600">{l.branch?.name || '—'}</td>
+                      <td className="px-5 py-3.5 text-xs text-slate-600">{l.company_name || '—'}</td>
                       <td className="px-5 py-3.5">
                         <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold capitalize text-indigo-700">
                           {l.stage?.replace('_', ' ')}
@@ -1572,9 +1932,7 @@ export function LeadsPage() {
                       <td className="px-5 py-3.5 text-right font-semibold text-slate-900">
                         {formatMoney(l.expected_value)}
                       </td>
-                      <td className="px-5 py-3.5 text-xs text-slate-600">
-                        {formatDate(l.next_follow_up)}
-                      </td>
+                      <td className="px-5 py-3.5 text-xs text-slate-600">{formatDate(l.next_follow_up)}</td>
                       <td className="px-5 py-3.5 text-right">
                         <div className="inline-flex items-center gap-1">
                           <button
@@ -1598,11 +1956,7 @@ export function LeadsPage() {
                           )}
                           <ActionMenu
                             items={[
-                              {
-                                label: 'View Details',
-                                icon: <Eye size={13} />,
-                                onClick: () => void openDetail(l.id),
-                              },
+                              { label: 'View Details', icon: <Eye size={13} />, onClick: () => void openDetail(l.id) },
                               {
                                 label: 'Edit',
                                 icon: <Edit2 size={13} />,
@@ -1630,7 +1984,6 @@ export function LeadsPage() {
         </div>
       )}
 
-      {/* Detail Modal */}
       {detailLead && (
         <Modal onClose={() => setDetailLead(null)} size="lg">
           <ModalHeader
@@ -1640,7 +1993,6 @@ export function LeadsPage() {
             onClose={() => setDetailLead(null)}
           />
           <div className="space-y-5 overflow-y-auto p-6 text-xs">
-            {/* Quick Actions */}
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
               <div className="flex flex-wrap items-center gap-1.5">
                 <button
@@ -1670,9 +2022,7 @@ export function LeadsPage() {
                 {detailLead.stage !== 'won' && (
                   <button
                     type="button"
-                    onClick={() => {
-                      void handleConvertLead(detailLead);
-                    }}
+                    onClick={() => { void handleConvertLead(detailLead); }}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-semibold text-emerald-700 transition hover:bg-emerald-100"
                   >
                     <UserCheck size={12} /> Convert to Customer
@@ -1681,9 +2031,7 @@ export function LeadsPage() {
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  void handleDeleteLead(detailLead.id, detailLead.name);
-                }}
+                onClick={() => { void handleDeleteLead(detailLead.id, detailLead.name); }}
                 className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-semibold text-rose-600 transition hover:bg-rose-100"
               >
                 <Trash2 size={12} /> Delete
@@ -1701,17 +2049,12 @@ export function LeadsPage() {
               </div>
             </div>
 
-            <form
-              onSubmit={handleAddActivity}
-              className="space-y-3 rounded-xl border border-slate-200 bg-white p-4"
-            >
+            <form onSubmit={handleAddActivity} className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
               <h3 className="text-xs font-bold text-slate-800">Log Activity</h3>
               <div className="grid grid-cols-2 gap-2">
                 <select
                   value={activityForm.activity_type}
-                  onChange={(e) =>
-                    setActivityForm({ ...activityForm, activity_type: e.target.value })
-                  }
+                  onChange={(e) => setActivityForm({ ...activityForm, activity_type: e.target.value })}
                   className="h-9 rounded-lg border border-slate-200 px-2 text-xs focus:border-indigo-500 focus:outline-none"
                 >
                   <option value="call">Phone Call</option>
@@ -1723,9 +2066,7 @@ export function LeadsPage() {
                 <input
                   type="date"
                   value={activityForm.follow_up_date}
-                  onChange={(e) =>
-                    setActivityForm({ ...activityForm, follow_up_date: e.target.value })
-                  }
+                  onChange={(e) => setActivityForm({ ...activityForm, follow_up_date: e.target.value })}
                   className="h-9 rounded-lg border border-slate-200 px-2 text-xs focus:border-indigo-500 focus:outline-none"
                 />
               </div>
@@ -1739,9 +2080,7 @@ export function LeadsPage() {
               <textarea
                 rows={2}
                 value={activityForm.description}
-                onChange={(e) =>
-                  setActivityForm({ ...activityForm, description: e.target.value })
-                }
+                onChange={(e) => setActivityForm({ ...activityForm, description: e.target.value })}
                 placeholder="Notes, outcomes…"
                 className="w-full rounded-lg border border-slate-200 p-2 text-xs focus:border-indigo-500 focus:outline-none"
               />
@@ -1755,16 +2094,11 @@ export function LeadsPage() {
             </form>
 
             <div>
-              <h3 className="mb-3 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                Timeline
-              </h3>
+              <h3 className="mb-3 text-[11px] font-bold uppercase tracking-wider text-slate-500">Timeline</h3>
               {detailLead.activities?.length ? (
                 <div className="space-y-3">
                   {detailLead.activities.map((act: any) => (
-                    <div
-                      key={act.id}
-                      className="space-y-0.5 border-l-2 border-indigo-300 pl-3"
-                    >
+                    <div key={act.id} className="space-y-0.5 border-l-2 border-indigo-300 pl-3">
                       <p className="font-semibold text-slate-900">{act.title}</p>
                       {act.description && <p className="text-slate-600">{act.description}</p>}
                       <p className="text-[10px] text-slate-400">
@@ -1781,7 +2115,6 @@ export function LeadsPage() {
         </Modal>
       )}
 
-      {/* Create/Edit Modal */}
       {createModalOpen && (
         <Modal onClose={() => setCreateModalOpen(false)}>
           <ModalHeader
@@ -1803,9 +2136,7 @@ export function LeadsPage() {
                 <Field label="Company">
                   <input
                     value={leadForm.company_name}
-                    onChange={(e) =>
-                      setLeadForm({ ...leadForm, company_name: e.target.value })
-                    }
+                    onChange={(e) => setLeadForm({ ...leadForm, company_name: e.target.value })}
                     className={inputCls}
                   />
                 </Field>
@@ -1842,24 +2173,18 @@ export function LeadsPage() {
                   <input
                     type="number"
                     value={leadForm.expected_value}
-                    onChange={(e) =>
-                      setLeadForm({ ...leadForm, expected_value: e.target.value })
-                    }
+                    onChange={(e) => setLeadForm({ ...leadForm, expected_value: e.target.value })}
                     className={inputCls}
                   />
                 </Field>
                 <Field label="Stage">
                   <select
                     value={leadForm.stage}
-                    onChange={(e) =>
-                      setLeadForm({ ...leadForm, stage: e.target.value as LeadStageKey })
-                    }
+                    onChange={(e) => setLeadForm({ ...leadForm, stage: e.target.value as LeadStageKey })}
                     className={inputCls}
                   >
                     {LEAD_STAGES.map((s) => (
-                      <option key={s.key} value={s.key}>
-                        {s.label}
-                      </option>
+                      <option key={s.key} value={s.key}>{s.label}</option>
                     ))}
                   </select>
                 </Field>
@@ -1871,9 +2196,7 @@ export function LeadsPage() {
                   >
                     <option value="">Default branch</option>
                     {branches.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.name}
-                      </option>
+                      <option key={b.id} value={b.id}>{b.name}</option>
                     ))}
                   </select>
                 </Field>
@@ -1909,9 +2232,7 @@ export function LeadsPage() {
                 type="button"
                 onClick={() => setCreateModalOpen(false)}
                 className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
+              >Cancel</button>
               <button
                 type="submit"
                 disabled={saving}
@@ -1925,7 +2246,6 @@ export function LeadsPage() {
         </Modal>
       )}
 
-      {/* Stage Modal */}
       {stageModalLead && (
         <Modal onClose={() => setStageModalLead(null)} size="sm">
           <ModalHeader
@@ -1939,15 +2259,11 @@ export function LeadsPage() {
               <Field label="New Stage">
                 <select
                   value={stageForm.stage}
-                  onChange={(e) =>
-                    setStageForm({ ...stageForm, stage: e.target.value as LeadStageKey })
-                  }
+                  onChange={(e) => setStageForm({ ...stageForm, stage: e.target.value as LeadStageKey })}
                   className={inputCls}
                 >
                   {LEAD_STAGES.map((s) => (
-                    <option key={s.key} value={s.key}>
-                      {s.label}
-                    </option>
+                    <option key={s.key} value={s.key}>{s.label}</option>
                   ))}
                 </select>
               </Field>
@@ -1976,15 +2292,11 @@ export function LeadsPage() {
                 type="button"
                 onClick={() => setStageModalLead(null)}
                 className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
+              >Cancel</button>
               <button
                 type="submit"
                 className="rounded-xl bg-indigo-600 px-5 py-2 text-xs font-semibold text-white shadow-sm hover:bg-indigo-500"
-              >
-                Update Stage
-              </button>
+              >Update Stage</button>
             </div>
           </form>
         </Modal>
@@ -2018,11 +2330,9 @@ function LeadCard({
         >
           {lead.name}
         </button>
-        <span
-          className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
-            isHigh ? 'bg-rose-50 text-rose-700' : 'bg-slate-100 text-slate-600'
-          }`}
-        >
+        <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
+          isHigh ? 'bg-rose-50 text-rose-700' : 'bg-slate-100 text-slate-600'
+        }`}>
           {lead.priority}
         </span>
       </div>
@@ -2046,9 +2356,7 @@ function LeadCard({
         </span>
       )}
       {safeNum(lead.expected_value) > 0 && (
-        <p className="mt-2 text-xs font-bold text-emerald-600">
-          {formatMoney(lead.expected_value)}
-        </p>
+        <p className="mt-2 text-xs font-bold text-emerald-600">{formatMoney(lead.expected_value)}</p>
       )}
       <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-2 text-xs text-slate-500">
         <span className="truncate">{lead.phone || lead.email || '—'}</span>
@@ -2116,14 +2424,38 @@ const emptyContactForm = () => ({
 
 export function ContactsPage() {
   const { toasts, push, dismiss } = useToasts();
+  const companyId = useCurrentCompanyId();
+  const { companies, branches } = useReferenceData();
+
   const [contacts, setContacts] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search);
+
   const [typeFilter, setTypeFilter] = useState('all');
+  const [companyFilter, setCompanyFilter] = useState('all');
   const [branchFilter, setBranchFilter] = useState('all');
-  const [branches, setBranches] = useState<any[]>([]);
+  const [datePreset, setDatePreset] = useState<DatePreset>('today');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+
+  const { open: filtersOpen, toggle: toggleFilters } = usePersistedToggle(
+    'contacts:filtersOpen:v2',
+    false,
+  );
+
+  const activeFilterCount =
+    (typeFilter !== 'all' ? 1 : 0) +
+    (companyFilter !== 'all' ? 1 : 0) +
+    (branchFilter !== 'all' ? 1 : 0) +
+    activeDateFilterCount(datePreset) +
+    (search.trim() ? 1 : 0);
+
+  const dateRange = useMemo(
+    () => dateRangeFromPreset(datePreset, customFrom, customTo),
+    [datePreset, customFrom, customTo],
+  );
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingContact, setEditingContact] = useState<any>(null);
@@ -2143,7 +2475,10 @@ export function ContactsPage() {
         const params: Record<string, unknown> = { per_page: 50 };
         if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
         if (typeFilter !== 'all') params.contact_type = typeFilter;
+        if (companyFilter !== 'all') params.company_id = companyFilter;
         if (branchFilter !== 'all') params.branch_id = branchFilter;
+        if (dateRange.from) params.from_date = dateRange.from;
+        if (dateRange.to) params.to_date = dateRange.to;
 
         const [res, sumRes] = await Promise.all([
           apiClient.getContacts(params),
@@ -2160,28 +2495,12 @@ export function ContactsPage() {
       }
     })();
     return () => controller.abort();
-  }, [debouncedSearch, typeFilter, branchFilter, refreshKey, push]);
+  }, [debouncedSearch, typeFilter, companyFilter, branchFilter, dateRange, refreshKey, push]);
+
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   useEffect(() => {
-    const controller = new AbortController();
-    (async () => {
-      try {
-        const bRes: any = await apiClient.getBranches();
-        if (controller.signal.aborted) return;
-        setBranches(Array.isArray(bRes) ? bRes : bRes?.data || []);
-      } catch {
-        /* soft */
-      }
-    })();
-    return () => controller.abort();
-  }, []);
-
-  // Debounced duplicate check
-  useEffect(() => {
-    if (!form.phone && !form.email) {
-      setDuplicateWarning(null);
-      return;
-    }
+    if (!form.phone && !form.email) { setDuplicateWarning(null); return; }
     const t = setTimeout(async () => {
       try {
         const check: any = await apiClient.checkContactDuplicate({
@@ -2195,9 +2514,7 @@ export function ContactsPage() {
         } else {
           setDuplicateWarning(null);
         }
-      } catch {
-        /* soft */
-      }
+      } catch { /* soft */ }
     }, 500);
     return () => clearTimeout(t);
   }, [form.phone, form.email, editingContact]);
@@ -2210,15 +2527,13 @@ export function ContactsPage() {
     if (!validators.phone(form.phone)) errs.phone = 'Invalid phone';
     if (!validators.gstin(form.gstin)) errs.gstin = 'Invalid GSTIN';
     if (!validators.pan(form.pan)) errs.pan = 'Invalid PAN';
-    if (Object.keys(errs).length > 0) {
-      setErrors(errs);
-      return;
-    }
+    if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+
     setSaving(true);
     try {
       const payload: any = {
         ...form,
-        company_id: 1,
+        ...(companyId > 0 ? { company_id: companyId } : {}),
         branch_id: form.branch_id ? Number(form.branch_id) : null,
       };
       let savedContact: any = null;
@@ -2234,16 +2549,14 @@ export function ContactsPage() {
       setModalOpen(false);
       setContacts((prev) => {
         if (editingContact) {
-          return prev.map((c) =>
-            c.id === editingContact.id ? { ...c, ...form, ...(savedContact?.id ? savedContact : {}) } : c,
-          );
+          return prev.map((c) => (c.id === editingContact.id ? { ...c, ...form, ...(savedContact?.id ? savedContact : {}) } : c));
         }
         if (savedContact && savedContact.id) {
           return [savedContact, ...prev.filter((c) => c.id !== savedContact.id)];
         }
         return prev;
       });
-      setRefreshKey((k) => k + 1);
+      reload();
     } catch (err: any) {
       push('error', err?.message || 'Could not save contact');
     } finally {
@@ -2278,12 +2591,8 @@ export function ContactsPage() {
       <section className="overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 p-6 text-white shadow-sm">
         <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
           <div className="max-w-2xl">
-            <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-indigo-300">
-              CRM · Directory
-            </p>
-            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
-              Contacts Directory
-            </h1>
+            <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-indigo-300">CRM · Directory</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Contacts Directory</h1>
             <p className="mt-2 text-sm leading-6 text-slate-300">
               Centralized address book and tax registry for customers, suppliers, dealers, and reps.
             </p>
@@ -2343,19 +2652,29 @@ export function ContactsPage() {
               className="h-10 w-full rounded-xl border border-slate-200 pl-9 pr-3 text-xs outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
             />
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={branchFilter}
-              onChange={(e) => setBranchFilter(e.target.value)}
-              className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs outline-none focus:border-indigo-500"
-            >
-              <option value="all">All Branches</option>
-              {branches.map((b) => (
-                <option key={b.id} value={b.id}>
-                  {b.name}
-                </option>
-              ))}
-            </select>
+          <div className="flex items-center gap-2">
+            <FilterToggle open={filtersOpen} onToggle={toggleFilters} activeCount={activeFilterCount} />
+          </div>
+        </div>
+
+        {filtersOpen && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-slate-50/60 px-4 py-3">
+            <CompanyBranchControls
+              companies={companies}
+              branches={branches}
+              company={companyFilter}
+              branch={branchFilter}
+              onCompanyChange={setCompanyFilter}
+              onBranchChange={setBranchFilter}
+            />
+            <DateRangeControls
+              preset={datePreset}
+              onPresetChange={setDatePreset}
+              from={customFrom}
+              to={customTo}
+              onFromChange={setCustomFrom}
+              onToChange={setCustomTo}
+            />
             <div className="inline-flex rounded-lg bg-slate-100 p-1 text-xs">
               {['all', 'customer', 'supplier', 'dealer', 'lead'].map((t) => (
                 <button
@@ -2366,25 +2685,21 @@ export function ContactsPage() {
                       ? 'bg-white font-semibold text-slate-900 shadow-sm'
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
-                >
-                  {t}
-                </button>
+                >{t}</button>
               ))}
             </div>
           </div>
-        </div>
+        )}
 
         {loading ? (
           <div className="space-y-2 p-4">
-            {[1, 2, 3, 4].map((i) => (
-              <Skeleton key={i} className="h-12 w-full" />
-            ))}
+            {[1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-12 w-full" />)}
           </div>
         ) : contacts.length === 0 ? (
           <EmptyState
             icon={<UserPlus size={40} className="text-slate-300" />}
-            title="No contacts yet"
-            description="Add your first customer or supplier."
+            title={activeFilterCount > 0 ? 'No matching contacts' : 'No contacts yet'}
+            description={activeFilterCount > 0 ? 'Try adjusting your filters.' : 'Add your first customer or supplier.'}
           />
         ) : (
           <div className="overflow-x-auto">
@@ -2410,9 +2725,7 @@ export function ContactsPage() {
                       >
                         {c.name}
                         {c.designation && (
-                          <span className="block text-xs font-normal text-slate-400">
-                            {c.designation}
-                          </span>
+                          <span className="block text-xs font-normal text-slate-400">{c.designation}</span>
                         )}
                       </button>
                     </td>
@@ -2421,12 +2734,8 @@ export function ContactsPage() {
                         {c.contact_type}
                       </span>
                     </td>
-                    <td className="px-5 py-3.5 text-xs text-slate-600">
-                      {c.company_name || '—'}
-                    </td>
-                    <td className="px-5 py-3.5 text-xs text-slate-600">
-                      {c.phone || c.alt_phone || '—'}
-                    </td>
+                    <td className="px-5 py-3.5 text-xs text-slate-600">{c.company_name || '—'}</td>
+                    <td className="px-5 py-3.5 text-xs text-slate-600">{c.phone || c.alt_phone || '—'}</td>
                     <td className="px-5 py-3.5 text-xs text-slate-600">{c.email || '—'}</td>
                     <td className="px-5 py-3.5 text-xs text-slate-600">
                       {[c.city, c.state].filter(Boolean).join(', ') || '—'}
@@ -2434,11 +2743,7 @@ export function ContactsPage() {
                     <td className="px-5 py-3.5 text-right">
                       <ActionMenu
                         items={[
-                          {
-                            label: 'View Details',
-                            icon: <Eye size={13} />,
-                            onClick: () => void openDetail(c.id),
-                          },
+                          { label: 'View Details', icon: <Eye size={13} />, onClick: () => void openDetail(c.id) },
                           {
                             label: 'Edit',
                             icon: <Edit2 size={13} />,
@@ -2466,7 +2771,6 @@ export function ContactsPage() {
         )}
       </section>
 
-      {/* Create/Edit Modal */}
       {modalOpen && (
         <Modal onClose={() => setModalOpen(false)}>
           <ModalHeader
@@ -2569,9 +2873,7 @@ export function ContactsPage() {
                   >
                     <option value="">Default branch</option>
                     {branches.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.name}
-                      </option>
+                      <option key={b.id} value={b.id}>{b.name}</option>
                     ))}
                   </select>
                 </Field>
@@ -2582,9 +2884,7 @@ export function ContactsPage() {
                 type="button"
                 onClick={() => setModalOpen(false)}
                 className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
+              >Cancel</button>
               <button
                 type="submit"
                 disabled={saving}
@@ -2598,7 +2898,6 @@ export function ContactsPage() {
         </Modal>
       )}
 
-      {/* Detail Modal */}
       {detailContact && (
         <Modal onClose={() => setDetailContact(null)}>
           <ModalHeader
@@ -2614,22 +2913,14 @@ export function ContactsPage() {
               <DetailRow label="GSTIN" value={detailContact.gstin} />
               <DetailRow label="City" value={detailContact.city} />
             </div>
-
             {detailContact.linked_invoices?.length > 0 && (
               <div>
-                <h3 className="mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                  Linked Invoices
-                </h3>
+                <h3 className="mb-2 text-[11px] font-bold uppercase tracking-wider text-slate-500">Linked Invoices</h3>
                 <div className="space-y-1.5">
                   {detailContact.linked_invoices.map((inv: any) => (
-                    <div
-                      key={inv.id}
-                      className="flex justify-between rounded-lg border border-slate-100 bg-slate-50 p-2"
-                    >
+                    <div key={inv.id} className="flex justify-between rounded-lg border border-slate-100 bg-slate-50 p-2">
                       <span className="font-semibold text-slate-800">{inv.invoice_no}</span>
-                      <span className="text-slate-600">
-                        {formatMoney(inv.total_amount)} · {inv.status}
-                      </span>
+                      <span className="text-slate-600">{formatMoney(inv.total_amount)} · {inv.status}</span>
                     </div>
                   ))}
                 </div>
@@ -2647,11 +2938,38 @@ export function ContactsPage() {
  * ========================================================== */
 export function OpportunitiesPage() {
   const { toasts, push, dismiss } = useToasts();
+  const companyId = useCurrentCompanyId();
+  const { companies, branches } = useReferenceData();
+
   const [opportunities, setOpportunities] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search);
+
+  const [companyFilter, setCompanyFilter] = useState('all');
+  const [branchFilter, setBranchFilter] = useState('all');
+  const [datePreset, setDatePreset] = useState<DatePreset>('today');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+
+  const { open: filtersOpen, toggle: toggleFilters } = usePersistedToggle(
+    'opportunities:filtersOpen:v2',
+    false,
+  );
+
+  const activeFilterCount =
+    (companyFilter !== 'all' ? 1 : 0) +
+    (branchFilter !== 'all' ? 1 : 0) +
+    activeDateFilterCount(datePreset) +
+    (search.trim() ? 1 : 0);
+
+  const dateRange = useMemo(
+    () => dateRangeFromPreset(datePreset, customFrom, customTo),
+    [datePreset, customFrom, customTo],
+  );
+
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<{ title?: string; deal_value?: string }>({});
@@ -2669,8 +2987,15 @@ export function OpportunitiesPage() {
     (async () => {
       setLoading(true);
       try {
+        const params: Record<string, unknown> = {};
+        if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
+        if (companyFilter !== 'all') params.company_id = companyFilter;
+        if (branchFilter !== 'all') params.branch_id = branchFilter;
+        if (dateRange.from) params.from_date = dateRange.from;
+        if (dateRange.to) params.to_date = dateRange.to;
+
         const [res, sumRes] = await Promise.all([
-          apiClient.getOpportunities({ search: debouncedSearch }),
+          apiClient.getOpportunities(params),
           apiClient.getOpportunitySummary(),
         ]);
         if (controller.signal.aborted) return;
@@ -2684,27 +3009,28 @@ export function OpportunitiesPage() {
       }
     })();
     return () => controller.abort();
-  }, [debouncedSearch, push]);
+  }, [debouncedSearch, companyFilter, branchFilter, dateRange, refreshKey, push]);
+
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
     const errs: typeof errors = {};
     if (!form.title.trim()) errs.title = 'Title is required';
     if (!form.deal_value || Number(form.deal_value) <= 0) errs.deal_value = 'Enter a positive value';
-    if (Object.keys(errs).length > 0) {
-      setErrors(errs);
-      return;
-    }
+    if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+
     setSaving(true);
     try {
       await apiClient.createOpportunity({
         ...form,
-        company_id: 1,
+        ...(companyId > 0 ? { company_id: companyId } : {}),
         deal_value: Number(form.deal_value || 0),
       });
       setOpen(false);
       setForm({ title: '', deal_value: '', stage: 'discovery', probability: 25, notes: '' });
       push('success', 'Opportunity created');
+      reload();
     } catch (err: any) {
       push('error', err?.message || 'Could not create opportunity');
     } finally {
@@ -2719,21 +3045,14 @@ export function OpportunitiesPage() {
       <section className="overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 p-6 text-white shadow-sm">
         <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
           <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-indigo-300">
-              CRM · Revenue
-            </p>
-            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
-              Deal Opportunities
-            </h1>
+            <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-indigo-300">CRM · Revenue</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Deal Opportunities</h1>
             <p className="mt-2 text-sm text-slate-300">
               Track deal value, stages, and close rates across enterprise accounts.
             </p>
           </div>
           <button
-            onClick={() => {
-              setErrors({});
-              setOpen(true);
-            }}
+            onClick={() => { setErrors({}); setOpen(true); }}
             className="inline-flex items-center gap-2 rounded-xl bg-indigo-500 px-4 py-2.5 text-xs font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:bg-indigo-400"
           >
             <Plus size={15} /> New Deal
@@ -2766,7 +3085,7 @@ export function OpportunitiesPage() {
       </section>
 
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="border-b border-slate-100 p-4">
+        <div className="flex flex-col gap-3 border-b border-slate-100 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="relative w-full sm:max-w-xs">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
             <input
@@ -2776,26 +3095,49 @@ export function OpportunitiesPage() {
               className="h-10 w-full rounded-xl border border-slate-200 pl-9 pr-3 text-xs outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
             />
           </div>
+          <div className="flex items-center gap-2">
+            <FilterToggle open={filtersOpen} onToggle={toggleFilters} activeCount={activeFilterCount} />
+          </div>
         </div>
+
+        {filtersOpen && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-slate-50/60 px-4 py-3">
+            <CompanyBranchControls
+              companies={companies}
+              branches={branches}
+              company={companyFilter}
+              branch={branchFilter}
+              onCompanyChange={setCompanyFilter}
+              onBranchChange={setBranchFilter}
+            />
+            <DateRangeControls
+              preset={datePreset}
+              onPresetChange={setDatePreset}
+              from={customFrom}
+              to={customTo}
+              onFromChange={setCustomFrom}
+              onToChange={setCustomTo}
+            />
+          </div>
+        )}
+
         {loading ? (
           <div className="space-y-2 p-4">
-            {[1, 2, 3].map((i) => (
-              <Skeleton key={i} className="h-12 w-full" />
-            ))}
+            {[1, 2, 3].map((i) => <Skeleton key={i} className="h-12 w-full" />)}
           </div>
         ) : opportunities.length === 0 ? (
           <EmptyState
             icon={<TrendingUp size={40} className="text-slate-300" />}
-            title="No opportunities yet"
-            description="Track high-value deals by creating an opportunity."
-            action={
+            title={activeFilterCount > 0 ? 'No matching opportunities' : 'No opportunities yet'}
+            description={activeFilterCount > 0 ? 'Try adjusting your filters.' : 'Track high-value deals by creating an opportunity.'}
+            action={activeFilterCount === 0 ? (
               <button
                 onClick={() => setOpen(true)}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-indigo-500"
               >
                 <Plus size={14} /> Create Opportunity
               </button>
-            }
+            ) : undefined}
           />
         ) : (
           <div className="overflow-x-auto">
@@ -2813,9 +3155,7 @@ export function OpportunitiesPage() {
                 {opportunities.map((op) => (
                   <tr key={op.id} className="transition hover:bg-slate-50/70">
                     <td className="px-5 py-3.5 font-semibold text-slate-900">{op.title}</td>
-                    <td className="px-5 py-3.5 text-xs text-slate-600">
-                      {op.customer?.name || '—'}
-                    </td>
+                    <td className="px-5 py-3.5 text-xs text-slate-600">{op.customer?.name || '—'}</td>
                     <td className="px-5 py-3.5 text-right font-semibold text-indigo-600">
                       {formatMoney(op.deal_value)}
                     </td>
@@ -2824,9 +3164,7 @@ export function OpportunitiesPage() {
                         {op.stage}
                       </span>
                     </td>
-                    <td className="px-5 py-3.5 text-right text-xs text-slate-600">
-                      {op.probability || 0}%
-                    </td>
+                    <td className="px-5 py-3.5 text-right text-xs text-slate-600">{op.probability || 0}%</td>
                   </tr>
                 ))}
               </tbody>
@@ -2878,9 +3216,7 @@ export function OpportunitiesPage() {
                   min="0"
                   max="100"
                   value={form.probability}
-                  onChange={(e) =>
-                    setForm({ ...form, probability: Number(e.target.value) })
-                  }
+                  onChange={(e) => setForm({ ...form, probability: Number(e.target.value) })}
                   className={inputCls}
                 />
               </Field>
@@ -2890,9 +3226,7 @@ export function OpportunitiesPage() {
                 type="button"
                 onClick={() => setOpen(false)}
                 className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
+              >Cancel</button>
               <button
                 type="submit"
                 disabled={saving}
@@ -2914,11 +3248,38 @@ export function OpportunitiesPage() {
  * ========================================================== */
 export function CampaignsPage() {
   const { toasts, push, dismiss } = useToasts();
+  const companyId = useCurrentCompanyId();
+  const { companies, branches } = useReferenceData();
+
   const [campaigns, setCampaigns] = useState<any[]>([]);
   const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search);
+
+  const [companyFilter, setCompanyFilter] = useState('all');
+  const [branchFilter, setBranchFilter] = useState('all');
+  const [datePreset, setDatePreset] = useState<DatePreset>('today');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+
+  const { open: filtersOpen, toggle: toggleFilters } = usePersistedToggle(
+    'campaigns:filtersOpen:v2',
+    false,
+  );
+
+  const activeFilterCount =
+    (companyFilter !== 'all' ? 1 : 0) +
+    (branchFilter !== 'all' ? 1 : 0) +
+    activeDateFilterCount(datePreset) +
+    (search.trim() ? 1 : 0);
+
+  const dateRange = useMemo(
+    () => dateRangeFromPreset(datePreset, customFrom, customTo),
+    [datePreset, customFrom, customTo],
+  );
+
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<{ name?: string }>({});
@@ -2935,8 +3296,15 @@ export function CampaignsPage() {
     (async () => {
       setLoading(true);
       try {
+        const params: Record<string, unknown> = {};
+        if (debouncedSearch.trim()) params.search = debouncedSearch.trim();
+        if (companyFilter !== 'all') params.company_id = companyFilter;
+        if (branchFilter !== 'all') params.branch_id = branchFilter;
+        if (dateRange.from) params.from_date = dateRange.from;
+        if (dateRange.to) params.to_date = dateRange.to;
+
         const [res, sumRes] = await Promise.all([
-          apiClient.getCampaigns({ search: debouncedSearch }),
+          apiClient.getCampaigns(params),
           apiClient.getCampaignSummary(),
         ]);
         if (controller.signal.aborted) return;
@@ -2950,25 +3318,25 @@ export function CampaignsPage() {
       }
     })();
     return () => controller.abort();
-  }, [debouncedSearch, push]);
+  }, [debouncedSearch, companyFilter, branchFilter, dateRange, refreshKey, push]);
+
+  const reload = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    if (!form.name.trim()) {
-      setErrors({ name: 'Name is required' });
-      return;
-    }
+    if (!form.name.trim()) { setErrors({ name: 'Name is required' }); return; }
     setErrors({});
     setSaving(true);
     try {
       await apiClient.createCampaign({
         ...form,
-        company_id: 1,
+        ...(companyId > 0 ? { company_id: companyId } : {}),
         budget: Number(form.budget || 0),
       });
       setOpen(false);
       setForm({ name: '', channel: 'email', target_audience: '', budget: '' });
       push('success', 'Campaign created');
+      reload();
     } catch (err: any) {
       push('error', err?.message || 'Could not create campaign');
     } finally {
@@ -2983,21 +3351,14 @@ export function CampaignsPage() {
       <section className="overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 p-6 text-white shadow-sm">
         <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
           <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-indigo-300">
-              CRM · Outreach
-            </p>
-            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
-              Marketing Campaigns
-            </h1>
+            <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-indigo-300">CRM · Outreach</p>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Marketing Campaigns</h1>
             <p className="mt-2 text-sm text-slate-300">
               Coordinate omnichannel outreach via WhatsApp, email, and social.
             </p>
           </div>
           <button
-            onClick={() => {
-              setErrors({});
-              setOpen(true);
-            }}
+            onClick={() => { setErrors({}); setOpen(true); }}
             className="inline-flex items-center gap-2 rounded-xl bg-indigo-500 px-4 py-2.5 text-xs font-semibold text-white shadow-lg shadow-indigo-500/25 transition hover:bg-indigo-400"
           >
             <Plus size={15} /> New Campaign
@@ -3030,7 +3391,7 @@ export function CampaignsPage() {
       </section>
 
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="border-b border-slate-100 p-4">
+        <div className="flex flex-col gap-3 border-b border-slate-100 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="relative w-full sm:max-w-xs">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
             <input
@@ -3040,26 +3401,49 @@ export function CampaignsPage() {
               className="h-10 w-full rounded-xl border border-slate-200 pl-9 pr-3 text-xs outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
             />
           </div>
+          <div className="flex items-center gap-2">
+            <FilterToggle open={filtersOpen} onToggle={toggleFilters} activeCount={activeFilterCount} />
+          </div>
         </div>
+
+        {filtersOpen && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 bg-slate-50/60 px-4 py-3">
+            <CompanyBranchControls
+              companies={companies}
+              branches={branches}
+              company={companyFilter}
+              branch={branchFilter}
+              onCompanyChange={setCompanyFilter}
+              onBranchChange={setBranchFilter}
+            />
+            <DateRangeControls
+              preset={datePreset}
+              onPresetChange={setDatePreset}
+              from={customFrom}
+              to={customTo}
+              onFromChange={setCustomFrom}
+              onToChange={setCustomTo}
+            />
+          </div>
+        )}
+
         {loading ? (
           <div className="space-y-2 p-4">
-            {[1, 2, 3].map((i) => (
-              <Skeleton key={i} className="h-12 w-full" />
-            ))}
+            {[1, 2, 3].map((i) => <Skeleton key={i} className="h-12 w-full" />)}
           </div>
         ) : campaigns.length === 0 ? (
           <EmptyState
             icon={<Send size={40} className="text-slate-300" />}
-            title="No campaigns yet"
-            description="Launch your first outreach campaign."
-            action={
+            title={activeFilterCount > 0 ? 'No matching campaigns' : 'No campaigns yet'}
+            description={activeFilterCount > 0 ? 'Try adjusting your filters.' : 'Launch your first outreach campaign.'}
+            action={activeFilterCount === 0 ? (
               <button
                 onClick={() => setOpen(true)}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-indigo-500"
               >
                 <Plus size={14} /> Create Campaign
               </button>
-            }
+            ) : undefined}
           />
         ) : (
           <div className="overflow-x-auto">
@@ -3078,9 +3462,7 @@ export function CampaignsPage() {
                   <tr key={c.id} className="transition hover:bg-slate-50/70">
                     <td className="px-5 py-3.5 font-semibold text-slate-900">{c.name}</td>
                     <td className="px-5 py-3.5 text-xs uppercase text-slate-600">{c.channel}</td>
-                    <td className="px-5 py-3.5 text-xs text-slate-600">
-                      {c.target_audience || 'All contacts'}
-                    </td>
+                    <td className="px-5 py-3.5 text-xs text-slate-600">{c.target_audience || 'All contacts'}</td>
                     <td className="px-5 py-3.5">
                       <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold capitalize text-indigo-700">
                         {c.status}
@@ -3147,9 +3529,7 @@ export function CampaignsPage() {
                 type="button"
                 onClick={() => setOpen(false)}
                 className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-              >
-                Cancel
-              </button>
+              >Cancel</button>
               <button
                 type="submit"
                 disabled={saving}
@@ -3201,14 +3581,8 @@ function DetailRow({
 }) {
   return (
     <div>
-      <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
-        {label}
-      </span>
-      <span
-        className={`mt-0.5 block font-medium ${
-          highlight ? 'font-bold text-emerald-600' : 'text-slate-800'
-        }`}
-      >
+      <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">{label}</span>
+      <span className={`mt-0.5 block font-medium ${highlight ? 'font-bold text-emerald-600' : 'text-slate-800'}`}>
         {value || '—'}
       </span>
     </div>

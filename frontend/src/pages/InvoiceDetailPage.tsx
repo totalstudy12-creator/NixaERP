@@ -965,6 +965,34 @@ export function InvoiceDetailPage() {
       ],
     );
 
+  
+  const [updatingDelivery, setUpdatingDelivery] = useState(false);
+
+  const handleUpdateInvoiceDeliveryStatus = useCallback(async (newStatus: string) => {
+    if (!invoice?.id) return;
+    setUpdatingDelivery(true);
+    try {
+      await apiClient.updateInvoiceDeliveryStatus(invoice.id, { delivery_status: newStatus });
+      showSuccess(`Invoice ${invoice.invoice_no} delivery status updated to ${newStatus}.`);
+      await loadInvoice();
+    } catch (err: any) {
+      showError(err.message || 'Could not update invoice delivery status.');
+    } finally {
+      setUpdatingDelivery(false);
+    }
+  }, [invoice, loadInvoice, showError, showSuccess]);
+
+  const handleUpdateItemDeliveryStatus = useCallback(async (itemId: number, newStatus: string) => {
+    if (!invoice?.id) return;
+    try {
+      await apiClient.updateInvoiceItemDeliveryStatus(invoice.id, itemId, { delivery_status: newStatus });
+      showSuccess(`Item delivery status updated to ${newStatus}.`);
+      await loadInvoice();
+    } catch (err: any) {
+      showError(err.message || 'Could not update item delivery status.');
+    }
+  }, [invoice, loadInvoice, showError, showSuccess]);
+
   const markInvoicePaid =
     useCallback(
       async () => {
@@ -4504,6 +4532,217 @@ export function InvoiceDetailPage() {
         </section>
 
         {/* ================================================================
+            DELIVERY & FULFILLMENT TRACKING (CONNECTED WITH LOGISTICS)
+        ================================================================= */}
+        <section className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 no-print">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-slate-100">
+            <div>
+              <div className="flex items-center gap-2.5">
+                <span className="p-2 rounded-lg bg-indigo-50 text-indigo-600">
+                  <FiClock size={18} />
+                </span>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-800">
+                    Delivery & Logistics Fulfillment
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Real-time status synchronization between Sales Invoices and Godown Logistics
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Quick Status Control Buttons */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-semibold text-slate-500 mr-1">Mark Status:</span>
+              
+              <button
+                type="button"
+                disabled={updatingDelivery || (invoice?.delivery_status === 'pending')}
+                onClick={() => handleUpdateInvoiceDeliveryStatus('pending')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                  invoice?.delivery_status === 'pending'
+                    ? 'bg-amber-100 text-amber-800 border-amber-300'
+                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                } disabled:opacity-50`}
+              >
+                Pending
+              </button>
+
+              <button
+                type="button"
+                disabled={updatingDelivery || (invoice?.delivery_status === 'packed')}
+                onClick={() => handleUpdateInvoiceDeliveryStatus('packed')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                  invoice?.delivery_status === 'packed'
+                    ? 'bg-sky-100 text-sky-800 border-sky-300'
+                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                } disabled:opacity-50`}
+              >
+                Packed
+              </button>
+
+              <button
+                type="button"
+                disabled={updatingDelivery || (invoice?.delivery_status === 'sent')}
+                onClick={() => handleUpdateInvoiceDeliveryStatus('sent')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                  invoice?.delivery_status === 'sent'
+                    ? 'bg-indigo-100 text-indigo-800 border-indigo-300'
+                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                } disabled:opacity-50`}
+              >
+                Sent
+              </button>
+
+              <button
+                type="button"
+                disabled={updatingDelivery || (invoice?.delivery_status === 'delivered')}
+                onClick={() => handleUpdateInvoiceDeliveryStatus('delivered')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                  invoice?.delivery_status === 'delivered'
+                    ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                    : 'bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700'
+                } disabled:opacity-50`}
+              >
+                ✓ Delivered
+              </button>
+            </div>
+          </div>
+
+          {/* Stepper Visualizer */}
+          <div className="py-6">
+            {(() => {
+              const currentStatus = String(invoice?.delivery_status || 'pending').toLowerCase();
+              const steps = [
+                {
+                  id: 'pending',
+                  title: '1. Pending',
+                  subtitle: 'Order Registered',
+                  timestamp: invoice?.created_at,
+                  isActive: true,
+                  isPassed: ['packed', 'sent', 'delivered'].includes(currentStatus),
+                },
+                {
+                  id: 'packed',
+                  title: '2. Packed',
+                  subtitle: 'Godown Picked',
+                  timestamp: invoice?.packed_at,
+                  isActive: ['packed', 'sent', 'delivered'].includes(currentStatus),
+                  isPassed: ['sent', 'delivered'].includes(currentStatus),
+                },
+                {
+                  id: 'sent',
+                  title: '3. Sent',
+                  subtitle: 'Vehicle Dispatched',
+                  timestamp: invoice?.dispatched_at,
+                  isActive: ['sent', 'delivered'].includes(currentStatus),
+                  isPassed: ['delivered'].includes(currentStatus),
+                },
+                {
+                  id: 'delivered',
+                  title: '4. Delivered',
+                  subtitle: 'Customer Received',
+                  timestamp: invoice?.delivered_at,
+                  isActive: currentStatus === 'delivered',
+                  isPassed: currentStatus === 'delivered',
+                },
+              ];
+
+              return (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {steps.map((st, idx) => (
+                    <div
+                      key={st.id}
+                      className={`p-4 rounded-xl border relative transition-all ${
+                        st.isActive
+                          ? st.id === 'delivered'
+                            ? 'bg-emerald-50/70 border-emerald-300 shadow-sm'
+                            : st.id === 'sent'
+                            ? 'bg-indigo-50/70 border-indigo-300 shadow-sm'
+                            : st.id === 'packed'
+                            ? 'bg-sky-50/70 border-sky-300 shadow-sm'
+                            : 'bg-amber-50/70 border-amber-300 shadow-sm'
+                          : 'bg-slate-50 border-slate-200 opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className={`text-xs font-bold uppercase tracking-wider ${
+                          st.isActive ? 'text-slate-900' : 'text-slate-400'
+                        }`}>
+                          {st.title}
+                        </span>
+                        {st.isActive && (
+                          <FiCheckCircle
+                            size={16}
+                            className={st.id === 'delivered' ? 'text-emerald-600' : 'text-indigo-600'}
+                          />
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-600 font-medium">{st.subtitle}</p>
+                      {st.timestamp && (
+                        <p className="text-[11px] text-slate-400 mt-1.5 font-mono">
+                          {formatDateTimeSafe(st.timestamp)}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Connected Logistics Dispatch Details (if exists) */}
+          {(invoice?.deliveryOrder || invoice?.delivery_order) && (() => {
+            const dOrder = invoice.deliveryOrder || invoice.delivery_order;
+            const trip = dOrder.currentTrip || dOrder.current_trip;
+            const vehicle = trip?.vehicle;
+            const driver = trip?.driver;
+
+            return (
+              <div className="mt-2 p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 w-full">
+                  <div>
+                    <span className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">Logistics Order</span>
+                    <p className="text-xs font-bold text-slate-800 mt-0.5 font-mono">
+                      {dOrder.delivery_order_no || `DO-#${dOrder.id}`}
+                    </p>
+                  </div>
+
+                  <div>
+                    <span className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">Logistics Status</span>
+                    <p className="text-xs font-bold text-indigo-700 capitalize mt-0.5">
+                      {String(dOrder.status || 'pending').replace(/_/g, ' ')}
+                    </p>
+                  </div>
+
+                  <div>
+                    <span className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">Carrier Vehicle</span>
+                    <p className="text-xs font-semibold text-slate-800 mt-0.5">
+                      {vehicle ? `${vehicle.name} (${vehicle.registration_number})` : 'Not assigned'}
+                    </p>
+                  </div>
+
+                  <div>
+                    <span className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">Driver & Contact</span>
+                    <p className="text-xs font-semibold text-slate-800 mt-0.5">
+                      {driver ? `${driver.name} · ${driver.contact_number}` : 'Not assigned'}
+                    </p>
+                  </div>
+                </div>
+
+                <Link
+                  to="/operations/deliveries"
+                  className="whitespace-nowrap px-3 py-2 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-xs font-medium text-slate-700 flex items-center gap-1.5 self-start md:self-auto"
+                >
+                  Open Logistics Module →
+                </Link>
+              </div>
+            );
+          })()}
+        </section>
+
+        {/* ================================================================
             MAIN
         ================================================================= */}
 
@@ -4698,6 +4937,10 @@ export function InvoiceDetailPage() {
                       Qty
                     </th>
 
+                    <th className="px-4 py-3 text-center">
+                      Delivery Status
+                    </th>
+
                     <th className="px-4 py-3 text-right">
                       Unit Price
                     </th>
@@ -4739,6 +4982,46 @@ export function InvoiceDetailPage() {
                             }
                           </td>
 
+                          <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
+                            <div className="inline-flex flex-col items-center gap-1">
+                              {(() => {
+                                const itemDelivery = String(item.delivery_status || invoice?.delivery_status || 'pending').toLowerCase();
+                                const itemBadges: Record<string, { bg: string; text: string; dot: string; label: string }> = {
+                                  pending:   { bg: 'bg-amber-50 border-amber-200', text: 'text-amber-700', dot: 'bg-amber-500', label: 'Pending' },
+                                  packed:    { bg: 'bg-sky-50 border-sky-200', text: 'text-sky-700', dot: 'bg-sky-500', label: 'Packed' },
+                                  sent:      { bg: 'bg-indigo-50 border-indigo-200', text: 'text-indigo-700', dot: 'bg-indigo-500', label: 'Sent' },
+                                  delivered: { bg: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700', dot: 'bg-emerald-500', label: 'Delivered' },
+                                };
+                                const st = itemBadges[itemDelivery] || itemBadges.pending;
+
+                                return (
+                                  <div className="relative inline-block text-left">
+                                    <select
+                                      aria-label="Update line item delivery status"
+                                      value={itemDelivery}
+                                      onChange={(e) => {
+                                        if (item.id) {
+                                          handleUpdateItemDeliveryStatus(item.id, e.target.value);
+                                        }
+                                      }}
+                                      className={`text-xs font-semibold rounded-full border px-2.5 py-1 cursor-pointer transition outline-none ${st.bg} ${st.text}`}
+                                    >
+                                      <option value="pending">● Pending</option>
+                                      <option value="packed">● Packed</option>
+                                      <option value="sent">● Sent</option>
+                                      <option value="delivered">● Delivered</option>
+                                    </select>
+                                  </div>
+                                );
+                              })()}
+                              {safeNumber(item.delivered_quantity) > 0 && (
+                                <span className="text-[10px] text-slate-400 font-mono">
+                                  {item.delivered_quantity} / {item.quantity} delivered
+                                </span>
+                              )}
+                            </div>
+                          </td>
+
                           <td className="px-4 py-3 text-right text-slate-700">
                             Rs{' '}
                             {safeNumber(
@@ -4762,7 +5045,7 @@ export function InvoiceDetailPage() {
                   ) : (
                     <tr>
                       <td
-                        colSpan={4}
+                        colSpan={5}
                         className="py-12 text-center text-slate-400"
                       >
                         No items found.
@@ -4774,7 +5057,7 @@ export function InvoiceDetailPage() {
                 <tfoot>
                   <tr className="bg-slate-50 border-t border-slate-200">
                     <td
-                      colSpan={3}
+                      colSpan={4}
                       className="px-4 py-3 text-right font-medium text-slate-600"
                     >
                       Items Total

@@ -4,6 +4,7 @@ import {
   FiHome,
   FiBox,
   FiShoppingCart,
+  FiTruck,
   FiDollarSign,
   FiUsers,
   FiMapPin,
@@ -116,6 +117,22 @@ const menuSections: MenuSection[] = [
       { icon: FiRotateCcw, label: 'Purchase Returns', path: '/purchase-returns' },
       { icon: FiDollarSign, label: 'Payments', path: '/payments' },
       { icon: FiCreditCard, label: 'Bank & Cash', path: '/bank-cash' },
+      { icon: FiDollarSign, label: 'Cash Drawer', path: '/cash-drawer' },
+    ],
+  },
+  {
+    title: 'Logistics & Delivery',
+    items: [
+      { icon: FiTruck, label: 'Delivery Dashboard', path: '/deliveries' },
+      { icon: FiPackage, label: 'Delivery Orders', path: '/deliveries/orders' },
+      { icon: FiMapPin, label: 'Route Planning', path: '/deliveries/routes' },
+      { icon: FiTruck, label: 'Carrier Trips', path: '/deliveries/trips' },
+      { icon: FiCheckSquare, label: 'Loading Checklist', path: '/deliveries/loading' },
+      { icon: FiDollarSign, label: 'Transport Costs', path: '/deliveries/costs' },
+      { icon: FiTruck, label: 'Carrier Vehicles', path: '/deliveries/vehicles' },
+      { icon: FiUserCheck, label: 'Carrier Drivers', path: '/deliveries/drivers' },
+      { icon: FiCalendar, label: 'Delivery Calendar', path: '/deliveries/calendar' },
+      { icon: FiFileText, label: 'Delivery Reports', path: '/deliveries/reports' },
     ],
   },
   {
@@ -129,7 +146,8 @@ const menuSections: MenuSection[] = [
   {
     title: 'Finance',
     items: [
-     { icon: FiDollarSign, label: 'Income & Expenses', path: '/income-expenses' },
+     { icon: FiDollarSign, label: 'Cash Drawer', path: '/cash-drawer' },
+      { icon: FiDollarSign, label: 'Income & Expenses', path: '/income-expenses' },
       { icon: FiPieChart, label: 'Budgets', path: '/budgets' },
       { icon: FiBarChart2, label: 'Reports', path: '/reports' },
     ],
@@ -474,7 +492,7 @@ export function Sidebar({ isOpen = true, onClose }: SidebarProps) {
                   </span>
                   System online
                 </p>
-                <p className="mt-0.5 truncate text-[10px] text-slate-500">v1.2.4 · Business OS</p>
+                <p className="mt-0.5 truncate text-[10px] text-slate-500">v1.2.8 · Business OS</p>
               </div>
               <Link
                 to="/ai-assistant"

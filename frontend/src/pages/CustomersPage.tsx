@@ -36,6 +36,9 @@ const Offcanvas = lazy(() =>
 type CustomerType = 'customer' | 'dealer' | 'distributor';
 type DuplicateAction = 'skip' | 'update' | 'stop';
 type DetailTab = 'overview' | 'invoices' | 'payments' | 'orders' | 'activity';
+type DatePreset =
+  | 'all' | 'today' | 'yesterday' | '7d' | '30d'
+  | 'this_month' | 'last_month' | 'this_year' | 'custom';
 
 interface Company { id: number; name: string }
 interface Branch { id: number; name: string; company_id?: number }
@@ -71,6 +74,8 @@ interface Customer {
   branch_id: number | null;
   company?: Company;
   branch?: Branch;
+  created_at?: string;
+  updated_at?: string;
 }
 
 interface CustomerFormData {
@@ -95,29 +100,22 @@ interface CustomerFormData {
 interface InvoiceSummaryRow {
   id: number; invoice_no?: string; total_amount?: number | string;
   status?: string; invoice_date?: string; due_date?: string | null;
-  payment_status?: string;
-  [key: string]: unknown;
+  payment_status?: string; [key: string]: unknown;
 }
 interface PaymentRow {
   id: number; reference_no?: string; amount?: number | string;
   payment_method?: string; payment_direction?: string; status?: string;
-  transaction_date?: string;
-  [key: string]: unknown;
+  transaction_date?: string; [key: string]: unknown;
 }
 interface OrderSummaryRow {
   id: number; order_no?: string; total_amount?: number | string;
   status?: string; source?: string; delivery_date?: string | null;
-  created_at?: string;
-  [key: string]: unknown;
+  created_at?: string; [key: string]: unknown;
 }
-
 interface ActivityEntry {
-  id: string;
-  type: 'invoice' | 'payment' | 'order';
-  title: string; subtitle: string; amount: number; date: string;
-  status?: string;
+  id: string; type: 'invoice' | 'payment' | 'order';
+  title: string; subtitle: string; amount: number; date: string; status?: string;
 }
-
 interface ImportPreviewRow {
   row: number; data: Record<string, unknown>;
   valid: boolean; errors: Record<string, string>;
@@ -135,13 +133,9 @@ interface GstLookupResult {
 }
 interface AppLogEntry {
   module: string; action: string;
-  status: 'success' | 'error' | 'info';
-  message: string;
+  status: 'success' | 'error' | 'info'; message: string;
 }
-interface ApiErrorLike {
-  message?: string; status?: number;
-  response?: { status?: number };
-}
+interface ApiErrorLike { message?: string; status?: number; response?: { status?: number } }
 
 /* ── Constants ── */
 
@@ -152,6 +146,30 @@ const MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
 const SEARCH_DEBOUNCE_MS = 300;
 const PAGE_SIZE_OPTIONS = [15, 25, 50, 100] as const;
 const DEFAULT_PAGE_SIZE = 25;
+const FILTERS_OPEN_KEY = 'customers:filtersOpen:v2';
+
+const LIMITS = {
+  nameMin: 1, nameMax: 200,
+  emailMax: 120,
+  phoneMin: 7, phoneMax: 20,
+  gstinLength: 15,
+  panLength: 10,
+  addressMax: 500,
+  cityMax: 100, stateMax: 100,
+  pincodeMin: 4, pincodeMax: 10,
+  contactPersonMax: 100,
+  groupNameMax: 80,
+  // numeric
+  dueDaysMin: 0, dueDaysMax: 365,
+  creditLimitMin: 0, creditLimitMax: 100_000_000,
+  outstandingMin: 0, outstandingMax: 100_000_000,
+  openingBalanceMin: -100_000_000, openingBalanceMax: 100_000_000,
+  ewayBillMin: 0, ewayBillMax: 10_000,
+  faxMax: 30,
+  websiteMax: 200,
+  licenseMax: 100,
+  customFieldMax: 200,
+} as const;
 
 const TYPE_OPTIONS = [
   { value: 'all', label: 'All types' },
@@ -160,28 +178,90 @@ const TYPE_OPTIONS = [
   { value: 'distributor', label: 'Distributor' },
 ] as const;
 
+const DATE_PRESETS: { value: DatePreset; label: string }[] = [
+  { value: 'today', label: 'Today' },
+  { value: 'yesterday', label: 'Yesterday' },
+  { value: '7d', label: 'Last 7 Days' },
+  { value: '30d', label: 'Last 30 Days' },
+  { value: 'this_month', label: 'This Month' },
+  { value: 'last_month', label: 'Last Month' },
+  { value: 'this_year', label: 'This Year' },
+  { value: 'all', label: 'All Time' },
+  { value: 'custom', label: 'Custom Range' },
+];
+
 const TABLE_HEAD_CLASS = 'text-[11px] font-semibold uppercase tracking-wide text-slate-500';
 const OWNERSHIP_KEYS = ['customer_id', 'party_id', 'dealer_id', 'client_id', 'contact_id'] as const;
 
-/* ── Safe helpers ── */
+/* ── Date helpers ── */
+
+const toISO = (d: Date) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+};
+
+function dateRangeFromPreset(
+  preset: DatePreset,
+  customFrom?: string,
+  customTo?: string,
+): { from?: string; to?: string } {
+  const now = new Date();
+  switch (preset) {
+    case 'all': return {};
+    case 'today': return { from: toISO(now), to: toISO(now) };
+    case 'yesterday': { const y = new Date(now); y.setDate(y.getDate() - 1); return { from: toISO(y), to: toISO(y) }; }
+    case '7d': { const d = new Date(now); d.setDate(d.getDate() - 6); return { from: toISO(d), to: toISO(now) }; }
+    case '30d': { const d = new Date(now); d.setDate(d.getDate() - 29); return { from: toISO(d), to: toISO(now) }; }
+    case 'this_month': {
+      const start = new Date(now.getFullYear(), now.getMonth(), 1);
+      return { from: toISO(start), to: toISO(now) };
+    }
+    case 'last_month': {
+      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const end = new Date(now.getFullYear(), now.getMonth(), 0);
+      return { from: toISO(start), to: toISO(end) };
+    }
+    case 'this_year': {
+      const start = new Date(now.getFullYear(), 0, 1);
+      return { from: toISO(start), to: toISO(now) };
+    }
+    case 'custom':
+      return { from: customFrom || undefined, to: customTo || undefined };
+    default: return {};
+  }
+}
+
+/* ── Helpers ── */
 
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error && typeof error === 'object') {
-    const candidate = (error as ApiErrorLike).message;
-    if (typeof candidate === 'string' && candidate.trim()) return candidate;
+    const c = (error as ApiErrorLike).message;
+    if (typeof c === 'string' && c.trim()) return c;
   }
   if (error instanceof Error && error.message) return error.message;
   return fallback;
 }
-
-function safeLog(entry: AppLogEntry): void {
-  try { addAppLog(entry); } catch { /* no-op */ }
-}
-
+function safeLog(entry: AppLogEntry): void { try { addAppLog(entry); } catch { /* */ } }
 function safeNum(value: unknown): number {
   const n = typeof value === 'number' ? value : parseFloat(String(value ?? ''));
   return Number.isFinite(n) ? n : 0;
 }
+function coerceNumeric(value: unknown, fallback = 0): number {
+  if (value === null || value === undefined || value === '') return fallback;
+  const n = typeof value === 'number' ? value : parseFloat(String(value));
+  return Number.isFinite(n) ? n : fallback;
+}
+function clampStr(v: unknown, max: number): string { return String(v ?? '').slice(0, max); }
+function clampNum(v: number, min: number, max: number): number {
+  if (!Number.isFinite(v)) return min;
+  return Math.min(Math.max(v, min), max);
+}
+const digitsOnly = (s: string) => s.replace(/\D/g, '');
+const alnumUpper = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+const upperOnly = (s: string) => s.toUpperCase();
+const phoneSafe = (s: string) => s.replace(/[^\d+\s\-()]/g, '');
 
 function unwrapList<T>(response: unknown): T[] {
   if (Array.isArray(response)) return response as T[];
@@ -191,20 +271,17 @@ function unwrapList<T>(response: unknown): T[] {
   }
   return [];
 }
-
 function escapeCsvField(value: unknown): string {
   const raw = String(value ?? '');
   const dangerous = /^[=+\-@\t\r]/.test(raw);
   const safe = dangerous ? `\t${raw}` : raw;
   return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
-
 function formatCurrency(value: unknown): string {
   return new Intl.NumberFormat('en-IN', {
     style: 'currency', currency: 'INR', maximumFractionDigits: 2,
   }).format(safeNum(value));
 }
-
 function formatDate(value?: string | null): string {
   if (!value) return '—';
   const v = String(value).slice(0, 10);
@@ -214,18 +291,13 @@ function formatDate(value?: string | null): string {
   if (Number.isNaN(date.getTime())) return '—';
   return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
 }
-
 function getOutstanding(customer: Customer | null | undefined): number {
   if (!customer) return 0;
   const raw = customer.computed_outstanding ?? customer.outstanding_amount;
   const n = Number(raw);
   return Number.isFinite(n) ? n : 0;
 }
-
-function filterByOwnership<T extends Record<string, unknown>>(
-  rows: T[],
-  customerId: number,
-): T[] {
+function filterByOwnership<T extends Record<string, unknown>>(rows: T[], customerId: number): T[] {
   if (rows.length === 0) return rows;
   const hasOwnershipField = rows.some((row) =>
     OWNERSHIP_KEYS.some((k) => row[k] != null && row[k] !== ''),
@@ -240,11 +312,10 @@ function filterByOwnership<T extends Record<string, unknown>>(
   );
 }
 
-/* ── Ledger utilities ── */
+/* ── Ledger utilities (unchanged) ── */
 
 function htmlEscape(v: unknown): string {
-  return String(v ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function inrPlain(v: unknown): string {
@@ -290,23 +361,14 @@ function amountInWords(value: number): string {
 }
 
 interface LedgerEntry {
-  id?: number | string;
-  date?: string | null;
-  type?: string;
-  reference_no?: string | null;
-  particulars?: string | null;
-  narration?: string | null;
-  debit?: number | string | null;
-  credit?: number | string | null;
-  status?: string | null;
-  [key: string]: unknown;
+  id?: number | string; date?: string | null; type?: string;
+  reference_no?: string | null; particulars?: string | null; narration?: string | null;
+  debit?: number | string | null; credit?: number | string | null;
+  status?: string | null; [key: string]: unknown;
 }
 interface LedgerSummary {
-  opening_balance?: number;
-  total_debit: number;
-  total_credit: number;
-  balance: number;
-  [key: string]: unknown;
+  opening_balance?: number; total_debit: number; total_credit: number;
+  balance: number; [key: string]: unknown;
 }
 
 const LEDGER_TYPE_LABEL: Record<string, string> = {
@@ -336,41 +398,30 @@ async function fetchLedger(
 
 function buildLedgerHtml(customer: Customer, entries: LedgerEntry[], serverSummary: LedgerSummary | null): string {
   const sorted = [...entries].sort((a, b) => {
-    const da = String(a.date ?? '').slice(0, 10);
-    const db = String(b.date ?? '').slice(0, 10);
+    const da = String(a.date ?? '').slice(0, 10), db = String(b.date ?? '').slice(0, 10);
     return da === db ? 0 : da < db ? -1 : 1;
   });
-
   const opening = safeNum(customer.opening_balance);
-  let running = opening;
-  let totalDebit = 0, totalCredit = 0;
-
+  let running = opening, totalDebit = 0, totalCredit = 0;
   const rows = sorted.map((entry, i) => {
-    const debit = safeNum(entry.debit);
-    const credit = safeNum(entry.credit);
-    totalDebit += debit; totalCredit += credit;
-    running += debit - credit;
+    const debit = safeNum(entry.debit), credit = safeNum(entry.credit);
+    totalDebit += debit; totalCredit += credit; running += debit - credit;
     return {
-      index: i + 1,
-      date: formatDate(entry.date),
+      index: i + 1, date: formatDate(entry.date),
       typeLabel: LEDGER_TYPE_LABEL[String(entry.type ?? '').toLowerCase()] ?? '—',
       reference: entry.reference_no ? String(entry.reference_no) : '—',
       particulars: ledgerEntryParticulars(entry),
       debit, credit, balance: running,
     };
   });
-
   const closing = serverSummary ? safeNum(serverSummary.balance) : opening + totalDebit - totalCredit;
-
   const companyName = customer.company?.name || 'Company';
   const branchName = customer.branch?.name || '';
-
   const addressLines = [
     customer.billing_street, customer.billing_landmark,
     [customer.billing_city, customer.billing_state, customer.billing_pincode].filter(Boolean).join(', '),
     customer.billing_country,
   ].filter((l) => typeof l === 'string' && l.trim());
-
   const bodyRows = rows.map((r) => `
       <tr>
         <td class="c-idx">${r.index}</td>
@@ -384,177 +435,113 @@ function buildLedgerHtml(customer: Customer, entries: LedgerEntry[], serverSumma
           <span class="dr">${r.balance >= 0 ? 'Dr' : 'Cr'}</span>
         </td>
       </tr>`).join('');
-
   const emptyRow = `<tr class="empty"><td colspan="8">No transactions recorded for this customer.</td></tr>`;
   const balWord = amountInWords(closing);
-
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8" />
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8" />
 <title>Ledger \u2013 ${htmlEscape(customer.name)}</title>
 <style>
   *{box-sizing:border-box}
   @page{size:A4 portrait;margin:12mm 10mm 14mm 10mm}
   html,body{margin:0;padding:0;background:#fff}
-  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:10px;line-height:1.35;color:#0f172a;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;font-size:10px;line-height:1.35;color:#0f172a;-webkit-print-color-adjust:exact;print-color-adjust:exact}
   .sheet{width:190mm;margin:0 auto;padding:4mm 0}
   @media print{.sheet{width:100%;margin:0;padding:0}}
   .doc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding-bottom:8px;border-bottom:2px solid #0f172a}
   .brand{display:flex;align-items:center;gap:9px;min-width:0}
-  .brand-mark{width:34px;height:34px;flex:0 0 34px;display:grid;place-items:center;border-radius:8px;background:#0f172a;color:#fff;font-size:13px;font-weight:700;letter-spacing:.5px}
-  .brand-name{font-size:13px;font-weight:700;letter-spacing:-.2px}
+  .brand-mark{width:34px;height:34px;flex:0 0 34px;display:grid;place-items:center;border-radius:8px;background:#0f172a;color:#fff;font-size:13px;font-weight:700}
+  .brand-name{font-size:13px;font-weight:700}
   .brand-sub{font-size:9px;color:#64748b;margin-top:1px}
   .doc-title{text-align:right}
-  .doc-title-main{font-size:15px;font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+  .doc-title-main{font-size:15px;font-weight:700;text-transform:uppercase}
   .doc-title-sub{font-size:9px;color:#64748b;margin-top:2px}
-  .meta{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-top:10px;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden}
+  .meta{display:grid;grid-template-columns:1fr 1fr;margin-top:10px;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden}
   .meta-col{padding:8px 10px}
   .meta-col+.meta-col{border-left:1px solid #e2e8f0}
-  .meta-label{font-size:8px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;color:#94a3b8;margin-bottom:4px}
-  .meta-name{font-size:12px;font-weight:700;color:#0f172a}
+  .meta-label{font-size:8px;font-weight:700;text-transform:uppercase;color:#94a3b8;margin-bottom:4px}
+  .meta-name{font-size:12px;font-weight:700}
   .meta-line{font-size:9.5px;color:#475569;margin-top:1px}
   .meta-kv{display:flex;gap:6px;font-size:9.5px;margin-top:2px}
   .meta-kv .k{color:#94a3b8;min-width:62px}
   .meta-kv .v{color:#1e293b;font-weight:600;word-break:break-word}
-  .summary{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-top:10px;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden}
+  .summary{display:grid;grid-template-columns:repeat(4,1fr);margin-top:10px;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden}
   .sum-cell{padding:7px 9px}
   .sum-cell+.sum-cell{border-left:1px solid #e2e8f0}
-  .sum-label{font-size:8px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:#94a3b8}
+  .sum-label{font-size:8px;font-weight:700;text-transform:uppercase;color:#94a3b8}
   .sum-value{font-size:12px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
-  .sum-value.dr{color:#b91c1c}
-  .sum-value.cr{color:#047857}
-  .sum-value.plain{color:#0f172a}
+  .sum-value.dr{color:#b91c1c}.sum-value.cr{color:#047857}.sum-value.plain{color:#0f172a}
   .table-wrap{margin-top:12px}
   table.ledger{width:100%;border-collapse:collapse;table-layout:fixed}
   table.ledger thead{display:table-header-group}
   table.ledger tr{page-break-inside:avoid}
-  table.ledger th{background:#f1f5f9;border-top:1px solid #cbd5e1;border-bottom:1px solid #cbd5e1;padding:6px;font-size:8.5px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:#475569;text-align:left;white-space:nowrap}
+  table.ledger th{background:#f1f5f9;border-top:1px solid #cbd5e1;border-bottom:1px solid #cbd5e1;padding:6px;font-size:8.5px;font-weight:700;text-transform:uppercase;color:#475569;text-align:left;white-space:nowrap}
   table.ledger th.c-amt{text-align:right}
   table.ledger td{padding:5px 6px;border-bottom:1px solid #eef2f7;font-size:9.5px;color:#1e293b;vertical-align:top;word-wrap:break-word}
   .c-idx{width:22px;text-align:center;color:#94a3b8}
   .c-date{width:60px;white-space:nowrap}
   .c-type{width:52px;white-space:nowrap;color:#475569}
-  .c-ref{width:72px}
-  .c-part{width:auto}
+  .c-ref{width:72px}.c-part{width:auto}
   .c-amt{width:66px;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
   .c-bal{font-weight:700}
   .c-bal .dr{font-size:7.5px;color:#94a3b8;margin-left:2px;font-weight:600}
   tbody tr:nth-child(even) td{background:#fafbfc}
   tr.empty td{text-align:center;color:#94a3b8;padding:22px 6px;font-style:italic}
-  tfoot td{border-top:2px solid #0f172a;border-bottom:none;padding:6px;font-size:10px;font-weight:700;background:#f8fafc}
+  tfoot td{border-top:2px solid #0f172a;padding:6px;font-size:10px;font-weight:700;background:#f8fafc}
   tfoot td.c-amt{text-align:right;font-variant-numeric:tabular-nums}
   .closing{margin-top:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc}
-  .closing .label{font-size:9px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:#475569}
+  .closing .label{font-size:9px;font-weight:700;text-transform:uppercase;color:#475569}
   .closing .words{font-size:9px;color:#64748b;margin-top:3px}
   .closing .value{font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
-  .closing .value.dr{color:#b91c1c}
-  .closing .value.cr{color:#047857}
+  .closing .value.dr{color:#b91c1c}.closing .value.cr{color:#047857}
   .doc-foot{margin-top:16px;padding-top:8px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;gap:12px;font-size:8px;color:#94a3b8}
   .sign{margin-top:26px;text-align:right;font-size:9px;color:#475569}
   .sign-line{display:inline-block;min-width:150px;padding-top:4px;border-top:1px solid #94a3b8;text-align:center}
-</style></head><body>
-  <div class="sheet">
-    <header class="doc-head">
-      <div class="brand">
-        <div class="brand-mark">${htmlEscape(companyName.slice(0, 2).toUpperCase())}</div>
-        <div>
-          <div class="brand-name">${htmlEscape(companyName)}</div>
-          ${branchName ? `<div class="brand-sub">${htmlEscape(branchName)}</div>` : ''}
-        </div>
-      </div>
-      <div class="doc-title">
-        <div class="doc-title-main">Customer Ledger</div>
-        <div class="doc-title-sub">Statement of Account</div>
-        <div class="doc-title-sub">As on ${htmlEscape(todayLabel())}</div>
-      </div>
-    </header>
-
-    <section class="meta">
-      <div class="meta-col">
-        <div class="meta-label">Account holder</div>
-        <div class="meta-name">${htmlEscape(customer.name)}</div>
-        ${addressLines.length ? addressLines.map((l) => `<div class="meta-line">${htmlEscape(l)}</div>`).join('') : '<div class="meta-line">Address not provided</div>'}
-      </div>
-      <div class="meta-col">
-        <div class="meta-label">Account details</div>
-        <div class="meta-kv"><span class="k">Account ID</span><span class="v">#${htmlEscape(customer.id)}</span></div>
-        ${customer.type ? `<div class="meta-kv"><span class="k">Type</span><span class="v" style="text-transform:capitalize">${htmlEscape(customer.type)}</span></div>` : ''}
-        ${customer.contact_person ? `<div class="meta-kv"><span class="k">Contact</span><span class="v">${htmlEscape(customer.contact_person)}</span></div>` : ''}
-        ${customer.contact_no ? `<div class="meta-kv"><span class="k">Phone</span><span class="v">${htmlEscape(customer.contact_no)}</span></div>` : ''}
-        ${customer.email ? `<div class="meta-kv"><span class="k">Email</span><span class="v">${htmlEscape(customer.email)}</span></div>` : ''}
-        ${customer.gst_number ? `<div class="meta-kv"><span class="k">GSTIN</span><span class="v">${htmlEscape(customer.gst_number)}</span></div>` : ''}
-        ${customer.pan ? `<div class="meta-kv"><span class="k">PAN</span><span class="v">${htmlEscape(customer.pan)}</span></div>` : ''}
-      </div>
-    </section>
-
-    <section class="summary">
-      <div class="sum-cell">
-        <div class="sum-label">Opening balance</div>
-        <div class="sum-value plain">${inrMoney(opening)}</div>
-      </div>
-      <div class="sum-cell">
-        <div class="sum-label">Total debit</div>
-        <div class="sum-value plain">${inrMoney(totalDebit)}</div>
-      </div>
-      <div class="sum-cell">
-        <div class="sum-label">Total credit</div>
-        <div class="sum-value plain">${inrMoney(totalCredit)}</div>
-      </div>
-      <div class="sum-cell">
-        <div class="sum-label">Closing balance</div>
-        <div class="sum-value ${closing > 0 ? 'dr' : closing < 0 ? 'cr' : 'plain'}">
-          ${inrMoney(Math.abs(closing))} ${closing >= 0 ? 'Dr' : 'Cr'}
-        </div>
-      </div>
-    </section>
-
-    <div class="table-wrap">
-      <table class="ledger">
-        <colgroup>
-          <col style="width:22px" /><col style="width:60px" /><col style="width:52px" />
-          <col style="width:72px" /><col /><col style="width:66px" /><col style="width:66px" /><col style="width:72px" />
-        </colgroup>
-        <thead><tr>
-          <th class="c-idx">#</th><th>Date</th><th>Type</th><th>Voucher</th>
-          <th>Particulars</th><th class="c-amt">Debit</th><th class="c-amt">Credit</th><th class="c-amt">Balance</th>
-        </tr></thead>
-        <tbody>
-          <tr>
-            <td class="c-idx">0</td><td class="c-date">—</td><td class="c-type">Opening</td>
-            <td class="c-ref">—</td><td class="c-part">Opening Balance</td>
-            <td class="c-amt">—</td><td class="c-amt">—</td>
-            <td class="c-amt c-bal">${inrPlain(Math.abs(opening))}
-              <span class="dr">${opening >= 0 ? 'Dr' : 'Cr'}</span>
-            </td>
-          </tr>
-          ${rows.length ? bodyRows : emptyRow}
-        </tbody>
-        <tfoot><tr>
-          <td colspan="5">Total</td>
-          <td class="c-amt">${inrPlain(totalDebit)}</td>
-          <td class="c-amt">${inrPlain(totalCredit)}</td>
-          <td class="c-amt">${inrPlain(Math.abs(closing))}</td>
-        </tr></tfoot>
-      </table>
-    </div>
-
-    <section class="closing">
-      <div>
-        <div class="label">Closing balance</div>
-        <div class="words">${htmlEscape(balWord)}</div>
-      </div>
-      <div class="value ${closing > 0 ? 'dr' : closing < 0 ? 'cr' : ''}">
-        ${inrMoney(Math.abs(closing))} ${closing >= 0 ? 'Dr' : 'Cr'}
-      </div>
-    </section>
-
-    <div class="sign"><span class="sign-line">Authorised Signatory</span></div>
-
-    <footer class="doc-foot">
-      <span>Generated on ${htmlEscape(todayLabel())} · Computer-generated statement.</span>
-      <span>${htmlEscape(companyName)}${branchName ? ` · ${htmlEscape(branchName)}` : ''}</span>
-    </footer>
-  </div>
-</body></html>`;
+</style></head><body><div class="sheet">
+  <header class="doc-head">
+    <div class="brand"><div class="brand-mark">${htmlEscape(companyName.slice(0, 2).toUpperCase())}</div>
+      <div><div class="brand-name">${htmlEscape(companyName)}</div>
+      ${branchName ? `<div class="brand-sub">${htmlEscape(branchName)}</div>` : ''}</div></div>
+    <div class="doc-title"><div class="doc-title-main">Customer Ledger</div>
+      <div class="doc-title-sub">Statement of Account</div>
+      <div class="doc-title-sub">As on ${htmlEscape(todayLabel())}</div></div>
+  </header>
+  <section class="meta">
+    <div class="meta-col"><div class="meta-label">Account holder</div>
+      <div class="meta-name">${htmlEscape(customer.name)}</div>
+      ${addressLines.length ? addressLines.map((l) => `<div class="meta-line">${htmlEscape(l)}</div>`).join('') : '<div class="meta-line">Address not provided</div>'}</div>
+    <div class="meta-col"><div class="meta-label">Account details</div>
+      <div class="meta-kv"><span class="k">Account ID</span><span class="v">#${htmlEscape(customer.id)}</span></div>
+      ${customer.type ? `<div class="meta-kv"><span class="k">Type</span><span class="v" style="text-transform:capitalize">${htmlEscape(customer.type)}</span></div>` : ''}
+      ${customer.contact_person ? `<div class="meta-kv"><span class="k">Contact</span><span class="v">${htmlEscape(customer.contact_person)}</span></div>` : ''}
+      ${customer.contact_no ? `<div class="meta-kv"><span class="k">Phone</span><span class="v">${htmlEscape(customer.contact_no)}</span></div>` : ''}
+      ${customer.email ? `<div class="meta-kv"><span class="k">Email</span><span class="v">${htmlEscape(customer.email)}</span></div>` : ''}
+      ${customer.gst_number ? `<div class="meta-kv"><span class="k">GSTIN</span><span class="v">${htmlEscape(customer.gst_number)}</span></div>` : ''}
+      ${customer.pan ? `<div class="meta-kv"><span class="k">PAN</span><span class="v">${htmlEscape(customer.pan)}</span></div>` : ''}
+    </div></section>
+  <section class="summary">
+    <div class="sum-cell"><div class="sum-label">Opening balance</div><div class="sum-value plain">${inrMoney(opening)}</div></div>
+    <div class="sum-cell"><div class="sum-label">Total debit</div><div class="sum-value plain">${inrMoney(totalDebit)}</div></div>
+    <div class="sum-cell"><div class="sum-label">Total credit</div><div class="sum-value plain">${inrMoney(totalCredit)}</div></div>
+    <div class="sum-cell"><div class="sum-label">Closing balance</div>
+      <div class="sum-value ${closing > 0 ? 'dr' : closing < 0 ? 'cr' : 'plain'}">${inrMoney(Math.abs(closing))} ${closing >= 0 ? 'Dr' : 'Cr'}</div></div>
+  </section>
+  <div class="table-wrap"><table class="ledger">
+    <colgroup><col style="width:22px" /><col style="width:60px" /><col style="width:52px" /><col style="width:72px" /><col /><col style="width:66px" /><col style="width:66px" /><col style="width:72px" /></colgroup>
+    <thead><tr><th class="c-idx">#</th><th>Date</th><th>Type</th><th>Voucher</th><th>Particulars</th><th class="c-amt">Debit</th><th class="c-amt">Credit</th><th class="c-amt">Balance</th></tr></thead>
+    <tbody>
+      <tr><td class="c-idx">0</td><td class="c-date">—</td><td class="c-type">Opening</td><td class="c-ref">—</td><td class="c-part">Opening Balance</td><td class="c-amt">—</td><td class="c-amt">—</td>
+        <td class="c-amt c-bal">${inrPlain(Math.abs(opening))}<span class="dr">${opening >= 0 ? 'Dr' : 'Cr'}</span></td></tr>
+      ${rows.length ? bodyRows : emptyRow}
+    </tbody>
+    <tfoot><tr><td colspan="5">Total</td><td class="c-amt">${inrPlain(totalDebit)}</td><td class="c-amt">${inrPlain(totalCredit)}</td><td class="c-amt">${inrPlain(Math.abs(closing))}</td></tr></tfoot>
+  </table></div>
+  <section class="closing"><div><div class="label">Closing balance</div><div class="words">${htmlEscape(balWord)}</div></div>
+    <div class="value ${closing > 0 ? 'dr' : closing < 0 ? 'cr' : ''}">${inrMoney(Math.abs(closing))} ${closing >= 0 ? 'Dr' : 'Cr'}</div></section>
+  <div class="sign"><span class="sign-line">Authorised Signatory</span></div>
+  <footer class="doc-foot">
+    <span>Generated on ${htmlEscape(todayLabel())} · Computer-generated statement.</span>
+    <span>${htmlEscape(companyName)}${branchName ? ` · ${htmlEscape(branchName)}` : ''}</span>
+  </footer>
+</div></body></html>`;
 }
 
 function printLedgerHtml(html: string): void {
@@ -563,27 +550,23 @@ function printLedgerHtml(html: string): void {
   frame.setAttribute('title', 'Ledger print frame');
   frame.style.cssText = 'position:fixed;left:-10000px;top:0;width:210mm;height:297mm;border:0;opacity:0;pointer-events:none';
   document.body.appendChild(frame);
-
   let printed = false;
   const run = () => {
     if (printed) return;
     printed = true;
     const win = frame.contentWindow;
-    if (win) { try { win.focus(); win.print(); } catch { /* user prints manually */ } }
+    if (win) { try { win.focus(); win.print(); } catch { /* */ } }
     window.setTimeout(() => { if (frame.parentNode) frame.remove(); }, 60_000);
   };
-
   const doc = frame.contentDocument;
   if (!doc) { frame.remove(); return; }
-
   doc.open(); doc.write(html); doc.close();
-
   if (doc.readyState === 'complete') window.setTimeout(run, 350);
   else frame.onload = () => window.setTimeout(run, 350);
   window.setTimeout(run, 1500);
 }
 
-/* ── Cached API hook ── */
+/* ── Cache hook ── */
 
 interface CacheEntry<T> { data: T; timestamp: number }
 const cache = new Map<string, CacheEntry<unknown>>();
@@ -604,14 +587,10 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
       const entry = cache.get(key);
       if (entry && Date.now() - entry.timestamp < ttlMs) {
         if (!mountedRef.current || requestId !== requestIdRef.current) return;
-        setData(entry.data as T);
-        setLoading(false);
-        setError(null);
-        return;
+        setData(entry.data as T); setLoading(false); setError(null); return;
       }
     }
-    setLoading(true);
-    setError(null);
+    setLoading(true); setError(null);
     try {
       const res = await fetcherRef.current();
       if (!mountedRef.current || requestId !== requestIdRef.current) return;
@@ -633,11 +612,10 @@ function useApiCache<T>(key: string, fetcher: () => Promise<T>, ttlMs = CACHE_TT
   }, [fetchData]);
 
   const refresh = useCallback(() => { cache.delete(key); return fetchData(true); }, [fetchData, key]);
-
   return { data, loading, error, refresh };
 }
 
-/* ── Presentation primitives ── */
+/* ── Presentation ── */
 
 function TableHeadLabel({ children, align = 'left' }: { children: React.ReactNode; align?: 'left' | 'right' }) {
   return (
@@ -665,11 +643,7 @@ const STATUS_MAP: Record<string, { label: string; className: string }> = {
 const StatusPill = memo(function StatusPill({ status }: { status?: string | null }) {
   const value = String(status ?? '').toLowerCase();
   const { label, className } = STATUS_MAP[value] ?? { label: status || '—', className: 'border-slate-200 bg-slate-50 text-slate-600' };
-  return (
-    <Badge variant="outline" className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${className}`}>
-      {label}
-    </Badge>
-  );
+  return <Badge variant="outline" className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${className}`}>{label}</Badge>;
 });
 
 const StatCardSkeleton = memo(() => (
@@ -684,7 +658,6 @@ const StatCardSkeleton = memo(() => (
 StatCardSkeleton.displayName = 'StatCardSkeleton';
 
 type Accent = 'indigo' | 'emerald' | 'rose' | 'amber' | 'violet' | 'teal' | 'sky';
-
 const ACCENTS: Record<Accent, { bg: string; icon: string; ring: string }> = {
   indigo:  { bg: 'bg-indigo-50',  icon: 'text-indigo-600',  ring: 'ring-indigo-500/10' },
   emerald: { bg: 'bg-emerald-50', icon: 'text-emerald-600', ring: 'ring-emerald-500/10' },
@@ -704,9 +677,7 @@ const StatCard = memo(function StatCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">{label}</p>
-          <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
-            {prefix}{value}
-          </p>
+          <p className="mt-2 truncate text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">{prefix}{value}</p>
         </div>
         <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${s.bg} ring-1 ${s.ring}`}>
           <Icon size={18} className={s.icon} />
@@ -716,48 +687,36 @@ const StatCard = memo(function StatCard({
   );
 });
 
-/* ── Row actions ── */
+/* ── Action menu ── */
 
 const MENU_WIDTH = 210, MENU_HEIGHT = 200, MENU_MARGIN = 8;
 
 interface ActionDropdownPermissions {
-  canEdit: boolean;
-  canDelete: boolean;
-  canViewLedger: boolean;
-  canPrintLedger: boolean;
+  canEdit: boolean; canDelete: boolean;
+  canViewLedger: boolean; canPrintLedger: boolean;
 }
 
 const ActionDropdown = memo(function ActionDropdown({
   customer, onEdit, onLedger, onLedgerA4, onDelete, onCustomer360, ledgerLoading, permissions,
 }: {
-  onCustomer360?: (c: Customer) => void;
-  customer: Customer;
-  onEdit: (c: Customer) => void;
-  onLedger: (c: Customer) => void;
-  onLedgerA4: (c: Customer) => void;
-  onDelete: (c: Customer) => void;
-  ledgerLoading?: boolean;
-  permissions: ActionDropdownPermissions;
+  onCustomer360?: (c: Customer) => void; customer: Customer;
+  onEdit: (c: Customer) => void; onLedger: (c: Customer) => void;
+  onLedgerA4: (c: Customer) => void; onDelete: (c: Customer) => void;
+  ledgerLoading?: boolean; permissions: ActionDropdownPermissions;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const hasAnyAction =
-    permissions.canEdit ||
-    permissions.canDelete ||
-    permissions.canViewLedger ||
-    permissions.canPrintLedger;
+  const hasAnyAction = permissions.canEdit || permissions.canDelete || permissions.canViewLedger || permissions.canPrintLedger;
 
   const toggle = useCallback(() => {
     if (isOpen) { setIsOpen(false); return; }
     const rect = buttonRef.current?.getBoundingClientRect();
     if (rect) {
       const left = Math.min(Math.max(MENU_MARGIN, rect.right - MENU_WIDTH), window.innerWidth - MENU_WIDTH - MENU_MARGIN);
-      const top = rect.bottom + MENU_HEIGHT <= window.innerHeight - MENU_MARGIN
-        ? rect.bottom + 4
-        : Math.max(MENU_MARGIN, rect.top - MENU_HEIGHT - 4);
+      const top = rect.bottom + MENU_HEIGHT <= window.innerHeight - MENU_MARGIN ? rect.bottom + 4 : Math.max(MENU_MARGIN, rect.top - MENU_HEIGHT - 4);
       setMenuStyle({ position: 'fixed', left, top, width: MENU_WIDTH, zIndex: 9999 });
     }
     setIsOpen(true);
@@ -766,53 +725,47 @@ const ActionDropdown = memo(function ActionDropdown({
   useEffect(() => {
     if (!isOpen) return;
     const handler = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (buttonRef.current && !buttonRef.current.contains(target) && menuRef.current && !menuRef.current.contains(target)) setIsOpen(false);
+      const t = event.target as Node;
+      if (buttonRef.current && !buttonRef.current.contains(t) && menuRef.current && !menuRef.current.contains(t)) setIsOpen(false);
     };
-    const onScrollOrResize = () => setIsOpen(false);
+    const onS = () => setIsOpen(false);
     document.addEventListener('mousedown', handler);
-    window.addEventListener('resize', onScrollOrResize);
-    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onS);
+    window.addEventListener('scroll', onS, true);
     return () => {
       document.removeEventListener('mousedown', handler);
-      window.removeEventListener('resize', onScrollOrResize);
-      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onS);
+      window.removeEventListener('scroll', onS, true);
     };
   }, [isOpen]);
 
   if (!hasAnyAction) return null;
-
   const showLedgerGroup = permissions.canViewLedger || permissions.canPrintLedger;
 
   return (
     <>
-      <button ref={buttonRef} type="button"
-        onClick={(e) => { e.stopPropagation(); toggle(); }}
+      <button ref={buttonRef} type="button" onClick={(e) => { e.stopPropagation(); toggle(); }}
         className={`grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 ${isOpen ? 'bg-slate-100 text-slate-700' : ''}`}
         title="Actions" aria-haspopup="menu" aria-expanded={isOpen}>
         <FiMoreVertical size={16} />
       </button>
-
       {isOpen && createPortal(
         <div ref={menuRef} role="menu" style={menuStyle} onClick={(e) => e.stopPropagation()}
           className="animate-fadeIn overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl shadow-slate-900/10">
           {onCustomer360 && (
-            <button type="button" role="menuitem"
-              onClick={() => { setIsOpen(false); onCustomer360(customer); }}
+            <button type="button" role="menuitem" onClick={() => { setIsOpen(false); onCustomer360(customer); }}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-indigo-600 transition hover:bg-indigo-50">
               <FiActivity size={14} className="text-indigo-600" /> Customer 360°
             </button>
           )}
           {permissions.canEdit && (
-            <button type="button" role="menuitem"
-              onClick={() => { setIsOpen(false); onEdit(customer); }}
+            <button type="button" role="menuitem" onClick={() => { setIsOpen(false); onEdit(customer); }}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
               <FiEdit size={14} className="text-indigo-500" /> Edit
             </button>
           )}
           {permissions.canViewLedger && (
-            <button type="button" role="menuitem"
-              onClick={() => { setIsOpen(false); onLedger(customer); }}
+            <button type="button" role="menuitem" onClick={() => { setIsOpen(false); onLedger(customer); }}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition hover:bg-slate-50">
               <FiBookOpen size={14} className="text-emerald-500" /> Ledger
             </button>
@@ -827,8 +780,7 @@ const ActionDropdown = memo(function ActionDropdown({
           )}
           {showLedgerGroup && permissions.canDelete && <div className="my-1 border-t border-slate-100" />}
           {permissions.canDelete && (
-            <button type="button" role="menuitem"
-              onClick={() => { setIsOpen(false); onDelete(customer); }}
+            <button type="button" role="menuitem" onClick={() => { setIsOpen(false); onDelete(customer); }}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-red-600 transition hover:bg-red-50">
               <FiTrash2 size={14} /> Delete
             </button>
@@ -850,13 +802,18 @@ interface FormTextFieldProps {
   hasError?: boolean;
   onChange: (field: string, value: string) => void;
   placeholder?: string;
-  maxLength?: number;
+  min?: number; max?: number;
+  minLength?: number; maxLength?: number;
+  pattern?: string;
+  inputMode?: 'text' | 'numeric' | 'decimal' | 'tel' | 'email';
   disabled?: boolean;
+  hint?: string;
 }
 
 const FormTextField = memo(function FormTextField({
   label, field, type = 'text', required = false, value, hasError = false,
-  onChange, placeholder, maxLength, disabled = false,
+  onChange, placeholder, min, max, minLength, maxLength,
+  pattern, inputMode, disabled = false, hint,
 }: FormTextFieldProps) {
   const id = `field-${field}`;
   const stateClass = hasError
@@ -873,7 +830,14 @@ const FormTextField = memo(function FormTextField({
         className={`h-10 w-full min-w-0 rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition disabled:cursor-not-allowed disabled:bg-slate-50 disabled:text-slate-500 ${stateClass}`}
         placeholder={placeholder ?? `Enter ${label}`}
         step={type === 'number' ? '0.01' : undefined}
-        maxLength={maxLength} />
+        min={min}
+        max={max}
+        minLength={minLength}
+        maxLength={maxLength}
+        pattern={pattern}
+        inputMode={inputMode ?? (type === 'number' ? 'decimal' : undefined)}
+      />
+      {hint && <p className="mt-1 text-[10px] text-slate-400">{hint}</p>}
     </div>
   );
 });
@@ -890,8 +854,6 @@ function EmptyTab({ icon: Icon, title, subtitle }: { icon: React.ElementType; ti
   );
 }
 
-/* ── Initial form ── */
-
 const createEmptyForm = (): CustomerFormData => ({
   name: '', type: 'customer', company_type: '', email: '', contact_no: '', contact_person: '',
   gst_number: '', registration_type: '', pan: '',
@@ -905,7 +867,7 @@ const createEmptyForm = (): CustomerFormData => ({
   company_id: '', branch_id: '', same_as_billing: true,
 });
 
-/* ── Page component ── */
+/* ── Page ── */
 
 export function CustomersPage() {
   const navigate = useNavigate();
@@ -914,7 +876,7 @@ export function CustomersPage() {
   const loadingUser = useAuthStore((s) => s.loadingUser);
   const hasUser = useAuthStore((s) => Boolean(s.user));
 
-  /* ── RBAC ── */
+  /* RBAC */
   const canViewCustomers    = isSuperAdmin || can('view customers');
   const canCreateCustomer   = isSuperAdmin || can('create customers');
   const canEditCustomer     = isSuperAdmin || can('edit customers');
@@ -928,36 +890,51 @@ export function CustomersPage() {
   const canBulkDelete       = isSuperAdmin || can('delete customers');
   const canAutoFillGst      = isSuperAdmin || can('create customers') || can('edit customers');
 
-  /* ── Filters state ── */
+  /* Filters state */
   const [filterType, setFilterType] = useState('all');
   const [filterCompany, setFilterCompany] = useState('all');
   const [filterBranch, setFilterBranch] = useState('all');
-  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [datePreset, setDatePreset] = useState<DatePreset>('today');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
 
-  /* ── Search state ── */
+  // Auto-hide: read from localStorage (defaults to false if missing)
+  const [filtersOpen, setFiltersOpen] = useState<boolean>(() => {
+    try {
+      const raw = window.localStorage.getItem(FILTERS_OPEN_KEY);
+      if (raw === '1') return true;
+      if (raw === '0') return false;
+    } catch { /* */ }
+    return false;
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(FILTERS_OPEN_KEY, filtersOpen ? '1' : '0'); } catch { /* */ }
+  }, [filtersOpen]);
+
+  /* Search */
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
 
-  /* ── Pagination state ── */
+  /* Pagination */
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
 
-  /* ── Form state ── */
+  /* Form */
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [formData, setFormData] = useState<CustomerFormData>(createEmptyForm);
   const [submitting, setSubmitting] = useState(false);
   const [formErrors, setFormErrors] = useState<Record<string, boolean>>({});
 
-  /* ── Selection ── */
+  /* Selection */
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
 
-  /* ── Group modal ── */
+  /* Group modal */
   const [showGroupModal, setShowGroupModal] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [addingGroup, setAddingGroup] = useState(false);
 
-  /* ── Import state ── */
+  /* Import */
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importStep, setImportStep] = useState<'select' | 'preview' | 'result'>('select');
@@ -971,7 +948,7 @@ export function CustomersPage() {
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  /* ── Quick view & detail ── */
+  /* Detail */
   const [quickViewCustomer, setQuickViewCustomer] = useState<Customer | null>(null);
   const [customer360Id, setCustomer360Id] = useState<number | null>(null);
   const [viewingCustomer, setViewingCustomer] = useState<Customer | null>(null);
@@ -982,7 +959,7 @@ export function CustomersPage() {
   const [customerOrders, setCustomerOrders] = useState<OrderSummaryRow[]>([]);
   const detailRequestRef = useRef(0);
 
-  /* ── Misc ── */
+  /* Misc */
   const [ledgerLoadingId, setLedgerLoadingId] = useState<number | null>(null);
   const [hiddenOutstandingIds, setHiddenOutstandingIds] = useState<Set<number>>(new Set());
   const [lookingUp, setLookingUp] = useState(false);
@@ -995,17 +972,24 @@ export function CustomersPage() {
     'customerGroups', () => apiClient.getCustomerGroups(),
   );
 
-  /* ── Debounce search ── */
   useEffect(() => {
     const t = window.setTimeout(() => setSearch(searchInput.trim().toLowerCase()), SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(t);
   }, [searchInput]);
 
-  /* ── Reset page & selection on filter/search/pageSize change ── */
-  useEffect(() => { setPage(1); }, [search, filterType, filterCompany, filterBranch, pageSize]);
-  useEffect(() => { setSelectedIds([]); }, [search, filterType, filterCompany, filterBranch, pageSize]);
+  const dateRange = useMemo(
+    () => dateRangeFromPreset(datePreset, customFrom, customTo),
+    [datePreset, customFrom, customTo],
+  );
 
-  /* ── Filtered customers (search + type + company + branch) ── */
+  useEffect(() => {
+    setPage(1);
+  }, [search, filterType, filterCompany, filterBranch, dateRange, pageSize]);
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [search, filterType, filterCompany, filterBranch, dateRange, pageSize]);
+
+  /* Filtered customers — includes date filter */
   const filteredCustomers = useMemo(() => {
     if (!customers) return [];
     let list = customers;
@@ -1028,10 +1012,19 @@ export function CustomersPage() {
       const bid = Number.parseInt(filterBranch, 10);
       if (!Number.isNaN(bid)) list = list.filter((c) => c.branch_id === bid);
     }
+    if (dateRange.from || dateRange.to) {
+      list = list.filter((c) => {
+        const raw = c.created_at || c.updated_at;
+        if (!raw) return true;
+        const d = String(raw).slice(0, 10);
+        if (dateRange.from && d < dateRange.from) return false;
+        if (dateRange.to && d > dateRange.to) return false;
+        return true;
+      });
+    }
     return list;
-  }, [customers, search, filterType, filterCompany, filterBranch]);
+  }, [customers, search, filterType, filterCompany, filterBranch, dateRange]);
 
-  /* ── Pagination math ── */
   const totalPages = Math.max(1, Math.ceil(filteredCustomers.length / pageSize));
   const safePage = Math.min(page, totalPages);
   const paginatedCustomers = useMemo(
@@ -1039,17 +1032,13 @@ export function CustomersPage() {
     [filteredCustomers, safePage, pageSize],
   );
 
-  useEffect(() => {
-    if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages]);
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
 
   const summary = useMemo(() => {
     const list = customers ?? [];
     const byType = (t: CustomerType) => list.filter((c) => c.type === t);
     const sum = (rows: Customer[]) => rows.reduce((a, c) => a + getOutstanding(c), 0);
-    const customerList = byType('customer');
-    const dealerList = byType('dealer');
-    const distributorList = byType('distributor');
+    const customerList = byType('customer'), dealerList = byType('dealer'), distributorList = byType('distributor');
     return {
       total: list.length,
       customersCount: customerList.length,
@@ -1063,31 +1052,31 @@ export function CustomersPage() {
   }, [customers]);
 
   const activeFilterCount = useMemo(
-    () => [filterType, filterCompany, filterBranch].filter((v) => v !== 'all').length,
-    [filterType, filterCompany, filterBranch],
+    () =>
+      [filterType, filterCompany, filterBranch].filter((v) => v !== 'all').length +
+      (datePreset !== 'all' ? 1 : 0),
+    [filterType, filterCompany, filterBranch, datePreset],
   );
 
   const showReset = activeFilterCount > 0 || searchInput.trim() !== '';
 
   const clearFilters = useCallback(() => {
     setFilterType('all'); setFilterCompany('all'); setFilterBranch('all');
+    setDatePreset('all'); setCustomFrom(''); setCustomTo('');
     setSearchInput(''); setSearch('');
-    setPage(1);
-    setSelectedIds([]);
+    setPage(1); setSelectedIds([]);
   }, []);
 
   const allSelected = useMemo(
     () => paginatedCustomers.length > 0 && paginatedCustomers.every((c) => selectedIds.includes(c.id)),
     [paginatedCustomers, selectedIds],
   );
-
   const toggleSelectAll = useCallback(() => {
     const ids = paginatedCustomers.map((c) => c.id);
     if (!ids.length) return;
     if (allSelected) setSelectedIds((cur) => cur.filter((id) => !ids.includes(id)));
     else setSelectedIds((cur) => Array.from(new Set([...cur, ...ids])));
   }, [allSelected, paginatedCustomers]);
-
   const toggleSelected = useCallback((id: number) => {
     setSelectedIds((cur) => cur.includes(id) ? cur.filter((v) => v !== id) : [...cur, id]);
   }, []);
@@ -1109,8 +1098,7 @@ export function CustomersPage() {
   const handleViewCustomer = useCallback(async (customer: Customer) => {
     if (!canViewCustomers) return;
     const reqId = ++detailRequestRef.current;
-    setViewingCustomer(customer);
-    setDetailTab('overview');
+    setViewingCustomer(customer); setDetailTab('overview');
     setCustomerInvoices([]); setCustomerPayments([]); setCustomerOrders([]);
     setDetailLoading(true);
     try {
@@ -1120,7 +1108,6 @@ export function CustomersPage() {
         apiClient.request('GET', `/orders?customer_id=${customer.id}&per_page=${RELATED_LIMIT}`),
       ]);
       if (reqId !== detailRequestRef.current) return;
-
       if (invRes.status === 'fulfilled') {
         const raw = unwrapList<InvoiceSummaryRow>(invRes.value) as unknown as Record<string, unknown>[];
         setCustomerInvoices(filterByOwnership(raw, customer.id) as unknown as InvoiceSummaryRow[]);
@@ -1173,7 +1160,10 @@ export function CustomersPage() {
   }, [customerInvoices, customerPayments, customerOrders]);
 
   const handleGstChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    setFormData((p) => ({ ...p, gst_number: e.target.value.toUpperCase().replace(/\s+/g, '') }));
+    setFormData((p) => ({
+      ...p,
+      gst_number: upperOnly(alnumUpper(clampStr(e.target.value, LIMITS.gstinLength))),
+    }));
   }, []);
 
   const handleAutoFill = useCallback(async () => {
@@ -1192,14 +1182,14 @@ export function CustomersPage() {
       if (data) {
         setFormData((p) => ({
           ...p,
-          name: data.company_name || p.name,
-          billing_street: data.billing_street || p.billing_street,
-          billing_city: data.billing_city || p.billing_city,
-          billing_state: data.billing_state || p.billing_state,
-          billing_pincode: data.billing_pincode || p.billing_pincode,
+          name: clampStr(data.company_name || p.name, LIMITS.nameMax),
+          billing_street: clampStr(data.billing_street || p.billing_street, LIMITS.addressMax),
+          billing_city: clampStr(data.billing_city || p.billing_city, LIMITS.cityMax),
+          billing_state: clampStr(data.billing_state || p.billing_state, LIMITS.stateMax),
+          billing_pincode: clampStr(data.billing_pincode || p.billing_pincode, LIMITS.pincodeMax),
           billing_country: data.billing_country || p.billing_country,
           registration_type: data.registration_type || p.registration_type,
-          pan: data.pan || p.pan,
+          pan: upperOnly(clampStr(data.pan || p.pan, LIMITS.panLength)),
         }));
         showSuccess('GSTIN details auto-filled');
       } else {
@@ -1207,9 +1197,7 @@ export function CustomersPage() {
       }
     } catch (err) {
       showError('Lookup failed', getErrorMessage(err, 'Unable to fetch GSTIN details.'));
-    } finally {
-      setLookingUp(false);
-    }
+    } finally { setLookingUp(false); }
   }, [formData.gst_number, canAutoFillGst, showSuccess, showError]);
 
   const handleSameAsBillingToggle = useCallback((checked: boolean) => {
@@ -1234,18 +1222,19 @@ export function CustomersPage() {
     }
     const name = newGroupName.trim();
     if (!name) return;
+    if (name.length > LIMITS.groupNameMax) {
+      showError('Invalid name', `Group name max ${LIMITS.groupNameMax} characters.`);
+      return;
+    }
     setAddingGroup(true);
     try {
       await apiClient.createCustomerGroup({ name });
       refreshGroups();
       showSuccess('Group added', `${name} created.`);
-      setNewGroupName('');
-      setShowGroupModal(false);
+      setNewGroupName(''); setShowGroupModal(false);
     } catch (err) {
       showError('Failed to add group', getErrorMessage(err, 'Failed to add group.'));
-    } finally {
-      setAddingGroup(false);
-    }
+    } finally { setAddingGroup(false); }
   }, [newGroupName, refreshGroups, canManageGroups, showSuccess, showError]);
 
   const handleBulkDelete = useCallback(async () => {
@@ -1259,8 +1248,7 @@ export function CustomersPage() {
       await Promise.all(selectedIds.map((id) => apiClient.deleteCustomer(id)));
       showSuccess('Bulk delete', `${selectedIds.length} deleted.`);
       safeLog({ module: 'Customers', action: 'Bulk delete', status: 'success', message: `Deleted ${selectedIds.length}` });
-      setSelectedIds([]);
-      refreshCustomers();
+      setSelectedIds([]); refreshCustomers();
     } catch (err) {
       showError('Bulk delete failed', getErrorMessage(err, 'Bulk delete failed.'));
     }
@@ -1276,9 +1264,7 @@ export function CustomersPage() {
     try {
       await Promise.all(selectedIds.map((id) => apiClient.updateCustomer(id, { type })));
       showSuccess('Bulk update', `Type changed for ${selectedIds.length} record(s).`);
-      safeLog({ module: 'Customers', action: 'Bulk type change', status: 'success', message: `Changed to ${type}` });
-      setSelectedIds([]);
-      refreshCustomers();
+      setSelectedIds([]); refreshCustomers();
     } catch (err) {
       showError('Bulk update failed', getErrorMessage(err, 'Bulk update failed.'));
     }
@@ -1307,7 +1293,6 @@ export function CustomersPage() {
       (customer.shipping_state ?? '') === (customer.billing_state ?? '') &&
       (customer.shipping_pincode ?? '') === (customer.billing_pincode ?? '') &&
       (customer.shipping_country ?? '') === (customer.billing_country ?? '');
-
     setFormData({
       name: customer.name || '', type: customer.type || 'customer',
       company_type: customer.company_type || '',
@@ -1360,9 +1345,7 @@ export function CustomersPage() {
     } catch (err) {
       showError('Ledger failed', getErrorMessage(err, 'Unable to prepare ledger. Please try again.'));
       safeLog({ module: 'Customers', action: 'Ledger A4', status: 'error', message: getErrorMessage(err, 'Ledger failed') });
-    } finally {
-      setLedgerLoadingId(null);
-    }
+    } finally { setLedgerLoadingId(null); }
   }, [canPrintLedger, showSuccess, showError]);
 
   const handleDelete = useCallback(async (customer: Customer) => {
@@ -1381,18 +1364,47 @@ export function CustomersPage() {
     }
   }, [refreshCustomers, canDeleteCustomer, showSuccess, showError]);
 
+  /* Validation with min/max */
   const validateForm = useCallback((): boolean => {
     const errors: Record<string, boolean> = {};
     let valid = true;
-    if (!formData.name.trim()) { errors.name = true; valid = false; }
-    if (!formData.company_id) { errors.company_id = true; valid = false; }
-    if (!formData.billing_city.trim()) { errors.billing_city = true; valid = false; }
-    if (formData.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
-      errors.email = true; valid = false;
+    const fail = (k: string) => { errors[k] = true; valid = false; };
+
+    const name = formData.name.trim();
+    if (!name) fail('name');
+    else if (name.length < LIMITS.nameMin || name.length > LIMITS.nameMax) fail('name');
+    if (!formData.company_id) fail('company_id');
+    if (!formData.billing_city.trim()) fail('billing_city');
+
+    const email = formData.email.trim();
+    if (email) {
+      if (email.length > LIMITS.emailMax) fail('email');
+      else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail('email');
     }
-    if (formData.contact_no.trim() && !/^\d+$/.test(formData.contact_no.trim())) {
-      errors.contact_no = true; valid = false;
+
+    const phoneDigits = digitsOnly(formData.contact_no);
+    if (formData.contact_no.trim()) {
+      if (phoneDigits.length < LIMITS.phoneMin) fail('contact_no');
+      else if (formData.contact_no.length > LIMITS.phoneMax) fail('contact_no');
     }
+
+    const gst = formData.gst_number.trim();
+    if (gst && gst.length !== LIMITS.gstinLength) fail('gst_number');
+    const pan = formData.pan.trim();
+    if (pan && pan.length !== LIMITS.panLength) fail('pan');
+
+    // Numeric ranges
+    const dueDays = coerceNumeric(formData.due_days, 0);
+    if (dueDays < LIMITS.dueDaysMin || dueDays > LIMITS.dueDaysMax) fail('due_days');
+    const creditLimit = coerceNumeric(formData.credit_limit, 0);
+    if (creditLimit < LIMITS.creditLimitMin || creditLimit > LIMITS.creditLimitMax) fail('credit_limit');
+    const opening = coerceNumeric(formData.opening_balance, 0);
+    if (opening < LIMITS.openingBalanceMin || opening > LIMITS.openingBalanceMax) fail('opening_balance');
+    const outstanding = coerceNumeric(formData.outstanding_amount, 0);
+    if (outstanding < LIMITS.outstandingMin || outstanding > LIMITS.outstandingMax) fail('outstanding_amount');
+    const eway = coerceNumeric(formData.eway_bill_distance, 0);
+    if (eway < LIMITS.ewayBillMin || eway > LIMITS.ewayBillMax) fail('eway_bill_distance');
+
     setFormErrors(errors);
     if (!valid) showError('Validation', 'Please fix the highlighted required fields.');
     return valid;
@@ -1408,6 +1420,7 @@ export function CustomersPage() {
       return;
     }
     if (!validateForm()) return;
+
     const { same_as_billing: _x, ...rest } = formData;
     const payload = {
       ...rest,
@@ -1417,12 +1430,13 @@ export function CustomersPage() {
       company_id: formData.company_id ? Number(formData.company_id) : null,
       branch_id: formData.branch_id ? Number(formData.branch_id) : null,
       group_id: formData.group_id ? Number(formData.group_id) : null,
-      eway_bill_distance: formData.eway_bill_distance ? Number(formData.eway_bill_distance) : null,
-      opening_balance: formData.opening_balance ? Number(formData.opening_balance) : 0,
-      credit_limit: formData.credit_limit ? Number(formData.credit_limit) : null,
-      due_days: formData.due_days ? Number(formData.due_days) : null,
-      outstanding_amount: formData.outstanding_amount ? Number(formData.outstanding_amount) : 0,
+      eway_bill_distance: formData.eway_bill_distance === '' ? null : coerceNumeric(formData.eway_bill_distance, 0),
+      opening_balance: coerceNumeric(formData.opening_balance, 0),
+      credit_limit: formData.credit_limit === '' ? null : coerceNumeric(formData.credit_limit, 0),
+      due_days: formData.due_days === '' ? null : coerceNumeric(formData.due_days, 0),
+      outstanding_amount: coerceNumeric(formData.outstanding_amount, 0),
     };
+
     setSubmitting(true);
     try {
       if (editingId) {
@@ -1439,9 +1453,7 @@ export function CustomersPage() {
     } catch (err) {
       showError('Save failed', getErrorMessage(err, 'Save failed.'));
       safeLog({ module: 'Customers', action: 'Save', status: 'error', message: getErrorMessage(err, 'Save failed') });
-    } finally {
-      setSubmitting(false);
-    }
+    } finally { setSubmitting(false); }
   }, [formData, editingId, refreshCustomers, canEditCustomer, canCreateCustomer, showSuccess, showError, validateForm]);
 
   const handleExport = useCallback(() => {
@@ -1467,8 +1479,7 @@ export function CustomersPage() {
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = `customers-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.href = url; a.download = `customers-${new Date().toISOString().slice(0, 10)}.csv`;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
     showSuccess('Export', 'Data exported.');
@@ -1479,15 +1490,9 @@ export function CustomersPage() {
       showError('Permission denied', 'You do not have permission to import customers.');
       return;
     }
-    setIsImportOpen(true);
-    setImportStep('select');
-    setImportFile(null);
-    setImportPreview([]);
-    setImportSummary(null);
-    setImportErrors([]);
-    setImportResultMessage('');
-    setImportSuccess(false);
-    setDragOver(false);
+    setIsImportOpen(true); setImportStep('select'); setImportFile(null);
+    setImportPreview([]); setImportSummary(null); setImportErrors([]);
+    setImportResultMessage(''); setImportSuccess(false); setDragOver(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, [canImportCustomers, showError]);
 
@@ -1502,9 +1507,7 @@ export function CustomersPage() {
     } catch (err) {
       showError('Preview failed', getErrorMessage(err, 'Preview failed.'));
       setImportStep('select');
-    } finally {
-      setImportLoading(false);
-    }
+    } finally { setImportLoading(false); }
   }, [duplicateAction, showError]);
 
   const handleFileChange = useCallback((file: File | null) => {
@@ -1517,15 +1520,13 @@ export function CustomersPage() {
     const okTypes = ['text/csv', 'application/vnd.ms-excel', 'application/octet-stream'];
     if (!okTypes.includes(file.type) && ext !== 'csv') { showError('Invalid file', 'Please select a CSV file.'); return; }
     if (file.size > MAX_IMPORT_FILE_BYTES) { showError('File too large', 'Maximum size is 10MB.'); return; }
-    setImportFile(file);
-    void handlePreview(file);
+    setImportFile(file); void handlePreview(file);
   }, [handlePreview, canImportCustomers, showError]);
 
   const handleDrop = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault(); setDragOver(false);
     if (e.dataTransfer.files.length) handleFileChange(e.dataTransfer.files[0]);
   }, [handleFileChange]);
-
   const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragOver(true); }, []);
   const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => { e.preventDefault(); setDragOver(false); }, []);
 
@@ -1547,18 +1548,13 @@ export function CustomersPage() {
       if (response.success) {
         showSuccess('Import completed', response.message || 'Import completed.');
         refreshCustomers();
-        safeLog({ module: 'Customers', action: 'Import', status: 'success', message: `${sum.created ?? 0} created` });
       } else {
         showError('Import failed', response.message || 'Please check errors.');
-        safeLog({ module: 'Customers', action: 'Import', status: 'error', message: response.message || 'Import failed' });
       }
     } catch (err) {
       showError('Import failed', getErrorMessage(err, 'Import failed.'));
       setImportStep('preview');
-      safeLog({ module: 'Customers', action: 'Import', status: 'error', message: getErrorMessage(err, 'Import failed') });
-    } finally {
-      setImportLoading(false);
-    }
+    } finally { setImportLoading(false); }
   }, [importFile, duplicateAction, refreshCustomers, canImportCustomers, showSuccess, showError]);
 
   const handleDownloadTemplate = useCallback(async () => {
@@ -1570,8 +1566,7 @@ export function CustomersPage() {
       const blob = await apiClient.downloadCustomerTemplate();
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      link.href = url;
-      link.download = 'customers_template.csv';
+      link.href = url; link.download = 'customers_template.csv';
       document.body.appendChild(link); link.click(); link.remove();
       URL.revokeObjectURL(url);
       showSuccess('Template downloaded', 'Ready for import.');
@@ -1588,8 +1583,7 @@ export function CustomersPage() {
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.href = url;
-    link.download = 'customer_import_errors.csv';
+    link.href = url; link.download = 'customer_import_errors.csv';
     document.body.appendChild(link); link.click(); link.remove();
     URL.revokeObjectURL(url);
   }, [importErrors]);
@@ -1604,49 +1598,34 @@ export function CustomersPage() {
 
   const closeFiltersOnBackdrop = useCallback(() => setFiltersOpen(false), []);
 
-  /* ── Loading / access guards ── */
-
+  /* Access guards */
   if (loadingUser && !hasUser) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50">
-        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">
-          Loading permissions…
-        </div>
+        <div className="rounded-2xl bg-white px-6 py-5 text-sm text-slate-600 shadow-sm">Loading permissions…</div>
       </div>
     );
   }
-
   if (!canViewCustomers) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
         <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
-          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
-            <FiLock size={22} />
-          </div>
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600"><FiLock size={22} /></div>
           <h2 className="mt-4 text-lg font-bold text-slate-900">Access denied</h2>
-          <p className="mt-1.5 text-sm text-slate-500">
-            You don't have permission to view the customer directory.
-          </p>
-          <Button onClick={() => navigate('/')} className="mt-5 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800">
-            Back to dashboard
-          </Button>
+          <p className="mt-1.5 text-sm text-slate-500">You don't have permission to view the customer directory.</p>
+          <Button onClick={() => navigate('/')} className="mt-5 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800">Back to dashboard</Button>
         </div>
       </div>
     );
   }
-
   if (custError) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
         <div className="w-full max-w-md rounded-2xl border border-rose-200 bg-white p-8 text-center shadow-sm">
-          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
-            <FiAlertCircle size={24} />
-          </div>
+          <div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-rose-50 text-rose-600"><FiAlertCircle size={24} /></div>
           <h2 className="mt-4 text-lg font-bold text-slate-900">Failed to load customers</h2>
           <p className="mt-1.5 text-sm text-slate-500">{custError}</p>
-          <Button onClick={() => refreshCustomers()} className="mt-5 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800">
-            Try again
-          </Button>
+          <Button onClick={() => refreshCustomers()} className="mt-5 rounded-xl bg-slate-900 text-sm font-semibold text-white hover:bg-slate-800">Try again</Button>
         </div>
       </div>
     );
@@ -1671,26 +1650,21 @@ export function CustomersPage() {
         .customers-detail-offcanvas .customers-form-scroll::-webkit-scrollbar { width: 8px; }
         .customers-offcanvas-wide .customers-form-scroll::-webkit-scrollbar-thumb,
         .customers-detail-offcanvas .customers-form-scroll::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 8px; }
-        .customers-offcanvas-wide .customers-form-scroll::-webkit-scrollbar-thumb:hover,
-        .customers-detail-offcanvas .customers-form-scroll::-webkit-scrollbar-thumb:hover { background-color: #94a3b8; }
       `}</style>
 
       <div className="min-h-full bg-gradient-to-b from-slate-50 via-slate-50 to-slate-100/60">
         <div className="mx-auto w-full max-w-[1900px] space-y-5 p-3 sm:p-4 lg:space-y-6 lg:p-6">
 
-          {/* ── Hero ── */}
+          {/* Hero — unchanged */}
           <section className="relative overflow-hidden rounded-2xl border border-slate-800/10 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 px-5 py-6 shadow-[0_20px_40px_-20px_rgba(15,23,42,0.45)] sm:px-7 lg:px-8">
             <div className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-indigo-500/20 blur-3xl" />
             <div className="pointer-events-none absolute -bottom-24 right-24 h-56 w-56 rounded-full bg-cyan-500/10 blur-3xl" />
-
             <div className="relative flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
               <div className="min-w-0">
                 <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-cyan-200 backdrop-blur">
                   <FiUsers size={12} /> CRM · Customers
                 </div>
-                <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl lg:text-[32px]">
-                  Customer directory
-                </h1>
+                <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl lg:text-[32px]">Customer directory</h1>
                 <p className="mt-1.5 max-w-2xl text-sm text-slate-300">
                   Manage customers, dealers, and distributors — with GST, addresses, and credit limits.
                 </p>
@@ -1717,36 +1691,27 @@ export function CustomersPage() {
                 )}
               </div>
             </div>
-
             <div className="relative mt-5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
                 <p className="text-[10px] uppercase tracking-wide text-slate-400">Total outstanding</p>
-                <p className="mt-1 text-sm font-bold text-rose-300">
-                  {custLoading ? '…' : formatCurrency(summary.totalOutstanding)}
-                </p>
+                <p className="mt-1 text-sm font-bold text-rose-300">{custLoading ? '…' : formatCurrency(summary.totalOutstanding)}</p>
               </div>
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
                 <p className="text-[10px] uppercase tracking-wide text-slate-400">From customers</p>
-                <p className="mt-1 text-sm font-bold text-emerald-300">
-                  {custLoading ? '…' : formatCurrency(summary.outstandingCustomers)}
-                </p>
+                <p className="mt-1 text-sm font-bold text-emerald-300">{custLoading ? '…' : formatCurrency(summary.outstandingCustomers)}</p>
               </div>
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
                 <p className="text-[10px] uppercase tracking-wide text-slate-400">From dealers</p>
-                <p className="mt-1 text-sm font-bold text-violet-300">
-                  {custLoading ? '…' : formatCurrency(summary.outstandingDealers)}
-                </p>
+                <p className="mt-1 text-sm font-bold text-violet-300">{custLoading ? '…' : formatCurrency(summary.outstandingDealers)}</p>
               </div>
               <div className="rounded-xl border border-white/10 bg-white/5 p-3">
                 <p className="text-[10px] uppercase tracking-wide text-slate-400">From distributors</p>
-                <p className="mt-1 text-sm font-bold text-teal-300">
-                  {custLoading ? '…' : formatCurrency(summary.outstandingDistributors)}
-                </p>
+                <p className="mt-1 text-sm font-bold text-teal-300">{custLoading ? '…' : formatCurrency(summary.outstandingDistributors)}</p>
               </div>
             </div>
           </section>
 
-          {/* ── KPI counts ── */}
+          {/* KPI counts */}
           <section className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
             {customers ? (
               <>
@@ -1758,7 +1723,6 @@ export function CustomersPage() {
             ) : Array.from({ length: 4 }).map((_, i) => <StatCardSkeleton key={i} />)}
           </section>
 
-          {/* ── KPI outstanding ── */}
           <section className="grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-4">
             {customers ? (
               <>
@@ -1770,46 +1734,38 @@ export function CustomersPage() {
             ) : Array.from({ length: 4 }).map((_, i) => <StatCardSkeleton key={`o-${i}`} />)}
           </section>
 
-          {/* ── Toolbar: Search + Filters button + Reset ── */}
+          {/* Toolbar */}
           <section className="rounded-2xl border border-slate-200/80 bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-
-              {/* Search */}
               <div className="relative flex-1">
                 <FiSearch className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                 <Input
-                  type="text"
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
+                  type="text" value={searchInput}
+                  onChange={(e) => setSearchInput(clampStr(e.target.value, LIMITS.nameMax))}
                   placeholder="Search name, email, phone, GST, city…"
                   className="h-10 rounded-xl border-slate-200 pl-10 pr-10 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
                   autoComplete="off"
+                  maxLength={LIMITS.nameMax}
                 />
                 {searchInput && (
-                  <button
-                    type="button"
-                    onClick={() => setSearchInput('')}
+                  <button type="button" onClick={() => setSearchInput('')}
                     aria-label="Clear search"
-                    className="absolute right-2.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
-                  >
+                    className="absolute right-2.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded-md text-slate-400 transition hover:bg-slate-100 hover:text-slate-700">
                     <FiX size={14} />
                   </button>
                 )}
               </div>
 
-              {/* Filters button + popover */}
               <div className="relative z-30">
-                <Button
-                  type="button"
-                  variant="outline"
+                <Button type="button" variant="outline"
                   onClick={() => setFiltersOpen((v) => !v)}
                   aria-expanded={filtersOpen}
+                  aria-controls="customers-filter-panel"
                   className={`h-10 w-full gap-2 rounded-xl text-sm font-semibold transition sm:w-auto ${
                     filtersOpen || activeFilterCount > 0
                       ? 'border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
                       : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                  }`}
-                >
+                  }`}>
                   <FiFilter size={15} />
                   <span>Filters</span>
                   {activeFilterCount > 0 && (
@@ -1821,13 +1777,10 @@ export function CustomersPage() {
                 </Button>
 
                 {filtersOpen && (
-                  <div className="absolute right-0 top-full z-40 mt-2 w-[min(460px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/10">
-                    {/* Header */}
+                  <div id="customers-filter-panel" className="absolute right-0 top-full z-40 mt-2 w-[min(480px,calc(100vw-2rem))] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl shadow-slate-900/10">
                     <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/70 px-4 py-3">
                       <div className="flex items-center gap-2">
-                        <div className="grid h-7 w-7 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                          <FiFilter size={13} />
-                        </div>
+                        <div className="grid h-7 w-7 place-items-center rounded-lg bg-indigo-50 text-indigo-600"><FiFilter size={13} /></div>
                         <div>
                           <p className="text-xs font-bold text-slate-800">Reporting Filters</p>
                           <p className="text-[10px] text-slate-500">
@@ -1837,37 +1790,50 @@ export function CustomersPage() {
                       </div>
                       <div className="flex items-center gap-1">
                         {activeFilterCount > 0 && (
-                          <button
-                            onClick={clearFilters}
-                            className="rounded-lg px-2 py-1 text-[11px] font-semibold text-rose-600 transition hover:bg-rose-50"
-                          >
+                          <button onClick={clearFilters}
+                            className="rounded-lg px-2 py-1 text-[11px] font-semibold text-rose-600 transition hover:bg-rose-50">
                             Reset all
                           </button>
                         )}
-                        <button
-                          onClick={() => setFiltersOpen(false)}
-                          aria-label="Close filters"
-                          className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
-                        >
+                        <button onClick={() => setFiltersOpen(false)} aria-label="Close filters"
+                          className="grid h-7 w-7 place-items-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700">
                           <FiX size={14} />
                         </button>
                       </div>
                     </div>
 
-                    {/* Body */}
                     <div className="space-y-4 p-4">
+                      {/* Date */}
+                      <div>
+                        <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Date Range</label>
+                        <div className="relative">
+                          <select aria-label="Date range" value={datePreset}
+                            onChange={(e) => setDatePreset(e.target.value as DatePreset)}
+                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
+                            {DATE_PRESETS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+                          </select>
+                          <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                        </div>
+                        {datePreset === 'custom' && (
+                          <div className="mt-2 flex items-center gap-2">
+                            <input type="date" aria-label="From" value={customFrom}
+                              onChange={(e) => setCustomFrom(e.target.value)}
+                              className="h-9 flex-1 rounded-lg border border-slate-200 px-2.5 text-sm" />
+                            <span className="text-xs text-slate-400">to</span>
+                            <input type="date" aria-label="To" value={customTo}
+                              onChange={(e) => setCustomTo(e.target.value)}
+                              className="h-9 flex-1 rounded-lg border border-slate-200 px-2.5 text-sm" />
+                          </div>
+                        )}
+                      </div>
+
                       <div>
                         <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Type</label>
                         <div className="relative">
-                          <select
-                            aria-label="Type"
-                            value={filterType}
+                          <select aria-label="Type" value={filterType}
                             onChange={(e) => setFilterType(e.target.value)}
-                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          >
-                            {TYPE_OPTIONS.map((o) => (
-                              <option key={o.value} value={o.value}>{o.label}</option>
-                            ))}
+                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
+                            {TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                           </select>
                           <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
                         </div>
@@ -1876,12 +1842,9 @@ export function CustomersPage() {
                       <div>
                         <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Company</label>
                         <div className="relative">
-                          <select
-                            aria-label="Company"
-                            value={filterCompany}
+                          <select aria-label="Company" value={filterCompany}
                             onChange={(e) => { setFilterCompany(e.target.value); setFilterBranch('all'); }}
-                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          >
+                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
                             <option value="all">All companies</option>
                             {companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                           </select>
@@ -1892,12 +1855,9 @@ export function CustomersPage() {
                       <div>
                         <label className="mb-1.5 block text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Branch</label>
                         <div className="relative">
-                          <select
-                            aria-label="Branch"
-                            value={filterBranch}
+                          <select aria-label="Branch" value={filterBranch}
                             onChange={(e) => setFilterBranch(e.target.value)}
-                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          >
+                            className="h-10 w-full appearance-none rounded-xl border border-slate-200 bg-white px-3.5 pr-9 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
                             <option value="all">All branches</option>
                             {filteredBranchesFilter.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
                           </select>
@@ -1908,10 +1868,13 @@ export function CustomersPage() {
                       {activeFilterCount > 0 && (
                         <div className="flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-3">
                           <span className="text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Active:</span>
-                          {filterType !== 'all' && (
-                            <span className="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">
-                              {filterType}
+                          {datePreset !== 'all' && (
+                            <span className="inline-flex items-center rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                              {DATE_PRESETS.find((p) => p.value === datePreset)?.label}
                             </span>
+                          )}
+                          {filterType !== 'all' && (
+                            <span className="inline-flex items-center rounded-md bg-indigo-50 px-2 py-0.5 text-[10px] font-semibold text-indigo-700">{filterType}</span>
                           )}
                           {filterCompany !== 'all' && (
                             <span className="inline-flex items-center rounded-md bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
@@ -1927,15 +1890,12 @@ export function CustomersPage() {
                       )}
                     </div>
 
-                    {/* Footer */}
                     <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50/70 px-4 py-2.5">
                       <p className="text-[11px] text-slate-500">
                         {filteredCustomers.length.toLocaleString('en-IN')} matching record{filteredCustomers.length === 1 ? '' : 's'}
                       </p>
-                      <button
-                        onClick={() => setFiltersOpen(false)}
-                        className="rounded-lg bg-slate-900 px-3.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-slate-800"
-                      >
+                      <button onClick={() => setFiltersOpen(false)}
+                        className="rounded-lg bg-slate-900 px-3.5 py-1.5 text-[11px] font-semibold text-white transition hover:bg-slate-800">
                         Done
                       </button>
                     </div>
@@ -1944,29 +1904,20 @@ export function CustomersPage() {
               </div>
 
               {showReset && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={clearFilters}
-                  className="h-10 rounded-xl text-sm font-medium text-slate-500 hover:text-slate-800"
-                >
-                  <FiX className="mr-1.5" size={16} />
-                  Reset
+                <Button type="button" variant="ghost" onClick={clearFilters}
+                  className="h-10 rounded-xl text-sm font-medium text-slate-500 hover:text-slate-800">
+                  <FiX className="mr-1.5" size={16} /> Reset
                 </Button>
               )}
             </div>
           </section>
 
-          {/* Backdrop */}
           {filtersOpen && (
-            <div
-              className="fixed inset-0 z-20 bg-slate-900/10 backdrop-blur-[1px]"
-              onClick={closeFiltersOnBackdrop}
-              aria-hidden="true"
-            />
+            <div className="fixed inset-0 z-20 bg-slate-900/10 backdrop-blur-[1px]"
+              onClick={closeFiltersOnBackdrop} aria-hidden="true" />
           )}
 
-          {/* ── Bulk toolbar ── */}
+          {/* Bulk toolbar */}
           {selectedIds.length > 0 && (canBulkUpdateType || canBulkDelete) && (
             <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
@@ -2002,31 +1953,24 @@ export function CustomersPage() {
             </div>
           )}
 
-          {/* ── Table card ── */}
+          {/* Table — unchanged structure */}
           <Card className="overflow-hidden rounded-2xl border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
             <CardHeader className="flex flex-col gap-3 border-b border-slate-100 bg-white px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
               <div className="flex items-center gap-2.5">
-                <div className="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-slate-600">
-                  <FiUsers size={14} />
-                </div>
+                <div className="grid h-8 w-8 place-items-center rounded-lg bg-slate-100 text-slate-600"><FiUsers size={14} /></div>
                 <div>
                   <CardTitle className="text-sm font-semibold text-slate-800">Customer list</CardTitle>
                   <CardDescription className="text-[11px] text-slate-500">
-                    {custLoading
-                      ? 'Loading customers…'
-                      : `${filteredCustomers.length.toLocaleString('en-IN')} record${filteredCustomers.length === 1 ? '' : 's'} · Click a row for quick view`}
+                    {custLoading ? 'Loading customers…' : `${filteredCustomers.length.toLocaleString('en-IN')} record${filteredCustomers.length === 1 ? '' : 's'} · Click a row for quick view`}
                   </CardDescription>
                 </div>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Rows</span>
                 <div className="relative">
-                  <select
-                    value={String(pageSize)}
-                    onChange={(e) => setPageSize(Number(e.target.value))}
+                  <select value={String(pageSize)} onChange={(e) => setPageSize(Number(e.target.value))}
                     aria-label="Rows per page"
-                    className="h-9 w-[76px] appearance-none rounded-lg border border-slate-200 bg-white px-2.5 pr-7 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                  >
+                    className="h-9 w-[76px] appearance-none rounded-lg border border-slate-200 bg-white px-2.5 pr-7 text-sm font-medium text-slate-700 outline-none transition focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10">
                     {PAGE_SIZE_OPTIONS.map((v) => <option key={v} value={v}>{v}</option>)}
                   </select>
                   <FiChevronDown className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400" size={13} />
@@ -2094,9 +2038,7 @@ export function CustomersPage() {
                             </div>
                             <div className="min-w-0">
                               <p className="truncate text-sm font-semibold text-slate-900">{customer.name}</p>
-                              {customer.gst_number && (
-                                <p className="truncate text-[11px] text-slate-500">{customer.gst_number}</p>
-                              )}
+                              {customer.gst_number && <p className="truncate text-[11px] text-slate-500">{customer.gst_number}</p>}
                             </div>
                           </div>
                         </TableCell>
@@ -2133,12 +2075,7 @@ export function CustomersPage() {
                             onCustomer360={(c) => setCustomer360Id(c.id)}
                             onLedger={handleLedger} onLedgerA4={handleLedgerA4}
                             onDelete={handleDelete} ledgerLoading={isLedgerLoading}
-                            permissions={{
-                              canEdit: canEditCustomer,
-                              canDelete: canDeleteCustomer,
-                              canViewLedger,
-                              canPrintLedger,
-                            }} />
+                            permissions={{ canEdit: canEditCustomer, canDelete: canDeleteCustomer, canViewLedger, canPrintLedger }} />
                         </TableCell>
                       </TableRow>
                     );
@@ -2153,7 +2090,7 @@ export function CustomersPage() {
                           </div>
                           <p className="mt-4 text-base font-semibold text-slate-800">No customers found</p>
                           <p className="mt-1 text-sm text-slate-500">
-                            Try adjusting the search term, type, company, or branch filter.
+                            Try adjusting the date, type, company, branch, or search term.
                           </p>
                           <Button type="button" className="mt-5 rounded-lg" variant="outline" onClick={clearFilters}>
                             <FiFilter className="mr-2" size={14} /> Reset filters
@@ -2166,63 +2103,43 @@ export function CustomersPage() {
               </Table>
             </div>
 
-            {/* ── Pagination footer ── */}
             <div className="flex flex-col gap-3 border-t border-slate-100 bg-white px-4 py-3.5 sm:px-5 md:flex-row md:items-center md:justify-between">
               <p className="text-xs text-slate-500 sm:text-[13px]">
-                Showing{' '}
-                <span className="font-semibold text-slate-700">
-                  {filteredCustomers.length === 0 ? 0 : (safePage - 1) * pageSize + 1}
-                </span>
+                Showing <span className="font-semibold text-slate-700">{filteredCustomers.length === 0 ? 0 : (safePage - 1) * pageSize + 1}</span>
                 {' – '}
-                <span className="font-semibold text-slate-700">
-                  {Math.min(safePage * pageSize, filteredCustomers.length)}
-                </span>
+                <span className="font-semibold text-slate-700">{Math.min(safePage * pageSize, filteredCustomers.length)}</span>
                 {' of '}
                 <span className="font-semibold text-slate-700">{filteredCustomers.length.toLocaleString('en-IN')}</span>
               </p>
               <div className="flex items-center justify-between gap-1.5 sm:justify-end">
                 <Button type="button" variant="outline" size="icon" className="h-9 w-9 rounded-lg"
-                  disabled={safePage <= 1 || custLoading} onClick={() => setPage(1)} aria-label="First page">
-                  <FiChevronsLeft size={16} />
-                </Button>
+                  disabled={safePage <= 1 || custLoading} onClick={() => setPage(1)} aria-label="First page"><FiChevronsLeft size={16} /></Button>
                 <Button type="button" variant="outline" size="icon" className="h-9 w-9 rounded-lg"
-                  disabled={safePage <= 1 || custLoading} onClick={() => setPage((p) => Math.max(1, p - 1))} aria-label="Previous page">
-                  <FiChevronLeft size={16} />
-                </Button>
+                  disabled={safePage <= 1 || custLoading} onClick={() => setPage((p) => Math.max(1, p - 1))} aria-label="Previous page"><FiChevronLeft size={16} /></Button>
                 <div className="mx-1 min-w-[76px] rounded-lg bg-slate-100 px-3 py-1.5 text-center text-xs font-semibold text-slate-700">
                   {safePage} / {totalPages}
                 </div>
                 <Button type="button" variant="outline" size="icon" className="h-9 w-9 rounded-lg"
-                  disabled={safePage >= totalPages || custLoading} onClick={() => setPage((p) => Math.min(totalPages, p + 1))} aria-label="Next page">
-                  <FiChevronRight size={16} />
-                </Button>
+                  disabled={safePage >= totalPages || custLoading} onClick={() => setPage((p) => Math.min(totalPages, p + 1))} aria-label="Next page"><FiChevronRight size={16} /></Button>
                 <Button type="button" variant="outline" size="icon" className="h-9 w-9 rounded-lg"
-                  disabled={safePage >= totalPages || custLoading} onClick={() => setPage(totalPages)} aria-label="Last page">
-                  <FiChevronsRight size={16} />
-                </Button>
+                  disabled={safePage >= totalPages || custLoading} onClick={() => setPage(totalPages)} aria-label="Last page"><FiChevronsRight size={16} /></Button>
               </div>
             </div>
           </Card>
         </div>
       </div>
 
-      {/* ── Quick view modal ── */}
+      {/* Quick view modal — unchanged structure, just re-emitted */}
       {quickViewCustomer && (
         <div className="fixed inset-0 z-[55] flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-slate-950/50 backdrop-blur-sm"
             onClick={() => setQuickViewCustomer(null)} aria-hidden="true" />
           <div className="animate-fadeIn relative w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
-            {/* Header */}
             <div className="relative overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-indigo-900 px-5 py-4 text-white">
               <div className="pointer-events-none absolute -right-8 -top-8 h-28 w-28 rounded-full bg-cyan-500/20 blur-2xl" />
-              <button
-                type="button"
-                onClick={() => setQuickViewCustomer(null)}
+              <button type="button" onClick={() => setQuickViewCustomer(null)}
                 className="absolute right-3 top-3 grid h-7 w-7 place-items-center rounded-lg text-slate-300 transition hover:bg-white/10 hover:text-white"
-                aria-label="Close"
-              >
-                <FiX size={16} />
-              </button>
+                aria-label="Close"><FiX size={16} /></button>
               <div className="relative flex items-center gap-3">
                 <div className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-gradient-to-br from-cyan-400 to-indigo-500 text-base font-bold shadow-lg">
                   {(quickViewCustomer.name || 'C')[0]?.toUpperCase()}
@@ -2239,10 +2156,7 @@ export function CustomersPage() {
                 </div>
               </div>
             </div>
-
-            {/* Body */}
             <div className="space-y-3 p-5">
-              {/* Financials */}
               <div className="grid grid-cols-3 gap-2">
                 <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
                   <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Outstanding</p>
@@ -2252,33 +2166,23 @@ export function CustomersPage() {
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
                   <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Credit limit</p>
-                  <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">
-                    {formatCurrency(quickViewCustomer.credit_limit)}
-                  </p>
+                  <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">{formatCurrency(quickViewCustomer.credit_limit)}</p>
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-2.5">
                   <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Opening</p>
-                  <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">
-                    {formatCurrency(quickViewCustomer.opening_balance)}
-                  </p>
+                  <p className="mt-0.5 text-sm font-bold tabular-nums text-slate-900">{formatCurrency(quickViewCustomer.opening_balance)}</p>
                 </div>
               </div>
-
-              {/* Contact + location */}
               <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
                 {quickViewCustomer.email && (
                   <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
-                    <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                      <FiMail size={12} /> Email
-                    </span>
+                    <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400"><FiMail size={12} /> Email</span>
                     <span className="min-w-0 truncate text-xs font-semibold text-slate-800">{quickViewCustomer.email}</span>
                   </div>
                 )}
                 {quickViewCustomer.contact_no && (
                   <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-3.5 py-2.5">
-                    <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                      <FiPhone size={12} /> Phone
-                    </span>
+                    <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400"><FiPhone size={12} /> Phone</span>
                     <span className="text-xs font-semibold text-slate-800">{quickViewCustomer.contact_no}</span>
                   </div>
                 )}
@@ -2290,51 +2194,35 @@ export function CustomersPage() {
                 )}
                 {(quickViewCustomer.billing_city || quickViewCustomer.billing_street) && (
                   <div className="flex items-start justify-between gap-3 px-3.5 py-2.5">
-                    <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
-                      <FiMapPin size={12} /> Address
-                    </span>
+                    <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400"><FiMapPin size={12} /> Address</span>
                     <span className="min-w-0 text-right text-xs text-slate-700">
                       {[quickViewCustomer.billing_city, quickViewCustomer.billing_state, quickViewCustomer.billing_pincode].filter(Boolean).join(', ') || '—'}
                     </span>
                   </div>
                 )}
               </div>
-
-              {/* Company / branch */}
               {(quickViewCustomer.company?.name || quickViewCustomer.branch?.name) && (
                 <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/50 px-3.5 py-2.5 text-[11px]">
                   {quickViewCustomer.company?.name && (
-                    <span className="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 font-semibold text-slate-700 ring-1 ring-slate-200">
-                      {quickViewCustomer.company.name}
-                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 font-semibold text-slate-700 ring-1 ring-slate-200">{quickViewCustomer.company.name}</span>
                   )}
                   {quickViewCustomer.branch?.name && (
-                    <span className="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 font-semibold text-slate-700 ring-1 ring-slate-200">
-                      {quickViewCustomer.branch.name}
-                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 font-semibold text-slate-700 ring-1 ring-slate-200">{quickViewCustomer.branch.name}</span>
                   )}
                 </div>
               )}
             </div>
-
-            {/* Footer */}
             <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-3">
-              <Button type="button" variant="outline" onClick={() => setQuickViewCustomer(null)} className="h-9 rounded-xl text-sm">
-                Close
-              </Button>
+              <Button type="button" variant="outline" onClick={() => setQuickViewCustomer(null)} className="h-9 rounded-xl text-sm">Close</Button>
               {canViewLedger && (
                 <Button type="button" variant="outline"
                   onClick={() => { const c = quickViewCustomer; setQuickViewCustomer(null); handleLedger(c); }}
-                  className="h-9 rounded-xl text-sm text-emerald-600">
-                  <FiBookOpen className="mr-1.5" size={14} /> Ledger
-                </Button>
+                  className="h-9 rounded-xl text-sm text-emerald-600"><FiBookOpen className="mr-1.5" size={14} /> Ledger</Button>
               )}
               {canEditCustomer && (
                 <Button type="button" variant="outline"
                   onClick={() => { const c = quickViewCustomer; setQuickViewCustomer(null); handleEdit(c); }}
-                  className="h-9 rounded-xl text-sm text-indigo-600">
-                  <FiEdit className="mr-1.5" size={14} /> Edit
-                </Button>
+                  className="h-9 rounded-xl text-sm text-indigo-600"><FiEdit className="mr-1.5" size={14} /> Edit</Button>
               )}
               <Button type="button"
                 onClick={() => { const c = quickViewCustomer; setQuickViewCustomer(null); if (c) setCustomer360Id(c.id); }}
@@ -2351,7 +2239,7 @@ export function CustomersPage() {
         </div>
       )}
 
-      {/* ── Detail offcanvas ── */}
+      {/* Detail offcanvas — unchanged structure */}
       {viewingCustomer && (
         <Suspense fallback={
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
@@ -2399,24 +2287,15 @@ export function CustomersPage() {
                   <div className="min-w-0">
                     <p className="truncate text-base font-bold text-slate-900">{viewingCustomer.name}</p>
                     <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                      <Badge variant="outline"
-                        className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold capitalize ${
-                          viewingCustomer.type === 'dealer'
-                            ? 'border-violet-200/70 bg-violet-50 text-violet-700'
-                            : viewingCustomer.type === 'distributor'
-                              ? 'border-teal-200/70 bg-teal-50 text-teal-700'
-                              : 'border-emerald-200/70 bg-emerald-50 text-emerald-700'
-                        }`}>
-                        {viewingCustomer.type}
-                      </Badge>
-                      <Badge variant="outline"
-                        className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
-                          viewingCustomer.is_active
-                            ? 'border-emerald-200/70 bg-emerald-50 text-emerald-700'
-                            : 'border-slate-200 bg-slate-50 text-slate-600'
-                        }`}>
-                        {viewingCustomer.is_active ? 'Active' : 'Inactive'}
-                      </Badge>
+                      <Badge variant="outline" className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold capitalize ${
+                        viewingCustomer.type === 'dealer' ? 'border-violet-200/70 bg-violet-50 text-violet-700'
+                          : viewingCustomer.type === 'distributor' ? 'border-teal-200/70 bg-teal-50 text-teal-700'
+                          : 'border-emerald-200/70 bg-emerald-50 text-emerald-700'
+                      }`}>{viewingCustomer.type}</Badge>
+                      <Badge variant="outline" className={`rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
+                        viewingCustomer.is_active ? 'border-emerald-200/70 bg-emerald-50 text-emerald-700'
+                          : 'border-slate-200 bg-slate-50 text-slate-600'
+                      }`}>{viewingCustomer.is_active ? 'Active' : 'Inactive'}</Badge>
                       <span className="font-mono text-[11px] text-slate-400">#{viewingCustomer.id}</span>
                     </div>
                   </div>
@@ -2426,9 +2305,7 @@ export function CustomersPage() {
               <div className="grid grid-cols-3 gap-2">
                 <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
                   <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Outstanding</p>
-                  <p className={`mt-1 text-sm font-bold tabular-nums ${getOutstanding(viewingCustomer) > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                    {formatCurrency(getOutstanding(viewingCustomer))}
-                  </p>
+                  <p className={`mt-1 text-sm font-bold tabular-nums ${getOutstanding(viewingCustomer) > 0 ? 'text-rose-600' : 'text-emerald-600'}`}>{formatCurrency(getOutstanding(viewingCustomer))}</p>
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
                   <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Credit limit</p>
@@ -2479,9 +2356,7 @@ export function CustomersPage() {
                             <span className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
                               {Icon ? <Icon size={12} /> : null}{row.label}
                             </span>
-                            <span className={`min-w-0 truncate text-xs font-semibold text-slate-800 ${row.mono ? 'font-mono' : ''}`}>
-                              {row.value || '—'}
-                            </span>
+                            <span className={`min-w-0 truncate text-xs font-semibold text-slate-800 ${row.mono ? 'font-mono' : ''}`}>{row.value || '—'}</span>
                           </div>
                         );
                       })}
@@ -2491,9 +2366,7 @@ export function CustomersPage() {
                   {(viewingCustomer.billing_city || viewingCustomer.billing_street) && (
                     <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
                       <div className="border-b border-slate-100 px-3.5 py-2.5">
-                        <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                          <FiMapPin size={12} /> Billing address
-                        </p>
+                        <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500"><FiMapPin size={12} /> Billing address</p>
                       </div>
                       <div className="px-3.5 py-3 text-xs text-slate-700">
                         {viewingCustomer.billing_street && <p className="whitespace-pre-line">{viewingCustomer.billing_street}</p>}
@@ -2531,9 +2404,7 @@ export function CustomersPage() {
                   ) : customerInvoices.map((inv) => (
                     <button key={inv.id} type="button" onClick={() => navigate(`/invoices/${inv.id}`)}
                       className="flex w-full items-center gap-3 rounded-xl border border-slate-200 bg-white p-3 text-left transition hover:border-indigo-300 hover:bg-indigo-50/40">
-                      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-indigo-50 text-indigo-600">
-                        <FiFileText size={16} />
-                      </div>
+                      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-indigo-50 text-indigo-600"><FiFileText size={16} /></div>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-semibold text-slate-900">{inv.invoice_no ?? `#${inv.id}`}</p>
                         <p className="text-[11px] text-slate-500">{formatDate(inv.invoice_date)} · {inv.payment_status || '—'}</p>
@@ -2558,19 +2429,13 @@ export function CustomersPage() {
                     const inward = String(pay.payment_direction ?? 'inward').toLowerCase() === 'inward';
                     return (
                       <div key={pay.id} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
-                        <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${inward ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
-                          <FiCreditCard size={16} />
-                        </div>
+                        <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${inward ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}><FiCreditCard size={16} /></div>
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm font-semibold text-slate-900">{pay.reference_no ?? `#${pay.id}`}</p>
-                          <p className="text-[11px] text-slate-500">
-                            {formatDate(pay.transaction_date)} · {pay.payment_method ?? '—'} · {inward ? 'Inward' : 'Outward'}
-                          </p>
+                          <p className="text-[11px] text-slate-500">{formatDate(pay.transaction_date)} · {pay.payment_method ?? '—'} · {inward ? 'Inward' : 'Outward'}</p>
                         </div>
                         <div className="shrink-0 text-right">
-                          <p className={`text-sm font-semibold tabular-nums ${inward ? 'text-emerald-600' : 'text-amber-600'}`}>
-                            {inward ? '+' : '−'}{formatCurrency(pay.amount)}
-                          </p>
+                          <p className={`text-sm font-semibold tabular-nums ${inward ? 'text-emerald-600' : 'text-amber-600'}`}>{inward ? '+' : '−'}{formatCurrency(pay.amount)}</p>
                           <div className="mt-0.5 flex justify-end"><StatusPill status={pay.status} /></div>
                         </div>
                       </div>
@@ -2588,9 +2453,7 @@ export function CustomersPage() {
                   ) : customerOrders.map((ord) => (
                     <button key={ord.id} type="button" onClick={() => navigate(`/orders/${ord.id}`)}
                       className="flex w-full items-center gap-3 rounded-xl border border-slate-200 bg-white p-3 text-left transition hover:border-violet-300 hover:bg-violet-50/40">
-                      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-violet-50 text-violet-600">
-                        <FiShoppingBag size={16} />
-                      </div>
+                      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-violet-50 text-violet-600"><FiShoppingBag size={16} /></div>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-semibold text-slate-900">{ord.order_no ?? `#${ord.id}`}</p>
                         <p className="text-[11px] text-slate-500">{formatDate(ord.created_at || ord.delivery_date)} · {ord.source ?? '—'}</p>
@@ -2623,15 +2486,11 @@ export function CustomersPage() {
                         const { icon: Icon, cls } = map[entry.type];
                         return (
                           <div key={entry.id} className="relative mb-2 pl-3">
-                            <div className={`absolute -left-[17px] top-2 grid h-6 w-6 place-items-center rounded-full ring-4 ring-white ${cls}`}>
-                              <Icon size={11} />
-                            </div>
+                            <div className={`absolute -left-[17px] top-2 grid h-6 w-6 place-items-center rounded-full ring-4 ring-white ${cls}`}><Icon size={11} /></div>
                             <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
                               <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm font-semibold text-slate-900">{entry.title}</p>
-                                <p className="flex items-center gap-1 text-[11px] text-slate-500">
-                                  <FiCalendar size={10} /> {formatDate(entry.date)} · {entry.subtitle}
-                                </p>
+                                <p className="flex items-center gap-1 text-[11px] text-slate-500"><FiCalendar size={10} /> {formatDate(entry.date)} · {entry.subtitle}</p>
                               </div>
                               <div className="shrink-0 text-right">
                                 <p className="text-sm font-semibold tabular-nums text-slate-900">{formatCurrency(entry.amount)}</p>
@@ -2650,7 +2509,7 @@ export function CustomersPage() {
         </Suspense>
       )}
 
-      {/* ── Form offcanvas ── */}
+      {/* Form offcanvas — enhanced validation */}
       {isPanelOpen && (
         <Suspense fallback={
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
@@ -2661,8 +2520,7 @@ export function CustomersPage() {
             onClose={() => setIsPanelOpen(false)} className="customers-offcanvas-wide"
             footer={
               <div className="flex w-full justify-between">
-                <Button type="button" variant="outline" onClick={() => setIsPanelOpen(false)}
-                  disabled={submitting} className="rounded-xl">
+                <Button type="button" variant="outline" onClick={() => setIsPanelOpen(false)} disabled={submitting} className="rounded-xl">
                   <FiX className="mr-2" size={14} /> Cancel
                 </Button>
                 <Button type="button" onClick={handleSubmit} disabled={submitting}
@@ -2729,7 +2587,11 @@ export function CustomersPage() {
                       <Input id="gst_number" type="text" value={formData.gst_number}
                         onChange={handleGstChange}
                         className="h-10 flex-1 rounded-xl border-slate-200 shadow-sm focus-visible:ring-4 focus-visible:ring-indigo-500/10"
-                        placeholder="Enter GSTIN" maxLength={15} />
+                        placeholder="Enter GSTIN"
+                        maxLength={LIMITS.gstinLength}
+                        minLength={LIMITS.gstinLength}
+                        pattern="[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]"
+                        spellCheck={false} />
                       {canAutoFillGst && (
                         <Button type="button" onClick={handleAutoFill}
                           disabled={lookingUp || !formData.gst_number}
@@ -2741,22 +2603,30 @@ export function CustomersPage() {
                   </div>
 
                   <FormTextField label="Company name" field="name" required
-                    value={formData.name} hasError={formErrors.name} onChange={handleFieldChange} />
+                    value={formData.name} hasError={formErrors.name} onChange={handleFieldChange}
+                    minLength={LIMITS.nameMin} maxLength={LIMITS.nameMax} />
 
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                    <FormTextField label="Contact person" field="contact_person" value={formData.contact_person} onChange={handleFieldChange} />
+                    <FormTextField label="Contact person" field="contact_person" value={formData.contact_person}
+                      onChange={handleFieldChange} maxLength={LIMITS.contactPersonMax} />
                     <div>
                       <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Contact no</label>
-                      <input id="contact_no" type="tel" inputMode="numeric" value={formData.contact_no}
-                        onChange={(e) => setFormData((p) => ({ ...p, contact_no: e.target.value.replace(/\D/g, '') }))}
+                      <input id="contact_no" type="tel" inputMode="tel" value={formData.contact_no}
+                        onChange={(e) =>
+                          setFormData((p) => ({ ...p, contact_no: phoneSafe(clampStr(e.target.value, LIMITS.phoneMax)) }))
+                        }
                         className={`h-10 w-full min-w-0 rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition ${
                           formErrors.contact_no
                             ? 'border-rose-300 ring-2 ring-rose-200'
                             : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
                         }`}
-                        placeholder="Enter contact no" maxLength={15} />
+                        placeholder="Enter contact no"
+                        minLength={LIMITS.phoneMin}
+                        maxLength={LIMITS.phoneMax}
+                        pattern="[+]?[0-9\s\-()]{7,20}" />
                     </div>
-                    <FormTextField label="Email" field="email" type="email" value={formData.email} hasError={formErrors.email} onChange={handleFieldChange} />
+                    <FormTextField label="Email" field="email" type="email" value={formData.email}
+                      hasError={formErrors.email} onChange={handleFieldChange} maxLength={LIMITS.emailMax} />
                   </div>
                 </div>
               </fieldset>
@@ -2779,7 +2649,19 @@ export function CustomersPage() {
                       <FiChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
                     </div>
                   </div>
-                  <FormTextField label="PAN" field="pan" value={formData.pan} onChange={handleFieldChange} />
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">PAN</label>
+                    <input id="pan" type="text" value={formData.pan}
+                      onChange={(e) =>
+                        setFormData((p) => ({ ...p, pan: upperOnly(clampStr(e.target.value.replace(/[^A-Za-z0-9]/g, ''), LIMITS.panLength)) }))
+                      }
+                      className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 font-mono text-sm shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                      placeholder="ABCDE1234F"
+                      minLength={LIMITS.panLength}
+                      maxLength={LIMITS.panLength}
+                      pattern="[A-Z]{5}[0-9]{4}[A-Z]"
+                      spellCheck={false} />
+                  </div>
                 </div>
               </fieldset>
 
@@ -2791,16 +2673,33 @@ export function CustomersPage() {
                   <div>
                     <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Address</label>
                     <textarea value={formData.billing_street}
-                      onChange={(e) => setFormData((p) => ({ ...p, billing_street: e.target.value }))}
+                      onChange={(e) => setFormData((p) => ({ ...p, billing_street: clampStr(e.target.value, LIMITS.addressMax) }))}
                       rows={2}
                       className="min-h-[80px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                      placeholder="Enter address" />
+                      placeholder="Enter address"
+                      maxLength={LIMITS.addressMax} />
+                    <p className="mt-1 text-[10px] text-slate-400 text-right">{formData.billing_street.length} / {LIMITS.addressMax}</p>
                   </div>
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    <FormTextField label="City" field="billing_city" required value={formData.billing_city} hasError={formErrors.billing_city} onChange={handleFieldChange} />
-                    <FormTextField label="State" field="billing_state" value={formData.billing_state} onChange={handleFieldChange} />
-                    <FormTextField label="Country" field="billing_country" value={formData.billing_country} onChange={handleFieldChange} />
-                    <FormTextField label="Pincode" field="billing_pincode" value={formData.billing_pincode} onChange={handleFieldChange} maxLength={10} />
+                    <FormTextField label="City" field="billing_city" required
+                      value={formData.billing_city} hasError={formErrors.billing_city}
+                      onChange={handleFieldChange} maxLength={LIMITS.cityMax} />
+                    <FormTextField label="State" field="billing_state"
+                      value={formData.billing_state} onChange={handleFieldChange} maxLength={LIMITS.stateMax} />
+                    <FormTextField label="Country" field="billing_country"
+                      value={formData.billing_country} onChange={handleFieldChange} maxLength={LIMITS.stateMax} />
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Pincode</label>
+                      <input id="billing_pincode" type="text" inputMode="numeric" value={formData.billing_pincode}
+                        onChange={(e) =>
+                          setFormData((p) => ({ ...p, billing_pincode: digitsOnly(clampStr(e.target.value, LIMITS.pincodeMax)) }))
+                        }
+                        className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 font-mono text-sm shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                        placeholder="110001"
+                        minLength={LIMITS.pincodeMin}
+                        maxLength={LIMITS.pincodeMax}
+                        pattern="[0-9]{4,10}" />
+                    </div>
                   </div>
                 </div>
               </fieldset>
@@ -2821,16 +2720,31 @@ export function CustomersPage() {
                       <div>
                         <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Address</label>
                         <textarea value={formData.shipping_street}
-                          onChange={(e) => setFormData((p) => ({ ...p, shipping_street: e.target.value }))}
+                          onChange={(e) => setFormData((p) => ({ ...p, shipping_street: clampStr(e.target.value, LIMITS.addressMax) }))}
                           rows={2}
                           className="min-h-[80px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          placeholder="Enter shipping address" />
+                          placeholder="Enter shipping address"
+                          maxLength={LIMITS.addressMax} />
                       </div>
                       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                        <FormTextField label="City" field="shipping_city" value={formData.shipping_city} onChange={handleFieldChange} />
-                        <FormTextField label="State" field="shipping_state" value={formData.shipping_state} onChange={handleFieldChange} />
-                        <FormTextField label="Country" field="shipping_country" value={formData.shipping_country} onChange={handleFieldChange} />
-                        <FormTextField label="Pincode" field="shipping_pincode" value={formData.shipping_pincode} onChange={handleFieldChange} maxLength={10} />
+                        <FormTextField label="City" field="shipping_city"
+                          value={formData.shipping_city} onChange={handleFieldChange} maxLength={LIMITS.cityMax} />
+                        <FormTextField label="State" field="shipping_state"
+                          value={formData.shipping_state} onChange={handleFieldChange} maxLength={LIMITS.stateMax} />
+                        <FormTextField label="Country" field="shipping_country"
+                          value={formData.shipping_country} onChange={handleFieldChange} maxLength={LIMITS.stateMax} />
+                        <div>
+                          <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Pincode</label>
+                          <input id="shipping_pincode" type="text" inputMode="numeric" value={formData.shipping_pincode}
+                            onChange={(e) =>
+                              setFormData((p) => ({ ...p, shipping_pincode: digitsOnly(clampStr(e.target.value, LIMITS.pincodeMax)) }))
+                            }
+                            className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3.5 font-mono text-sm shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
+                            placeholder="110001"
+                            minLength={LIMITS.pincodeMin}
+                            maxLength={LIMITS.pincodeMax}
+                            pattern="[0-9]{4,10}" />
+                        </div>
                       </div>
                     </div>
                   )}
@@ -2862,28 +2776,72 @@ export function CustomersPage() {
                     )}
                   </div>
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    <FormTextField label="Opening balance" field="opening_balance" type="number" value={formData.opening_balance} onChange={handleFieldChange} />
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Opening balance</label>
+                      <input type="number" inputMode="decimal"
+                        min={LIMITS.openingBalanceMin} max={LIMITS.openingBalanceMax} step="0.01"
+                        value={formData.opening_balance}
+                        onChange={(e) =>
+                          setFormData((p) => ({ ...p, opening_balance: clampNum(Number(e.target.value), LIMITS.openingBalanceMin, LIMITS.openingBalanceMax) }))
+                        }
+                        className={`h-10 w-full rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition ${
+                          formErrors.opening_balance
+                            ? 'border-rose-300 ring-2 ring-rose-200'
+                            : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
+                        }`}
+                        placeholder="0" />
+                    </div>
                     <div>
                       <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Outstanding amount</label>
                       <div className="relative">
                         <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-sm text-slate-500">₹</span>
-                        <input type="number" value={formData.outstanding_amount ?? ''}
-                          onChange={(e) => setFormData((p) => ({ ...p, outstanding_amount: e.target.value }))}
-                          className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-8 pr-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          placeholder="0" step="0.01" />
+                        <input type="number" inputMode="decimal"
+                          min={LIMITS.outstandingMin} max={LIMITS.outstandingMax} step="0.01"
+                          value={formData.outstanding_amount ?? ''}
+                          onChange={(e) =>
+                            setFormData((p) => ({ ...p, outstanding_amount: clampNum(Number(e.target.value), LIMITS.outstandingMin, LIMITS.outstandingMax) }))
+                          }
+                          className={`h-10 w-full rounded-xl border bg-white pl-8 pr-3.5 text-sm shadow-sm outline-none transition ${
+                            formErrors.outstanding_amount
+                              ? 'border-rose-300 ring-2 ring-rose-200'
+                              : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
+                          }`}
+                          placeholder="0" />
                       </div>
                     </div>
                     <div>
                       <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Credit limit</label>
                       <div className="relative">
                         <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-sm text-slate-500">₹</span>
-                        <input type="number" value={formData.credit_limit ?? ''}
-                          onChange={(e) => setFormData((p) => ({ ...p, credit_limit: e.target.value }))}
-                          className="h-10 w-full rounded-xl border border-slate-200 bg-white pl-8 pr-3.5 text-sm text-slate-700 shadow-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                          placeholder="0" step="0.01" />
+                        <input type="number" inputMode="decimal"
+                          min={LIMITS.creditLimitMin} max={LIMITS.creditLimitMax} step="0.01"
+                          value={formData.credit_limit ?? ''}
+                          onChange={(e) =>
+                            setFormData((p) => ({ ...p, credit_limit: clampNum(Number(e.target.value), LIMITS.creditLimitMin, LIMITS.creditLimitMax) }))
+                          }
+                          className={`h-10 w-full rounded-xl border bg-white pl-8 pr-3.5 text-sm shadow-sm outline-none transition ${
+                            formErrors.credit_limit
+                              ? 'border-rose-300 ring-2 ring-rose-200'
+                              : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
+                          }`}
+                          placeholder="0" />
                       </div>
                     </div>
-                    <FormTextField label="Due days" field="due_days" type="number" value={formData.due_days} onChange={handleFieldChange} />
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Due days</label>
+                      <input type="number" inputMode="numeric"
+                        min={LIMITS.dueDaysMin} max={LIMITS.dueDaysMax} step="1"
+                        value={formData.due_days}
+                        onChange={(e) =>
+                          setFormData((p) => ({ ...p, due_days: clampNum(Number(e.target.value), LIMITS.dueDaysMin, LIMITS.dueDaysMax) }))
+                        }
+                        className={`h-10 w-full rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition ${
+                          formErrors.due_days
+                            ? 'border-rose-300 ring-2 ring-rose-200'
+                            : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
+                        }`}
+                        placeholder="0" />
+                    </div>
                   </div>
                 </div>
               </fieldset>
@@ -2893,9 +2851,12 @@ export function CustomersPage() {
                   <span className="h-2 w-2 rounded-full bg-rose-500" /> Custom fields
                 </legend>
                 <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  <FormTextField label="License no." field="license_no" value={formData.license_no} onChange={handleFieldChange} />
-                  <FormTextField label="Custom field 1" field="custom_field_1" value={formData.custom_field_1} onChange={handleFieldChange} />
-                  <FormTextField label="Custom field 2" field="custom_field_2" value={formData.custom_field_2} onChange={handleFieldChange} />
+                  <FormTextField label="License no." field="license_no" value={formData.license_no}
+                    onChange={handleFieldChange} maxLength={LIMITS.licenseMax} />
+                  <FormTextField label="Custom field 1" field="custom_field_1" value={formData.custom_field_1}
+                    onChange={handleFieldChange} maxLength={LIMITS.customFieldMax} />
+                  <FormTextField label="Custom field 2" field="custom_field_2" value={formData.custom_field_2}
+                    onChange={handleFieldChange} maxLength={LIMITS.customFieldMax} />
                 </div>
               </fieldset>
 
@@ -2905,17 +2866,35 @@ export function CustomersPage() {
                 </legend>
                 <div className="mt-3 space-y-4">
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                    <FormTextField label="Fax no" field="fax" value={formData.fax} onChange={handleFieldChange} />
-                    <FormTextField label="Website" field="website" value={formData.website} onChange={handleFieldChange} />
-                    <FormTextField label="E-way distance (km)" field="eway_bill_distance" type="number" value={formData.eway_bill_distance} onChange={handleFieldChange} />
+                    <FormTextField label="Fax no" field="fax" value={formData.fax}
+                      onChange={handleFieldChange} maxLength={LIMITS.faxMax} />
+                    <FormTextField label="Website" field="website" value={formData.website}
+                      onChange={handleFieldChange} maxLength={LIMITS.websiteMax} />
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">E-way distance (km)</label>
+                      <input type="number" inputMode="numeric"
+                        min={LIMITS.ewayBillMin} max={LIMITS.ewayBillMax} step="1"
+                        value={formData.eway_bill_distance}
+                        onChange={(e) =>
+                          setFormData((p) => ({ ...p, eway_bill_distance: clampNum(Number(e.target.value), LIMITS.ewayBillMin, LIMITS.ewayBillMax) }))
+                        }
+                        className={`h-10 w-full rounded-xl border bg-white px-3.5 text-sm shadow-sm outline-none transition ${
+                          formErrors.eway_bill_distance
+                            ? 'border-rose-300 ring-2 ring-rose-200'
+                            : 'border-slate-200 text-slate-700 hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10'
+                        }`}
+                        placeholder="0" />
+                    </div>
                   </div>
                   <div>
                     <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Note</label>
                     <textarea value={formData.note}
-                      onChange={(e) => setFormData((p) => ({ ...p, note: e.target.value }))}
+                      onChange={(e) => setFormData((p) => ({ ...p, note: clampStr(e.target.value, LIMITS.addressMax) }))}
                       rows={2}
                       className="min-h-[80px] w-full resize-y rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none transition hover:border-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/10"
-                      placeholder="Enter note" />
+                      placeholder="Enter note"
+                      maxLength={LIMITS.addressMax} />
+                    <p className="mt-1 text-[10px] text-slate-400 text-right">{formData.note.length} / {LIMITS.addressMax}</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <input type="checkbox" id="is_active" checked={formData.is_active}
@@ -2932,31 +2911,28 @@ export function CustomersPage() {
         </Suspense>
       )}
 
-      {/* ── Add group modal ── */}
+      {/* Group modal */}
       {showGroupModal && canManageGroups && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
           <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm"
             onClick={() => !addingGroup && setShowGroupModal(false)} />
           <div className="animate-fadeIn relative w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
             <div className="mb-5 flex items-center gap-3">
-              <div className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600 ring-1 ring-indigo-500/10">
-                <FiUsers size={18} />
-              </div>
+              <div className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-600 ring-1 ring-indigo-500/10"><FiUsers size={18} /></div>
               <div>
                 <h3 className="text-base font-bold text-slate-900">Add customer group</h3>
                 <p className="text-xs text-slate-500">Group customers for easier filtering.</p>
               </div>
             </div>
             <Input type="text" value={newGroupName}
-              onChange={(e) => setNewGroupName(e.target.value)}
+              onChange={(e) => setNewGroupName(clampStr(e.target.value, LIMITS.groupNameMax))}
               className="h-10 rounded-xl border-slate-200" placeholder="Group name"
+              maxLength={LIMITS.groupNameMax}
               onKeyDown={(e) => { if (e.key === 'Enter' && newGroupName.trim() && !addingGroup) { e.preventDefault(); void handleAddGroup(); } }} />
             <div className="mt-5 flex justify-end gap-2">
               <Button type="button" variant="outline"
                 onClick={() => { setShowGroupModal(false); setNewGroupName(''); }}
-                disabled={addingGroup} className="rounded-xl">
-                Cancel
-              </Button>
+                disabled={addingGroup} className="rounded-xl">Cancel</Button>
               <Button type="button" onClick={handleAddGroup}
                 disabled={addingGroup || !newGroupName.trim()}
                 className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700">
@@ -2967,7 +2943,7 @@ export function CustomersPage() {
         </div>
       )}
 
-      {/* ── Import offcanvas ── */}
+      {/* Import offcanvas — unchanged structure */}
       {isImportOpen && canImportCustomers && (
         <Suspense fallback={
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-sm">
@@ -2993,9 +2969,7 @@ export function CustomersPage() {
                 )}
                 {importStep === 'result' && (
                   <Button type="button" onClick={() => { setIsImportOpen(false); refreshCustomers(); }}
-                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700">
-                    Close & refresh
-                  </Button>
+                    className="rounded-xl bg-indigo-600 font-semibold hover:bg-indigo-700">Close & refresh</Button>
                 )}
               </div>
             }>
@@ -3004,7 +2978,6 @@ export function CustomersPage() {
                 <>
                   <p className="text-sm text-slate-600">
                     Upload a CSV file to import customers. The file must match the required format.
-                    You can download a template below.
                   </p>
                   <div className={`rounded-2xl border-2 border-dashed p-8 text-center transition ${dragOver ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300'}`}
                     onDrop={handleDrop} onDragOver={handleDragOver} onDragLeave={handleDragLeave}>
@@ -3026,9 +2999,7 @@ export function CustomersPage() {
                       <button type="button"
                         onClick={() => { setImportFile(null); if (fileInputRef.current) fileInputRef.current.value = ''; setImportStep('select'); }}
                         className="grid h-7 w-7 place-items-center rounded-lg text-red-500 transition hover:bg-red-50"
-                        aria-label="Remove file">
-                        <FiX size={16} />
-                      </button>
+                        aria-label="Remove file"><FiX size={16} /></button>
                     </div>
                   )}
                   <div className="mt-2 flex items-center justify-between">
@@ -3037,8 +3008,7 @@ export function CustomersPage() {
                       <FiDownload size={14} /> Download template
                     </button>
                     {importFile && (
-                      <Button type="button" onClick={() => handlePreview(importFile)}
-                        disabled={importLoading}
+                      <Button type="button" onClick={() => handlePreview(importFile)} disabled={importLoading}
                         className="rounded-xl bg-slate-900 font-semibold hover:bg-slate-800">
                         {importLoading ? 'Processing…' : 'Preview'}
                       </Button>
@@ -3094,17 +3064,14 @@ export function CustomersPage() {
                                 <td className="px-3 py-2 text-xs text-slate-700">{(row.data.contact_no as string) || '-'}</td>
                                 <td className="px-3 py-2 text-xs text-slate-700">{(row.data.billing_city as string) || '-'}</td>
                                 <td className="px-3 py-2 text-xs">
-                                  {row.valid
-                                    ? <FiCheck className="text-emerald-600" size={14} />
+                                  {row.valid ? <FiCheck className="text-emerald-600" size={14} />
                                     : <FiAlertTriangle className="text-red-600" size={14} aria-label={Object.values(row.errors).join(', ')} />}
                                 </td>
                               </tr>
                             ))}
                             {importPreview.length > 50 && (
                               <tr className="border-t border-slate-100">
-                                <td colSpan={6} className="px-3 py-2 text-center text-xs text-slate-500">
-                                  … and {importPreview.length - 50} more rows
-                                </td>
+                                <td colSpan={6} className="px-3 py-2 text-center text-xs text-slate-500">… and {importPreview.length - 50} more rows</td>
                               </tr>
                             )}
                           </tbody>
@@ -3129,9 +3096,7 @@ export function CustomersPage() {
               {importStep === 'result' && (
                 <div className="space-y-4">
                   <div className={`rounded-xl p-4 ${importSuccess ? 'border border-emerald-200 bg-emerald-50' : 'border border-red-200 bg-red-50'}`}>
-                    <h3 className="text-base font-bold text-slate-900">
-                      {importSuccess ? 'Import completed' : 'Import failed'}
-                    </h3>
+                    <h3 className="text-base font-bold text-slate-900">{importSuccess ? 'Import completed' : 'Import failed'}</h3>
                     <p className="mt-1 text-sm text-slate-700">{importResultMessage}</p>
                   </div>
                   {importSummary && (
@@ -3178,9 +3143,7 @@ export function CustomersPage() {
                             ))}
                             {importErrors.length > 50 && (
                               <tr className="border-t border-slate-100">
-                                <td colSpan={3} className="px-3 py-1.5 text-center text-slate-500">
-                                  … and {importErrors.length - 50} more
-                                </td>
+                                <td colSpan={3} className="px-3 py-1.5 text-center text-slate-500">… and {importErrors.length - 50} more</td>
                               </tr>
                             )}
                           </tbody>
@@ -3194,6 +3157,7 @@ export function CustomersPage() {
           </Offcanvas>
         </Suspense>
       )}
+
       <Customer360Modal
         customerId={customer360Id}
         isOpen={customer360Id !== null}

@@ -41,6 +41,7 @@ import {
   PageTemplate,
   CreateInvoicePage,
   BankCashPage,
+  CashDrawerPage,
   IncomePage,
   ExpensesPage,
   AutomationPage,
@@ -66,6 +67,16 @@ import {
   ProjectBoardsPage,
   CalendarPage,
   PublicInvoiceViewPage,
+  DeliveryDashboard,
+  DeliveryOrdersPage,
+  RoutePlanningPage,
+  TripManagementPage,
+  VehicleManagementPage,
+  DriverManagementPage,
+  LoadingChecklistPage,
+  TransportCostPage,
+  DeliveryCalendarPage,
+  DeliveryReportsPage,
 } from './pages';
 import { AppLayout } from './components/AppLayout';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -192,12 +203,65 @@ const protectedRoutes: ProtectedRouteDef[] = [
   /* Finance */
   { path: 'payments', element: <PaymentsPage />, permissions: ['view payments'] },
   { path: 'bank-cash', element: <BankCashPage />, permissions: ['view accounting accounts'] },
+  { path: 'cash-drawer', element: <CashDrawerPage />, permissions: ['finance.cash_drawer.view', 'view accounting accounts', 'banking.accounts.view', 'view payments'] },
   { path: 'income', element: <IncomePage />, permissions: ['view payments'] },
   { path: 'expenses', element: <ExpensesPage />, permissions: ['view payments'] },
   { path: 'income-expenses', element: <IncomeExpensePage />, permissions: ['income_expenses.view'] },
   { path: 'budgets', element: <BudgetsPage />, permissions: ['view accounting accounts'] },
   { path: 'qr-payment', element: <QRPaymentPage />, permissions: ['view payments'] },
 
+
+  /* Logistics & Delivery Management */
+  {
+    path: 'deliveries',
+    element: <DeliveryDashboard />,
+    permissions: ['delivery.orders.view', 'view delivery orders'],
+  },
+  {
+    path: 'deliveries/orders',
+    element: <DeliveryOrdersPage />,
+    permissions: ['delivery.orders.view', 'view delivery orders'],
+  },
+  {
+    path: 'deliveries/routes',
+    element: <RoutePlanningPage />,
+    permissions: ['delivery.routes.view', 'view delivery routes', 'delivery.orders.view'],
+  },
+  {
+    path: 'deliveries/trips',
+    element: <TripManagementPage />,
+    permissions: ['delivery.trips.view', 'view delivery trips'],
+  },
+  {
+    path: 'deliveries/vehicles',
+    element: <VehicleManagementPage />,
+    permissions: ['delivery.vehicles.view', 'view delivery vehicles'],
+  },
+  {
+    path: 'deliveries/drivers',
+    element: <DriverManagementPage />,
+    permissions: ['delivery.drivers.view', 'view delivery drivers'],
+  },
+  {
+    path: 'deliveries/loading',
+    element: <LoadingChecklistPage />,
+    permissions: ['delivery.loading.view', 'view delivery loading', 'delivery.trips.view'],
+  },
+  {
+    path: 'deliveries/costs',
+    element: <TransportCostPage />,
+    permissions: ['delivery.costs.view', 'view delivery costs', 'delivery.trips.view'],
+  },
+  {
+    path: 'deliveries/calendar',
+    element: <DeliveryCalendarPage />,
+    permissions: ['delivery.orders.view', 'delivery.trips.view', 'view delivery orders'],
+  },
+  {
+    path: 'deliveries/reports',
+    element: <DeliveryReportsPage />,
+    permissions: ['delivery.reports.view', 'view delivery reports'],
+  },
   /* Inventory */
   {
     path: 'inventory',

@@ -175,6 +175,15 @@ class PaymentController extends Controller
                 }
             }
 
+            
+            // Automatic integration: Sync with physical Cash Drawer if payment_method is cash
+            try {
+                if (strtolower((string) $payment->payment_method) === 'cash') {
+                    app(\App\Services\CashDrawerService::class)->syncPayment($payment, request()->input('cash_drawer_id'));
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('CashDrawer sync warning: ' . $e->getMessage());
+            }
             return $payment->load(['company', 'invoice', 'branch', 'bankAccount']);
         });
     }
@@ -185,7 +194,16 @@ class PaymentController extends Controller
 
     public function show(Payment $payment)
     {
-        return $payment->load(['company', 'invoice', 'branch', 'bankAccount']);
+        
+            // Automatic integration: Sync with physical Cash Drawer if payment_method is cash
+            try {
+                if (strtolower((string) $payment->payment_method) === 'cash') {
+                    app(\App\Services\CashDrawerService::class)->syncPayment($payment, request()->input('cash_drawer_id'));
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::warning('CashDrawer sync warning: ' . $e->getMessage());
+            }
+            return $payment->load(['company', 'invoice', 'branch', 'bankAccount']);
     }
 
     /* ==================================================================

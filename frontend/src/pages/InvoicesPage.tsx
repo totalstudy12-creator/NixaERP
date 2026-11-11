@@ -31,6 +31,7 @@ import {
   CircleDollarSign,
   ReceiptText,
   Sparkles,
+  Printer,
 } from 'lucide-react';
 
 import { apiClient } from '../api';
@@ -38,6 +39,7 @@ import { useNotification } from '../components/NotificationContext';
 import { addAppLog } from '../services/appLogger';
 import { useAuthStore } from '../store/auth';
 import InvoicePrint from '../components/InvoicePrint';
+import BulkInvoicePrint from '../components/BulkInvoicePrint';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -191,6 +193,11 @@ interface Invoice {
   payment_received?: number | string | null;
   paid_amount?: number | string | null;
   status?: string | null;
+  delivery_status?: string | null;
+  packed_at?: string | null;
+  dispatched_at?: string | null;
+  delivered_at?: string | null;
+  deliveryOrder?: any;
   due_date?: string | null;
   invoice_date?: string | null;
   created_at?: string | null;
@@ -208,6 +215,7 @@ interface InvoiceQuery {
   branch_id?: number;
   status?: string;
   payment_state?: string;
+  delivery_status?: string;
   date_from?: string;
   date_to?: string;
   sort_by?: string;
@@ -268,7 +276,7 @@ const MENU_WIDTH = 190;
 const MENU_HEIGHT = 168;
 const MENU_MARGIN = 8;
 const UNWRAP_DEPTH = 3;
-const TABLE_COLUMN_COUNT = 9;
+const TABLE_COLUMN_COUNT = 10;
 const TOTALS_DEBOUNCE_MS = 120;
 
 const TABLE_HEAD_CLASS =
@@ -493,6 +501,106 @@ function paymentBadge(status: ReturnType<typeof getPaymentStatus>) {
       <span className={`h-1.5 w-1.5 rounded-full ${selected.dot}`} />
       {selected.label}
     </Badge>
+  );
+}
+
+
+function deliveryStatusBadge(status?: string | null) {
+  const value = String(status ?? 'pending').toLowerCase();
+  const config: Record<string, { label: string; className: string; dot: string }> = {
+    pending:   { label: 'Pending',   className: 'border-amber-200/70 bg-amber-50 text-amber-700',   dot: 'bg-amber-500' },
+    packed:    { label: 'Packed',    className: 'border-sky-200/70 bg-sky-50 text-sky-700',          dot: 'bg-sky-500' },
+    sent:      { label: 'Sent',      className: 'border-indigo-200/70 bg-indigo-50 text-indigo-700', dot: 'bg-indigo-500' },
+    delivered: { label: 'Delivered', className: 'border-emerald-200/70 bg-emerald-50 text-emerald-700', dot: 'bg-emerald-500' },
+  };
+  const selected = config[value] ?? config.pending;
+  return (
+    <Badge variant="outline" className={`gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${selected.className}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${selected.dot}`} />
+      {selected.label}
+    </Badge>
+  );
+}
+
+function DeliveryStatusDropdown({
+  invoice,
+  onStatusUpdated,
+}: {
+  invoice: Invoice;
+  onStatusUpdated: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const { showError, showSuccess } = useNotification();
+  const current = String(invoice.delivery_status || 'pending').toLowerCase();
+
+  const handleSelect = async (newStatus: string) => {
+    if (newStatus === current) {
+      setOpen(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      await apiClient.updateInvoiceDeliveryStatus(invoice.id, {
+        delivery_status: newStatus,
+      });
+      showSuccess(`Invoice ${invoice.invoice_no} marked as ${newStatus}.`);
+      onStatusUpdated();
+    } catch (err: any) {
+      showError(err.message || 'Could not update delivery status.');
+    } finally {
+      setLoading(false);
+      setOpen(false);
+    }
+  };
+
+  const options: Array<{ id: string; label: string; dot: string }> = [
+    { id: 'pending', label: 'Pending', dot: 'bg-amber-500' },
+    { id: 'packed', label: 'Packed', dot: 'bg-sky-500' },
+    { id: 'sent', label: 'Sent / Dispatched', dot: 'bg-indigo-500' },
+    { id: 'delivered', label: 'Delivered', dot: 'bg-emerald-500' },
+  ];
+
+  return (
+    <div className="relative inline-block text-left" onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        disabled={loading}
+        onClick={() => setOpen(!open)}
+        className="inline-flex items-center gap-1 cursor-pointer transition hover:opacity-80"
+        title="Click to update delivery status"
+      >
+        {deliveryStatusBadge(invoice.delivery_status)}
+        <ChevronDown className="h-3 w-3 text-slate-400" />
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 mt-1 z-50 w-44 origin-top-left rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl shadow-slate-900/10">
+            <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+              Delivery Status
+            </div>
+            {options.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => handleSelect(opt.id)}
+                className={`flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs transition ${
+                  opt.id === current ? 'bg-slate-100 font-semibold text-slate-900' : 'text-slate-700 hover:bg-slate-50'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className={`h-1.5 w-1.5 rounded-full ${opt.dot}`} />
+                  <span>{opt.label}</span>
+                </div>
+                {opt.id === current && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -739,6 +847,8 @@ export function InvoicesPage() {
   const [viewingInvoice, setViewingInvoice] = useState<Invoice | null>(null);
   const [printInvoice, setPrintInvoice] = useState<Invoice | null>(null);
   const [printing, setPrinting] = useState(false);
+  const [bulkPrintInvoices, setBulkPrintInvoices] = useState<any[] | null>(null);
+  const [bulkPrinting, setBulkPrinting] = useState(false);
   const [actionMenuId, setActionMenuId] = useState<number | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -759,6 +869,7 @@ export function InvoicesPage() {
   const branchId = Number(params.get('branch_id') || 0) || undefined;
   const invoiceStatus = params.get('status') || 'all';
   const paymentState = params.get('payment_state') || 'all';
+  const deliveryStatus = params.get('delivery_status') || 'all';
   const dateFrom = params.get('date_from') || '';
   const dateTo = params.get('date_to') || '';
   const sortBy = params.get('sort_by') || 'invoice_date';
@@ -844,11 +955,12 @@ export function InvoicesPage() {
       branch_id: branchId,
       status: invoiceStatus !== 'all' ? invoiceStatus : undefined,
       payment_state: paymentState !== 'all' ? paymentState : undefined,
+      delivery_status: deliveryStatus !== 'all' ? deliveryStatus : undefined,
       date_from: dateFrom || undefined,
       date_to: dateTo || undefined,
       sort_by: sortBy, sort_dir: sortDir,
     }),
-    [page, perPage, search, companyId, branchId, invoiceStatus, paymentState, dateFrom, dateTo, sortBy, sortDir],
+    [page, perPage, search, companyId, branchId, invoiceStatus, paymentState, deliveryStatus, dateFrom, dateTo, sortBy, sortDir],
   );
 
   const loadInvoices = useCallback(async () => {
@@ -887,6 +999,7 @@ export function InvoicesPage() {
         branch_id: branchId,
         status: invoiceStatus !== 'all' ? invoiceStatus : undefined,
         payment_state: paymentState !== 'all' ? paymentState : undefined,
+        delivery_status: deliveryStatus !== 'all' ? deliveryStatus : undefined,
         date_from: dateFrom || undefined,
         date_to: dateTo || undefined,
       };
@@ -1054,6 +1167,46 @@ export function InvoicesPage() {
       showError('Delete failed', getErrorMessage(err, 'Unable to delete invoice.'));
     }
   }, [loadInvoices, showError, showSuccess, canDeleteInvoice]);
+
+  const handleBulkPrint = useCallback(async () => {
+    if (!selectedIds.length) return;
+    if (!canPrintInvoice) {
+      showError('Permission denied', 'You do not have permission to print invoices.');
+      return;
+    }
+
+    setBulkPrinting(true);
+    try {
+      const detailedPromises = selectedIds.map(async (id) => {
+        try {
+          const res: any = await apiClient.getInvoice(id);
+          return res?.data ?? res;
+        } catch {
+          return invoices?.data.find((inv) => inv.id === id) ?? null;
+        }
+      });
+
+      const loaded = await Promise.all(detailedPromises);
+      const validInvoices = loaded.filter(Boolean);
+
+      if (!validInvoices.length) {
+        showError('Print error', 'Could not load invoice data for printing.');
+        return;
+      }
+
+      setBulkPrintInvoices(validInvoices);
+      safeLog({
+        module: 'Invoices',
+        action: 'Bulk print',
+        status: 'success',
+        message: `Dispatched print batch of ${validInvoices.length} invoices`,
+      });
+    } catch (err: any) {
+      showError('Bulk print failed', getErrorMessage(err, 'Failed to prepare invoices for printing.'));
+    } finally {
+      setBulkPrinting(false);
+    }
+  }, [selectedIds, canPrintInvoice, invoices, showError, safeLog]);
 
   const bulkStatus = useCallback(async (status: 'paid' | 'pending' | 'overdue') => {
     if (!canUpdateInvoice) {
@@ -1528,7 +1681,7 @@ export function InvoicesPage() {
         )}
 
         {/* Bulk toolbar */}
-        {selectedIds.length > 0 && (canUpdateInvoice || canDeleteInvoice) && (
+        {selectedIds.length > 0 && (canUpdateInvoice || canDeleteInvoice || canPrintInvoice) && (
           <div className="sticky top-3 z-30 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/90 shadow-lg shadow-slate-900/5 backdrop-blur">
             <div className="flex flex-wrap items-center gap-2 px-3 py-2.5 sm:px-4">
               <div className="mr-1 flex items-center gap-2 rounded-lg bg-indigo-50 px-2.5 py-1 text-indigo-700 ring-1 ring-indigo-500/10">
@@ -1553,6 +1706,18 @@ export function InvoicesPage() {
                   className="h-9 rounded-lg bg-rose-600 hover:bg-rose-700"
                   onClick={bulkDelete}>
                   <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Delete
+                </Button>
+              )}
+              {canPrintInvoice && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-9 gap-1.5 rounded-lg border-indigo-200 bg-indigo-50/50 text-indigo-700 hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950/40 dark:text-indigo-300"
+                  onClick={handleBulkPrint}
+                  disabled={bulkPrinting}
+                >
+                  <Printer className="h-3.5 w-3.5" />
+                  {bulkPrinting ? 'Preparing…' : `Bulk Print (${selectedIds.length})`}
                 </Button>
               )}
               <Button size="sm" variant="ghost"
@@ -1630,6 +1795,7 @@ export function InvoicesPage() {
                     <TableHeadLabel align="right">Outstanding</TableHeadLabel>
                   </TableHead>
                   <TableHead><TableHeadLabel>Status</TableHeadLabel></TableHead>
+                  <TableHead><TableHeadLabel>Delivery</TableHeadLabel></TableHead>
                   <TableHead>
                     <TableHeadLabel sortable onClick={() => handleSort('invoice_date')}>
                       Date {sortIcon('invoice_date')}
@@ -1732,6 +1898,9 @@ export function InvoicesPage() {
                         </TableCell>
 
                         <TableCell>{invoiceStatusBadge(invoice.status)}</TableCell>
+                        <TableCell>
+                          <DeliveryStatusDropdown invoice={invoice} onStatusUpdated={loadInvoices} />
+                        </TableCell>
 
                         <TableCell className="whitespace-nowrap text-sm text-slate-600">
                           {formatDate(invoice.invoice_date || invoice.created_at)}
@@ -1828,6 +1997,7 @@ export function InvoicesPage() {
                   <div className="mt-2 flex flex-wrap items-center gap-1.5">
                     {invoiceStatusBadge(viewingInvoice.status)}
                     {paymentBadge(getPaymentStatus(viewingInvoice))}
+                    {deliveryStatusBadge(viewingInvoice.delivery_status)}
                     <span className="ml-auto text-[11px] font-medium text-slate-400">#{viewingInvoice.id}</span>
                   </div>
                 </SheetHeader>
@@ -1944,6 +2114,14 @@ export function InvoicesPage() {
           )}
         </SheetContent>
       </Sheet>
+
+      {/* Bulk Print pipeline */}
+      {bulkPrintInvoices && (
+        <BulkInvoicePrint
+          invoices={bulkPrintInvoices}
+          onReady={() => setBulkPrintInvoices(null)}
+        />
+      )}
 
       {/* Print pipeline */}
       {printInvoice && (

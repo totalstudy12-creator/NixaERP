@@ -58,21 +58,4 @@ function CashflowPage({ direction }: { direction: 'inward' | 'outward' }) {
 }
 export const IncomePage = () => <CashflowPage direction="inward" />; export const ExpensesPage = () => <CashflowPage direction="outward" />; export const BudgetsPage = () => <WorkspacePage workspace="budgets" />; export const RecruitmentPage = () => <WorkspacePage workspace="recruitment" />; export const KnowledgeBasePage = () => <WorkspacePage workspace="knowledge-base" />; export const TicketsPage = () => <WorkspacePage workspace="tickets" />; export const ProjectBoardsPage = () => <WorkspacePage workspace="project-boards" />;
 
-export function CalendarPage() {
-  const [selected, setSelected] = useState(16);
-  const events = [
-    { day: 16, title: 'Sales pipeline review', time: '10:00 AM', type: 'Meeting' },
-    { day: 18, title: 'Warehouse stock count', time: '02:30 PM', type: 'Operations' },
-    { day: 22, title: 'Campaign launch', time: '09:00 AM', type: 'Marketing' },
-  ];
-  const days = Array.from({ length: 30 }, (_, index) => index + 1);
-  const renderDay = (day: number) => {
-    const hasEvent = events.some((event) => event.day === day);
-    const selectedStyle = selected === day ? 'border-indigo-500 bg-indigo-50' : 'border-slate-100 hover:border-indigo-200';
-    return <button type="button" key={day} onClick={() => setSelected(day)} className={`min-h-20 rounded-xl border p-2 text-left transition ${selectedStyle} ${hasEvent ? 'font-semibold text-indigo-700' : 'text-slate-600'}`}><span>{day}</span>{hasEvent && <span className="mt-2 block h-1.5 w-1.5 rounded-full bg-indigo-500" />}</button>;
-  };
-  return <div className="space-y-6">
-    <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm"><p className="text-xs font-bold uppercase tracking-[.22em] text-indigo-600">Workspace · Schedule</p><h1 className="mt-2 text-3xl font-semibold text-slate-950">Calendar</h1><p className="mt-2 text-sm text-slate-500">Keep meetings, operational deadlines, and customer follow-ups visible.</p></section>
-    <section className="grid gap-6 xl:grid-cols-[1fr_.38fr]"><div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold text-slate-900">September 2026</h2><button type="button" onClick={() => setSelected(16)} className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-600">Today</button></div><div className="mt-5 grid grid-cols-7 gap-1 text-center text-xs font-semibold uppercase tracking-wide text-slate-400">{['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => <span key={day} className="py-2">{day}</span>)}</div><div className="grid grid-cols-7 gap-1">{days.map(renderDay)}</div></div><aside className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-center gap-2"><FiCalendar className="text-indigo-600" /><h2 className="font-semibold text-slate-900">{selected} September</h2></div><div className="mt-5 space-y-3">{events.filter((event) => event.day === selected).map((event) => <div className="rounded-xl border border-slate-100 p-3" key={event.title}><p className="font-medium text-slate-900">{event.title}</p><p className="mt-1 text-xs text-slate-500">{event.time} · {event.type}</p></div>)}{!events.some((event) => event.day === selected) && <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-500">No events scheduled. Backend calendar integration can be added in step 2.</p>}</div></aside></section>
-  </div>;
-}
+export { CalendarPage } from './CalendarPage';
